@@ -1,0 +1,13 @@
+# Workflow and local desktop metadata
+.workflow/
+.DS_Store
+
+# Future Node/Next build artifacts
+node_modules/
+.next/
+out/
+build/
+coverage/
+
+# Local environment overrides
+*.local
