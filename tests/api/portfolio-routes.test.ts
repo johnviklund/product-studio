@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
@@ -48,7 +48,10 @@ async function createWorkspace(): Promise<string> {
   return root;
 }
 
-async function createService(): Promise<PortfolioService> {
+async function createService(): Promise<{
+  registry: PortfolioRegistry;
+  service: PortfolioService;
+}> {
   const applicationRoot = await createRoot("product-studio-api-app-");
   const registry = new PortfolioRegistry(
     join(applicationRoot, ".local-data", "registry.json"),
@@ -57,7 +60,7 @@ async function createService(): Promise<PortfolioService> {
   const service = new PortfolioService(registry, index);
   openIndexes.push(index);
   getService.mockResolvedValue(service);
-  return service;
+  return { registry, service };
 }
 
 function registrationRequest(workspacePath: string): Request {
@@ -65,6 +68,14 @@ function registrationRequest(workspacePath: string): Request {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ workspace_path: workspacePath }),
+  });
+}
+
+function registrationRequestBody(body: unknown): Request {
+  return new Request("http://localhost/api/workspaces", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
   });
 }
 
@@ -124,5 +135,75 @@ describe("portfolio API routes", () => {
     expect(response.status).toBe(200);
     expect(body.items).toHaveLength(1);
     expect(body.failures).toEqual([]);
+  });
+
+  it("returns 400 invalid_request for malformed registration input", async () => {
+    await createService();
+
+    const response = await registerWorkspace(
+      registrationRequestBody({ workspace_path: "relative/workspace" }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+  });
+
+  it("returns 422 invalid_workspace before writing a registration", async () => {
+    const { registry } = await createService();
+    const workspacePath = await createRoot("product-studio-api-invalid-");
+    await mkdir(join(workspacePath, ".founder"));
+
+    const response = await registerWorkspace(
+      registrationRequest(workspacePath),
+    );
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "invalid_workspace",
+        message: "required file is missing",
+        artifact_path: ".founder/product.yaml",
+      },
+    });
+    await expect(registry.read()).resolves.toEqual([]);
+  });
+
+  it("returns 422 invalid_registry with the durable artifact path", async () => {
+    const { registry } = await createService();
+    await mkdir(dirname(registry.registryPath), { recursive: true });
+    await writeFile(registry.registryPath, "{invalid", "utf8");
+
+    const response = await getWorkspaces();
+
+    expect(response.status).toBe(422);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      error: {
+        code: "invalid_registry",
+        artifact_path: registry.registryPath,
+      },
+    });
+    expect(body.error.message).toContain("invalid JSON");
+  });
+
+  it("returns 409 duplicate_workspace and preserves one registration", async () => {
+    const { registry } = await createService();
+    const workspacePath = await createWorkspace();
+    await registerWorkspace(registrationRequest(workspacePath));
+
+    const response = await registerWorkspace(
+      registrationRequest(workspacePath),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "duplicate_workspace",
+        message: `Workspace is already registered: ${workspacePath}`,
+      },
+    });
+    await expect(registry.read()).resolves.toHaveLength(1);
   });
 });

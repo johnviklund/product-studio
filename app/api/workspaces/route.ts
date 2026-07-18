@@ -1,5 +1,5 @@
 import { getPortfolioService } from "../../../src/application/portfolio-service";
-import { errorResponse } from "../work-items/responses";
+import { errorResponse } from "../responses";
 
 export const runtime = "nodejs";
 
