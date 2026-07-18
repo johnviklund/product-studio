@@ -31,6 +31,10 @@ export interface PortfolioRebuildResult {
   failures: WorkspaceRebuildFailure[];
 }
 
+export interface RegisterWorkspaceInput {
+  workspace_path: string;
+}
+
 export interface PortfolioWorkItemIndex {
   rebuild(items: PortfolioWorkItem[]): void;
   list(): PortfolioWorkItem[];
@@ -80,6 +84,14 @@ export const portfolioRebuildResultSchema: z.ZodType<PortfolioRebuildResult> =
     failures: z.array(workspaceRebuildFailureSchema),
   });
 
+export const registerWorkspaceInputSchema: z.ZodType<RegisterWorkspaceInput> =
+  z.strictObject({
+    workspace_path: z
+      .string()
+      .min(1, "workspace_path must not be empty")
+      .refine(isAbsolute, "workspace_path must be absolute"),
+  });
+
 export class InvalidRegistryError extends Error {
   readonly kind = "invalid_registry" as const;
 
@@ -89,5 +101,14 @@ export class InvalidRegistryError extends Error {
   ) {
     super(`${artifactPath}: ${reason}`);
     this.name = "InvalidRegistryError";
+  }
+}
+
+export class DuplicateWorkspaceError extends Error {
+  readonly kind = "duplicate_workspace" as const;
+
+  constructor(readonly workspacePath: string) {
+    super(`Workspace is already registered: ${workspacePath}`);
+    this.name = "DuplicateWorkspaceError";
   }
 }
