@@ -5,6 +5,19 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-17 · Portfolio registration and rebuildable index (roadmap 1.2)
+- Added a strict, atomically written v1 workspace registry as durable portfolio truth and kept
+  invalid registrations visible for repair.
+- Replaced the single-workspace cache with a versioned SQLite portfolio projection keyed by
+  workspace and work-item IDs, with atomic full replacement and deterministic ordering.
+- Added portfolio registration/rebuild coordination plus Node-runtime workspace and work-item
+  routes, shared error envelopes, and removal of ambiguous single-workspace handlers.
+- Verified all eight acceptance scenarios and reconstructed the same two-workspace projection
+  after deleting the SQLite index using only registry and `.founder/` artifacts.
+- Commits: e416789 203c556 c7759a7 5ef7bca 935a97e addb81b fc63456 3e17eea
+- Why: completes roadmap 1.2's durable portfolio seam so the focused cross-project Kanban can
+  build on registered workspaces without treating local cache state as truth.
+
 ## 2026-07-17 · Durable workspace foundation (roadmap 1.1)
 - Defined the work-item domain contract and schema-versioned `.founder/` filesystem repository
   (goal.yaml + state.json as durable truth).
