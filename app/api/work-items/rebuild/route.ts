@@ -1,12 +1,12 @@
-import { getSampleWorkItemsService } from "../../../../src/application/sample-workspace";
+import { getPortfolioService } from "../../../../src/application/portfolio-service";
 import { errorResponse } from "../responses";
 
 export const runtime = "nodejs";
 
 export async function POST(): Promise<Response> {
   try {
-    const service = await getSampleWorkItemsService();
-    return Response.json({ items: await service.rebuild() });
+    const service = await getPortfolioService();
+    return Response.json(await service.rebuild());
   } catch (error) {
     return errorResponse(error);
   }

@@ -69,12 +69,6 @@ export interface WorkItemRepository {
   list(): Promise<WorkItem[]>;
 }
 
-export interface WorkItemIndex {
-  rebuild(items: WorkItem[]): void;
-  list(): WorkItem[];
-  clear(): void;
-}
-
 export const workItemIdSchema = z
   .string()
   .regex(
