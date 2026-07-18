@@ -72,6 +72,11 @@ plans, and review findings. JSON or YAML holds machine-readable state and contra
 SQLite is a disposable local cache/index that can be rebuilt from durable files; it is
 never the only copy of product or workflow state.
 
+Product workspaces use `.founder/` as the initial metadata directory. Its version-1
+manifest, goal, and state contract is implemented in
+[`src/domain/work-item.ts`](src/domain/work-item.ts) and demonstrated by the checked-in
+[`fixtures/sample-workspace`](fixtures/sample-workspace).
+
 ## 8. Core documents
 
 - [Design system](DESIGN.md)
@@ -85,7 +90,7 @@ never the only copy of product or workflow state.
 
 The following remain unresolved and must be decided with implementation evidence:
 
-- Final product name and metadata-directory name.
+- Final product name.
 - Exact durable-state schema and migration mechanism.
 - The first two proof repositories for provider-neutral manual handoff.
 - Canonical mission and result-submission schemas, including which agent-specific renderers
