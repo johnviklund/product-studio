@@ -1,8 +1,8 @@
-import type {
-  CreateWorkItemInput,
-  WorkItem,
-  WorkItemIndex,
-  WorkItemRepository,
+import {
+  createWorkItemInputSchema,
+  type WorkItem,
+  type WorkItemIndex,
+  type WorkItemRepository,
 } from "../domain/work-item";
 
 export class WorkItemsService {
@@ -11,8 +11,9 @@ export class WorkItemsService {
     private readonly index: WorkItemIndex,
   ) {}
 
-  async create(input: CreateWorkItemInput): Promise<WorkItem> {
-    const created = await this.workspace.create(input);
+  async create(input: unknown): Promise<WorkItem> {
+    const validatedInput = createWorkItemInputSchema.parse(input);
+    const created = await this.workspace.create(validatedInput);
     const durableItems = await this.workspace.list();
 
     this.index.rebuild(durableItems);
