@@ -75,7 +75,7 @@ export interface WorkItemIndex {
   clear(): void;
 }
 
-const workItemIdSchema = z
+export const workItemIdSchema = z
   .string()
   .regex(
     /^wi_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
