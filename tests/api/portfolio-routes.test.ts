@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,7 +17,7 @@ vi.mock("../../src/application/portfolio-service", () => ({
   getPortfolioService: getService,
 }));
 
-import { GET as getWorkItems } from "../../app/api/work-items/route";
+import * as workItemsRoute from "../../app/api/work-items/route";
 import { POST as rebuildWorkItems } from "../../app/api/work-items/rebuild/route";
 import {
   GET as getWorkspaces,
@@ -117,7 +118,7 @@ describe("portfolio API routes", () => {
       workspaces: [registration.workspace],
     });
 
-    const workItemsResponse = await getWorkItems();
+    const workItemsResponse = await workItemsRoute.GET();
     expect(workItemsResponse.status).toBe(200);
     expect(await workItemsResponse.json()).toEqual({
       items: registration.rebuild.items,
@@ -135,6 +136,44 @@ describe("portfolio API routes", () => {
     expect(response.status).toBe(200);
     expect(body.items).toHaveLength(1);
     expect(body.failures).toEqual([]);
+  });
+
+  it("keeps a missing registration visible while rebuild reports its failure", async () => {
+    await createService();
+    const workspacePath = await createWorkspace();
+    const registrationResponse = await registerWorkspace(
+      registrationRequest(workspacePath),
+    );
+    const registration = await registrationResponse.json();
+    await rm(workspacePath, { recursive: true, force: true });
+
+    const rebuildResponse = await rebuildWorkItems();
+    const rebuild = await rebuildResponse.json();
+    const workspacesResponse = await getWorkspaces();
+
+    expect(rebuild.items).toEqual([]);
+    expect(rebuild.failures).toMatchObject([
+      { workspace: { workspace_path: workspacePath }, reason: expect.any(String) },
+    ]);
+    expect(await workspacesResponse.json()).toEqual({
+      workspaces: [registration.workspace],
+    });
+  });
+
+  it("does not expose ambiguous single-workspace route handlers", () => {
+    expect("POST" in workItemsRoute).toBe(false);
+    expect(
+      existsSync(
+        join(
+          process.cwd(),
+          "app",
+          "api",
+          "work-items",
+          "[workItemId]",
+          "route.ts",
+        ),
+      ),
+    ).toBe(false);
   });
 
   it("returns 400 invalid_request for malformed registration input", async () => {

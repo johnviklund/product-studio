@@ -2,7 +2,6 @@ import {
   mkdtemp,
   mkdir,
   rm,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -105,6 +104,10 @@ describe("PortfolioService", () => {
   it("reports one invalid workspace without blocking valid indexed items", async () => {
     const invalidRoot = await createWorkspace("Invalid Later");
     const validRoot = await createWorkspace("Still Valid");
+    await new ProductWorkspace(invalidRoot).create({
+      title: "Removed after indexing",
+      type: "Fix",
+    });
     await new ProductWorkspace(validRoot).create({
       title: "Surviving item",
       type: "MVP",
@@ -112,7 +115,8 @@ describe("PortfolioService", () => {
     const { index, service } = await createService();
     await service.register({ workspace_path: invalidRoot });
     await service.register({ workspace_path: validRoot });
-    await unlink(join(invalidRoot, ".founder", "product.yaml"));
+    await expect(service.list()).resolves.toHaveLength(2);
+    await rm(invalidRoot, { recursive: true, force: true });
 
     const rebuild = await service.rebuild();
 
@@ -121,6 +125,7 @@ describe("PortfolioService", () => {
     expect(rebuild.failures).toMatchObject([
       { workspace: { workspace_path: invalidRoot }, reason: expect.any(String) },
     ]);
+    await expect(service.list()).resolves.toEqual(rebuild.items);
     await expect(service.listWorkspaces()).resolves.toHaveLength(2);
     index.close();
   });
@@ -166,6 +171,24 @@ describe("PortfolioService", () => {
       service.register({ workspace_path: join(tmpdir(), "missing-workspace") }),
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
     await expect(registry.read()).resolves.toEqual([]);
+    index.close();
+  });
+
+  it("does not overwrite existing registrations for a malformed manifest", async () => {
+    const validRoot = await createWorkspace("Preserved Workspace");
+    const malformedRoot = await createWorkspace("Malformed Workspace");
+    const { registry, index, service } = await createService();
+    const registered = await service.register({ workspace_path: validRoot });
+    await writeFile(
+      join(malformedRoot, ".founder", "product.yaml"),
+      "schema_version: 2\nproduct_name: Future Workspace\n",
+      "utf8",
+    );
+
+    await expect(
+      service.register({ workspace_path: malformedRoot }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    await expect(registry.read()).resolves.toEqual([registered.workspace]);
     index.close();
   });
 });

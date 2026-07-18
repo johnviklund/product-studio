@@ -70,6 +70,17 @@ describe("PortfolioRegistry", () => {
     });
   });
 
+  it("never overwrites a corrupt durable registry", async () => {
+    const { registryPath, registry } = await createRegistry();
+    await mkdir(dirname(registryPath), { recursive: true });
+    await writeFile(registryPath, "{invalid", "utf8");
+
+    await expect(registry.append(workspace)).rejects.toBeInstanceOf(
+      InvalidRegistryError,
+    );
+    await expect(readFile(registryPath, "utf8")).resolves.toBe("{invalid");
+  });
+
   it("rejects a registry symlink", async () => {
     const { root, registryPath, registry } = await createRegistry();
     const targetPath = join(root, "target.json");
