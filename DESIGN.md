@@ -429,6 +429,8 @@ For review-ready work, the footer uses primary `Approve result` and secondary `S
 
 `Edit details` exposes project, priority, type, goal, or scope without replacing the entire panel. Editing must preserve the original capture and activity history.
 
+For a captured idea/todo, keep refinement in a narrow structural side panel: show the immutable original thought, kind, and captured-at timestamp read-only above the editable metadata (project, type, tags, notes). Do not let this panel accrete activity feed, review, or approval surfaces — those stay part of the full work-item detail panel once a capture has been promoted into a governed work item.
+
 ### Agent update
 
 Summarize an agent attempt in one contained block:
