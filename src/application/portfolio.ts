@@ -1,8 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { link, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import {
+  link,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { stringify } from "yaml";
+import { z } from "zod";
 
 import {
   DuplicateWorkspaceError,
@@ -11,6 +22,7 @@ import {
   InvalidWorkItemTransitionError,
   PortfolioWorkItemNotFoundError,
   UnknownPortfolioSourceError,
+  portfolioSourceIdSchema,
   registerWorkspaceInputSchema,
   registeredWorkspaceSchema,
   type PortfolioRebuildResult,
@@ -20,24 +32,82 @@ import {
 } from "../domain/portfolio";
 import {
   InvalidWorkspaceError,
+  WorkItemTargetCollisionError,
+  WorkItemTransferFailedError,
+  assignWorkItemInputSchema,
+  createCaptureInputSchema,
+  updateWorkItemDetailsInputSchema,
   updateWorkItemPhaseInputSchema,
+  workItemIdSchema,
+  type AssignWorkItemInput,
+  type CreateCaptureInput,
+  type UpdateWorkItemDetailsInput,
   type UpdateWorkItemPhaseInput,
+  type WorkItem,
+  type WorkItemGoal,
 } from "../domain/work-item";
 import { validatePhaseTransition } from "../presentation/board";
 import { ProductWorkspace } from "../workspace/product-workspace";
 import { PortfolioRegistry } from "../workspace/portfolio-registry";
 
-type WorkspaceReader = Pick<
+type WorkspaceGateway = Pick<
   ProductWorkspace,
-  "readManifest" | "list" | "read" | "updatePhase"
+  | "workspaceRoot"
+  | "readManifest"
+  | "list"
+  | "read"
+  | "createCapture"
+  | "updateGoal"
+  | "updatePhase"
+  | "hasWorkItem"
+  | "stageIncomingWorkItem"
+  | "publishStagedWorkItem"
+  | "discardStagedWorkItem"
+  | "removeWorkItem"
 >;
-type WorkspaceFactory = (workspacePath: string) => WorkspaceReader;
+type WorkspaceFactory = (workspacePath: string) => WorkspaceGateway;
 
 interface ResolvedSource {
   source_id: string;
   project: RegisteredWorkspace | null;
-  workspace: WorkspaceReader;
+  workspace: WorkspaceGateway;
 }
+
+const TRANSFER_STAGES = ["staged", "published", "source_removed"] as const;
+const TRANSFER_TEMP_FILE_PATTERN =
+  /^\.tr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
+
+interface TransferJournalRecord {
+  schema_version: 1;
+  transfer_id: string;
+  work_item_id: string;
+  from_source_id: string;
+  from_path: string;
+  to_source_id: string;
+  to_path: string;
+  stage: (typeof TRANSFER_STAGES)[number];
+}
+
+const transferJournalRecordSchema: z.ZodType<TransferJournalRecord> = z
+  .strictObject({
+    schema_version: z.literal(1),
+    transfer_id: z
+      .string()
+      .regex(
+        /^tr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+        "transfer_id must use the tr_<uuid> format",
+      ),
+    work_item_id: workItemIdSchema,
+    from_source_id: portfolioSourceIdSchema,
+    from_path: z.string().refine(isAbsolute, "from_path must be absolute"),
+    to_source_id: portfolioSourceIdSchema,
+    to_path: z.string().refine(isAbsolute, "to_path must be absolute"),
+    stage: z.enum(TRANSFER_STAGES),
+  })
+  .refine(
+    (record) => record.from_source_id !== record.to_source_id,
+    "transfer sources must differ",
+  );
 
 export interface RegisterWorkspaceResult {
   workspace: RegisteredWorkspace;
@@ -46,6 +116,14 @@ export interface RegisterWorkspaceResult {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function validationReason(error: z.ZodError): string {
+  return error.issues
+    .map(({ path, message }) =>
+      path.length > 0 ? `${path.map(String).join(".")}: ${message}` : message,
+    )
+    .join("; ");
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
@@ -73,9 +151,11 @@ export class PortfolioService {
       new ProductWorkspace(workspacePath),
   ) {
     this.inboxRoot = resolve(inboxRoot);
+    this.transfersRoot = join(dirname(this.inboxRoot), "transfers");
   }
 
   readonly inboxRoot: string;
+  readonly transfersRoot: string;
 
   listWorkspaces(): Promise<RegisteredWorkspace[]> {
     return this.registry.read();
@@ -116,6 +196,177 @@ export class PortfolioService {
 
   async list(): Promise<PortfolioWorkItem[]> {
     return this.index.list();
+  }
+
+  async createCapture(input: CreateCaptureInput): Promise<PortfolioWorkItem> {
+    const validatedInput = createCaptureInputSchema.parse(input);
+    const source = await this.resolveSource(
+      validatedInput.source_id ?? INBOX_SOURCE_ID,
+    );
+    const created = await source.workspace.createCapture(validatedInput);
+
+    await this.rebuild();
+    return this.toPortfolioItem(source, created);
+  }
+
+  async updateWorkItemDetails(
+    sourceId: string,
+    workItemId: string,
+    input: UpdateWorkItemDetailsInput,
+  ): Promise<PortfolioWorkItem> {
+    const validatedInput = updateWorkItemDetailsInputSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const current = await source.workspace.read(workItemId);
+    if (current === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+
+    const nextGoal: WorkItemGoal = { ...current.goal };
+    if (validatedInput.title !== undefined) {
+      nextGoal.title = validatedInput.title;
+    }
+    if (validatedInput.type !== undefined) {
+      if (validatedInput.type === null) {
+        delete nextGoal.type;
+      } else {
+        nextGoal.type = validatedInput.type;
+      }
+    }
+    if (validatedInput.priority !== undefined) {
+      if (validatedInput.priority === null) {
+        delete nextGoal.priority;
+      } else {
+        nextGoal.priority = validatedInput.priority;
+      }
+    }
+    if (validatedInput.tags !== undefined) {
+      if (validatedInput.tags.length === 0) {
+        delete nextGoal.tags;
+      } else {
+        nextGoal.tags = validatedInput.tags;
+      }
+    }
+    if (validatedInput.notes !== undefined) {
+      if (validatedInput.notes === null) {
+        delete nextGoal.notes;
+      } else {
+        nextGoal.notes = validatedInput.notes;
+      }
+    }
+
+    const updated = await source.workspace.updateGoal(workItemId, nextGoal);
+    if (updated === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+
+    await this.rebuild();
+    return this.toPortfolioItem(source, updated);
+  }
+
+  async assignWorkItem(
+    sourceId: string,
+    workItemId: string,
+    input: AssignWorkItemInput,
+  ): Promise<PortfolioWorkItem> {
+    const validatedInput = assignWorkItemInputSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const target = await this.resolveSource(validatedInput.target_source_id);
+    const current = await source.workspace.read(workItemId);
+
+    if (current === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    if (source.source_id === target.source_id) {
+      return this.toPortfolioItem(source, current);
+    }
+    if (await target.workspace.hasWorkItem(workItemId)) {
+      throw new WorkItemTargetCollisionError(
+        source.source_id,
+        workItemId,
+        target.source_id,
+      );
+    }
+
+    const transferId = `tr_${randomUUID()}`;
+    let record: TransferJournalRecord | null = null;
+
+    try {
+      const stagingPath = await target.workspace.stageIncomingWorkItem(current);
+      record = transferJournalRecordSchema.parse({
+        schema_version: 1,
+        transfer_id: transferId,
+        work_item_id: workItemId,
+        from_source_id: source.source_id,
+        from_path: source.workspace.workspaceRoot,
+        to_source_id: target.source_id,
+        to_path: stagingPath,
+        stage: "staged",
+      });
+      await this.writeTransferJournal(record);
+
+      await target.workspace.publishStagedWorkItem(workItemId, stagingPath);
+      record = { ...record, stage: "published" };
+      await this.writeTransferJournal(record);
+
+      await source.workspace.removeWorkItem(workItemId);
+      record = { ...record, stage: "source_removed" };
+      await this.writeTransferJournal(record);
+      await this.deleteTransferJournal(record.transfer_id);
+
+      await this.rebuild();
+      return this.toPortfolioItem(target, current);
+    } catch (error) {
+      let cleanupError: unknown;
+      if (record?.stage === "staged") {
+        try {
+          const targetItem = await target.workspace.read(workItemId);
+          if (targetItem === null) {
+            await target.workspace.discardStagedWorkItem(
+              workItemId,
+              record.to_path,
+            );
+            await this.deleteTransferJournal(record.transfer_id);
+          } else if (!isDeepStrictEqual(targetItem, current)) {
+            await target.workspace.discardStagedWorkItem(
+              workItemId,
+              record.to_path,
+            );
+            await this.deleteTransferJournal(record.transfer_id);
+          }
+        } catch (candidateCleanupError) {
+          cleanupError = candidateCleanupError;
+        }
+      }
+
+      if (
+        cleanupError === undefined &&
+        error instanceof InvalidWorkspaceError &&
+        error.reason === "target work-item already exists"
+      ) {
+        throw new WorkItemTargetCollisionError(
+          source.source_id,
+          workItemId,
+          target.source_id,
+        );
+      }
+      if (
+        error instanceof WorkItemTargetCollisionError ||
+        error instanceof WorkItemTransferFailedError
+      ) {
+        throw error;
+      }
+
+      const reason =
+        cleanupError === undefined
+          ? errorMessage(error)
+          : `${errorMessage(error)}; cleanup also failed: ${errorMessage(cleanupError)}`;
+      throw new WorkItemTransferFailedError(
+        source.source_id,
+        workItemId,
+        target.source_id,
+        reason,
+      );
+    }
   }
 
   async updateWorkItemPhase(
@@ -160,7 +411,15 @@ export class PortfolioService {
     };
   }
 
+  async recoverPendingTransfers(): Promise<void> {
+    const records = await this.readTransferJournals();
+    for (const record of records) {
+      await this.recoverTransfer(record);
+    }
+  }
+
   async rebuild(): Promise<PortfolioRebuildResult> {
+    await this.recoverPendingTransfers();
     const workspaces = await this.registry.read();
     const items: PortfolioWorkItem[] = [];
     const failures: PortfolioRebuildResult["failures"] = [];
@@ -215,6 +474,190 @@ export class PortfolioService {
     return { items: this.index.list(), failures };
   }
 
+  private toPortfolioItem(
+    source: ResolvedSource,
+    workItem: WorkItem,
+  ): PortfolioWorkItem {
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: workItem,
+    };
+  }
+
+  private async recoverTransfer(record: TransferJournalRecord): Promise<void> {
+    const source = await this.resolveSource(record.from_source_id);
+    const target = await this.resolveSource(record.to_source_id);
+    if (source.workspace.workspaceRoot !== resolve(record.from_path)) {
+      throw new WorkItemTransferFailedError(
+        record.from_source_id,
+        record.work_item_id,
+        record.to_source_id,
+        "journal source path no longer matches the registered source",
+      );
+    }
+
+    const sourceItem = await source.workspace.read(record.work_item_id);
+    const targetItem = await target.workspace.read(record.work_item_id);
+
+    if (record.stage === "staged" && targetItem === null) {
+      if (sourceItem === null) {
+        throw new WorkItemTransferFailedError(
+          record.from_source_id,
+          record.work_item_id,
+          record.to_source_id,
+          "staged transfer has neither a source item nor a published target",
+        );
+      }
+      await target.workspace.discardStagedWorkItem(
+        record.work_item_id,
+        record.to_path,
+      );
+      await this.deleteTransferJournal(record.transfer_id);
+      return;
+    }
+
+    if (targetItem === null) {
+      throw new WorkItemTransferFailedError(
+        record.from_source_id,
+        record.work_item_id,
+        record.to_source_id,
+        `${record.stage} transfer is missing its published target`,
+      );
+    }
+    if (sourceItem !== null && !isDeepStrictEqual(sourceItem, targetItem)) {
+      throw new WorkItemTransferFailedError(
+        record.from_source_id,
+        record.work_item_id,
+        record.to_source_id,
+        "source and published target content differ",
+      );
+    }
+
+    if (sourceItem !== null) {
+      await source.workspace.removeWorkItem(record.work_item_id);
+    }
+    const completedRecord: TransferJournalRecord = {
+      ...record,
+      stage: "source_removed",
+    };
+    await this.writeTransferJournal(completedRecord);
+    await this.deleteTransferJournal(record.transfer_id);
+  }
+
+  private async readTransferJournals(): Promise<TransferJournalRecord[]> {
+    await this.ensureTransfersDirectory();
+    const entries = await readdir(this.transfersRoot, { withFileTypes: true });
+    const records: TransferJournalRecord[] = [];
+
+    for (const entry of entries) {
+      if (TRANSFER_TEMP_FILE_PATTERN.test(entry.name)) {
+        if (!entry.isFile()) {
+          throw new InvalidWorkspaceError(
+            `.portfolio/transfers/${entry.name}`,
+            "transfer journal temporary entry must be a regular file",
+          );
+        }
+        continue;
+      }
+      const artifactPath = `.portfolio/transfers/${entry.name}`;
+      if (!entry.isFile()) {
+        throw new InvalidWorkspaceError(
+          artifactPath,
+          "transfer journal entry must be a regular file",
+        );
+      }
+
+      const journalPath = join(this.transfersRoot, entry.name);
+      const stats = await lstat(journalPath);
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new InvalidWorkspaceError(
+          artifactPath,
+          "transfer journal must be a regular file, not a symlink",
+        );
+      }
+
+      let value: unknown;
+      try {
+        value = JSON.parse(await readFile(journalPath, "utf8"));
+      } catch (error) {
+        throw new InvalidWorkspaceError(
+          artifactPath,
+          `invalid JSON: ${errorMessage(error)}`,
+        );
+      }
+      const result = transferJournalRecordSchema.safeParse(value);
+      if (!result.success) {
+        throw new InvalidWorkspaceError(
+          artifactPath,
+          validationReason(result.error),
+        );
+      }
+      if (entry.name !== `${result.data.transfer_id}.json`) {
+        throw new InvalidWorkspaceError(
+          artifactPath,
+          "journal filename must match transfer_id",
+        );
+      }
+      records.push(result.data);
+    }
+
+    return records.sort((left, right) =>
+      left.transfer_id.localeCompare(right.transfer_id),
+    );
+  }
+
+  private async writeTransferJournal(
+    record: TransferJournalRecord,
+  ): Promise<void> {
+    const validatedRecord = transferJournalRecordSchema.parse(record);
+    await this.ensureTransfersDirectory();
+    const journalPath = join(
+      this.transfersRoot,
+      `${validatedRecord.transfer_id}.json`,
+    );
+    const temporaryPath = join(
+      this.transfersRoot,
+      `.${validatedRecord.transfer_id}.json.${randomUUID()}.tmp`,
+    );
+
+    try {
+      await writeFile(
+        temporaryPath,
+        `${JSON.stringify(validatedRecord, null, 2)}\n`,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await rename(temporaryPath, journalPath);
+    } finally {
+      try {
+        await unlink(temporaryPath);
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async deleteTransferJournal(transferId: string): Promise<void> {
+    try {
+      await unlink(join(this.transfersRoot, `${transferId}.json`));
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  private async ensureTransfersDirectory(): Promise<void> {
+    const portfolioRoot = dirname(this.inboxRoot);
+    await this.ensureSafeDirectory(portfolioRoot, ".portfolio");
+    await this.ensureSafeDirectory(
+      this.transfersRoot,
+      ".portfolio/transfers",
+    );
+  }
+
   private async resolveSource(sourceId: string): Promise<ResolvedSource> {
     if (sourceId === INBOX_SOURCE_ID) {
       return {
@@ -238,7 +681,7 @@ export class PortfolioService {
     };
   }
 
-  private async ensureInboxWorkspace(): Promise<WorkspaceReader> {
+  private async ensureInboxWorkspace(): Promise<WorkspaceGateway> {
     const portfolioRoot = dirname(this.inboxRoot);
     const founderDirectory = join(this.inboxRoot, ".founder");
     const manifestPath = join(founderDirectory, "product.yaml");

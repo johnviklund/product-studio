@@ -2,6 +2,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -20,6 +21,10 @@ import {
   UnknownPortfolioSourceError,
   type PortfolioWorkItemIndex,
 } from "../../src/domain/portfolio";
+import {
+  WorkItemTargetCollisionError,
+  WorkItemTransferFailedError,
+} from "../../src/domain/work-item";
 import { SQLitePortfolioIndex } from "../../src/index/work-item-index";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
 import { PortfolioRegistry } from "../../src/workspace/portfolio-registry";
@@ -46,17 +51,97 @@ async function createWorkspace(productName: string): Promise<string> {
 
 async function createService(
   index: PortfolioWorkItemIndex = new SQLitePortfolioIndex(":memory:"),
+  makeWorkspace?: (workspacePath: string) => ProductWorkspace,
 ) {
   const applicationRoot = await createRoot("product-studio-service-app-");
   const registry = new PortfolioRegistry(
     join(applicationRoot, ".local-data", "registry.json"),
   );
   const inboxRoot = join(applicationRoot, ".portfolio", "inbox");
+  const service = new PortfolioService(
+    registry,
+    index,
+    inboxRoot,
+    makeWorkspace,
+  );
   return {
     registry,
     index,
     inboxRoot,
-    service: new PortfolioService(registry, index, inboxRoot),
+    transfersRoot: service.transfersRoot,
+    service,
+  };
+}
+
+async function writeTransferJournal(
+  transfersRoot: string,
+  record: {
+    transfer_id: string;
+    work_item_id: string;
+    from_source_id: string;
+    from_path: string;
+    to_source_id: string;
+    to_path: string;
+    stage: "staged" | "published" | "source_removed";
+  },
+): Promise<void> {
+  await mkdir(transfersRoot, { recursive: true });
+  await writeFile(
+    join(transfersRoot, `${record.transfer_id}.json`),
+    `${JSON.stringify({ schema_version: 1, ...record }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function preparePendingTransfer(
+  actualStage: "staged" | "published" | "source_removed",
+  recordedStage: "staged" | "published" | "source_removed" = actualStage,
+) {
+  const sourceRoot = await createWorkspace(`Recovery source ${actualStage}`);
+  const targetRoot = await createWorkspace(`Recovery target ${actualStage}`);
+  const createdService = await createService();
+  const sourceRegistration = await createdService.service.register({
+    workspace_path: sourceRoot,
+  });
+  const targetRegistration = await createdService.service.register({
+    workspace_path: targetRoot,
+  });
+  const created = await createdService.service.createCapture({
+    title: `Recover ${recordedStage} transfer`,
+    capture_kind: "idea",
+    source_id: sourceRegistration.workspace.workspace_id,
+  });
+  const source = new ProductWorkspace(sourceRoot);
+  const target = new ProductWorkspace(targetRoot);
+  const stagingPath = await target.stageIncomingWorkItem(created.work_item);
+
+  if (actualStage !== "staged") {
+    await target.publishStagedWorkItem(
+      created.work_item.goal.work_item_id,
+      stagingPath,
+    );
+  }
+  if (actualStage === "source_removed") {
+    await source.removeWorkItem(created.work_item.goal.work_item_id);
+  }
+
+  await writeTransferJournal(createdService.transfersRoot, {
+    transfer_id: "tr_123e4567-e89b-42d3-a456-426614174000",
+    work_item_id: created.work_item.goal.work_item_id,
+    from_source_id: sourceRegistration.workspace.workspace_id,
+    from_path: sourceRoot,
+    to_source_id: targetRegistration.workspace.workspace_id,
+    to_path: stagingPath,
+    stage: recordedStage,
+  });
+
+  return {
+    ...createdService,
+    source,
+    target,
+    sourceRegistration,
+    targetRegistration,
+    created,
   };
 }
 
@@ -185,6 +270,323 @@ describe("PortfolioService", () => {
       work_item: { state: { phase: "spec" } },
     });
     await expect(service.list()).resolves.toEqual([updated]);
+    index.close();
+  });
+
+  it("creates minimal captures in Inbox or directly in a selected project", async () => {
+    const projectRoot = await createWorkspace("Capture Project");
+    const { inboxRoot, index, service } = await createService();
+    const registration = await service.register({ workspace_path: projectRoot });
+
+    const inboxCapture = await service.createCapture({
+      title: "Unassigned capture",
+      capture_kind: "idea",
+    });
+    expect(inboxCapture).toMatchObject({
+      source_id: INBOX_SOURCE_ID,
+      project: null,
+      work_item: {
+        goal: {
+          title: "Unassigned capture",
+          capture: {
+            kind: "idea",
+            original_title: "Unassigned capture",
+          },
+        },
+        state: { phase: "idea", status: "active" },
+      },
+    });
+    expect(inboxCapture.work_item.goal).not.toHaveProperty("type");
+    expect(inboxCapture.work_item.goal).not.toHaveProperty("priority");
+
+    const projectCapture = await service.createCapture({
+      title: "Project capture",
+      capture_kind: "todo",
+      source_id: registration.workspace.workspace_id,
+    });
+    expect(projectCapture).toMatchObject({
+      source_id: registration.workspace.workspace_id,
+      project: { workspace_path: projectRoot },
+      work_item: { goal: { title: "Project capture" } },
+    });
+
+    const inbox = new ProductWorkspace(inboxRoot);
+    const project = new ProductWorkspace(projectRoot);
+    expect(await inbox.read(projectCapture.work_item.goal.work_item_id)).toBeNull();
+    expect(await project.read(projectCapture.work_item.goal.work_item_id)).toEqual(
+      projectCapture.work_item,
+    );
+    await expect(service.list()).resolves.toHaveLength(2);
+    index.close();
+  });
+
+  it("updates and clears capture details without rewriting provenance", async () => {
+    const { index, service } = await createService();
+    const created = await service.createCapture({
+      title: "Original capture",
+      capture_kind: "idea",
+      priority: "normal",
+      tags: ["Question"],
+      notes: "Original context",
+    });
+    const provenance = created.work_item.goal.capture;
+
+    const updated = await service.updateWorkItemDetails(
+      INBOX_SOURCE_ID,
+      created.work_item.goal.work_item_id,
+      { title: "Refined capture", type: "Feature" },
+    );
+    expect(updated.work_item.goal).toMatchObject({
+      title: "Refined capture",
+      type: "Feature",
+      priority: "normal",
+      tags: ["Question"],
+      notes: "Original context",
+      capture: provenance,
+    });
+
+    const cleared = await service.updateWorkItemDetails(
+      INBOX_SOURCE_ID,
+      created.work_item.goal.work_item_id,
+      { type: null, priority: null, tags: [], notes: null },
+    );
+    expect(cleared.work_item.goal).toEqual({
+      schema_version: 1,
+      work_item_id: created.work_item.goal.work_item_id,
+      title: "Refined capture",
+      capture: provenance,
+    });
+    await expect(service.list()).resolves.toEqual([cleared]);
+    index.close();
+  });
+
+  it("assigns a capture across workspace roots and treats same-source assignment as idempotent", async () => {
+    const sourceRoot = await createWorkspace("Transfer Source");
+    const targetRoot = await createWorkspace("Transfer Target");
+    const { index, service, transfersRoot } = await createService();
+    const sourceRegistration = await service.register({
+      workspace_path: sourceRoot,
+    });
+    const targetRegistration = await service.register({
+      workspace_path: targetRoot,
+    });
+    const created = await service.createCapture({
+      title: "Portable capture",
+      capture_kind: "todo",
+      source_id: sourceRegistration.workspace.workspace_id,
+      tags: ["Portable"],
+    });
+
+    const unchanged = await service.assignWorkItem(
+      sourceRegistration.workspace.workspace_id,
+      created.work_item.goal.work_item_id,
+      { target_source_id: sourceRegistration.workspace.workspace_id },
+    );
+    expect(unchanged).toEqual(created);
+
+    const assigned = await service.assignWorkItem(
+      sourceRegistration.workspace.workspace_id,
+      created.work_item.goal.work_item_id,
+      { target_source_id: targetRegistration.workspace.workspace_id },
+    );
+    expect(assigned).toEqual({
+      source_id: targetRegistration.workspace.workspace_id,
+      project: targetRegistration.workspace,
+      work_item: created.work_item,
+    });
+    expect(
+      await new ProductWorkspace(sourceRoot).read(
+        created.work_item.goal.work_item_id,
+      ),
+    ).toBeNull();
+    expect(
+      await new ProductWorkspace(targetRoot).read(
+        created.work_item.goal.work_item_id,
+      ),
+    ).toEqual(created.work_item);
+    await expect(service.list()).resolves.toEqual([assigned]);
+    expect(await readdir(transfersRoot)).toEqual([]);
+    index.close();
+  });
+
+  it("rejects unknown, missing, and colliding assignment targets without overwriting", async () => {
+    const sourceRoot = await createWorkspace("Collision Source");
+    const targetRoot = await createWorkspace("Collision Target");
+    const { index, service } = await createService();
+    const sourceRegistration = await service.register({
+      workspace_path: sourceRoot,
+    });
+    const targetRegistration = await service.register({
+      workspace_path: targetRoot,
+    });
+    const created = await service.createCapture({
+      title: "Collision candidate",
+      capture_kind: "idea",
+      source_id: sourceRegistration.workspace.workspace_id,
+    });
+
+    await expect(
+      service.assignWorkItem(
+        sourceRegistration.workspace.workspace_id,
+        created.work_item.goal.work_item_id,
+        { target_source_id: "ws_00000000-0000-4000-8000-000000000000" },
+      ),
+    ).rejects.toBeInstanceOf(UnknownPortfolioSourceError);
+    await expect(
+      service.assignWorkItem(
+        sourceRegistration.workspace.workspace_id,
+        "wi_123e4567-e89b-12d3-a456-426614174000",
+        { target_source_id: targetRegistration.workspace.workspace_id },
+      ),
+    ).rejects.toBeInstanceOf(PortfolioWorkItemNotFoundError);
+
+    const target = new ProductWorkspace(targetRoot);
+    const stagingPath = await target.stageIncomingWorkItem(created.work_item);
+    await target.publishStagedWorkItem(
+      created.work_item.goal.work_item_id,
+      stagingPath,
+    );
+    await expect(
+      service.assignWorkItem(
+        sourceRegistration.workspace.workspace_id,
+        created.work_item.goal.work_item_id,
+        { target_source_id: targetRegistration.workspace.workspace_id },
+      ),
+    ).rejects.toBeInstanceOf(WorkItemTargetCollisionError);
+    expect(
+      await new ProductWorkspace(sourceRoot).read(
+        created.work_item.goal.work_item_id,
+      ),
+    ).toEqual(created.work_item);
+    expect(await target.read(created.work_item.goal.work_item_id)).toEqual(
+      created.work_item,
+    );
+    index.close();
+  });
+
+  it("rolls back a staged transfer during rebuild", async () => {
+    const fixture = await preparePendingTransfer("staged");
+    const workItemId = fixture.created.work_item.goal.work_item_id;
+
+    const rebuilt = await fixture.service.rebuild();
+
+    expect(await fixture.source.read(workItemId)).toEqual(
+      fixture.created.work_item,
+    );
+    expect(await fixture.target.read(workItemId)).toBeNull();
+    expect(rebuilt.items).toEqual([fixture.created]);
+    expect(await readdir(fixture.transfersRoot)).toEqual([]);
+    fixture.index.close();
+  });
+
+  it("detects crash-after-publish from a stale staged journal and completes the transfer", async () => {
+    const fixture = await preparePendingTransfer("published", "staged");
+    const workItemId = fixture.created.work_item.goal.work_item_id;
+
+    const rebuilt = await fixture.service.rebuild();
+
+    expect(await fixture.source.read(workItemId)).toBeNull();
+    expect(await fixture.target.read(workItemId)).toEqual(
+      fixture.created.work_item,
+    );
+    expect(rebuilt.items).toEqual([
+      {
+        source_id: fixture.targetRegistration.workspace.workspace_id,
+        project: fixture.targetRegistration.workspace,
+        work_item: fixture.created.work_item,
+      },
+    ]);
+    expect(await readdir(fixture.transfersRoot)).toEqual([]);
+    fixture.index.close();
+  });
+
+  it("completes a published transfer during rebuild", async () => {
+    const fixture = await preparePendingTransfer("published");
+    const workItemId = fixture.created.work_item.goal.work_item_id;
+
+    await fixture.service.rebuild();
+
+    expect(await fixture.source.read(workItemId)).toBeNull();
+    expect(await fixture.target.read(workItemId)).toEqual(
+      fixture.created.work_item,
+    );
+    expect(await readdir(fixture.transfersRoot)).toEqual([]);
+    fixture.index.close();
+  });
+
+  it("finalizes a source-removed transfer during rebuild", async () => {
+    const fixture = await preparePendingTransfer("source_removed");
+    const workItemId = fixture.created.work_item.goal.work_item_id;
+
+    await fixture.service.rebuild();
+
+    expect(await fixture.source.read(workItemId)).toBeNull();
+    expect(await fixture.target.read(workItemId)).toEqual(
+      fixture.created.work_item,
+    );
+    expect(await readdir(fixture.transfersRoot)).toEqual([]);
+    fixture.index.close();
+  });
+
+  it("surfaces an interrupted published transfer and recovers it idempotently", async () => {
+    const sourceRoot = await createWorkspace("Interrupted Source");
+    const targetRoot = await createWorkspace("Interrupted Target");
+    const workspaces = new Map<string, ProductWorkspace>();
+    const makeWorkspace = (workspacePath: string) => {
+      let workspace = workspaces.get(workspacePath);
+      if (workspace === undefined) {
+        workspace = new ProductWorkspace(workspacePath);
+        workspaces.set(workspacePath, workspace);
+      }
+      return workspace;
+    };
+    const { index, service, transfersRoot } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      makeWorkspace,
+    );
+    const sourceRegistration = await service.register({
+      workspace_path: sourceRoot,
+    });
+    const targetRegistration = await service.register({
+      workspace_path: targetRoot,
+    });
+    const created = await service.createCapture({
+      title: "Recover after denied source removal",
+      capture_kind: "todo",
+      source_id: sourceRegistration.workspace.workspace_id,
+    });
+    const source = makeWorkspace(sourceRoot);
+    const target = makeWorkspace(targetRoot);
+    const removeWorkItem = source.removeWorkItem.bind(source);
+    source.removeWorkItem = async () => {
+      throw Object.assign(new Error("source removal denied"), {
+        code: "EACCES",
+      });
+    };
+
+    await expect(
+      service.assignWorkItem(
+        sourceRegistration.workspace.workspace_id,
+        created.work_item.goal.work_item_id,
+        { target_source_id: targetRegistration.workspace.workspace_id },
+      ),
+    ).rejects.toBeInstanceOf(WorkItemTransferFailedError);
+    expect(await source.read(created.work_item.goal.work_item_id)).toEqual(
+      created.work_item,
+    );
+    expect(await target.read(created.work_item.goal.work_item_id)).toEqual(
+      created.work_item,
+    );
+    expect(await readdir(transfersRoot)).toHaveLength(1);
+
+    source.removeWorkItem = removeWorkItem;
+    await service.rebuild();
+    await service.rebuild();
+    expect(await source.read(created.work_item.goal.work_item_id)).toBeNull();
+    expect(await target.read(created.work_item.goal.work_item_id)).toEqual(
+      created.work_item,
+    );
+    expect(await readdir(transfersRoot)).toEqual([]);
     index.close();
   });
 
