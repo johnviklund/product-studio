@@ -1,5 +1,16 @@
 # Product Studio working rules
 
+## Skill invocation (process invariant)
+
+A message of the form `workflow <command>` or `/workflow <command>` (brainstorm, spec, plan,
+execute, review, learn, wrap, status, next, log, compact, todo, bootstrap, improve) is a
+**deliberate skill invocation, not a request to improvise**. Before reading files, running
+commands, or emitting any output, **invoke the `workflow` skill as the first action** and
+follow its loaded instructions (seat, verification bar, and the mandatory closing next-step
+card). Reading the skill's `SKILL.md` or `references/*.md` directly is **not** a substitute for
+invoking the skill. The same rule applies to any message that matches an available skill's
+documented trigger: invoke the skill first, then act.
+
 ## Required reading
 
 Before product, UI, workflow, or architecture work, read `PRODUCT.md`, `DESIGN.md`,
