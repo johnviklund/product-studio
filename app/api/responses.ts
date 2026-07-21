@@ -2,7 +2,10 @@ import { ZodError } from "zod";
 
 import {
   DuplicateWorkspaceError,
+  InvalidWorkItemTransitionError,
   InvalidRegistryError,
+  PortfolioWorkItemNotFoundError,
+  UnknownPortfolioSourceError,
 } from "../../src/domain/portfolio";
 import { InvalidWorkspaceError } from "../../src/domain/work-item";
 
@@ -35,6 +38,42 @@ export function errorResponse(error: unknown): Response {
         error: {
           code: error.kind,
           message: error.message,
+        },
+      },
+      { status: 409 },
+    );
+  }
+
+  if (error instanceof UnknownPortfolioSourceError) {
+    return Response.json(
+      {
+        error: {
+          code: error.kind,
+          message: "Portfolio source not found",
+        },
+      },
+      { status: 404 },
+    );
+  }
+
+  if (error instanceof PortfolioWorkItemNotFoundError) {
+    return Response.json(
+      {
+        error: {
+          code: error.kind,
+          message: "Work item not found",
+        },
+      },
+      { status: 404 },
+    );
+  }
+
+  if (error instanceof InvalidWorkItemTransitionError) {
+    return Response.json(
+      {
+        error: {
+          code: error.kind,
+          message: error.reason,
         },
       },
       { status: 409 },
