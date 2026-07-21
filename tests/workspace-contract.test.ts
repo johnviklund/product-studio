@@ -123,6 +123,57 @@ describe("ProductWorkspace", () => {
     ]);
   });
 
+  it("atomically updates only the validated state phase", async () => {
+    const root = await createWorkspace();
+    await writeWorkItem(root, firstId, "2026-07-17T12:00:00.000Z");
+    const workspace = new ProductWorkspace(root);
+    const itemDirectory = join(root, ".founder", "work-items", firstId);
+    const goalPath = join(itemDirectory, "goal.yaml");
+    const statePath = join(itemDirectory, "state.json");
+    const goalBefore = await readFile(goalPath, "utf8");
+
+    const updated = await workspace.updatePhase(firstId, {
+      target_phase: "spec",
+    });
+
+    expect(updated).not.toBeNull();
+    if (updated === null) {
+      throw new Error("Expected the existing item to be updated");
+    }
+    expect(updated.state).toMatchObject({ phase: "spec", status: "active" });
+    expect(Date.parse(updated.state.updated_at)).toBeGreaterThan(
+      Date.parse("2026-07-17T12:00:00.000Z"),
+    );
+    expect(await workspace.read(firstId)).toEqual(updated);
+    expect(await readFile(goalPath, "utf8")).toBe(goalBefore);
+    expect(JSON.parse(await readFile(statePath, "utf8"))).toEqual(updated.state);
+    expect((await readdir(itemDirectory)).sort()).toEqual([
+      "goal.yaml",
+      "state.json",
+    ]);
+  });
+
+  it("rejects an invalid existing item without changing state", async () => {
+    const root = await createWorkspace();
+    await writeWorkItem(root, firstId, "2026-07-17T12:00:00.000Z");
+    const workspace = new ProductWorkspace(root);
+    const itemDirectory = join(root, ".founder", "work-items", firstId);
+    const goalPath = join(itemDirectory, "goal.yaml");
+    const statePath = join(itemDirectory, "state.json");
+    const goal = parse(await readFile(goalPath, "utf8"));
+    const stateBefore = await readFile(statePath, "utf8");
+    await writeFile(
+      goalPath,
+      stringify({ ...goal, work_item_id: secondId }),
+      "utf8",
+    );
+
+    await expect(
+      workspace.updatePhase(firstId, { target_phase: "spec" }),
+    ).rejects.toBeInstanceOf(InvalidWorkspaceError);
+    expect(await readFile(statePath, "utf8")).toBe(stateBefore);
+  });
+
   it("surfaces malformed YAML and JSON as artifact-relative errors", async () => {
     const root = await createWorkspace();
     await writeWorkItem(root, firstId, "2026-07-17T12:00:00.000Z");

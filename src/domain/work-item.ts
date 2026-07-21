@@ -71,6 +71,10 @@ export interface WorkItemRepository {
   create(input: CreateWorkItemInput): Promise<WorkItem>;
   read(workItemId: string): Promise<WorkItem | null>;
   list(): Promise<WorkItem[]>;
+  updatePhase(
+    workItemId: string,
+    input: UpdateWorkItemPhaseInput,
+  ): Promise<WorkItem | null>;
 }
 
 export const workItemIdSchema = z

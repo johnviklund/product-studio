@@ -5,6 +5,7 @@ import {
   readFile,
   readdir,
   rename,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
@@ -20,12 +21,14 @@ import {
   workItemIdSchema,
   workItemSchema,
   workItemStateSchema,
+  updateWorkItemPhaseInputSchema,
   type CreateWorkItemInput,
   type ProductManifest,
   type WorkItem,
   type WorkItemGoal,
   type WorkItemRepository,
   type WorkItemState,
+  type UpdateWorkItemPhaseInput,
 } from "../domain/work-item";
 
 const FOUNDER_DIRECTORY = ".founder";
@@ -162,6 +165,45 @@ export class ProductWorkspace implements WorkItemRepository {
     );
   }
 
+  async updatePhase(
+    workItemId: string,
+    input: UpdateWorkItemPhaseInput,
+  ): Promise<WorkItem | null> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = updateWorkItemPhaseInputSchema.parse(input);
+
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return null;
+    }
+
+    const current = await this.readValidated(validatedId);
+    if (current === null) {
+      return null;
+    }
+
+    const currentTimestamp = Date.parse(current.state.updated_at);
+    const updatedAt = new Date(
+      Math.max(Date.now(), currentTimestamp + 1),
+    ).toISOString();
+    const state = workItemStateSchema.parse({
+      ...current.state,
+      phase: validatedInput.target_phase,
+      updated_at: updatedAt,
+    });
+    const itemResult = workItemSchema.safeParse({ goal: current.goal, state });
+
+    if (!itemResult.success) {
+      throw this.invalid(
+        join(this.workItemsDirectory, validatedId),
+        validationReason(itemResult),
+      );
+    }
+
+    await this.replaceStateAtomically(validatedId, itemResult.data.state);
+    return itemResult.data;
+  }
+
   private async readValidated(workItemId: string): Promise<WorkItem | null> {
     const workItemDirectory = join(this.workItemsDirectory, workItemId);
 
@@ -296,6 +338,40 @@ export class ProductWorkspace implements WorkItemRepository {
     });
     await rename(temporaryGoalPath, goalPath);
     await rename(temporaryStatePath, statePath);
+  }
+
+  private async replaceStateAtomically(
+    workItemId: string,
+    state: WorkItemState,
+  ): Promise<void> {
+    const workItemDirectory = join(this.workItemsDirectory, workItemId);
+    const statePath = join(workItemDirectory, STATE_FILE);
+    const temporaryStatePath = join(
+      workItemDirectory,
+      `.${STATE_FILE}.${randomUUID()}.tmp`,
+    );
+
+    await this.readRequiredFile(statePath);
+
+    try {
+      await writeFile(temporaryStatePath, `${JSON.stringify(state, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(temporaryStatePath, statePath);
+    } catch (error) {
+      try {
+        await unlink(temporaryStatePath);
+      } catch (cleanupError) {
+        if (!isNodeError(cleanupError) || cleanupError.code !== "ENOENT") {
+          throw new AggregateError(
+            [error, cleanupError],
+            "State update failed and its temporary file could not be removed",
+          );
+        }
+      }
+      throw error;
+    }
   }
 
   private async readRequiredFile(filePath: string): Promise<string> {
