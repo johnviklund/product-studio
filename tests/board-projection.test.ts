@@ -115,7 +115,7 @@ describe("board identity and view state", () => {
     ).toEqual(createDefaultBoardView());
   });
 
-  it("supports all-project, selected-project, and unassigned-only filters", () => {
+  it("supports all, single-project, multi-project, and unassigned filters", () => {
     const project = { source_id: "ws_one", project: { name: "One" } };
     const anotherProject = { source_id: "ws_two", project: { name: "Two" } };
     const unassigned = { source_id: "inbox", project: null };
@@ -136,6 +136,14 @@ describe("board identity and view state", () => {
         }),
       ),
     ).toEqual([anotherProject]);
+    expect(
+      [project, anotherProject, unassigned].filter((source) =>
+        isBoardSourceVisible(source, {
+          project_source_ids: ["ws_one", "ws_two"],
+          include_unassigned: false,
+        }),
+      ),
+    ).toEqual([project, anotherProject]);
     expect(
       [project, anotherProject, unassigned].filter((source) =>
         isBoardSourceVisible(source, {
