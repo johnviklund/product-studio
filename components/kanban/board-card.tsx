@@ -12,10 +12,9 @@ interface BoardCardProps {
   item: PortfolioWorkItem;
   selectedIdentity: BoardItemIdentity | null;
   onSelect: (identity: BoardItemIdentity) => void;
-  onMoveFocus?: (
-    identity: BoardItemIdentity,
-    direction: "previous" | "next",
-  ) => void;
+  previousIdentity?: BoardItemIdentity;
+  nextIdentity?: BoardItemIdentity;
+  onMoveFocus?: (identity: BoardItemIdentity) => void;
   onOpenDetail?: (identity: BoardItemIdentity) => void;
   disabled?: boolean;
 }
@@ -89,6 +88,8 @@ export function BoardCard({
   item,
   selectedIdentity,
   onSelect,
+  previousIdentity,
+  nextIdentity,
   onMoveFocus,
   onOpenDetail,
   disabled = false,
@@ -123,10 +124,14 @@ export function BoardCard({
 
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      onMoveFocus?.(identity, "previous");
+      if (previousIdentity) {
+        onMoveFocus?.(previousIdentity);
+      }
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
-      onMoveFocus?.(identity, "next");
+      if (nextIdentity) {
+        onMoveFocus?.(nextIdentity);
+      }
     } else if (event.key === "Enter") {
       event.preventDefault();
       onOpenDetail?.(identity);

@@ -16,6 +16,8 @@ interface KanbanColumnProps {
   pendingItemKey: string | null;
   selectedIdentity: BoardItemIdentity | null;
   onSelect: (identity: BoardItemIdentity) => void;
+  onMoveFocus?: (identity: BoardItemIdentity) => void;
+  onOpenDetail?: (identity: BoardItemIdentity) => void;
 }
 
 export function KanbanColumn({
@@ -25,6 +27,8 @@ export function KanbanColumn({
   pendingItemKey,
   selectedIdentity,
   onSelect,
+  onMoveFocus,
+  onOpenDetail,
 }: KanbanColumnProps) {
   const { isOver, setNodeRef } = useDroppable({ id: column.id });
 
@@ -49,17 +53,37 @@ export function KanbanColumn({
       </header>
 
       <div className="space-y-2" role="list">
-        {items.map((item) => {
+        {items.map((item, index) => {
           const itemKey = boardItemIdentityKey({
             source_id: item.source_id,
             work_item_id: item.work_item.goal.work_item_id,
           });
+          const previousItem = items[index - 1];
+          const nextItem = items[index + 1];
           return (
             <div key={itemKey} role="listitem">
               <BoardCard
                 item={item}
                 selectedIdentity={selectedIdentity}
                 onSelect={onSelect}
+                previousIdentity={
+                  previousItem
+                    ? {
+                        source_id: previousItem.source_id,
+                        work_item_id: previousItem.work_item.goal.work_item_id,
+                      }
+                    : undefined
+                }
+                nextIdentity={
+                  nextItem
+                    ? {
+                        source_id: nextItem.source_id,
+                        work_item_id: nextItem.work_item.goal.work_item_id,
+                      }
+                    : undefined
+                }
+                onMoveFocus={onMoveFocus}
+                onOpenDetail={onOpenDetail}
                 disabled={pendingItemKey !== null}
               />
             </div>
