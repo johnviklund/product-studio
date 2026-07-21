@@ -7,7 +7,11 @@ import {
   PortfolioWorkItemNotFoundError,
   UnknownPortfolioSourceError,
 } from "../../src/domain/portfolio";
-import { InvalidWorkspaceError } from "../../src/domain/work-item";
+import {
+  InvalidWorkspaceError,
+  WorkItemTargetCollisionError,
+  WorkItemTransferFailedError,
+} from "../../src/domain/work-item";
 
 function artifactErrorResponse(
   error: InvalidWorkspaceError | InvalidRegistryError,
@@ -74,6 +78,21 @@ export function errorResponse(error: unknown): Response {
         error: {
           code: error.kind,
           message: error.reason,
+        },
+      },
+      { status: 409 },
+    );
+  }
+
+  if (
+    error instanceof WorkItemTargetCollisionError ||
+    error instanceof WorkItemTransferFailedError
+  ) {
+    return Response.json(
+      {
+        error: {
+          code: error.kind,
+          message: error.message,
         },
       },
       { status: 409 },

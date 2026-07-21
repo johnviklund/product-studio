@@ -7,6 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
+import {
+  WorkItemTargetCollisionError,
+  WorkItemTransferFailedError,
+} from "../../src/domain/work-item";
 import { SQLitePortfolioIndex } from "../../src/index/work-item-index";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
 import { PortfolioRegistry } from "../../src/workspace/portfolio-registry";
@@ -18,6 +22,9 @@ vi.mock("../../src/application/portfolio-service", () => ({
 }));
 
 import * as workItemsRoute from "../../app/api/work-items/route";
+import { POST as createPortfolioWorkItem } from "../../app/api/portfolio/work-items/route";
+import { POST as assignPortfolioWorkItem } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/assignment/route";
+import { PATCH as updatePortfolioWorkItemDetails } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/details/route";
 import {
   PATCH as updatePortfolioWorkItem,
 } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/route";
@@ -93,6 +100,36 @@ function phaseUpdateRequest(body: unknown): Request {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function captureRequest(body: unknown): Request {
+  return new Request("http://localhost/api/portfolio/work-items", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function detailsUpdateRequest(body: unknown): Request {
+  return new Request(
+    "http://localhost/api/portfolio/work-items/source/item/details",
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+function assignmentRequest(body: unknown): Request {
+  return new Request(
+    "http://localhost/api/portfolio/work-items/source/item/assignment",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 function phaseUpdateContext(sourceId: string, workItemId: string) {
@@ -185,6 +222,159 @@ describe("portfolio API routes", () => {
     });
     expect(await (await workItemsRoute.GET()).json()).toEqual({
       items: [updated],
+    });
+  });
+
+  it("creates, refines, and assigns a source-qualified capture", async () => {
+    await createService();
+    const workspacePath = await createWorkspace();
+    const registrationResponse = await registerWorkspace(
+      registrationRequest(workspacePath),
+    );
+    const registration = await registrationResponse.json();
+    const targetSourceId = registration.workspace.workspace_id as string;
+
+    const createResponse = await createPortfolioWorkItem(
+      captureRequest({
+        title: "Capture through HTTP",
+        capture_kind: "idea",
+      }),
+    );
+    const created = await createResponse.json();
+    const workItemId = created.work_item.goal.work_item_id as string;
+    expect(createResponse.status).toBe(201);
+    expect(created).toMatchObject({
+      source_id: "inbox",
+      project: null,
+      work_item: {
+        goal: {
+          title: "Capture through HTTP",
+          capture: { kind: "idea", original_title: "Capture through HTTP" },
+        },
+        state: { phase: "idea", status: "active" },
+      },
+    });
+    expect(created.work_item.goal).not.toHaveProperty("type");
+
+    const detailsResponse = await updatePortfolioWorkItemDetails(
+      detailsUpdateRequest({ type: "Feature", priority: "high" }),
+      phaseUpdateContext("inbox", workItemId),
+    );
+    const updated = await detailsResponse.json();
+    expect(detailsResponse.status).toBe(200);
+    expect(updated).toMatchObject({
+      source_id: "inbox",
+      work_item: {
+        goal: {
+          work_item_id: workItemId,
+          type: "Feature",
+          priority: "high",
+          capture: { original_title: "Capture through HTTP" },
+        },
+      },
+    });
+
+    const assignmentResponse = await assignPortfolioWorkItem(
+      assignmentRequest({ target_source_id: targetSourceId }),
+      phaseUpdateContext("inbox", workItemId),
+    );
+    const assigned = await assignmentResponse.json();
+    expect(assignmentResponse.status).toBe(200);
+    expect(assigned).toMatchObject({
+      source_id: targetSourceId,
+      project: { workspace_path: workspacePath },
+      work_item: { goal: { work_item_id: workItemId } },
+    });
+  });
+
+  it("returns 400 for invalid capture and detail bodies", async () => {
+    await createService();
+
+    const captureResponse = await createPortfolioWorkItem(
+      captureRequest({ title: "Missing kind" }),
+    );
+    const detailsResponse = await updatePortfolioWorkItemDetails(
+      detailsUpdateRequest({}),
+      phaseUpdateContext(
+        "inbox",
+        "wi_123e4567-e89b-12d3-a456-426614174000",
+      ),
+    );
+
+    expect(captureResponse.status).toBe(400);
+    expect(await captureResponse.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+    expect(detailsResponse.status).toBe(400);
+    expect(await detailsResponse.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+  });
+
+  it("returns 404 for unknown sources and missing items on new routes", async () => {
+    await createService();
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+
+    const unknownResponse = await assignPortfolioWorkItem(
+      assignmentRequest({ target_source_id: "inbox" }),
+      phaseUpdateContext(
+        "ws_00000000-0000-4000-8000-000000000000",
+        workItemId,
+      ),
+    );
+    const missingResponse = await updatePortfolioWorkItemDetails(
+      detailsUpdateRequest({ title: "Still missing" }),
+      phaseUpdateContext("inbox", workItemId),
+    );
+
+    expect(unknownResponse.status).toBe(404);
+    expect(await unknownResponse.json()).toMatchObject({
+      error: { code: "unknown_source" },
+    });
+    expect(missingResponse.status).toBe(404);
+    expect(await missingResponse.json()).toMatchObject({
+      error: { code: "work_item_not_found" },
+    });
+  });
+
+  it("maps transfer collisions and incomplete transfers to 409, never 500", async () => {
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const targetSourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const assignWorkItem = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new WorkItemTargetCollisionError(
+          "inbox",
+          workItemId,
+          targetSourceId,
+        ),
+      )
+      .mockRejectedValueOnce(
+        new WorkItemTransferFailedError(
+          "inbox",
+          workItemId,
+          targetSourceId,
+          "source removal denied",
+        ),
+      );
+    getService.mockResolvedValue({ assignWorkItem });
+
+    const collisionResponse = await assignPortfolioWorkItem(
+      assignmentRequest({ target_source_id: targetSourceId }),
+      phaseUpdateContext("inbox", workItemId),
+    );
+    const failedResponse = await assignPortfolioWorkItem(
+      assignmentRequest({ target_source_id: targetSourceId }),
+      phaseUpdateContext("inbox", workItemId),
+    );
+
+    expect(collisionResponse.status).toBe(409);
+    expect(await collisionResponse.json()).toMatchObject({
+      error: { code: "target_collision" },
+    });
+    expect(failedResponse.status).toBe(409);
+    expect(await failedResponse.json()).toMatchObject({
+      error: { code: "transfer_failed" },
     });
   });
 
