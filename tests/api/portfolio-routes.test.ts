@@ -18,6 +18,9 @@ vi.mock("../../src/application/portfolio-service", () => ({
 }));
 
 import * as workItemsRoute from "../../app/api/work-items/route";
+import {
+  PATCH as updatePortfolioWorkItem,
+} from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/route";
 import { POST as rebuildWorkItems } from "../../app/api/work-items/rebuild/route";
 import {
   GET as getWorkspaces,
@@ -84,6 +87,18 @@ function registrationRequestBody(body: unknown): Request {
   });
 }
 
+function phaseUpdateRequest(body: unknown): Request {
+  return new Request("http://localhost/api/portfolio/work-items/source/item", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function phaseUpdateContext(sourceId: string, workItemId: string) {
+  return { params: Promise.resolve({ sourceId, workItemId }) };
+}
+
 beforeEach(() => {
   getService.mockReset();
 });
@@ -140,6 +155,125 @@ describe("portfolio API routes", () => {
     expect(response.status).toBe(200);
     expect(body.items).toHaveLength(1);
     expect(body.failures).toEqual([]);
+  });
+
+  it("updates a source-qualified work item phase", async () => {
+    await createService();
+    const workspacePath = await createWorkspace();
+    const registrationResponse = await registerWorkspace(
+      registrationRequest(workspacePath),
+    );
+    const registration = await registrationResponse.json();
+    const sourceId = registration.workspace.workspace_id as string;
+    const workItemId = registration.rebuild.items[0].work_item.goal
+      .work_item_id as string;
+
+    const response = await updatePortfolioWorkItem(
+      phaseUpdateRequest({ target_phase: "spec" }),
+      phaseUpdateContext(sourceId, workItemId),
+    );
+    const updated = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(updated).toMatchObject({
+      source_id: sourceId,
+      project: { workspace_path: workspacePath },
+      work_item: {
+        goal: { work_item_id: workItemId },
+        state: { phase: "spec", status: "active" },
+      },
+    });
+    expect(await (await workItemsRoute.GET()).json()).toEqual({
+      items: [updated],
+    });
+  });
+
+  it("returns 400 for a malformed phase-update body", async () => {
+    await createService();
+
+    const response = await updatePortfolioWorkItem(
+      phaseUpdateRequest({ target_phase: "operate" }),
+      phaseUpdateContext(
+        "inbox",
+        "wi_123e4567-e89b-12d3-a456-426614174000",
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+  });
+
+  it("returns 404 for an unknown portfolio source", async () => {
+    await createService();
+
+    const response = await updatePortfolioWorkItem(
+      phaseUpdateRequest({ target_phase: "spec" }),
+      phaseUpdateContext(
+        "ws_00000000-0000-4000-8000-000000000000",
+        "wi_123e4567-e89b-12d3-a456-426614174000",
+      ),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "unknown_source",
+        message: "Portfolio source not found",
+      },
+    });
+  });
+
+  it("returns 404 for a missing source-qualified work item", async () => {
+    await createService();
+    const workspacePath = await createWorkspace();
+    const registrationResponse = await registerWorkspace(
+      registrationRequest(workspacePath),
+    );
+    const registration = await registrationResponse.json();
+
+    const response = await updatePortfolioWorkItem(
+      phaseUpdateRequest({ target_phase: "spec" }),
+      phaseUpdateContext(
+        registration.workspace.workspace_id,
+        "wi_123e4567-e89b-12d3-a456-426614174000",
+      ),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "work_item_not_found",
+        message: "Work item not found",
+      },
+    });
+  });
+
+  it("returns 409 with a reason for an invalid move", async () => {
+    await createService();
+    const workspacePath = await createWorkspace();
+    const registrationResponse = await registerWorkspace(
+      registrationRequest(workspacePath),
+    );
+    const registration = await registrationResponse.json();
+    const sourceId = registration.workspace.workspace_id as string;
+    const workItemId = registration.rebuild.items[0].work_item.goal
+      .work_item_id as string;
+
+    const response = await updatePortfolioWorkItem(
+      phaseUpdateRequest({ target_phase: "plan" }),
+      phaseUpdateContext(sourceId, workItemId),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "invalid_transition",
+        message:
+          "Move from Todo to Plan is not allowed; move one column at a time.",
+      },
+    });
   });
 
   it("keeps a missing registration visible while rebuild reports its failure", async () => {
