@@ -107,6 +107,35 @@ describe("ProductWorkspace", () => {
     expect(await workspace.read(secondId)).toBeNull();
   });
 
+  it("creates an untyped capture with immutable provenance", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+
+    const created = await workspace.createCapture({
+      title: "Capture this exact sentence",
+      capture_kind: "todo",
+      priority: "high",
+      tags: ["Question"],
+      notes: "Keep the context durable.",
+    });
+
+    expect(created.goal).toMatchObject({
+      schema_version: 1,
+      title: "Capture this exact sentence",
+      capture: {
+        kind: "todo",
+        original_title: "Capture this exact sentence",
+      },
+      priority: "high",
+      tags: ["Question"],
+      notes: "Keep the context durable.",
+    });
+    expect(created.goal).not.toHaveProperty("type");
+    expect(created.goal.capture?.captured_at).toMatch(/Z$/);
+    expect(created.state).toMatchObject({ phase: "idea", status: "active" });
+    expect(await workspace.read(created.goal.work_item_id)).toEqual(created);
+  });
+
   it("orders newest items first and uses work_item_id as the tie-breaker", async () => {
     const root = await createWorkspace();
     await writeWorkItem(root, secondId, "2026-07-17T12:00:00.000Z");
@@ -151,6 +180,138 @@ describe("ProductWorkspace", () => {
       "goal.yaml",
       "state.json",
     ]);
+  });
+
+  it("atomically updates only goal metadata and preserves capture provenance", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const created = await workspace.createCapture({
+      title: "Original capture",
+      capture_kind: "idea",
+      priority: "normal",
+      tags: ["Idea"],
+      notes: "Original notes",
+    });
+    const itemDirectory = join(
+      root,
+      ".founder",
+      "work-items",
+      created.goal.work_item_id,
+    );
+    const statePath = join(itemDirectory, "state.json");
+    const stateBefore = await readFile(statePath, "utf8");
+
+    const updated = await workspace.updateGoal(created.goal.work_item_id, {
+      ...created.goal,
+      title: "Refined capture",
+      type: "Feature",
+      priority: "high",
+      tags: ["Front-end"],
+      notes: "Refined notes",
+    });
+
+    expect(updated?.goal).toMatchObject({
+      title: "Refined capture",
+      type: "Feature",
+      priority: "high",
+      tags: ["Front-end"],
+      notes: "Refined notes",
+      capture: created.goal.capture,
+    });
+    expect(await readFile(statePath, "utf8")).toBe(stateBefore);
+    expect((await readdir(itemDirectory)).sort()).toEqual([
+      "goal.yaml",
+      "state.json",
+    ]);
+
+    const cleared = await workspace.updateGoal(created.goal.work_item_id, {
+      schema_version: 1,
+      work_item_id: created.goal.work_item_id,
+      title: "Refined capture",
+      capture: created.goal.capture,
+    });
+    expect(cleared?.goal).toEqual({
+      schema_version: 1,
+      work_item_id: created.goal.work_item_id,
+      title: "Refined capture",
+      capture: created.goal.capture,
+    });
+
+    await expect(
+      workspace.updateGoal(created.goal.work_item_id, {
+        ...cleared!.goal,
+        capture: {
+          ...created.goal.capture!,
+          original_title: "Rewritten provenance",
+        },
+      }),
+    ).rejects.toMatchObject({
+      kind: "invalid_workspace",
+      reason: "capture provenance must not change",
+    });
+    await expect(
+      workspace.updateGoal(created.goal.work_item_id, {
+        ...cleared!.goal,
+        work_item_id: secondId,
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    expect((await workspace.read(created.goal.work_item_id))?.goal).toEqual(
+      cleared?.goal,
+    );
+  });
+
+  it("stages, publishes, and removes a work item without exposing partial state", async () => {
+    const sourceRoot = await createWorkspace();
+    const targetRoot = await createWorkspace();
+    const source = new ProductWorkspace(sourceRoot);
+    const target = new ProductWorkspace(targetRoot);
+    const item = await source.createCapture({
+      title: "Move this capture",
+      capture_kind: "idea",
+      tags: ["Portable"],
+    });
+
+    const stagingPath = await target.stageIncomingWorkItem(item);
+    expect(await target.list()).toEqual([]);
+    expect(await target.hasWorkItem(item.goal.work_item_id)).toBe(false);
+
+    await target.publishStagedWorkItem(item.goal.work_item_id, stagingPath);
+    expect(await target.read(item.goal.work_item_id)).toEqual(item);
+    expect(await source.read(item.goal.work_item_id)).toEqual(item);
+
+    await source.removeWorkItem(item.goal.work_item_id);
+    expect(await source.read(item.goal.work_item_id)).toBeNull();
+    expect(await target.read(item.goal.work_item_id)).toEqual(item);
+    await source.removeWorkItem(item.goal.work_item_id);
+  });
+
+  it("refuses a publish collision without overwriting either artifact", async () => {
+    const sourceRoot = await createWorkspace();
+    const targetRoot = await createWorkspace();
+    await writeWorkItem(sourceRoot, firstId, "2026-07-17T12:00:00.000Z");
+    const source = new ProductWorkspace(sourceRoot);
+    const target = new ProductWorkspace(targetRoot);
+    const item = await source.read(firstId);
+    if (item === null) {
+      throw new Error("Expected source fixture item");
+    }
+
+    const stagingPath = await target.stageIncomingWorkItem(item);
+    await writeWorkItem(targetRoot, firstId, "2026-07-21T12:00:00.000Z");
+    const targetBefore = await target.read(firstId);
+
+    await expect(
+      target.publishStagedWorkItem(firstId, stagingPath),
+    ).rejects.toMatchObject({
+      kind: "invalid_workspace",
+      reason: "target work-item already exists",
+    });
+    expect(await target.read(firstId)).toEqual(targetBefore);
+    expect(await source.read(firstId)).toEqual(item);
+
+    await target.discardStagedWorkItem(firstId, stagingPath);
+    await target.discardStagedWorkItem(firstId, stagingPath);
+    expect(await target.list()).toEqual([targetBefore]);
   });
 
   it("rejects an invalid existing item without changing state", async () => {

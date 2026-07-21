@@ -5,6 +5,7 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -15,6 +16,7 @@ import type { ZodType } from "zod";
 
 import {
   InvalidWorkspaceError,
+  createCaptureInputSchema,
   createWorkItemInputSchema,
   productManifestSchema,
   workItemGoalSchema,
@@ -23,6 +25,7 @@ import {
   workItemStateSchema,
   updateWorkItemPhaseInputSchema,
   type CreateWorkItemInput,
+  type CreateCaptureInput,
   type ProductManifest,
   type WorkItem,
   type WorkItemGoal,
@@ -35,6 +38,12 @@ const FOUNDER_DIRECTORY = ".founder";
 const WORK_ITEMS_DIRECTORY = "work-items";
 const GOAL_FILE = "goal.yaml";
 const STATE_FILE = "state.json";
+const UUID_PATTERN =
+  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const STAGING_DIRECTORY_PATTERN = new RegExp(
+  `^\\.wi_${UUID_PATTERN}\\.${UUID_PATTERN}\\.staging$`,
+  "i",
+);
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
@@ -81,6 +90,38 @@ export class ProductWorkspace implements WorkItemRepository {
   async create(input: CreateWorkItemInput): Promise<WorkItem> {
     const validatedInput = createWorkItemInputSchema.parse(input);
 
+    return this.createItem({
+      title: validatedInput.title,
+      type: validatedInput.type,
+    });
+  }
+
+  async createCapture(input: CreateCaptureInput): Promise<WorkItem> {
+    const validatedInput = createCaptureInputSchema.parse(input);
+    const capturedAt = new Date().toISOString();
+
+    return this.createItem({
+      title: validatedInput.title,
+      capture: {
+        kind: validatedInput.capture_kind,
+        original_title: validatedInput.title,
+        captured_at: capturedAt,
+      },
+      ...(validatedInput.priority === undefined
+        ? {}
+        : { priority: validatedInput.priority }),
+      ...(validatedInput.tags === undefined
+        ? {}
+        : { tags: validatedInput.tags }),
+      ...(validatedInput.notes === undefined
+        ? {}
+        : { notes: validatedInput.notes }),
+    });
+  }
+
+  private async createItem(
+    goalFields: Omit<WorkItemGoal, "schema_version" | "work_item_id">,
+  ): Promise<WorkItem> {
     await this.readManifest();
     await this.ensureWorkItemsDirectory();
 
@@ -93,8 +134,7 @@ export class ProductWorkspace implements WorkItemRepository {
       goal: {
         schema_version: 1,
         work_item_id: workItemId,
-        title: validatedInput.title,
-        type: validatedInput.type,
+        ...goalFields,
       },
       state: {
         schema_version: 1,
@@ -139,6 +179,10 @@ export class ProductWorkspace implements WorkItemRepository {
     for (const entry of entries) {
       const entryPath = join(this.workItemsDirectory, entry.name);
 
+      if (entry.isDirectory() && STAGING_DIRECTORY_PATTERN.test(entry.name)) {
+        continue;
+      }
+
       if (!entry.isDirectory()) {
         throw this.invalid(
           entryPath,
@@ -163,6 +207,52 @@ export class ProductWorkspace implements WorkItemRepository {
         right.state.updated_at.localeCompare(left.state.updated_at) ||
         left.goal.work_item_id.localeCompare(right.goal.work_item_id),
     );
+  }
+
+  async updateGoal(
+    workItemId: string,
+    nextGoal: WorkItemGoal,
+  ): Promise<WorkItem | null> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedGoal = workItemGoalSchema.parse(nextGoal);
+
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return null;
+    }
+
+    const current = await this.readValidated(validatedId);
+    if (current === null) {
+      return null;
+    }
+
+    const goalPath = join(this.workItemsDirectory, validatedId, GOAL_FILE);
+    if (validatedGoal.work_item_id !== validatedId) {
+      throw this.invalid(
+        goalPath,
+        `work_item_id must remain ${validatedId}`,
+      );
+    }
+    if (
+      JSON.stringify(validatedGoal.capture) !==
+      JSON.stringify(current.goal.capture)
+    ) {
+      throw this.invalid(goalPath, "capture provenance must not change");
+    }
+
+    const itemResult = workItemSchema.safeParse({
+      goal: validatedGoal,
+      state: current.state,
+    });
+    if (!itemResult.success) {
+      throw this.invalid(
+        join(this.workItemsDirectory, validatedId),
+        validationReason(itemResult),
+      );
+    }
+
+    await this.replaceGoalAtomically(validatedId, itemResult.data.goal);
+    return itemResult.data;
   }
 
   async updatePhase(
@@ -204,6 +294,138 @@ export class ProductWorkspace implements WorkItemRepository {
     return itemResult.data;
   }
 
+  async hasWorkItem(workItemId: string): Promise<boolean> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return false;
+    }
+
+    const workItemDirectory = join(this.workItemsDirectory, validatedId);
+    let stats;
+    try {
+      stats = await lstat(workItemDirectory);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      throw this.invalid(workItemDirectory, "work-item path must be a directory");
+    }
+    return true;
+  }
+
+  async stageIncomingWorkItem(item: WorkItem): Promise<string> {
+    const validatedItem = workItemSchema.parse(item);
+    await this.readManifest();
+    await this.ensureWorkItemsDirectory();
+    await this.assertWorkItemAbsent(validatedItem.goal.work_item_id);
+
+    const stagingPath = join(
+      this.workItemsDirectory,
+      `.${validatedItem.goal.work_item_id}.${randomUUID()}.staging`,
+    );
+    await mkdir(stagingPath);
+
+    try {
+      await this.writeAtomically(
+        stagingPath,
+        validatedItem.goal,
+        validatedItem.state,
+      );
+    } catch (error) {
+      try {
+        await rm(stagingPath, { recursive: true, force: true });
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Staging failed and its temporary directory could not be removed",
+        );
+      }
+      throw error;
+    }
+
+    return stagingPath;
+  }
+
+  async publishStagedWorkItem(
+    workItemId: string,
+    stagingPath: string,
+  ): Promise<void> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+    await this.ensureWorkItemsDirectory();
+    const validatedStagingPath = await this.validateStagingDirectory(
+      validatedId,
+      stagingPath,
+    );
+    await this.readValidatedDirectory(validatedStagingPath, validatedId);
+    await this.assertWorkItemAbsent(validatedId);
+
+    const targetPath = join(this.workItemsDirectory, validatedId);
+    try {
+      await rename(validatedStagingPath, targetPath);
+    } catch (error) {
+      if (
+        isNodeError(error) &&
+        ["EEXIST", "ENOTEMPTY"].includes(error.code ?? "")
+      ) {
+        throw this.invalid(targetPath, "target work-item already exists");
+      }
+      throw error;
+    }
+  }
+
+  async discardStagedWorkItem(
+    workItemId: string,
+    stagingPath: string,
+  ): Promise<void> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return;
+    }
+
+    let validatedStagingPath: string;
+    try {
+      validatedStagingPath = await this.validateStagingDirectory(
+        validatedId,
+        stagingPath,
+      );
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return;
+      }
+      if (
+        error instanceof InvalidWorkspaceError &&
+        error.reason === "required directory is missing"
+      ) {
+        return;
+      }
+      throw error;
+    }
+
+    await rm(validatedStagingPath, { recursive: true });
+  }
+
+  async removeWorkItem(workItemId: string): Promise<void> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return;
+    }
+
+    const item = await this.readValidated(validatedId);
+    if (item === null) {
+      return;
+    }
+
+    await rm(join(this.workItemsDirectory, validatedId), { recursive: true });
+  }
+
   private async readValidated(workItemId: string): Promise<WorkItem | null> {
     const workItemDirectory = join(this.workItemsDirectory, workItemId);
 
@@ -221,6 +443,13 @@ export class ProductWorkspace implements WorkItemRepository {
       throw this.invalid(workItemDirectory, "work-item path must be a directory");
     }
 
+    return this.readValidatedDirectory(workItemDirectory, workItemId);
+  }
+
+  private async readValidatedDirectory(
+    workItemDirectory: string,
+    workItemId: string,
+  ): Promise<WorkItem> {
     const goalPath = join(workItemDirectory, GOAL_FILE);
     const statePath = join(workItemDirectory, STATE_FILE);
     const goalSource = await this.readRequiredFile(goalPath);
@@ -240,6 +469,42 @@ export class ProductWorkspace implements WorkItemRepository {
     }
 
     return itemResult.data;
+  }
+
+  private async assertWorkItemAbsent(workItemId: string): Promise<void> {
+    const workItemDirectory = join(this.workItemsDirectory, workItemId);
+    try {
+      await lstat(workItemDirectory);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+
+    throw this.invalid(workItemDirectory, "target work-item already exists");
+  }
+
+  private async validateStagingDirectory(
+    workItemId: string,
+    stagingPath: string,
+  ): Promise<string> {
+    const resolvedPath = resolve(stagingPath);
+    const relativePath = relative(this.workItemsDirectory, resolvedPath);
+    const stagingName = relativePath.split(sep).at(-1) ?? "";
+
+    if (
+      relativePath.startsWith(`..${sep}`) ||
+      relativePath === ".." ||
+      relativePath.includes(sep) ||
+      !STAGING_DIRECTORY_PATTERN.test(stagingName) ||
+      !stagingName.startsWith(`.${workItemId}.`)
+    ) {
+      throw this.invalid(stagingPath, "invalid work-item staging path");
+    }
+
+    await this.assertDirectory(resolvedPath);
+    return resolvedPath;
   }
 
   private async assertDirectory(directoryPath: string): Promise<void> {
@@ -367,6 +632,40 @@ export class ProductWorkspace implements WorkItemRepository {
           throw new AggregateError(
             [error, cleanupError],
             "State update failed and its temporary file could not be removed",
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async replaceGoalAtomically(
+    workItemId: string,
+    goal: WorkItemGoal,
+  ): Promise<void> {
+    const workItemDirectory = join(this.workItemsDirectory, workItemId);
+    const goalPath = join(workItemDirectory, GOAL_FILE);
+    const temporaryGoalPath = join(
+      workItemDirectory,
+      `.${GOAL_FILE}.${randomUUID()}.tmp`,
+    );
+
+    await this.readRequiredFile(goalPath);
+
+    try {
+      await writeFile(temporaryGoalPath, stringify(goal), {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(temporaryGoalPath, goalPath);
+    } catch (error) {
+      try {
+        await unlink(temporaryGoalPath);
+      } catch (cleanupError) {
+        if (!isNodeError(cleanupError) || cleanupError.code !== "ENOENT") {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Goal update failed and its temporary file could not be removed",
           );
         }
       }

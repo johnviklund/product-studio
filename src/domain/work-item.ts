@@ -108,12 +108,28 @@ export interface UpdateWorkItemPhaseInput {
 
 export interface WorkItemRepository {
   create(input: CreateWorkItemInput): Promise<WorkItem>;
+  createCapture(input: CreateCaptureInput): Promise<WorkItem>;
   read(workItemId: string): Promise<WorkItem | null>;
   list(): Promise<WorkItem[]>;
+  updateGoal(
+    workItemId: string,
+    nextGoal: WorkItemGoal,
+  ): Promise<WorkItem | null>;
   updatePhase(
     workItemId: string,
     input: UpdateWorkItemPhaseInput,
   ): Promise<WorkItem | null>;
+  hasWorkItem(workItemId: string): Promise<boolean>;
+  stageIncomingWorkItem(item: WorkItem): Promise<string>;
+  publishStagedWorkItem(
+    workItemId: string,
+    stagingPath: string,
+  ): Promise<void>;
+  discardStagedWorkItem(
+    workItemId: string,
+    stagingPath: string,
+  ): Promise<void>;
+  removeWorkItem(workItemId: string): Promise<void>;
 }
 
 export const workItemIdSchema = z
