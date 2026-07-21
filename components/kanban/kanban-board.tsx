@@ -2,6 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  closestCenter,
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import {
   FolderKanban,
   LayoutGrid,
   RefreshCw,
@@ -15,15 +26,19 @@ import type {
 import {
   BOARD_COLUMNS,
   BOARD_VIEW_STORAGE_KEY,
+  boardItemIdentityKey,
   boardColumnForPhase,
   createDefaultBoardView,
   isBoardSourceVisible,
   parseBoardView,
+  resolveBoardDrop,
+  type BoardColumnId,
   type BoardItemIdentity,
   type BoardView,
 } from "@/src/presentation/board";
 
-import { BoardCard } from "./board-card";
+import { BoardCardPreview } from "./board-card";
+import { KanbanColumn } from "./kanban-column";
 
 interface WorkspacesResponse {
   workspaces: RegisteredWorkspace[];
@@ -31,6 +46,37 @@ interface WorkspacesResponse {
 
 interface WorkItemsResponse {
   items: PortfolioWorkItem[];
+}
+
+interface ErrorResponse {
+  error?: {
+    message?: string;
+  };
+}
+
+interface TransitionMessage {
+  kind: "success" | "error";
+  text: string;
+}
+
+function loadBoardView(): BoardView {
+  try {
+    return parseBoardView(localStorage.getItem(BOARD_VIEW_STORAGE_KEY));
+  } catch {
+    return createDefaultBoardView();
+  }
+}
+
+function saveBoardView(view: BoardView): void {
+  try {
+    localStorage.setItem(BOARD_VIEW_STORAGE_KEY, JSON.stringify(view));
+  } catch {
+    // Browser-local view state is optional and never workflow truth.
+  }
+}
+
+function isBoardColumnId(value: string): value is BoardColumnId {
+  return BOARD_COLUMNS.some((column) => column.id === value);
 }
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -69,8 +115,19 @@ export function KanbanBoard() {
   const [viewReady, setViewReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeItem, setActiveItem] = useState<PortfolioWorkItem | null>(null);
+  const [pendingItemKey, setPendingItemKey] = useState<string | null>(null);
+  const [transitionMessage, setTransitionMessage] =
+    useState<TransitionMessage | null>(null);
   const boardViewportRef = useRef<HTMLDivElement>(null);
   const restoredScrollRef = useRef(false);
+  const scrollPositionRef = useRef(view.scroll);
+  const scrollSaveFrameRef = useRef<number | null>(null);
+  const viewRef = useRef(view);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor),
+  );
 
   const loadPortfolio = useCallback(async () => {
     setLoading(true);
@@ -99,8 +156,27 @@ export function KanbanBoard() {
   }, []);
 
   useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  useEffect(
+    () => () => {
+      if (scrollSaveFrameRef.current !== null) {
+        cancelAnimationFrame(scrollSaveFrameRef.current);
+      }
+      saveBoardView({
+        ...viewRef.current,
+        scroll: scrollPositionRef.current,
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
     const frame = requestAnimationFrame(() => {
-      setView(parseBoardView(localStorage.getItem(BOARD_VIEW_STORAGE_KEY)));
+      const storedView = loadBoardView();
+      scrollPositionRef.current = storedView.scroll;
+      setView(storedView);
       setViewReady(true);
     });
 
@@ -116,7 +192,7 @@ export function KanbanBoard() {
     if (!viewReady) {
       return;
     }
-    localStorage.setItem(BOARD_VIEW_STORAGE_KEY, JSON.stringify(view));
+    saveBoardView({ ...view, scroll: scrollPositionRef.current });
   }, [view, viewReady]);
 
   useEffect(() => {
@@ -152,6 +228,20 @@ export function KanbanBoard() {
     return grouped;
   }, [visibleItems]);
 
+  const itemsByIdentity = useMemo(() => {
+    const mapped = new Map<string, PortfolioWorkItem>();
+    for (const item of items) {
+      mapped.set(
+        boardItemIdentityKey({
+          source_id: item.source_id,
+          work_item_id: item.work_item.goal.work_item_id,
+        }),
+        item,
+      );
+    }
+    return mapped;
+  }, [items]);
+
   function setSelectedItem(identity: BoardItemIdentity): void {
     setView((current) => ({
       ...current,
@@ -173,6 +263,86 @@ export function KanbanBoard() {
         : [...selected, workspaceId];
       return { ...current, project_source_ids: next };
     });
+  }
+
+  function handleDragStart(event: DragStartEvent): void {
+    setTransitionMessage(null);
+    setActiveItem(itemsByIdentity.get(String(event.active.id)) ?? null);
+  }
+
+  async function handleDragEnd(event: DragEndEvent): Promise<void> {
+    setActiveItem(null);
+
+    const item = itemsByIdentity.get(String(event.active.id));
+    const targetColumnId = event.over ? String(event.over.id) : null;
+    if (!item || targetColumnId === null || !isBoardColumnId(targetColumnId)) {
+      return;
+    }
+
+    const resolution = resolveBoardDrop(
+      item.work_item.state.phase,
+      targetColumnId,
+    );
+    if (!resolution.ok) {
+      setTransitionMessage({ kind: "error", text: resolution.reason });
+      return;
+    }
+    if (!resolution.changed) {
+      setTransitionMessage({
+        kind: "success",
+        text: `Already in ${boardColumnForPhase(item.work_item.state.phase).label}.`,
+      });
+      return;
+    }
+
+    const itemKey = boardItemIdentityKey({
+      source_id: item.source_id,
+      work_item_id: item.work_item.goal.work_item_id,
+    });
+    setPendingItemKey(itemKey);
+    setTransitionMessage(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(item.work_item.goal.work_item_id)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ target_phase: resolution.target_phase }),
+        },
+      );
+      const body = (await response.json()) as PortfolioWorkItem & ErrorResponse;
+      if (!response.ok) {
+        setTransitionMessage({
+          kind: "error",
+          text: body.error?.message ?? "The move was rejected.",
+        });
+        return;
+      }
+
+      setItems((current) =>
+        current.map((candidate) =>
+          boardItemIdentityKey({
+            source_id: candidate.source_id,
+            work_item_id: candidate.work_item.goal.work_item_id,
+          }) === itemKey
+            ? body
+            : candidate,
+        ),
+      );
+      setTransitionMessage({
+        kind: "success",
+        text: `Moved to ${boardColumnForPhase(body.work_item.state.phase).label}.`,
+      });
+    } catch {
+      setTransitionMessage({
+        kind: "error",
+        text: "The move could not be confirmed. The board was refreshed.",
+      });
+      await loadPortfolio();
+    } finally {
+      setPendingItemKey(null);
+    }
   }
 
   return (
@@ -280,10 +450,9 @@ export function KanbanBoard() {
               className="grid size-9 place-items-center rounded-md border bg-secondary text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:opacity-50"
               aria-label="Refresh portfolio"
             >
-              <RefreshCw
-                className={`size-4 ${loading ? "animate-spin" : ""}`}
-                strokeWidth={1.75}
-              />
+              <span className={loading ? "animate-spin" : ""}>
+                <RefreshCw className="size-4" strokeWidth={1.75} />
+              </span>
             </button>
           </div>
         </header>
@@ -304,61 +473,71 @@ export function KanbanBoard() {
           </div>
         ) : null}
 
-        <div
-          ref={boardViewportRef}
-          onScroll={(event) => {
-            const viewport = event.currentTarget;
-            setView((current) => ({
-              ...current,
-              scroll: { x: viewport.scrollLeft, y: viewport.scrollTop },
-            }));
-          }}
-          className="min-h-0 flex-1 overflow-auto [scrollbar-color:#3a404d_transparent]"
-          aria-busy={loading}
-        >
-          <div className="grid min-h-full min-w-[1616px] grid-cols-[repeat(7,minmax(224px,1fr))] divide-x">
-            {BOARD_COLUMNS.map((column) => {
-              const columnItems = itemsByColumn.get(column.id) ?? [];
-              return (
-                <section
-                  key={column.id}
-                  aria-labelledby={`column-${column.id}`}
-                  className="min-w-0 px-2 pb-6"
-                >
-                  <header className="sticky top-0 z-10 flex h-12 items-center justify-between bg-background px-1">
-                    <h2
-                      id={`column-${column.id}`}
-                      className="text-xs font-semibold tracking-[0.06em] text-muted-foreground uppercase"
-                    >
-                      {column.label}
-                    </h2>
-                    <span className="min-w-5 rounded-full bg-secondary px-1.5 py-0.5 text-center text-[11px] text-muted-foreground">
-                      {columnItems.length}
-                    </span>
-                  </header>
-
-                  <div className="space-y-2" role="list">
-                    {columnItems.map((item) => (
-                      <div
-                        key={`${item.source_id}:${item.work_item.goal.work_item_id}`}
-                        role="listitem"
-                      >
-                        <BoardCard
-                          item={item}
-                          selectedIdentity={view.selected_item}
-                          onSelect={setSelectedItem}
-                        />
-                      </div>
-                    ))}
-                    {!loading && columnItems.length === 0 ? (
-                      <p className="px-2 py-3 text-xs text-[#7f8794]">No work</p>
-                    ) : null}
-                  </div>
-                </section>
-              );
-            })}
+        {transitionMessage ? (
+          <div
+            className={`flex min-h-10 items-center border-b px-5 text-xs ${
+              transitionMessage.kind === "error"
+                ? "border-destructive/40 bg-destructive/10 text-foreground"
+                : "bg-success/10 text-foreground"
+            }`}
+            role={transitionMessage.kind === "error" ? "alert" : "status"}
+          >
+            {transitionMessage.text}
           </div>
-        </div>
+        ) : null}
+
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
+          onDragCancel={() => setActiveItem(null)}
+          onDragEnd={(event) => void handleDragEnd(event)}
+          accessibility={{
+            screenReaderInstructions: {
+              draggable:
+                "Press space to pick up a card, use arrow keys to move it, and press space again to drop.",
+            },
+          }}
+        >
+          <div
+            ref={boardViewportRef}
+            onScroll={(event) => {
+              const viewport = event.currentTarget;
+              scrollPositionRef.current = {
+                x: viewport.scrollLeft,
+                y: viewport.scrollTop,
+              };
+              if (scrollSaveFrameRef.current === null) {
+                scrollSaveFrameRef.current = requestAnimationFrame(() => {
+                  saveBoardView({
+                    ...viewRef.current,
+                    scroll: scrollPositionRef.current,
+                  });
+                  scrollSaveFrameRef.current = null;
+                });
+              }
+            }}
+            className="min-h-0 flex-1 overflow-auto [scrollbar-color:#3a404d_transparent]"
+            aria-busy={loading}
+          >
+            <div className="grid min-h-full min-w-[1616px] grid-cols-[repeat(7,minmax(224px,1fr))] divide-x">
+              {BOARD_COLUMNS.map((column) => (
+                <KanbanColumn
+                  key={column.id}
+                  column={column}
+                  items={itemsByColumn.get(column.id) ?? []}
+                  loading={loading}
+                  pendingItemKey={pendingItemKey}
+                  selectedIdentity={view.selected_item}
+                  onSelect={setSelectedItem}
+                />
+              ))}
+            </div>
+          </div>
+          <DragOverlay>
+            {activeItem ? <BoardCardPreview item={activeItem} /> : null}
+          </DragOverlay>
+        </DndContext>
       </section>
     </main>
   );

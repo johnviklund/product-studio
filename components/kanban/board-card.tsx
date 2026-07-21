@@ -1,3 +1,5 @@
+import { useDraggable } from "@dnd-kit/core";
+
 import type { PortfolioWorkItem } from "@/src/domain/portfolio";
 import {
   boardItemIdentityKey,
@@ -9,6 +11,7 @@ interface BoardCardProps {
   item: PortfolioWorkItem;
   selectedIdentity: BoardItemIdentity | null;
   onSelect: (identity: BoardItemIdentity) => void;
+  disabled?: boolean;
 }
 
 const updatedAtFormatter = new Intl.DateTimeFormat(undefined, {
@@ -33,31 +36,11 @@ function statusDotClass(
   }
 }
 
-export function BoardCard({
-  item,
-  selectedIdentity,
-  onSelect,
-}: BoardCardProps) {
-  const identity = {
-    source_id: item.source_id,
-    work_item_id: item.work_item.goal.work_item_id,
-  };
-  const selected =
-    selectedIdentity !== null &&
-    boardItemIdentityKey(selectedIdentity) === boardItemIdentityKey(identity);
+function BoardCardContent({ item }: { item: PortfolioWorkItem }) {
   const { goal, state } = item.work_item;
 
   return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={() => onSelect(identity)}
-      className={`group w-full rounded-md border p-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
-        selected
-          ? "border-primary bg-[#111c34]"
-          : "border-transparent bg-card hover:border-[#3a404d] hover:bg-accent"
-      }`}
-    >
+    <>
       <span className="line-clamp-2 text-sm leading-5 font-semibold tracking-[-0.005em] text-card-foreground">
         {goal.title}
       </span>
@@ -90,6 +73,53 @@ export function BoardCard({
       <span className="sr-only">
         Phase {state.phase}. Status {state.status}.
       </span>
+    </>
+  );
+}
+
+export function BoardCard({
+  item,
+  selectedIdentity,
+  onSelect,
+  disabled = false,
+}: BoardCardProps) {
+  const identity = {
+    source_id: item.source_id,
+    work_item_id: item.work_item.goal.work_item_id,
+  };
+  const selected =
+    selectedIdentity !== null &&
+    boardItemIdentityKey(selectedIdentity) === boardItemIdentityKey(identity);
+  const { attributes, isDragging, listeners, setNodeRef } = useDraggable({
+    id: boardItemIdentityKey(identity),
+    data: { item },
+    disabled,
+  });
+
+  return (
+    <button
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      type="button"
+      aria-pressed={selected}
+      disabled={disabled}
+      onClick={() => onSelect(identity)}
+      className={`group w-full touch-none rounded-md border p-3 text-left transition-[border-color,background-color,opacity] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-wait ${
+        selected
+          ? "border-primary bg-[#111c34]"
+          : "border-transparent bg-card hover:border-[#3a404d] hover:bg-accent"
+      } ${isDragging ? "cursor-grabbing opacity-30" : "cursor-grab"}`}
+    >
+      <BoardCardContent item={item} />
     </button>
+  );
+}
+
+export function BoardCardPreview({ item }: { item: PortfolioWorkItem }) {
+  return (
+    <div className="kanban-drag-overlay w-[224px] rounded-md border border-[#3a404d] bg-card p-3 text-left">
+      <BoardCardContent item={item} />
+    </div>
   );
 }
