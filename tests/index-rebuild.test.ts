@@ -93,6 +93,43 @@ describe("SQLitePortfolioIndex", () => {
     rebuiltIndex.close();
   });
 
+  it("round-trips an untyped capture and its optional metadata after cache deletion", async () => {
+    const databasePath = await createDatabasePath();
+    const capture = portfolioItem(null, {
+      goal: {
+        schema_version: 1,
+        work_item_id: "wi_550e8400-e29b-41d4-a716-446655440000",
+        title: "Capture a calmer idea",
+        capture: {
+          kind: "idea",
+          original_title: "Capture a calmer idea",
+          captured_at: "2026-07-21T14:00:00.000Z",
+        },
+        priority: "normal",
+        tags: ["Front-end", "Question"],
+        notes: "Preserve this context in the disposable projection.",
+      },
+      state: {
+        schema_version: 1,
+        work_item_id: "wi_550e8400-e29b-41d4-a716-446655440000",
+        phase: "idea",
+        status: "active",
+        updated_at: "2026-07-21T14:00:00.000Z",
+      },
+    });
+
+    const index = new SQLitePortfolioIndex(databasePath);
+    index.rebuild([capture]);
+    expect(index.list()).toEqual([capture]);
+    index.close();
+
+    await rm(databasePath);
+    const rebuiltIndex = new SQLitePortfolioIndex(databasePath);
+    rebuiltIndex.rebuild([capture]);
+    expect(rebuiltIndex.list()).toEqual([capture]);
+    rebuiltIndex.close();
+  });
+
   it("recreates an older cache schema instead of migrating its rows", async () => {
     const databasePath = await createDatabasePath();
     const oldDatabase = new Database(databasePath);
@@ -119,7 +156,7 @@ describe("SQLitePortfolioIndex", () => {
     index.close();
 
     const inspected = new Database(databasePath, { readonly: true });
-    expect(inspected.pragma("user_version", { simple: true })).toBe(2);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(3);
     expect(
       inspected
         .prepare(
@@ -139,6 +176,27 @@ describe("SQLitePortfolioIndex", () => {
         .all()
         .map((column) => (column as { name: string }).name),
     ).not.toContain("workspace_id");
+    expect(
+      inspected
+        .prepare("PRAGMA table_info(portfolio_work_items)")
+        .all()
+        .map((column) => (column as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        "capture_kind",
+        "capture_original_title",
+        "capture_captured_at",
+        "priority",
+        "tags",
+        "notes",
+      ]),
+    );
+    expect(
+      inspected
+        .prepare("PRAGMA table_info(portfolio_work_items)")
+        .all()
+        .find((column) => (column as { name: string }).name === "type"),
+    ).toMatchObject({ notnull: 0 });
     inspected.close();
   });
 

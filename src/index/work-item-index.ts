@@ -9,7 +9,7 @@ import {
   type PortfolioWorkItemIndex,
 } from "../domain/portfolio";
 
-const PORTFOLIO_CACHE_SCHEMA_VERSION = 2;
+const PORTFOLIO_CACHE_SCHEMA_VERSION = 3;
 
 const PORTFOLIO_SCHEMA = `
   CREATE TABLE IF NOT EXISTS portfolio_work_items (
@@ -20,7 +20,13 @@ const PORTFOLIO_SCHEMA = `
     project_registered_at TEXT,
     work_item_id TEXT NOT NULL,
     title TEXT NOT NULL,
-    type TEXT NOT NULL,
+    type TEXT,
+    capture_kind TEXT,
+    capture_original_title TEXT,
+    capture_captured_at TEXT,
+    priority TEXT,
+    tags TEXT,
+    notes TEXT,
     phase TEXT NOT NULL,
     status TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -36,7 +42,13 @@ interface PortfolioWorkItemRow {
   project_registered_at: string | null;
   work_item_id: string;
   title: string;
-  type: string;
+  type: string | null;
+  capture_kind: string | null;
+  capture_original_title: string | null;
+  capture_captured_at: string | null;
+  priority: string | null;
+  tags: string | null;
+  notes: string | null;
   phase: string;
   status: string;
   updated_at: string;
@@ -75,6 +87,12 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         work_item_id,
         title,
         type,
+        capture_kind,
+        capture_original_title,
+        capture_captured_at,
+        priority,
+        tags,
+        notes,
         phase,
         status,
         updated_at
@@ -87,6 +105,12 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         @work_item_id,
         @title,
         @type,
+        @capture_kind,
+        @capture_original_title,
+        @capture_captured_at,
+        @priority,
+        @tags,
+        @notes,
         @phase,
         @status,
         @updated_at
@@ -105,7 +129,18 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             project_registered_at: item.project?.registered_at ?? null,
             work_item_id: item.work_item.goal.work_item_id,
             title: item.work_item.goal.title,
-            type: item.work_item.goal.type,
+            type: item.work_item.goal.type ?? null,
+            capture_kind: item.work_item.goal.capture?.kind ?? null,
+            capture_original_title:
+              item.work_item.goal.capture?.original_title ?? null,
+            capture_captured_at:
+              item.work_item.goal.capture?.captured_at ?? null,
+            priority: item.work_item.goal.priority ?? null,
+            tags:
+              item.work_item.goal.tags === undefined
+                ? null
+                : JSON.stringify(item.work_item.goal.tags),
+            notes: item.work_item.goal.notes ?? null,
             phase: item.work_item.state.phase,
             status: item.work_item.state.status,
             updated_at: item.work_item.state.updated_at,
@@ -135,6 +170,12 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             work_item_id,
             title,
             type,
+            capture_kind,
+            capture_original_title,
+            capture_captured_at,
+            priority,
+            tags,
+            notes,
             phase,
             status,
             updated_at
@@ -144,8 +185,13 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
       )
       .all() as PortfolioWorkItemRow[];
 
-    return rows.map((row) =>
-      portfolioWorkItemSchema.parse({
+    return rows.map((row) => {
+      const hasCapture =
+        row.capture_kind !== null ||
+        row.capture_original_title !== null ||
+        row.capture_captured_at !== null;
+
+      return portfolioWorkItemSchema.parse({
         source_id: row.source_id,
         project:
           row.project_workspace_id === null
@@ -161,7 +207,19 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             schema_version: 1,
             work_item_id: row.work_item_id,
             title: row.title,
-            type: row.type,
+            ...(row.type === null ? {} : { type: row.type }),
+            ...(hasCapture
+              ? {
+                  capture: {
+                    kind: row.capture_kind,
+                    original_title: row.capture_original_title,
+                    captured_at: row.capture_captured_at,
+                  },
+                }
+              : {}),
+            ...(row.priority === null ? {} : { priority: row.priority }),
+            ...(row.tags === null ? {} : { tags: JSON.parse(row.tags) }),
+            ...(row.notes === null ? {} : { notes: row.notes }),
           },
           state: {
             schema_version: 1,
@@ -171,8 +229,8 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             updated_at: row.updated_at,
           },
         },
-      }),
-    );
+      });
+    });
   }
 
   clear(): void {
