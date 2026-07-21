@@ -9,6 +9,7 @@ import {
   nextActionForPhase,
   parseBoardItemIdentityKey,
   parseBoardView,
+  revealBoardItem,
   resolveBoardDrop,
   targetPhaseForColumn,
   validatePhaseTransition,
@@ -152,5 +153,38 @@ describe("board identity and view state", () => {
         }),
       ),
     ).toEqual([unassigned]);
+  });
+
+  it("reveals and selects confirmed mutations without changing scroll context", () => {
+    const view = {
+      version: 1 as const,
+      project_source_ids: ["ws_one"],
+      include_unassigned: false,
+      selected_item: null,
+      scroll: { x: 640, y: 120 },
+    };
+
+    expect(
+      revealBoardItem(view, {
+        source_id: "ws_two",
+        work_item_id: workItemId,
+        project: { name: "Two" },
+      }),
+    ).toEqual({
+      ...view,
+      project_source_ids: ["ws_one", "ws_two"],
+      selected_item: { source_id: "ws_two", work_item_id: workItemId },
+    });
+    expect(
+      revealBoardItem(view, {
+        source_id: "inbox",
+        work_item_id: workItemId,
+        project: null,
+      }),
+    ).toEqual({
+      ...view,
+      include_unassigned: true,
+      selected_item: { source_id: "inbox", work_item_id: workItemId },
+    });
   });
 });

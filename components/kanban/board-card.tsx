@@ -50,7 +50,7 @@ function BoardCardContent({ item }: { item: PortfolioWorkItem }) {
           {item.project?.product_name ?? "Unassigned"}
         </span>
         <span aria-hidden="true">·</span>
-        <span>{goal.type}</span>
+        <span>{goal.type ?? "Unclassified"}</span>
       </span>
 
       <span className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#9aa2b1] capitalize">

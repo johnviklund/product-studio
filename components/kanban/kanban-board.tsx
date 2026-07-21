@@ -15,6 +15,7 @@ import {
 import {
   FolderKanban,
   LayoutGrid,
+  Plus,
   RefreshCw,
   SlidersHorizontal,
 } from "lucide-react";
@@ -31,6 +32,7 @@ import {
   createDefaultBoardView,
   isBoardSourceVisible,
   parseBoardView,
+  revealBoardItem,
   resolveBoardDrop,
   type BoardColumnId,
   type BoardItemIdentity,
@@ -38,6 +40,8 @@ import {
 } from "@/src/presentation/board";
 
 import { BoardCardPreview } from "./board-card";
+import { CaptureEditor } from "./capture-editor";
+import { CapturePanel } from "./capture-panel";
 import { KanbanColumn } from "./kanban-column";
 
 interface WorkspacesResponse {
@@ -58,6 +62,11 @@ interface TransitionMessage {
   kind: "success" | "error";
   text: string;
 }
+
+type PanelState =
+  | { kind: "capture" }
+  | { kind: "editor"; identity: BoardItemIdentity }
+  | null;
 
 function loadBoardView(): BoardView {
   try {
@@ -108,6 +117,13 @@ function scopeLabel(view: BoardView, workspaces: RegisteredWorkspace[]): string 
   return `${sourceCount} sources`;
 }
 
+function identityForItem(item: PortfolioWorkItem): BoardItemIdentity {
+  return {
+    source_id: item.source_id,
+    work_item_id: item.work_item.goal.work_item_id,
+  };
+}
+
 export function KanbanBoard() {
   const [items, setItems] = useState<PortfolioWorkItem[]>([]);
   const [workspaces, setWorkspaces] = useState<RegisteredWorkspace[]>([]);
@@ -119,6 +135,7 @@ export function KanbanBoard() {
   const [pendingItemKey, setPendingItemKey] = useState<string | null>(null);
   const [transitionMessage, setTransitionMessage] =
     useState<TransitionMessage | null>(null);
+  const [panel, setPanel] = useState<PanelState>(null);
   const boardViewportRef = useRef<HTMLDivElement>(null);
   const restoredScrollRef = useRef(false);
   const scrollPositionRef = useRef(view.scroll);
@@ -128,6 +145,11 @@ export function KanbanBoard() {
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor),
   );
+
+  const openCapturePanel = useCallback(() => {
+    setPanel((current) => current ?? { kind: "capture" });
+    setTransitionMessage(null);
+  }, []);
 
   const loadPortfolio = useCallback(async () => {
     setLoading(true);
@@ -189,6 +211,22 @@ export function KanbanBoard() {
   }, [loadPortfolio]);
 
   useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (
+        !event.defaultPrevented &&
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === "n"
+      ) {
+        event.preventDefault();
+        openCapturePanel();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [openCapturePanel]);
+
+  useEffect(() => {
     if (!viewReady) {
       return;
     }
@@ -241,8 +279,20 @@ export function KanbanBoard() {
     }
     return mapped;
   }, [items]);
+  const editorItem =
+    panel?.kind === "editor"
+      ? itemsByIdentity.get(boardItemIdentityKey(panel.identity)) ?? null
+      : null;
 
-  function setSelectedItem(identity: BoardItemIdentity): void {
+  function handleSelectItem(identity: BoardItemIdentity): void {
+    const item = itemsByIdentity.get(boardItemIdentityKey(identity));
+    if (item?.work_item.goal.capture) {
+      setView((current) => ({ ...current, selected_item: identity }));
+      setPanel({ kind: "editor", identity });
+      return;
+    }
+
+    setPanel(null);
     setView((current) => ({
       ...current,
       selected_item:
@@ -251,6 +301,66 @@ export function KanbanBoard() {
           ? null
           : identity,
     }));
+  }
+
+  function handleCaptureCreated(item: PortfolioWorkItem): void {
+    const itemKey = boardItemIdentityKey(identityForItem(item));
+    setItems((current) => [
+      item,
+      ...current.filter(
+        (candidate) =>
+          boardItemIdentityKey(identityForItem(candidate)) !== itemKey,
+      ),
+    ]);
+    setView((current) =>
+      revealBoardItem(current, {
+        ...identityForItem(item),
+        project: item.project,
+      }),
+    );
+    setPanel(null);
+    setTransitionMessage({
+      kind: "success",
+      text: `Captured in ${item.project?.product_name ?? "Unassigned"}.`,
+    });
+  }
+
+  function handleCaptureUpdated(item: PortfolioWorkItem): void {
+    const itemKey = boardItemIdentityKey(identityForItem(item));
+    setItems((current) =>
+      current.map((candidate) =>
+        boardItemIdentityKey(identityForItem(candidate)) === itemKey
+          ? item
+          : candidate,
+      ),
+    );
+    setTransitionMessage({ kind: "success", text: "Capture details saved." });
+  }
+
+  function handleCaptureAssigned(
+    previous: PortfolioWorkItem,
+    item: PortfolioWorkItem,
+  ): void {
+    const previousKey = boardItemIdentityKey(identityForItem(previous));
+    const itemKey = boardItemIdentityKey(identityForItem(item));
+    setItems((current) => [
+      item,
+      ...current.filter((candidate) => {
+        const candidateKey = boardItemIdentityKey(identityForItem(candidate));
+        return candidateKey !== previousKey && candidateKey !== itemKey;
+      }),
+    ]);
+    setView((current) =>
+      revealBoardItem(current, {
+        ...identityForItem(item),
+        project: item.project,
+      }),
+    );
+    setPanel({ kind: "editor", identity: identityForItem(item) });
+    setTransitionMessage({
+      kind: "success",
+      text: `Assigned to ${item.project?.product_name ?? "Unassigned"}.`,
+    });
   }
 
   function toggleProject(workspaceId: string): void {
@@ -384,7 +494,17 @@ export function KanbanBoard() {
             </p>
           </div>
 
-          <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={openCapturePanel}
+            className="ml-auto hidden h-10 min-w-0 max-w-md flex-1 items-center gap-2 rounded-md border bg-muted px-3 text-left text-sm text-muted-foreground transition-colors hover:border-[#3a404d] hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary sm:flex"
+          >
+            <Plus className="size-4 shrink-0" strokeWidth={1.75} />
+            <span className="truncate">Capture an idea or todo…</span>
+            <kbd className="ml-auto shrink-0 text-[11px] text-[#7f8794]">⌘N</kbd>
+          </button>
+
+          <div className="flex items-center gap-2">
             <details className="group relative">
               <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
                 <SlidersHorizontal className="size-4" strokeWidth={1.75} />
@@ -529,7 +649,7 @@ export function KanbanBoard() {
                   loading={loading}
                   pendingItemKey={pendingItemKey}
                   selectedIdentity={view.selected_item}
-                  onSelect={setSelectedItem}
+                  onSelect={handleSelectItem}
                 />
               ))}
             </div>
@@ -539,6 +659,24 @@ export function KanbanBoard() {
           </DragOverlay>
         </DndContext>
       </section>
+
+      {panel?.kind === "capture" ? (
+        <CapturePanel
+          workspaces={workspaces}
+          onClose={() => setPanel(null)}
+          onCreated={handleCaptureCreated}
+        />
+      ) : null}
+      {editorItem ? (
+        <CaptureEditor
+          key={boardItemIdentityKey(identityForItem(editorItem))}
+          item={editorItem}
+          workspaces={workspaces}
+          onClose={() => setPanel(null)}
+          onUpdated={handleCaptureUpdated}
+          onAssigned={handleCaptureAssigned}
+        />
+      ) : null}
     </main>
   );
 }

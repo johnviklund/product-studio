@@ -77,6 +77,10 @@ export interface BoardItemIdentity {
   work_item_id: string;
 }
 
+export interface BoardItemLocation extends BoardItemIdentity {
+  project: unknown | null;
+}
+
 export interface BoardView {
   version: 1;
   project_source_ids: string[] | null;
@@ -237,4 +241,33 @@ export function isBoardSourceVisible(
     view.project_source_ids === null ||
     view.project_source_ids.includes(source.source_id)
   );
+}
+
+export function revealBoardItem(
+  view: BoardView,
+  item: BoardItemLocation,
+): BoardView {
+  const selectedItem: BoardItemIdentity = {
+    source_id: item.source_id,
+    work_item_id: item.work_item_id,
+  };
+
+  if (item.project === null) {
+    return {
+      ...view,
+      include_unassigned: true,
+      selected_item: selectedItem,
+    };
+  }
+  if (
+    view.project_source_ids === null ||
+    view.project_source_ids.includes(item.source_id)
+  ) {
+    return { ...view, selected_item: selectedItem };
+  }
+  return {
+    ...view,
+    project_source_ids: [...view.project_source_ids, item.source_id],
+    selected_item: selectedItem,
+  };
 }
