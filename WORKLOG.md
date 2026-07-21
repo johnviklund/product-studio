@@ -5,6 +5,25 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-21 · One-sentence capture and progressive exploration (roadmap 1.4)
+- Added durable capture domain contracts (source, kind, optional tags/notes) and a dependency-free
+  value-object module for source-ID validation to break a schema/aggregate circular import.
+- Projected capture metadata into the cache (schema v2→v3), rehydrating without NULL-backed
+  optional keys so untyped captures still pass strict validation.
+- Added atomic capture workspace operations plus a recoverable, journaled cross-workspace
+  transfer protocol (validate → stage → publish → remove-source) whose recovery inspects durable
+  target state rather than trusting the journal stage alone, with a dedicated staging-discard
+  repository primitive for unpublished rollback.
+- Exposed source-qualified capture create/detail/assignment mutations over HTTP with mapped
+  errors (`409` collision/transfer-failed, `400` bad body, `404` unknown source/item).
+- Shipped `⌘N`/`Ctrl+N` one-sentence capture and a narrow refinement side panel with immutable
+  provenance (original title/kind/captured-at) above editable metadata.
+- Verified: lint, typecheck, 93 tests, and production build pass; Phase 4 review clean (no
+  P0–P2, four deferred/wontfix P3s, no patch plan required).
+- Commits: ace4a9a a8f7a76 525abf6 501aae5 174d231
+- Why: delivers roadmap 1.4's fast, frictionless capture with safe recoverable project transfer,
+  keeping the refinement surface intentionally narrow ahead of any future promotion/AI-shaping work.
+
 ## 2026-07-21 · Focused Kanban and project filtering (roadmap 1.3)
 - Renamed the durable `explore` phase to `brainstorm` and added a shared, pure board module:
   seven-column projection, an adjacent-column transition policy, phase-derived next actions,
