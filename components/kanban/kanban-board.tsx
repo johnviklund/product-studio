@@ -40,8 +40,8 @@ import {
 } from "@/src/presentation/board";
 
 import { BoardCardPreview } from "./board-card";
-import { CaptureEditor } from "./capture-editor";
 import { CapturePanel } from "./capture-panel";
+import { DetailPanel } from "./detail-panel";
 import { KanbanColumn } from "./kanban-column";
 
 interface WorkspacesResponse {
@@ -65,7 +65,7 @@ interface TransitionMessage {
 
 type PanelState =
   | { kind: "capture" }
-  | { kind: "editor"; identity: BoardItemIdentity }
+  | { kind: "detail"; identity: BoardItemIdentity }
   | null;
 
 function loadBoardView(): BoardView {
@@ -279,28 +279,41 @@ export function KanbanBoard() {
     }
     return mapped;
   }, [items]);
-  const editorItem =
-    panel?.kind === "editor"
+  const detailItem =
+    panel?.kind === "detail"
       ? itemsByIdentity.get(boardItemIdentityKey(panel.identity)) ?? null
       : null;
 
   function handleSelectItem(identity: BoardItemIdentity): void {
-    const item = itemsByIdentity.get(boardItemIdentityKey(identity));
-    if (item?.work_item.goal.capture) {
-      setView((current) => ({ ...current, selected_item: identity }));
-      setPanel({ kind: "editor", identity });
+    setView((current) => ({ ...current, selected_item: identity }));
+    setPanel({ kind: "detail", identity });
+  }
+
+  function focusBoardItem(identity: BoardItemIdentity): void {
+    const itemKey = boardItemIdentityKey(identity);
+    requestAnimationFrame(() => {
+      for (const target of document.querySelectorAll<HTMLButtonElement>(
+        "[data-board-item-key]",
+      )) {
+        if (target.dataset.boardItemKey === itemKey) {
+          target.focus();
+          return;
+        }
+      }
+    });
+  }
+
+  function handleMoveFocus(identity: BoardItemIdentity): void {
+    if (panel !== null) {
       return;
     }
+    setView((current) => ({ ...current, selected_item: identity }));
+    focusBoardItem(identity);
+  }
 
+  function closeDetailPanel(identity: BoardItemIdentity): void {
     setPanel(null);
-    setView((current) => ({
-      ...current,
-      selected_item:
-        current.selected_item?.source_id === identity.source_id &&
-        current.selected_item.work_item_id === identity.work_item_id
-          ? null
-          : identity,
-    }));
+    focusBoardItem(identity);
   }
 
   function handleCaptureCreated(item: PortfolioWorkItem): void {
@@ -356,7 +369,7 @@ export function KanbanBoard() {
         project: item.project,
       }),
     );
-    setPanel({ kind: "editor", identity: identityForItem(item) });
+    setPanel({ kind: "detail", identity: identityForItem(item) });
     setTransitionMessage({
       kind: "success",
       text: `Assigned to ${item.project?.product_name ?? "Unassigned"}.`,
@@ -380,15 +393,10 @@ export function KanbanBoard() {
     setActiveItem(itemsByIdentity.get(String(event.active.id)) ?? null);
   }
 
-  async function handleDragEnd(event: DragEndEvent): Promise<void> {
-    setActiveItem(null);
-
-    const item = itemsByIdentity.get(String(event.active.id));
-    const targetColumnId = event.over ? String(event.over.id) : null;
-    if (!item || targetColumnId === null || !isBoardColumnId(targetColumnId)) {
-      return;
-    }
-
+  async function commitTransition(
+    item: PortfolioWorkItem,
+    targetColumnId: BoardColumnId,
+  ): Promise<void> {
     const resolution = resolveBoardDrop(
       item.work_item.state.phase,
       targetColumnId,
@@ -453,6 +461,18 @@ export function KanbanBoard() {
     } finally {
       setPendingItemKey(null);
     }
+  }
+
+  async function handleDragEnd(event: DragEndEvent): Promise<void> {
+    setActiveItem(null);
+
+    const item = itemsByIdentity.get(String(event.active.id));
+    const targetColumnId = event.over ? String(event.over.id) : null;
+    if (!item || targetColumnId === null || !isBoardColumnId(targetColumnId)) {
+      return;
+    }
+
+    await commitTransition(item, targetColumnId);
   }
 
   return (
@@ -650,6 +670,8 @@ export function KanbanBoard() {
                   pendingItemKey={pendingItemKey}
                   selectedIdentity={view.selected_item}
                   onSelect={handleSelectItem}
+                  onMoveFocus={handleMoveFocus}
+                  onOpenDetail={handleSelectItem}
                 />
               ))}
             </div>
@@ -667,14 +689,17 @@ export function KanbanBoard() {
           onCreated={handleCaptureCreated}
         />
       ) : null}
-      {editorItem ? (
-        <CaptureEditor
-          key={boardItemIdentityKey(identityForItem(editorItem))}
-          item={editorItem}
+      {detailItem ? (
+        <DetailPanel
+          key={boardItemIdentityKey(identityForItem(detailItem))}
+          item={detailItem}
           workspaces={workspaces}
-          onClose={() => setPanel(null)}
+          onClose={() => closeDetailPanel(identityForItem(detailItem))}
           onUpdated={handleCaptureUpdated}
           onAssigned={handleCaptureAssigned}
+          onTransition={(item, targetColumnId) => {
+            void commitTransition(item, targetColumnId);
+          }}
         />
       ) : null}
     </main>
