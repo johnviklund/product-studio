@@ -369,6 +369,8 @@ The UI should avoid a dense enterprise-navigation hierarchy. A user should reach
 
 ### 9.3 Kanban work board
 
+> **Superseded 2026-07-20:** The active board now uses the seven-column Todo → Spec → Plan → Execute → Review → Ship → Done workflow defined in [PRODUCT.md](../../PRODUCT.md), [DESIGN.md](../../DESIGN.md), and [ROADMAP.md](../../ROADMAP.md). The historical requirements below remain unchanged for provenance.
+
 The Kanban is the primary everyday view.
 
 Default columns:
