@@ -5,6 +5,8 @@ import {
   type WorkItemPhase,
 } from "../domain/work-item";
 
+export const BOARD_VIEW_STORAGE_KEY = "product-studio.board-view.v1";
+
 export const BOARD_COLUMNS = [
   {
     id: "todo",
