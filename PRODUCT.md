@@ -36,7 +36,7 @@ system, or a replacement for Git, pull requests, CI, or hosting.
 
 Milestones 1–3 form the MVP:
 
-1. A focused, cross-project Kanban with Inbox, Exploring, Ready, Working, Review, and
+1. A focused, cross-project Kanban with Todo, Spec, Plan, Execute, Review, Ship, and
    Done; project filtering; context-preserving side panels; and fast, unassigned capture.
 2. Provider-neutral portable missions, durable controller state, result import, and
    deterministic verification for manual bring-your-own-agent handoff.
@@ -56,7 +56,7 @@ architecture. Product Studio does not add them merely to remove every manual act
 
 ## 6. Lifecycle and gates
 
-The lifecycle is Idea → Explore → Spec → Plan → Execute → Review → Test → Ship → Learn,
+The lifecycle is Idea → Brainstorm → Spec → Plan → Execute → Review → Test → Ship → Learn,
 with Operate as a continuous lane. Each active item has one bounded next action.
 
 The controller validates preconditions, runs or records required deterministic checks,

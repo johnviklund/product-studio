@@ -318,12 +318,13 @@ Rules:
 
 The board is the dominant surface and uses these columns:
 
-1. Inbox.
-2. Exploring.
-3. Ready.
-4. Working.
-5. Review.
-6. Done.
+1. Todo (`idea`, `brainstorm`).
+2. Spec.
+3. Plan.
+4. Execute.
+5. Review (`review`, `test`).
+6. Ship.
+7. Done (`learn`).
 
 Columns have a minimum useful width of 224px and expand modestly when space allows. Keep 8px between columns or separate them with a single vertical divider. The column header remains visible while its cards scroll vertically.
 
@@ -376,7 +377,7 @@ A card is a concise status object, not a miniature detail page. It contains:
 1. Title, up to two lines.
 2. Project name or `Unassigned`.
 3. Work type.
-4. Current actor: `You`, `Codex`, `Claude`, another configured agent, or `System`.
+4. Current durable phase and status.
 5. One next-action label or compact button.
 6. A status dot only when it communicates active, attention, blocked, or review state.
 

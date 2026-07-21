@@ -24,8 +24,8 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 
 ### 1.3 Focused Kanban and project filtering
 
-- **Goal:** Project registered and unassigned work into the six-column board while preserving UI state.
-- **Primary scope:** Inbox, Exploring, Ready, Working, Review, and Done; project filtering and board context.
+- **Goal:** Project registered and unassigned work into the seven-column workflow board while preserving UI state.
+- **Primary scope:** Todo, Spec, Plan, Execute, Review, Ship, and Done; project filtering and board context.
 - **Traceability:** PRD §9.3, FR-002/021, `DESIGN.md` Kanban.
 - **Dependencies:** 1.1–1.2.
 - **Completion signal:** The founder can filter and return to a stable cross-project board without losing position or selection.
