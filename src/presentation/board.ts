@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   workItemIdSchema,
+  type WorkItemCapture,
   type WorkItemPhase,
 } from "../domain/work-item";
 
@@ -39,6 +40,14 @@ export const BOARD_COLUMNS = [
 
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 export type BoardColumnId = BoardColumn["id"];
+
+export type DetailPanelMode = "capture" | "governed";
+
+export interface BoardTransitionAction {
+  target_column_id: BoardColumnId;
+  target_phase: WorkItemPhase;
+  label: string;
+}
 
 export const ALLOWED_PHASE_TRANSITIONS = {
   idea: ["spec"],
@@ -185,6 +194,55 @@ export function resolveBoardDrop(
 
 export function nextActionForPhase(phase: WorkItemPhase): string {
   return NEXT_ACTION_BY_PHASE[phase];
+}
+
+export function detailPanelModeForItem(item: {
+  work_item: {
+    goal: { capture?: WorkItemCapture };
+    state: { phase: WorkItemPhase };
+  };
+}): DetailPanelMode {
+  return item.work_item.goal.capture !== undefined &&
+    boardColumnForPhase(item.work_item.state.phase).id === "todo"
+    ? "capture"
+    : "governed";
+}
+
+export function boardTransitionActionsForPhase(phase: WorkItemPhase): {
+  forward: BoardTransitionAction | null;
+  back: BoardTransitionAction | null;
+} {
+  const sourceColumnIndex = BOARD_COLUMNS.findIndex(
+    (column) => column.id === boardColumnForPhase(phase).id,
+  );
+  let forward: BoardTransitionAction | null = null;
+  let back: BoardTransitionAction | null = null;
+
+  for (const candidatePhase of ALLOWED_PHASE_TRANSITIONS[phase]) {
+    const targetColumn = boardColumnForPhase(candidatePhase);
+    const resolution = resolveBoardDrop(phase, targetColumn.id);
+
+    if (!resolution.ok || !resolution.changed) {
+      continue;
+    }
+
+    const action: BoardTransitionAction = {
+      target_column_id: targetColumn.id,
+      target_phase: resolution.target_phase,
+      label: `Move to ${targetColumn.label}`,
+    };
+    const targetColumnIndex = BOARD_COLUMNS.findIndex(
+      (column) => column.id === targetColumn.id,
+    );
+
+    if (targetColumnIndex > sourceColumnIndex) {
+      forward = action;
+    } else if (targetColumnIndex < sourceColumnIndex) {
+      back = action;
+    }
+  }
+
+  return { forward, back };
 }
 
 export function boardItemIdentityKey(identity: BoardItemIdentity): string {

@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   BOARD_COLUMNS,
+  boardTransitionActionsForPhase,
   boardColumnForPhase,
   boardItemIdentityKey,
   createDefaultBoardView,
+  detailPanelModeForItem,
   isBoardSourceVisible,
   nextActionForPhase,
   parseBoardItemIdentityKey,
@@ -79,6 +81,102 @@ describe("board projection", () => {
     expect(nextActionForPhase("idea")).toBe("Brainstorm the idea");
     expect(nextActionForPhase("execute")).toBe("Review the result");
     expect(nextActionForPhase("ship")).toBe("Capture the learning");
+  });
+
+  it("uses a capture panel only for captures still in Todo", () => {
+    const capture = {
+      work_item: {
+        goal: {
+          capture: {
+            kind: "idea" as const,
+            original_title: "Capture the thought",
+            captured_at: "2026-07-21T00:00:00.000Z",
+          },
+        },
+        state: { phase: "idea" as const },
+      },
+    };
+
+    expect(detailPanelModeForItem(capture)).toBe("capture");
+    expect(
+      detailPanelModeForItem({
+        ...capture,
+        work_item: { ...capture.work_item, state: { phase: "spec" } },
+      }),
+    ).toBe("governed");
+    expect(
+      detailPanelModeForItem({
+        work_item: {
+          goal: {},
+          state: { phase: "idea" },
+        },
+      }),
+    ).toBe("governed");
+  });
+
+  it("derives only valid forward and backward board transition actions", () => {
+    const phases = [
+      "idea",
+      "brainstorm",
+      "spec",
+      "plan",
+      "execute",
+      "review",
+      "test",
+      "ship",
+      "learn",
+    ] as const;
+
+    for (const phase of phases) {
+      const actions = boardTransitionActionsForPhase(phase);
+      const sourceIndex = BOARD_COLUMNS.findIndex(
+        (column) => column.id === boardColumnForPhase(phase).id,
+      );
+
+      for (const action of [actions.forward, actions.back]) {
+        if (action === null) {
+          continue;
+        }
+
+        const targetIndex = BOARD_COLUMNS.findIndex(
+          (column) => column.id === action.target_column_id,
+        );
+        expect(resolveBoardDrop(phase, action.target_column_id)).toEqual({
+          ok: true,
+          changed: true,
+          target_phase: action.target_phase,
+        });
+        expect(action.label).toBe(
+          `Move to ${BOARD_COLUMNS[targetIndex].label}`,
+        );
+        expect(targetIndex).not.toBe(sourceIndex);
+      }
+
+      expect(actions.forward === null || actions.back === null).toBe(
+        phase === "idea" || phase === "brainstorm" || phase === "learn",
+      );
+    }
+
+    expect(boardTransitionActionsForPhase("idea")).toMatchObject({
+      forward: { target_column_id: "spec", target_phase: "spec" },
+      back: null,
+    });
+    expect(boardTransitionActionsForPhase("brainstorm")).toMatchObject({
+      forward: { target_column_id: "spec", target_phase: "spec" },
+      back: null,
+    });
+    expect(boardTransitionActionsForPhase("spec")).toMatchObject({
+      forward: { target_column_id: "plan", target_phase: "plan" },
+      back: { target_column_id: "todo", target_phase: "brainstorm" },
+    });
+    expect(boardTransitionActionsForPhase("test")).toMatchObject({
+      forward: { target_column_id: "ship", target_phase: "ship" },
+      back: { target_column_id: "execute", target_phase: "execute" },
+    });
+    expect(boardTransitionActionsForPhase("learn")).toMatchObject({
+      forward: null,
+      back: { target_column_id: "ship", target_phase: "ship" },
+    });
   });
 });
 
