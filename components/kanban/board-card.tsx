@@ -53,12 +53,18 @@ function BoardCardContent({ item }: { item: PortfolioWorkItem }) {
         <span>{goal.type}</span>
       </span>
 
+      <span className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#9aa2b1] capitalize">
+        <span
+          className={`size-1.5 shrink-0 rounded-full ${statusDotClass(state.status)}`}
+          aria-hidden="true"
+        />
+        <span>{state.phase}</span>
+        <span aria-hidden="true">·</span>
+        <span>{state.status}</span>
+      </span>
+
       <span className="mt-3 flex items-center justify-between gap-3 border-t pt-2.5">
-        <span className="flex min-w-0 items-center gap-2 text-xs text-foreground">
-          <span
-            className={`size-1.5 shrink-0 rounded-full ${statusDotClass(state.status)}`}
-            aria-hidden="true"
-          />
+        <span className="flex min-w-0 items-center text-xs text-foreground">
           <span className="truncate">{nextActionForPhase(state.phase)}</span>
         </span>
         <time
@@ -68,10 +74,6 @@ function BoardCardContent({ item }: { item: PortfolioWorkItem }) {
         >
           {updatedAtFormatter.format(new Date(state.updated_at))}
         </time>
-      </span>
-
-      <span className="sr-only">
-        Phase {state.phase}. Status {state.status}.
       </span>
     </>
   );
