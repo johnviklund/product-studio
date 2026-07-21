@@ -1,3 +1,4 @@
+import { useCallback, useRef, type KeyboardEvent } from "react";
 import { useDraggable } from "@dnd-kit/core";
 
 import type { PortfolioWorkItem } from "@/src/domain/portfolio";
@@ -11,6 +12,11 @@ interface BoardCardProps {
   item: PortfolioWorkItem;
   selectedIdentity: BoardItemIdentity | null;
   onSelect: (identity: BoardItemIdentity) => void;
+  onMoveFocus?: (
+    identity: BoardItemIdentity,
+    direction: "previous" | "next",
+  ) => void;
+  onOpenDetail?: (identity: BoardItemIdentity) => void;
   disabled?: boolean;
 }
 
@@ -83,6 +89,8 @@ export function BoardCard({
   item,
   selectedIdentity,
   onSelect,
+  onMoveFocus,
+  onOpenDetail,
   disabled = false,
 }: BoardCardProps) {
   const identity = {
@@ -97,16 +105,45 @@ export function BoardCard({
     data: { item },
     disabled,
   });
+  const focusTargetRef = useRef<HTMLButtonElement>(null);
+  const setRefs = useCallback(
+    (node: HTMLButtonElement | null) => {
+      setNodeRef(node);
+      focusTargetRef.current = node;
+    },
+    [setNodeRef],
+  );
+  const { onKeyDown: onDragKeyDown, ...dragListeners } = listeners ?? {};
+
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    onDragKeyDown?.(event);
+    if (event.defaultPrevented || isDragging || focusTargetRef.current === null) {
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      onMoveFocus?.(identity, "previous");
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      onMoveFocus?.(identity, "next");
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      onOpenDetail?.(identity);
+    }
+  }
 
   return (
     <button
-      ref={setNodeRef}
+      ref={setRefs}
       {...attributes}
-      {...listeners}
+      {...dragListeners}
       type="button"
       aria-pressed={selected}
       disabled={disabled}
       onClick={() => onSelect(identity)}
+      onKeyDown={handleKeyDown}
+      data-board-item-key={boardItemIdentityKey(identity)}
       className={`group w-full touch-none rounded-md border p-3 text-left transition-[border-color,background-color,opacity] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-wait ${
         selected
           ? "border-primary bg-[#111c34]"
