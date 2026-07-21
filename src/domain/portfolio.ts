@@ -7,6 +7,18 @@ import {
   type WorkItem,
   type WorkItemPhase,
 } from "./work-item";
+import {
+  INBOX_SOURCE_ID,
+  portfolioSourceIdSchema,
+  workspaceIdSchema,
+} from "./portfolio-source";
+
+export {
+  INBOX_SOURCE_ID,
+  INBOX_SOURCE_LABEL,
+  portfolioSourceIdSchema,
+  workspaceIdSchema,
+} from "./portfolio-source";
 
 export interface RegisteredWorkspace {
   workspace_id: string;
@@ -19,9 +31,6 @@ export interface PortfolioRegistry {
   schema_version: 1;
   workspaces: RegisteredWorkspace[];
 }
-
-export const INBOX_SOURCE_ID = "inbox";
-export const INBOX_SOURCE_LABEL = "Unassigned";
 
 export interface PortfolioSource {
   source_id: string;
@@ -52,13 +61,6 @@ export interface PortfolioWorkItemIndex {
   close(): void;
 }
 
-export const workspaceIdSchema = z
-  .string()
-  .regex(
-    /^ws_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-    "workspace_id must use the ws_<uuid> format",
-  );
-
 export const registeredWorkspaceSchema: z.ZodType<RegisteredWorkspace> =
   z.strictObject({
     workspace_id: workspaceIdSchema,
@@ -69,11 +71,6 @@ export const registeredWorkspaceSchema: z.ZodType<RegisteredWorkspace> =
     product_name: z.string(),
     registered_at: z.iso.datetime(),
   });
-
-export const portfolioSourceIdSchema = z.union([
-  z.literal(INBOX_SOURCE_ID),
-  workspaceIdSchema,
-]);
 
 function validatePortfolioSource(
   source: PortfolioSource,

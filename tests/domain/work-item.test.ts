@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   InvalidWorkspaceError,
+  WorkItemTargetCollisionError,
+  WorkItemTransferFailedError,
+  assignWorkItemInputSchema,
+  createCaptureInputSchema,
   createWorkItemInputSchema,
   productManifestSchema,
+  updateWorkItemDetailsInputSchema,
   updateWorkItemPhaseInputSchema,
   workItemGoalSchema,
   workItemSchema,
@@ -36,6 +41,28 @@ describe("durable work-item schemas", () => {
       }),
     ).toEqual({ schema_version: 1, product_name: "Sample Workspace" });
     expect(workItemSchema.parse({ goal, state })).toEqual({ goal, state });
+  });
+
+  it("accepts an untyped capture goal with optional metadata", () => {
+    const captureGoal = {
+      schema_version: 1 as const,
+      work_item_id: workItemId,
+      title: "Explore a calmer capture flow",
+      capture: {
+        kind: "idea" as const,
+        original_title: "Explore a calmer capture flow",
+        captured_at: "2026-07-21T14:00:00.000Z",
+      },
+      priority: "high" as const,
+      tags: ["Front-end", "Question"],
+      notes: "Keep the first interaction minimal.",
+    };
+
+    expect(workItemGoalSchema.parse(captureGoal)).toEqual(captureGoal);
+    expect(workItemSchema.parse({ goal: captureGoal, state })).toEqual({
+      goal: captureGoal,
+      state,
+    });
   });
 
   it("accepts brainstorm and rejects the retired explore phase", () => {
@@ -90,6 +117,74 @@ describe("durable work-item schemas", () => {
   });
 });
 
+describe("capture and details inputs", () => {
+  it("accepts a minimal capture and trims case-preserving tags", () => {
+    expect(
+      createCaptureInputSchema.parse({
+        title: "Capture this idea",
+        capture_kind: "idea",
+        tags: [" Front-end ", "Question"],
+      }),
+    ).toEqual({
+      title: "Capture this idea",
+      capture_kind: "idea",
+      tags: ["Front-end", "Question"],
+    });
+
+    expect(
+      createCaptureInputSchema.parse({
+        title: "Project todo",
+        capture_kind: "todo",
+        source_id: "ws_550e8400-e29b-41d4-a716-446655440000",
+      }),
+    ).toMatchObject({ capture_kind: "todo" });
+  });
+
+  it("rejects empty and case-insensitive duplicate tags", () => {
+    expect(() =>
+      createCaptureInputSchema.parse({
+        title: "Capture this idea",
+        capture_kind: "idea",
+        tags: ["   "],
+      }),
+    ).toThrow("tags must not be empty");
+
+    expect(() =>
+      createCaptureInputSchema.parse({
+        title: "Capture this idea",
+        capture_kind: "idea",
+        tags: ["Question", "question"],
+      }),
+    ).toThrow("tags must not contain case-insensitive duplicates");
+  });
+
+  it("distinguishes omitted details from explicit clearing", () => {
+    expect(updateWorkItemDetailsInputSchema.parse({ title: "Retitled" })).toEqual({
+      title: "Retitled",
+    });
+    expect(
+      updateWorkItemDetailsInputSchema.parse({
+        type: null,
+        priority: null,
+        tags: [],
+        notes: null,
+      }),
+    ).toEqual({ type: null, priority: null, tags: [], notes: null });
+  });
+
+  it("rejects empty details, provenance edits, and invalid sources", () => {
+    expect(() => updateWorkItemDetailsInputSchema.parse({})).toThrow(
+      "details update must contain at least one field",
+    );
+    expect(() =>
+      updateWorkItemDetailsInputSchema.parse({ capture_kind: "todo" }),
+    ).toThrow();
+    expect(() =>
+      assignWorkItemInputSchema.parse({ target_source_id: "unknown" }),
+    ).toThrow();
+  });
+});
+
 describe("InvalidWorkspaceError", () => {
   it("carries a stable discriminator, artifact path, and reason", () => {
     const error = new InvalidWorkspaceError(
@@ -102,6 +197,35 @@ describe("InvalidWorkspaceError", () => {
       kind: "invalid_workspace",
       artifactPath: ".founder/work-items/example/state.json",
       reason: "invalid JSON",
+    });
+  });
+});
+
+describe("transfer errors", () => {
+  it("carry stable conflict discriminators and transfer context", () => {
+    const collision = new WorkItemTargetCollisionError(
+      "inbox",
+      workItemId,
+      "ws_550e8400-e29b-41d4-a716-446655440000",
+    );
+    const failure = new WorkItemTransferFailedError(
+      "inbox",
+      workItemId,
+      "ws_550e8400-e29b-41d4-a716-446655440000",
+      "source removal was denied",
+    );
+
+    expect(collision).toMatchObject({
+      name: "WorkItemTargetCollisionError",
+      kind: "target_collision",
+      sourceId: "inbox",
+      workItemId,
+    });
+    expect(failure).toMatchObject({
+      name: "WorkItemTransferFailedError",
+      kind: "transfer_failed",
+      reason: "source removal was denied",
+      workItemId,
     });
   });
 });
