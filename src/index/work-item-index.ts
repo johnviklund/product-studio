@@ -9,29 +9,31 @@ import {
   type PortfolioWorkItemIndex,
 } from "../domain/portfolio";
 
-const PORTFOLIO_CACHE_SCHEMA_VERSION = 1;
+const PORTFOLIO_CACHE_SCHEMA_VERSION = 2;
 
 const PORTFOLIO_SCHEMA = `
   CREATE TABLE IF NOT EXISTS portfolio_work_items (
-    workspace_id TEXT NOT NULL,
-    workspace_path TEXT NOT NULL,
-    product_name TEXT NOT NULL,
-    registered_at TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    project_workspace_id TEXT,
+    project_workspace_path TEXT,
+    project_name TEXT,
+    project_registered_at TEXT,
     work_item_id TEXT NOT NULL,
     title TEXT NOT NULL,
     type TEXT NOT NULL,
     phase TEXT NOT NULL,
     status TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (workspace_id, work_item_id)
+    PRIMARY KEY (source_id, work_item_id)
   )
 `;
 
 interface PortfolioWorkItemRow {
-  workspace_id: string;
-  workspace_path: string;
-  product_name: string;
-  registered_at: string;
+  source_id: string;
+  project_workspace_id: string | null;
+  project_workspace_path: string | null;
+  project_name: string | null;
+  project_registered_at: string | null;
   work_item_id: string;
   title: string;
   type: string;
@@ -65,10 +67,11 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
     );
     const insertStatement = this.database.prepare(`
       INSERT INTO portfolio_work_items (
-        workspace_id,
-        workspace_path,
-        product_name,
-        registered_at,
+        source_id,
+        project_workspace_id,
+        project_workspace_path,
+        project_name,
+        project_registered_at,
         work_item_id,
         title,
         type,
@@ -76,10 +79,11 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         status,
         updated_at
       ) VALUES (
-        @workspace_id,
-        @workspace_path,
-        @product_name,
-        @registered_at,
+        @source_id,
+        @project_workspace_id,
+        @project_workspace_path,
+        @project_name,
+        @project_registered_at,
         @work_item_id,
         @title,
         @type,
@@ -94,10 +98,11 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         clearStatement.run();
         for (const item of items) {
           insertStatement.run({
-            workspace_id: item.workspace.workspace_id,
-            workspace_path: item.workspace.workspace_path,
-            product_name: item.workspace.product_name,
-            registered_at: item.workspace.registered_at,
+            source_id: item.source_id,
+            project_workspace_id: item.project?.workspace_id ?? null,
+            project_workspace_path: item.project?.workspace_path ?? null,
+            project_name: item.project?.product_name ?? null,
+            project_registered_at: item.project?.registered_at ?? null,
             work_item_id: item.work_item.goal.work_item_id,
             title: item.work_item.goal.title,
             type: item.work_item.goal.type,
@@ -122,10 +127,11 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
       .prepare(
         `
           SELECT
-            workspace_id,
-            workspace_path,
-            product_name,
-            registered_at,
+            source_id,
+            project_workspace_id,
+            project_workspace_path,
+            project_name,
+            project_registered_at,
             work_item_id,
             title,
             type,
@@ -133,19 +139,23 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             status,
             updated_at
           FROM portfolio_work_items
-          ORDER BY updated_at DESC, workspace_id ASC, work_item_id ASC
+          ORDER BY updated_at DESC, source_id ASC, work_item_id ASC
         `,
       )
       .all() as PortfolioWorkItemRow[];
 
     return rows.map((row) =>
       portfolioWorkItemSchema.parse({
-        workspace: {
-          workspace_id: row.workspace_id,
-          workspace_path: row.workspace_path,
-          product_name: row.product_name,
-          registered_at: row.registered_at,
-        },
+        source_id: row.source_id,
+        project:
+          row.project_workspace_id === null
+            ? null
+            : {
+                workspace_id: row.project_workspace_id,
+                workspace_path: row.project_workspace_path,
+                product_name: row.project_name,
+                registered_at: row.project_registered_at,
+              },
         work_item: {
           goal: {
             schema_version: 1,

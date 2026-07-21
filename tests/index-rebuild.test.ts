@@ -5,9 +5,10 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type {
-  PortfolioWorkItem,
-  RegisteredWorkspace,
+import {
+  INBOX_SOURCE_ID,
+  type PortfolioWorkItem,
+  type RegisteredWorkspace,
 } from "../src/domain/portfolio";
 import type { WorkItem } from "../src/domain/work-item";
 import { SQLitePortfolioIndex } from "../src/index/work-item-index";
@@ -47,10 +48,14 @@ function workItem(workItemId: string, title: string): WorkItem {
 }
 
 function portfolioItem(
-  workspace: RegisteredWorkspace,
+  project: RegisteredWorkspace | null,
   work_item: WorkItem,
 ): PortfolioWorkItem {
-  return { workspace, work_item };
+  return {
+    source_id: project?.workspace_id ?? INBOX_SOURCE_ID,
+    project,
+    work_item,
+  };
 }
 
 async function createDatabasePath(): Promise<string> {
@@ -72,8 +77,9 @@ describe("SQLitePortfolioIndex", () => {
     const items = [
       portfolioItem(secondWorkspace, workItem(sharedId, "Second product item")),
       portfolioItem(firstWorkspace, workItem(sharedId, "First product item")),
+      portfolioItem(null, workItem(sharedId, "Unassigned item")),
     ];
-    const expected = [items[1], items[0]];
+    const expected = [items[2], items[1], items[0]];
     const index = new SQLitePortfolioIndex(databasePath);
     index.rebuild(items);
 
@@ -90,12 +96,22 @@ describe("SQLitePortfolioIndex", () => {
   it("recreates an older cache schema instead of migrating its rows", async () => {
     const databasePath = await createDatabasePath();
     const oldDatabase = new Database(databasePath);
-    oldDatabase.exec(
-      "CREATE TABLE work_items (work_item_id TEXT PRIMARY KEY, title TEXT NOT NULL)",
-    );
-    oldDatabase.prepare(
-      "INSERT INTO work_items (work_item_id, title) VALUES (?, ?)",
-    ).run("wi_old", "Disposable row");
+    oldDatabase.exec(`
+      CREATE TABLE portfolio_work_items (
+        workspace_id TEXT NOT NULL,
+        workspace_path TEXT NOT NULL,
+        product_name TEXT NOT NULL,
+        registered_at TEXT NOT NULL,
+        work_item_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        type TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, work_item_id)
+      );
+      PRAGMA user_version = 1;
+    `);
     oldDatabase.close();
 
     const index = new SQLitePortfolioIndex(databasePath);
@@ -103,7 +119,7 @@ describe("SQLitePortfolioIndex", () => {
     index.close();
 
     const inspected = new Database(databasePath, { readonly: true });
-    expect(inspected.pragma("user_version", { simple: true })).toBe(1);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(2);
     expect(
       inspected
         .prepare(
@@ -111,6 +127,18 @@ describe("SQLitePortfolioIndex", () => {
         )
         .all(),
     ).toEqual([{ name: "portfolio_work_items" }]);
+    expect(
+      inspected
+        .prepare("PRAGMA table_info(portfolio_work_items)")
+        .all()
+        .map((column) => (column as { name: string }).name),
+    ).toContain("source_id");
+    expect(
+      inspected
+        .prepare("PRAGMA table_info(portfolio_work_items)")
+        .all()
+        .map((column) => (column as { name: string }).name),
+    ).not.toContain("workspace_id");
     inspected.close();
   });
 

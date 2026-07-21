@@ -16,13 +16,18 @@ export interface PortfolioRegistry {
   workspaces: RegisteredWorkspace[];
 }
 
-export interface PortfolioWorkItem {
-  workspace: RegisteredWorkspace;
+export const INBOX_SOURCE_ID = "inbox";
+
+export interface PortfolioSource {
+  source_id: string;
+  project: RegisteredWorkspace | null;
+}
+
+export interface PortfolioWorkItem extends PortfolioSource {
   work_item: WorkItem;
 }
 
-export interface WorkspaceRebuildFailure {
-  workspace: RegisteredWorkspace;
+export interface WorkspaceRebuildFailure extends PortfolioSource {
   reason: string;
 }
 
@@ -60,6 +65,44 @@ export const registeredWorkspaceSchema: z.ZodType<RegisteredWorkspace> =
     registered_at: z.iso.datetime(),
   });
 
+export const portfolioSourceIdSchema = z.union([
+  z.literal(INBOX_SOURCE_ID),
+  workspaceIdSchema,
+]);
+
+function validatePortfolioSource(
+  source: PortfolioSource,
+  context: z.core.$RefinementCtx<PortfolioSource>,
+): void {
+  if (source.project === null && source.source_id !== INBOX_SOURCE_ID) {
+    context.addIssue({
+      code: "custom",
+      message: `a null project must use source_id ${INBOX_SOURCE_ID}`,
+      path: ["source_id"],
+      input: source.source_id,
+    });
+  }
+
+  if (
+    source.project !== null &&
+    source.source_id !== source.project.workspace_id
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "source_id must match project.workspace_id",
+      path: ["source_id"],
+      input: source.source_id,
+    });
+  }
+}
+
+export const portfolioSourceSchema: z.ZodType<PortfolioSource> = z
+  .strictObject({
+    source_id: portfolioSourceIdSchema,
+    project: registeredWorkspaceSchema.nullable(),
+  })
+  .superRefine(validatePortfolioSource);
+
 export const portfolioRegistrySchema: z.ZodType<PortfolioRegistry> =
   z.strictObject({
     schema_version: z.literal(1),
@@ -67,16 +110,22 @@ export const portfolioRegistrySchema: z.ZodType<PortfolioRegistry> =
   });
 
 export const portfolioWorkItemSchema: z.ZodType<PortfolioWorkItem> =
-  z.strictObject({
-    workspace: registeredWorkspaceSchema,
-    work_item: workItemSchema,
-  });
+  z
+    .strictObject({
+      source_id: portfolioSourceIdSchema,
+      project: registeredWorkspaceSchema.nullable(),
+      work_item: workItemSchema,
+    })
+    .superRefine(validatePortfolioSource);
 
 export const workspaceRebuildFailureSchema: z.ZodType<WorkspaceRebuildFailure> =
-  z.strictObject({
-    workspace: registeredWorkspaceSchema,
-    reason: z.string(),
-  });
+  z
+    .strictObject({
+      source_id: portfolioSourceIdSchema,
+      project: registeredWorkspaceSchema.nullable(),
+      reason: z.string(),
+    })
+    .superRefine(validatePortfolioSource);
 
 export const portfolioRebuildResultSchema: z.ZodType<PortfolioRebuildResult> =
   z.strictObject({

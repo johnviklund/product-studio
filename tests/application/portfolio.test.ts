@@ -121,9 +121,13 @@ describe("PortfolioService", () => {
     const rebuild = await service.rebuild();
 
     expect(rebuild.items).toHaveLength(1);
-    expect(rebuild.items[0]?.workspace.workspace_path).toBe(validRoot);
+    expect(rebuild.items[0]?.project?.workspace_path).toBe(validRoot);
     expect(rebuild.failures).toMatchObject([
-      { workspace: { workspace_path: invalidRoot }, reason: expect.any(String) },
+      {
+        source_id: expect.stringMatching(/^ws_/),
+        project: { workspace_path: invalidRoot },
+        reason: expect.any(String),
+      },
     ]);
     await expect(service.list()).resolves.toEqual(rebuild.items);
     await expect(service.listWorkspaces()).resolves.toHaveLength(2);

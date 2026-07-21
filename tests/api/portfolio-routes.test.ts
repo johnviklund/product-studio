@@ -153,7 +153,11 @@ describe("portfolio API routes", () => {
 
     expect(rebuild.items).toEqual([]);
     expect(rebuild.failures).toMatchObject([
-      { workspace: { workspace_path: workspacePath }, reason: expect.any(String) },
+      {
+        source_id: expect.stringMatching(/^ws_/),
+        project: { workspace_path: workspacePath },
+        reason: expect.any(String),
+      },
     ]);
     expect(await workspacesResponse.json()).toEqual({
       workspaces: [registration.workspace],

@@ -102,13 +102,21 @@ export class PortfolioService {
         await reader.readManifest();
         const workspaceItems = await reader.list();
         items.push(
-          ...workspaceItems.map((work_item) => ({ workspace, work_item })),
+          ...workspaceItems.map((work_item) => ({
+            source_id: workspace.workspace_id,
+            project: workspace,
+            work_item,
+          })),
         );
       } catch (error) {
         if (!isExpectedWorkspaceFailure(error)) {
           throw error;
         }
-        failures.push({ workspace, reason: errorMessage(error) });
+        failures.push({
+          source_id: workspace.workspace_id,
+          project: workspace,
+          reason: errorMessage(error),
+        });
       }
     }
 
