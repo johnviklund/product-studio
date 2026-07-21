@@ -12,7 +12,7 @@ export const WORK_ITEM_TYPES = [
 
 export const WORK_ITEM_PHASES = [
   "idea",
-  "explore",
+  "brainstorm",
   "spec",
   "plan",
   "execute",
@@ -61,6 +61,10 @@ export interface WorkItem {
 export interface CreateWorkItemInput {
   title: string;
   type: WorkItemType;
+}
+
+export interface UpdateWorkItemPhaseInput {
+  target_phase: WorkItemPhase;
 }
 
 export interface WorkItemRepository {
@@ -118,6 +122,11 @@ export const createWorkItemInputSchema: z.ZodType<CreateWorkItemInput> =
   z.strictObject({
     title: titleSchema,
     type: z.enum(WORK_ITEM_TYPES),
+  });
+
+export const updateWorkItemPhaseInputSchema: z.ZodType<UpdateWorkItemPhaseInput> =
+  z.strictObject({
+    target_phase: z.enum(WORK_ITEM_PHASES),
   });
 
 export class InvalidWorkspaceError extends Error {

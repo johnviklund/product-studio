@@ -4,6 +4,7 @@ import {
   InvalidWorkspaceError,
   createWorkItemInputSchema,
   productManifestSchema,
+  updateWorkItemPhaseInputSchema,
   workItemGoalSchema,
   workItemSchema,
   workItemStateSchema,
@@ -35,6 +36,18 @@ describe("durable work-item schemas", () => {
       }),
     ).toEqual({ schema_version: 1, product_name: "Sample Workspace" });
     expect(workItemSchema.parse({ goal, state })).toEqual({ goal, state });
+  });
+
+  it("accepts brainstorm and rejects the retired explore phase", () => {
+    expect(
+      workItemStateSchema.parse({ ...state, phase: "brainstorm" }),
+    ).toMatchObject({ phase: "brainstorm" });
+    expect(() =>
+      workItemStateSchema.parse({ ...state, phase: "explore" }),
+    ).toThrow();
+    expect(
+      updateWorkItemPhaseInputSchema.parse({ target_phase: "brainstorm" }),
+    ).toEqual({ target_phase: "brainstorm" });
   });
 
   it("rejects unknown fields instead of silently stripping them", () => {
