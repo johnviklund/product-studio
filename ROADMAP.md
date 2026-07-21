@@ -29,6 +29,7 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Traceability:** PRD §9.3, FR-002/021, `DESIGN.md` Kanban.
 - **Dependencies:** 1.1–1.2.
 - **Completion signal:** The founder can filter and return to a stable cross-project board without losing position or selection.
+- **Status:** Delivered — commit `1fec11a` (seven-column board, source-qualified inbox/project filtering, accessible drag transitions, persisted board view).
 
 ### 1.4 One-sentence capture and progressive exploration
 
