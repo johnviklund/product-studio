@@ -101,3 +101,45 @@
     background: color-mix(in srgb, var(--primary) 35%, transparent);
   }
 }
+
+@layer components {
+  .kanban-board-viewport {
+    overscroll-behavior: contain;
+    scrollbar-color: #3a404d transparent;
+    scrollbar-width: thin;
+  }
+
+  .kanban-board-viewport::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .kanban-board-viewport::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .kanban-board-viewport::-webkit-scrollbar-thumb {
+    background: #3a404d;
+    border: 2px solid var(--background);
+    border-radius: 9999px;
+  }
+
+  .kanban-board-viewport::-webkit-scrollbar-thumb:hover {
+    background: #545b69;
+  }
+
+  .kanban-drag-overlay {
+    box-shadow: 0 12px 28px rgb(0 0 0 / 32%);
+    transform: translateZ(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kanban-board-viewport *,
+  .kanban-drag-overlay {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

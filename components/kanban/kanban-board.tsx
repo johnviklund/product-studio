@@ -517,7 +517,7 @@ export function KanbanBoard() {
                 });
               }
             }}
-            className="min-h-0 flex-1 overflow-auto [scrollbar-color:#3a404d_transparent]"
+            className="kanban-board-viewport min-h-0 flex-1 overflow-auto"
             aria-busy={loading}
           >
             <div className="grid min-h-full min-w-[1616px] grid-cols-[repeat(7,minmax(224px,1fr))] divide-x">
