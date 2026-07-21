@@ -2,7 +2,11 @@ import { isAbsolute } from "node:path";
 
 import { z } from "zod";
 
-import { workItemSchema, type WorkItem } from "./work-item";
+import {
+  workItemSchema,
+  type WorkItem,
+  type WorkItemPhase,
+} from "./work-item";
 
 export interface RegisteredWorkspace {
   workspace_id: string;
@@ -17,6 +21,7 @@ export interface PortfolioRegistry {
 }
 
 export const INBOX_SOURCE_ID = "inbox";
+export const INBOX_SOURCE_LABEL = "Unassigned";
 
 export interface PortfolioSource {
   source_id: string;
@@ -159,5 +164,39 @@ export class DuplicateWorkspaceError extends Error {
   constructor(readonly workspacePath: string) {
     super(`Workspace is already registered: ${workspacePath}`);
     this.name = "DuplicateWorkspaceError";
+  }
+}
+
+export class UnknownPortfolioSourceError extends Error {
+  readonly kind = "unknown_source" as const;
+
+  constructor(readonly sourceId: string) {
+    super(`Unknown portfolio source: ${sourceId}`);
+    this.name = "UnknownPortfolioSourceError";
+  }
+}
+
+export class PortfolioWorkItemNotFoundError extends Error {
+  readonly kind = "work_item_not_found" as const;
+
+  constructor(
+    readonly sourceId: string,
+    readonly workItemId: string,
+  ) {
+    super(`Work item ${workItemId} was not found in source ${sourceId}`);
+    this.name = "PortfolioWorkItemNotFoundError";
+  }
+}
+
+export class InvalidWorkItemTransitionError extends Error {
+  readonly kind = "invalid_transition" as const;
+
+  constructor(
+    readonly sourcePhase: WorkItemPhase,
+    readonly targetPhase: WorkItemPhase,
+    readonly reason: string,
+  ) {
+    super(reason);
+    this.name = "InvalidWorkItemTransitionError";
   }
 }

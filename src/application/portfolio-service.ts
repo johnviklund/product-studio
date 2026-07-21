@@ -9,6 +9,7 @@ const localDataRoot = join(applicationRoot, ".local-data");
 
 export const portfolioRegistryPath = join(localDataRoot, "registry.json");
 export const portfolioIndexPath = join(localDataRoot, "index.sqlite");
+export const portfolioInboxRoot = join(applicationRoot, ".portfolio", "inbox");
 
 let portfolioServicePromise: Promise<PortfolioService> | undefined;
 
@@ -16,7 +17,7 @@ export function getPortfolioService(): Promise<PortfolioService> {
   if (portfolioServicePromise === undefined) {
     const registry = new PortfolioRegistry(portfolioRegistryPath);
     const index = new SQLitePortfolioIndex(portfolioIndexPath);
-    const service = new PortfolioService(registry, index);
+    const service = new PortfolioService(registry, index, portfolioInboxRoot);
 
     portfolioServicePromise = service
       .rebuild()

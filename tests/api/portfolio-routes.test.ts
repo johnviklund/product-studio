@@ -58,7 +58,11 @@ async function createService(): Promise<{
     join(applicationRoot, ".local-data", "registry.json"),
   );
   const index = new SQLitePortfolioIndex(":memory:");
-  const service = new PortfolioService(registry, index);
+  const service = new PortfolioService(
+    registry,
+    index,
+    join(applicationRoot, ".portfolio", "inbox"),
+  );
   openIndexes.push(index);
   getService.mockResolvedValue(service);
   return { registry, service };
