@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ProductWorkspace } from "../src/workspace/product-workspace";
+
 const repositoryRoot = process.cwd();
 const fixtureRoot = join(repositoryRoot, "fixtures", "sample-workspace");
 const createdRoots: string[] = [];
@@ -25,7 +27,7 @@ afterEach(async () => {
 });
 
 describe("portfolio rebuild completion signal", () => {
-  it("reconstructs the same two-workspace projection after deleting SQLite", async () => {
+  it("reconstructs project and inbox sources after deleting SQLite", async () => {
     const root = await mkdtemp(join(tmpdir(), "product-studio-completion-"));
     createdRoots.push(root);
     const firstWorkspace = join(root, "first-workspace");
@@ -39,18 +41,35 @@ describe("portfolio rebuild completion signal", () => {
     const workItemRoutes = await import("../app/api/work-items/route");
     await workspaceRoutes.POST(registrationRequest(firstWorkspace));
     await workspaceRoutes.POST(registrationRequest(secondWorkspace));
+    const inbox = new ProductWorkspace(join(root, ".portfolio", "inbox"));
+    await inbox.create({
+      title: "Durable unassigned item",
+      type: "Explore",
+    });
+    const initialRebuildRoutes = await import(
+      "../app/api/work-items/rebuild/route"
+    );
+    await initialRebuildRoutes.POST();
     const before = await (await workItemRoutes.GET()).json();
 
-    expect(before.items).toHaveLength(2);
+    expect(before.items).toHaveLength(3);
+    const identities = before.items.map(
+      (item: {
+        source_id: string;
+        work_item: { goal: { work_item_id: string } };
+      }) => `${item.source_id}:${item.work_item.goal.work_item_id}`,
+    );
+    expect(new Set(identities).size).toBe(3);
     expect(
-      before.items.map(
-        (item: { work_item: { goal: { work_item_id: string } } }) =>
-          item.work_item.goal.work_item_id,
+      identities.filter((identity: string) => identity.startsWith("inbox:")),
+    ).toHaveLength(1);
+    expect(
+      identities.filter(
+        (identity: string) =>
+          identity.startsWith("ws_") &&
+          identity.endsWith(":wi_550e8400-e29b-41d4-a716-446655440000"),
       ),
-    ).toEqual([
-      "wi_550e8400-e29b-41d4-a716-446655440000",
-      "wi_550e8400-e29b-41d4-a716-446655440000",
-    ]);
+    ).toHaveLength(2);
 
     await unlink(join(root, ".local-data", "index.sqlite"));
     vi.resetModules();
