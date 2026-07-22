@@ -54,6 +54,23 @@ tooling exists in this baseline yet.
 - Promote only evidence-backed, durable implementation or operating learning into
   `MEMORY.md`; do not make it a PRD summary or an active work log.
 
+## GitHub CLI account
+
+This repo lives under the personal `johnviklund` GitHub account, but `gh`'s global default
+on this machine is a work account. Both accounts are authenticated in the keyring; only the
+active one changes. **Before running any `gh` command in this repo** (PRs, issues, `gh api`,
+`gh pr`/`gh repo`, etc.), ensure the personal account is active:
+
+```bash
+gh auth switch --user johnviklund
+```
+
+Do this automatically as part of the `gh` step — do not ask the user to run it. If a `gh`
+command fails with `Could not resolve to a Repository with the name 'johnviklund/...'`, the
+work account is active; switch and retry. `git push`/`pull` here use SSH and are unaffected,
+so this applies to `gh` only. Leave the switch as-is when done (it is global; the user
+switches back to work themselves when needed).
+
 ## Future command contract
 
 The initial Next.js setup will add and document package-manager scripts for development,
