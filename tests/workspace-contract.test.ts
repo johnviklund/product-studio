@@ -574,6 +574,47 @@ describe("ProductWorkspace", () => {
     });
   });
 
+  it("fails closed with durable paths for partial and cross-file-mismatched contracts", async () => {
+    const root = await createWorkspace();
+    await writeWorkItem(root, firstId, "2026-07-17T12:00:00.000Z");
+    const workspace = new ProductWorkspace(root);
+    const itemDirectory = join(root, ".founder", "work-items", firstId);
+    const goalPath = join(itemDirectory, "goal.yaml");
+    const originalGoal = parse(await readFile(goalPath, "utf8"));
+
+    await writeFile(
+      goalPath,
+      stringify({ ...originalGoal, goal_version: 1 }),
+      "utf8",
+    );
+    await expect(workspace.read(firstId)).rejects.toMatchObject({
+      kind: "invalid_workspace",
+      artifactPath: `.founder/work-items/${firstId}/goal.yaml`,
+      reason: expect.stringContaining(
+        "acceptance_criteria is required when a goal contract is present",
+      ),
+    });
+
+    await writeFile(
+      goalPath,
+      stringify({
+        ...originalGoal,
+        goal_version: 1,
+        acceptance_criteria: ["Reject stale state"],
+        allowed_scope: ["src/domain"],
+        review_ready: ["Checks pass"],
+      }),
+      "utf8",
+    );
+    await expect(workspace.read(firstId)).rejects.toMatchObject({
+      kind: "invalid_workspace",
+      artifactPath: `.founder/work-items/${firstId}`,
+      reason: expect.stringContaining(
+        "state.goal_version: state goal_version must match goal goal_version",
+      ),
+    });
+  });
+
   it("fails closed on mismatched IDs and partial directories", async () => {
     const root = await createWorkspace();
     await writeWorkItem(root, firstId, "2026-07-17T12:00:00.000Z");
