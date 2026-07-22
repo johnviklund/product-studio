@@ -9,6 +9,7 @@ import {
 } from "react";
 import { ArrowLeft, ArrowRight, LockKeyhole, X } from "lucide-react";
 
+import type { MissionCompilation } from "@/src/application/portfolio";
 import {
   INBOX_SOURCE_ID,
   type PortfolioWorkItem,
@@ -45,6 +46,11 @@ interface MutationErrorResponse {
 
 type DetailTab = "overview" | "activity" | "files";
 
+interface MissionCompilationState {
+  itemKey: string;
+  result: MissionCompilation;
+}
+
 const capturedAtFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "short",
@@ -79,6 +85,10 @@ export function DetailPanel({
   const [targetSourceId, setTargetSourceId] = useState(item.source_id);
   const [savingDetails, setSavingDetails] = useState(false);
   const [savingAssignment, setSavingAssignment] = useState(false);
+  const [compilingMission, setCompilingMission] = useState(false);
+  const [missionCompilationState, setMissionCompilationState] =
+    useState<MissionCompilationState | null>(null);
+  const [copiedMissionKey, setCopiedMissionKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const detailsDirty =
@@ -88,6 +98,22 @@ export function DetailPanel({
     tags !== (goal.tags?.join(", ") ?? "") ||
     notes !== (goal.notes ?? "");
   const assignmentDirty = targetSourceId !== item.source_id;
+  const missionItemKey = [
+    item.source_id,
+    goal.work_item_id,
+    goal.goal_version,
+    state.input_revision,
+    state.attempt,
+  ].join(":");
+  const missionEligible =
+    item.source_id !== INBOX_SOURCE_ID &&
+    goal.goal_version !== undefined &&
+    state.phase === "execute" &&
+    state.status === "active";
+  const missionCompilation =
+    missionCompilationState?.itemKey === missionItemKey
+      ? missionCompilationState.result
+      : null;
 
   const attemptClose = useCallback(() => {
     if (
@@ -192,6 +218,56 @@ export function DetailPanel({
       setError("The project could not be changed. Check the local server and try again.");
     } finally {
       setSavingAssignment(false);
+    }
+  }
+
+  async function handleCompileMission() {
+    setCompilingMission(true);
+    setError(null);
+    setCopiedMissionKey(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | MissionCompilation
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The mission could not be compiled."
+            : "The mission could not be compiled.",
+        );
+        return;
+      }
+
+      setMissionCompilationState({
+        itemKey: missionItemKey,
+        result: body as MissionCompilation,
+      });
+    } catch {
+      setError(
+        "The mission could not be compiled. Check the local server and try again.",
+      );
+    } finally {
+      setCompilingMission(false);
+    }
+  }
+
+  async function handleCopyLaunchInstruction() {
+    if (missionCompilation === null) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(
+        `Open the workspace in your chosen agent and follow ${missionCompilation.task_path}.`,
+      );
+      setCopiedMissionKey(missionItemKey);
+    } catch {
+      setError("The launch instruction could not be copied.");
     }
   }
 
@@ -419,6 +495,14 @@ export function DetailPanel({
             </div>
 
             <div className="space-y-5 p-4" role="tabpanel">
+              {error ? (
+                <p
+                  className="border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-foreground"
+                  role="alert"
+                >
+                  {error}
+                </p>
+              ) : null}
               {activeTab === "overview" ? (
                 <>
                   <section aria-labelledby={`${fieldId}-summary`}>
@@ -451,6 +535,82 @@ export function DetailPanel({
                     </h3>
                     <p className="mt-1 text-sm font-medium">{nextActionForPhase(state.phase)}</p>
                   </section>
+
+                  {missionEligible ? (
+                    <section
+                      aria-labelledby={`${fieldId}-mission-handoff`}
+                      className="border-y py-4"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <h3
+                            id={`${fieldId}-mission-handoff`}
+                            className="text-xs font-medium"
+                          >
+                            Mission handoff
+                          </h3>
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            Compile durable instructions for an external agent.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={compilingMission}
+                          onClick={() => void handleCompileMission()}
+                          className="h-9 shrink-0 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {compilingMission ? "Compiling…" : "Compile mission"}
+                        </button>
+                      </div>
+
+                      {missionCompilation ? (
+                        <div className="mt-4 border-l-2 border-border bg-background px-3 py-3">
+                          <dl className="space-y-3 text-xs">
+                            <div>
+                              <dt className="text-muted-foreground">TASK.md</dt>
+                              <dd className="mt-1 break-all leading-5">
+                                {missionCompilation.task_path}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">Mission JSON</dt>
+                              <dd className="mt-1 break-all leading-5">
+                                {missionCompilation.mission_path}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">Workspace</dt>
+                              <dd className="mt-1 break-all leading-5">
+                                {missionCompilation.workspace_path}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">Package hash</dt>
+                              <dd className="mt-1 break-all text-[11px] leading-5">
+                                {missionCompilation.mission.content_sha256}
+                              </dd>
+                            </div>
+                          </dl>
+                          <div className="mt-4 flex items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyLaunchInstruction()}
+                              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                            >
+                              Copy launch instruction
+                            </button>
+                            <span
+                              className="text-[11px] text-muted-foreground"
+                              role="status"
+                              aria-live="polite"
+                            >
+                              {copiedMissionKey === missionItemKey ? "Copied" : ""}
+                            </span>
+                          </div>
+                        </div>
+                      ) : null}
+                    </section>
+                  ) : null}
 
                   {transitionActions.forward || transitionActions.back ? (
                     <section aria-label="Valid workflow transitions" className="flex flex-wrap gap-2">
