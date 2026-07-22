@@ -5,6 +5,29 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-21 · Controller state and goal-contract foundation (roadmap 2.1)
+- Added versioned work-item goal-contract schemas (`workItemGoalSchema` + aggregate
+  `workItemSchema` `superRefine`) that fail closed on partial or cross-file-mismatched contracts;
+  uncontracted items carry no controller state.
+- Built lease-guarded controller transitions: `validateTransitionExpectations` +
+  `validateWorkItemTransition` reject every `expected_*` mismatch (`contract_required`,
+  `stale_expectation`, `invalid_transition`, `attempt_conflict`) before any write, with first
+  activation at 1/1/0 and single-per-revision increment.
+- Made applied-key replay idempotent (content-addressed `deriveControllerRunId`, `pending`
+  manifest durable before mutation) and failure recovery compensated: a mid-write crash restores
+  the prior leased goal+state, leaves an inspectable `failed` manifest, and leaks no
+  `.controller.lock`/`.tmp`; concurrent lease attempts get `repair_required`.
+- Extracted `domain/workflow-policy` as the single phase-transition matrix shared by board and
+  controller (board keeps its column-aware reason strings); bumped the SQLite cache to schema v4
+  (JSON-encoded controller arrays/`active_run`, no NULL-backed optional keys).
+- Verified: lint, typecheck, 119 tests (13 files), and production build pass; Phase 4 review
+  clean at `a7326fd` — no P0–P2 findings, three P3s deferred/wontfix as intentional 2.2/2.3
+  forward scaffolding or out-of-scope per spec.
+- Commits: 9ac50d2 a5d5072 cf00d16 9a5796d 87d7014 292f81e 236dbb3 51f615b a7326fd
+- Why: delivers roadmap 2.1's controller-owned, versioned work state so transitions are validated
+  against expected state and never guess a conflicting one — the foundation 2.2's mission
+  compiler builds on.
+
 ## 2026-07-21 · Context panel, valid transitions, and keyboard flow (roadmap 1.5)
 - Added pure board policy helpers (`detailPanelModeForItem`, `boardTransitionActionsForPhase`,
   `BoardTransitionAction`) so panel mode and the one displayed next transition are derived, not

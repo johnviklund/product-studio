@@ -59,6 +59,11 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Traceability:** PRD §11, §16.3–16.5, FR-004/005/011.
 - **Dependencies:** 1.1 and 1.5.
 - **Completion signal:** Invalid or stale transitions are rejected without guessing conflicting state.
+- **Status:** Delivered — commits `9ac50d2`–`a7326fd` (versioned work-item/goal-contract schemas
+  fail closed for partial contracts; lease-guarded transitions validate every `expected_*` before
+  writing; idempotent applied-key replay; compensated recovery from mid-write failure leaves an
+  inspectable `failed` manifest; board and controller share one phase-transition policy; v4 cache
+  round-trip drops/recreates cleanly). Reviewed clean, no P0–P2 findings; see `WORKLOG.md`.
 
 ### 2.2 Provider-neutral mission compiler
 
