@@ -57,19 +57,24 @@ tooling exists in this baseline yet.
 ## GitHub CLI account
 
 This repo lives under the personal `johnviklund` GitHub account, but `gh`'s global default
-on this machine is a work account. Both accounts are authenticated in the keyring; only the
-active one changes. **Before running any `gh` command in this repo** (PRs, issues, `gh api`,
-`gh pr`/`gh repo`, etc.), ensure the personal account is active:
+on this machine is a work account. To avoid globally switching accounts (which races across
+concurrent terminals), the personal token is provided per-shell via `GH_TOKEN`:
 
-```bash
-gh auth switch --user johnviklund
-```
+- **Interactive terminals:** direnv loads the repo's `.envrc`, which exports `GH_TOKEN` from
+  `~/.config/gh-tokens/johnviklund` (chmod 600, never committed). `cd` into the repo and gh
+  is personal automatically; other terminals keep the global work default. No action needed.
+- **Agent-run `gh` commands** (this tool runs fresh non-interactive shells that do **not**
+  trigger direnv): prefix every `gh` invocation with the token so it targets the personal
+  account without touching global state:
 
-Do this automatically as part of the `gh` step — do not ask the user to run it. If a `gh`
-command fails with `Could not resolve to a Repository with the name 'johnviklund/...'`, the
-work account is active; switch and retry. `git push`/`pull` here use SSH and are unaffected,
-so this applies to `gh` only. Leave the switch as-is when done (it is global; the user
-switches back to work themselves when needed).
+  ```bash
+  GH_TOKEN="$(cat "$HOME/.config/gh-tokens/johnviklund")" gh <args>
+  ```
+
+  Do this automatically as part of the `gh` step — do not ask the user, and do **not** use
+  `gh auth switch` (it is global and races with the user's other terminals). If the token
+  file is missing, fall back to `gh auth switch --user johnviklund` and tell the user to
+  re-seed the file. `git push`/`pull` use SSH and are unaffected — this applies to `gh` only.
 
 ## Future command contract
 
