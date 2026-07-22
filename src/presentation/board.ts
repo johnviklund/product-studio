@@ -5,6 +5,13 @@ import {
   type WorkItemCapture,
   type WorkItemPhase,
 } from "../domain/work-item";
+import {
+  ALLOWED_PHASE_TRANSITIONS,
+  validatePhaseTransition as validateDomainPhaseTransition,
+  type WorkflowTransitionResult,
+} from "../domain/workflow-policy";
+
+export { ALLOWED_PHASE_TRANSITIONS } from "../domain/workflow-policy";
 
 export const BOARD_VIEW_STORAGE_KEY = "product-studio.board-view.v1";
 
@@ -49,18 +56,6 @@ export interface BoardTransitionAction {
   label: string;
 }
 
-export const ALLOWED_PHASE_TRANSITIONS = {
-  idea: ["spec"],
-  brainstorm: ["spec"],
-  spec: ["brainstorm", "plan"],
-  plan: ["spec", "execute"],
-  execute: ["plan", "review"],
-  review: ["execute", "ship"],
-  test: ["execute", "ship"],
-  ship: ["review", "learn"],
-  learn: ["ship"],
-} as const satisfies Record<WorkItemPhase, readonly WorkItemPhase[]>;
-
 const NEXT_ACTION_BY_PHASE = {
   idea: "Brainstorm the idea",
   brainstorm: "Write the specification",
@@ -73,9 +68,7 @@ const NEXT_ACTION_BY_PHASE = {
   learn: "Review the completed work",
 } as const satisfies Record<WorkItemPhase, string>;
 
-export type PhaseTransitionResult =
-  | { ok: true }
-  | { ok: false; reason: string };
+export type PhaseTransitionResult = WorkflowTransitionResult;
 
 export type BoardDropResolution =
   | { ok: true; changed: boolean; target_phase: WorkItemPhase }
@@ -146,10 +139,10 @@ export function validatePhaseTransition(
   sourcePhase: WorkItemPhase,
   targetPhase: WorkItemPhase,
 ): PhaseTransitionResult {
-  const allowedTargets = ALLOWED_PHASE_TRANSITIONS[sourcePhase];
+  const transition = validateDomainPhaseTransition(sourcePhase, targetPhase);
 
-  if ((allowedTargets as readonly WorkItemPhase[]).includes(targetPhase)) {
-    return { ok: true };
+  if (transition.ok) {
+    return transition;
   }
 
   const sourceColumn = boardColumnForPhase(sourcePhase);
