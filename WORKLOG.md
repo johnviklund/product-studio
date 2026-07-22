@@ -5,6 +5,27 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-21 · Context panel, valid transitions, and keyboard flow (roadmap 1.5)
+- Added pure board policy helpers (`detailPanelModeForItem`, `boardTransitionActionsForPhase`,
+  `BoardTransitionAction`) so panel mode and the one displayed next transition are derived, not
+  duplicated, across drag and panel paths.
+- Built a reusable 410px `DetailPanel` with Todo-capture and governed modes, source-qualified
+  capture mutations, governed tabs, and callback-only forward/back transitions; retired
+  `capture-editor.tsx` into the panel's capture mode.
+- Added roving-focus and keyboard callbacks (Arrow Up/Down navigate, Enter opens) to board cards,
+  threaded through column-local ordering so boundary arrows are no-ops; every card now opens the
+  shared `DetailPanel` from `kanban-board.tsx`, with `commitTransition` shared by drag and panel
+  actions and a `transitionPending` guard added in the patch cycle to block duplicate in-flight
+  transitions.
+- Verified: lint, typecheck, 95 tests, and production build pass; Phase 4 review clean at
+  `4dedf19` — P2 double-submit guard resolved and verified, P1 (Enter-opens-panel) **wontfix**
+  by explicit product-owner descope (pointer/click remains the supported open path; the dnd-kit
+  `KeyboardSensor`-vs-custom-Enter-handler collision is recorded and captured as a reviewer
+  eval case), two P3 a11y/focus items deferred.
+- Commits: ebf9422 ac5af25 6d69a1f 44dd491 a3e89bc 1a4596b 55005b3 54e0b3c 4dedf19
+- Why: delivers roadmap 1.5's context-preserving detail panel and keyboard flow so a founder can
+  inspect and progress a board item without losing filters or scroll position.
+
 ## 2026-07-21 · One-sentence capture and progressive exploration (roadmap 1.4)
 - Added durable capture domain contracts (source, kind, optional tags/notes) and a dependency-free
   value-object module for source-ID validation to break a schema/aggregate circular import.

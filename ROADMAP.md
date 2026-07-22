@@ -46,6 +46,7 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Traceability:** PRD §9.9, FR-002/021, `DESIGN.md` detail panel.
 - **Dependencies:** 1.3–1.4.
 - **Completion signal:** A founder can inspect and progress an item from the board without losing filters or scroll position.
+- **Status:** Delivered — commit `4dedf19` (reusable 410px detail panel with Todo-capture and governed modes, shared forward/back transition actions, column-local keyboard navigation, `capture-editor.tsx` retired into the panel's capture mode). Enter-to-open-panel (spec AC5) is descoped by explicit product-owner direction — pointer/click remains the supported open path; see `TODO.md` if reopened later.
 
 **Milestone exit:** The founder can capture, find, explore, organize, and progress real work across products without relying on GitHub Projects or raw repository files.
 
