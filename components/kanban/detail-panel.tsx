@@ -34,6 +34,7 @@ interface DetailPanelProps {
   onUpdated: (item: PortfolioWorkItem) => void;
   onAssigned: (previous: PortfolioWorkItem, item: PortfolioWorkItem) => void;
   onTransition: (item: PortfolioWorkItem, targetColumnId: BoardColumnId) => void;
+  transitionPending?: boolean;
 }
 
 interface MutationErrorResponse {
@@ -63,6 +64,7 @@ export function DetailPanel({
   onUpdated,
   onAssigned,
   onTransition,
+  transitionPending = false,
 }: DetailPanelProps) {
   const fieldId = useId();
   const mode = detailPanelModeForItem(item);
@@ -455,8 +457,9 @@ export function DetailPanel({
                       {transitionActions.back ? (
                         <button
                           type="button"
+                          disabled={transitionPending}
                           onClick={() => onTransition(item, transitionActions.back!.target_column_id)}
-                          className="inline-flex h-9 items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                          className="inline-flex h-9 items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           <ArrowLeft className="size-3.5" strokeWidth={1.75} />
                           {transitionActions.back.label}
@@ -465,8 +468,9 @@ export function DetailPanel({
                       {transitionActions.forward ? (
                         <button
                           type="button"
+                          disabled={transitionPending}
                           onClick={() => onTransition(item, transitionActions.forward!.target_column_id)}
-                          className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                          className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {transitionActions.forward.label}
                           <ArrowRight className="size-3.5" strokeWidth={1.75} />

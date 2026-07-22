@@ -694,6 +694,11 @@ export function KanbanBoard() {
           key={boardItemIdentityKey(identityForItem(detailItem))}
           item={detailItem}
           workspaces={workspaces}
+          transitionPending={
+            pendingItemKey !== null &&
+            pendingItemKey ===
+              boardItemIdentityKey(identityForItem(detailItem))
+          }
           onClose={() => closeDetailPanel(identityForItem(detailItem))}
           onUpdated={handleCaptureUpdated}
           onAssigned={handleCaptureAssigned}
