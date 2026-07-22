@@ -7,7 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
+import { WorkItemController } from "../../src/application/work-item-controller";
 import {
+  PortfolioWorkItemNotFoundError,
+  UnknownPortfolioSourceError,
+} from "../../src/domain/portfolio";
+import {
+  ControllerConflictError,
+  InvalidWorkspaceError,
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
 } from "../../src/domain/work-item";
@@ -25,6 +32,7 @@ import * as workItemsRoute from "../../app/api/work-items/route";
 import { POST as createPortfolioWorkItem } from "../../app/api/portfolio/work-items/route";
 import { POST as assignPortfolioWorkItem } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/assignment/route";
 import { PATCH as updatePortfolioWorkItemDetails } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/details/route";
+import { POST as compilePortfolioMission } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route";
 import {
   PATCH as updatePortfolioWorkItem,
 } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/route";
@@ -57,6 +65,44 @@ async function createWorkspace(): Promise<string> {
     type: "Feature",
   });
   return root;
+}
+
+async function createMissionReadyWorkspace(): Promise<{
+  workspacePath: string;
+  workItemId: string;
+}> {
+  const workspacePath = await createWorkspace();
+  const repository = new ProductWorkspace(workspacePath);
+  const item = (await repository.list())[0];
+  if (item === undefined) {
+    throw new Error("Expected API mission fixture work item");
+  }
+  const controller = new WorkItemController(
+    repository,
+    () => new Date("2026-07-22T12:00:00.000Z"),
+  );
+  let current = (
+    await controller.updateGoalContract(item.goal.work_item_id, {
+      acceptance_criteria: ["The mission package is reproducible"],
+      allowed_scope: ["src/application", "app/api"],
+      review_ready: ["All checks pass"],
+    })
+  ).work_item;
+  for (const targetPhase of ["spec", "plan", "execute"] as const) {
+    current = (
+      await controller.transition(current.goal.work_item_id, {
+        target_phase: targetPhase,
+        target_status: "active",
+        expected_phase: current.state.phase,
+        expected_status: current.state.status,
+        expected_schema_version: 1,
+        expected_goal_version: current.state.goal_version!,
+        expected_input_revision: current.state.input_revision!,
+        attempt: current.state.attempt!,
+      })
+    ).work_item;
+  }
+  return { workspacePath, workItemId: item.goal.work_item_id };
 }
 
 async function createService(): Promise<{
@@ -128,6 +174,17 @@ function assignmentRequest(body: unknown): Request {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+    },
+  );
+}
+
+function missionRequest(): Request {
+  return new Request(
+    "http://localhost/api/portfolio/work-items/source/item/mission",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{ignored-no-body-contract",
     },
   );
 }
@@ -284,6 +341,114 @@ describe("portfolio API routes", () => {
       source_id: targetSourceId,
       project: { workspace_path: workspacePath },
       work_item: { goal: { work_item_id: workItemId } },
+    });
+  });
+
+  it("compiles and idempotently replays a source-qualified mission", async () => {
+    await createService();
+    const { workspacePath, workItemId } = await createMissionReadyWorkspace();
+    const registrationResponse = await registerWorkspace(
+      registrationRequest(workspacePath),
+    );
+    const registration = await registrationResponse.json();
+    const context = phaseUpdateContext(
+      registration.workspace.workspace_id,
+      workItemId,
+    );
+
+    const firstResponse = await compilePortfolioMission(
+      missionRequest(),
+      context,
+    );
+    const first = await firstResponse.json();
+    const secondResponse = await compilePortfolioMission(
+      missionRequest(),
+      context,
+    );
+    const second = await secondResponse.json();
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+    expect(second).toEqual(first);
+    expect(first).toMatchObject({
+      workspace_path: workspacePath,
+      task_path: join(
+        workspacePath,
+        ".founder",
+        "missions",
+        workItemId,
+        "1-1-0",
+        "TASK.md",
+      ),
+      mission_path: join(
+        workspacePath,
+        ".founder",
+        "missions",
+        workItemId,
+        "1-1-0",
+        "mission.json",
+      ),
+      mission: {
+        identity: { work_item_id: workItemId },
+        content_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+  });
+
+  it("maps mission compile failures through the established response contract", async () => {
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const compileMission = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new UnknownPortfolioSourceError(
+          "ws_00000000-0000-4000-8000-000000000000",
+        ),
+      )
+      .mockRejectedValueOnce(
+        new PortfolioWorkItemNotFoundError("inbox", workItemId),
+      )
+      .mockRejectedValueOnce(
+        new ControllerConflictError(
+          "mission_not_ready",
+          workItemId,
+          "No applied execute manifest matches the governed tuple.",
+        ),
+      )
+      .mockRejectedValueOnce(
+        new InvalidWorkspaceError(
+          `.founder/work-items/${workItemId}/runs/bad.json`,
+          "invalid JSON",
+        ),
+      )
+      .mockRejectedValueOnce(new Error("injected failure"));
+    getService.mockResolvedValue({ compileMission });
+    const context = phaseUpdateContext("inbox", workItemId);
+
+    const responses = [];
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      responses.push(await compilePortfolioMission(missionRequest(), context));
+    }
+
+    expect(responses.map(({ status }) => status)).toEqual([
+      404, 404, 409, 422, 500,
+    ]);
+    expect(await responses[0].json()).toMatchObject({
+      error: { code: "unknown_source" },
+    });
+    expect(await responses[1].json()).toMatchObject({
+      error: { code: "work_item_not_found" },
+    });
+    expect(await responses[2].json()).toEqual({
+      error: {
+        code: "mission_not_ready",
+        message: "No applied execute manifest matches the governed tuple.",
+      },
+    });
+    expect(await responses[3].json()).toMatchObject({
+      error: { code: "invalid_workspace" },
+    });
+    expect(await responses[4].json()).toEqual({
+      error: { code: "internal_error", message: "Unexpected server error" },
     });
   });
 
