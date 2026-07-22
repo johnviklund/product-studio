@@ -20,6 +20,7 @@ import {
 } from "../../src/domain/work-item";
 
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
+const runId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
 
 const goal = {
   schema_version: 1 as const,
@@ -134,7 +135,7 @@ describe("durable work-item schemas", () => {
       input_revision: 1,
       attempt: 0,
       active_run: {
-        run_id: "run-1",
+        run_id: runId,
         idempotency_key: `${workItemId}:spec:1:1:0`,
         acquired_at: "2026-07-21T20:00:00.000Z",
       },
@@ -256,7 +257,7 @@ describe("durable work-item schemas", () => {
     expect(
       controllerRunManifestSchema.parse({
         schema_version: 1,
-        run_id: "run-1",
+        run_id: runId,
         work_item_id: workItemId,
         idempotency_key: `${workItemId}:plan:1:1:0`,
         phase: "plan",

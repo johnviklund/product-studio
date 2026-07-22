@@ -13,12 +13,19 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse, stringify } from "yaml";
 
-import { InvalidWorkspaceError } from "../src/domain/work-item";
+import {
+  InvalidWorkspaceError,
+  type ActiveRun,
+  type ControllerMutationInput,
+  type WorkItem,
+} from "../src/domain/work-item";
 import { ProductWorkspace } from "../src/workspace/product-workspace";
 
 const createdRoots: string[] = [];
 const firstId = "wi_123e4567-e89b-12d3-a456-426614174000";
 const secondId = "wi_550e8400-e29b-41d4-a716-446655440000";
+const firstRunId = "550e8400-e29b-41d4-a716-446655440000";
+const secondRunId = "123e4567-e89b-42d3-a456-426614174000";
 
 async function createWorkspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-workspace-"));
@@ -67,6 +74,107 @@ async function writeWorkItem(
     )}\n`,
     "utf8",
   );
+}
+
+async function writeContractedWorkItem(
+  root: string,
+  workItemId: string,
+): Promise<void> {
+  const directory = join(root, ".founder", "work-items", workItemId);
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "goal.yaml"),
+    stringify({
+      schema_version: 1,
+      work_item_id: workItemId,
+      title: `Item ${workItemId}`,
+      type: "Explore",
+      goal_version: 1,
+      acceptance_criteria: ["Reject stale state"],
+      allowed_scope: ["src/domain"],
+      review_ready: ["Checks pass"],
+    }),
+    "utf8",
+  );
+  await writeFile(
+    join(directory, "state.json"),
+    `${JSON.stringify(
+      {
+        schema_version: 1,
+        work_item_id: workItemId,
+        phase: "idea",
+        status: "active",
+        updated_at: "2026-07-21T20:00:00.000Z",
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+function activeRun(
+  runId = firstRunId,
+  idempotencyKey = `${firstId}:spec:1:1:0`,
+): ActiveRun {
+  return {
+    run_id: runId,
+    idempotency_key: idempotencyKey,
+    acquired_at: "2026-07-21T20:01:00.000Z",
+  };
+}
+
+function controllerMutation(
+  current: WorkItem,
+  run: ActiveRun,
+  overrides: {
+    goalVersion?: number;
+    inputRevision?: number;
+    phase?: "idea" | "spec";
+  } = {},
+): ControllerMutationInput {
+  const goalVersion = overrides.goalVersion ?? 1;
+  const inputRevision = overrides.inputRevision ?? 1;
+  const phase = overrides.phase ?? "spec";
+
+  return {
+    goal: {
+      ...current.goal,
+      goal_version: goalVersion,
+      acceptance_criteria: ["Reject stale state"],
+      allowed_scope: ["src/domain"],
+      review_ready: ["Checks pass"],
+    },
+    state: {
+      ...current.state,
+      phase,
+      updated_at: "2026-07-21T20:02:00.000Z",
+      goal_version: goalVersion,
+      input_revision: inputRevision,
+      attempt: 0,
+    },
+    manifest: {
+      schema_version: 1,
+      run_id: run.run_id,
+      work_item_id: current.goal.work_item_id,
+      idempotency_key: run.idempotency_key,
+      phase,
+      goal_version: goalVersion,
+      input_revision: inputRevision,
+      attempt: 0,
+      started_at: "2026-07-21T20:01:00.000Z",
+      outcome: "pending",
+    },
+  };
+}
+
+class FailingControllerWorkspace extends ProductWorkspace {
+  protected override async afterControllerGoalReplaced(): Promise<void> {
+    throw new Error("injected controller state write failure");
+  }
 }
 
 afterEach(async () => {
@@ -283,6 +391,117 @@ describe("ProductWorkspace", () => {
     expect(await source.read(item.goal.work_item_id)).toBeNull();
     expect(await target.read(item.goal.work_item_id)).toEqual(item);
     await source.removeWorkItem(item.goal.work_item_id);
+  });
+
+  it("rejects a concurrent controller lease and releases durable active state", async () => {
+    const root = await createWorkspace();
+    await writeContractedWorkItem(root, firstId);
+    const workspace = new ProductWorkspace(root);
+    const firstLease = await workspace.acquireControllerLease(
+      firstId,
+      activeRun(),
+    );
+
+    expect(firstLease).not.toBeNull();
+    expect((await workspace.read(firstId))?.state.active_run).toEqual(
+      activeRun(),
+    );
+    await expect(
+      workspace.acquireControllerLease(
+        firstId,
+        activeRun(secondRunId, `${firstId}:plan:1:1:0`),
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required", workItemId: firstId });
+
+    await workspace.releaseControllerLease(firstLease!);
+    expect((await workspace.read(firstId))?.state).not.toHaveProperty(
+      "active_run",
+    );
+    expect(
+      await readdir(join(root, ".founder", "work-items", firstId)),
+    ).not.toContain(".controller.lock");
+  });
+
+  it("persists an applied manifest and returns it on idempotent replay", async () => {
+    const root = await createWorkspace();
+    await writeWorkItem(root, firstId, "2026-07-21T20:00:00.000Z");
+    const workspace = new ProductWorkspace(root);
+    const run = activeRun();
+    const firstLease = await workspace.acquireControllerLease(firstId, run);
+    if (firstLease === null) {
+      throw new Error("Expected first controller lease");
+    }
+    const mutation = controllerMutation(firstLease.work_item, run);
+
+    const firstResult = await workspace.commitControllerMutation(
+      firstLease,
+      mutation,
+    );
+    await workspace.releaseControllerLease(firstLease);
+
+    expect(firstResult.manifest).toMatchObject({ outcome: "applied" });
+    expect(firstResult.manifest.completed_at).toMatch(/Z$/);
+    expect(await workspace.readControllerRunManifest(firstId, run.run_id)).toEqual(
+      firstResult.manifest,
+    );
+    expect(await workspace.read(firstId)).toEqual(firstResult.work_item);
+
+    const replayLease = await workspace.acquireControllerLease(firstId, run);
+    if (replayLease === null) {
+      throw new Error("Expected replay controller lease");
+    }
+    const replay = await workspace.commitControllerMutation(
+      replayLease,
+      mutation,
+    );
+    await workspace.releaseControllerLease(replayLease);
+
+    expect(replay).toEqual(firstResult);
+    expect(await workspace.read(firstId)).toEqual(firstResult.work_item);
+    expect(
+      await readdir(
+        join(root, ".founder", "work-items", firstId, "runs"),
+      ),
+    ).toEqual([`${run.run_id}.json`]);
+  });
+
+  it("compensates a mid-write failure and leaves an inspectable failed manifest", async () => {
+    const root = await createWorkspace();
+    await writeContractedWorkItem(root, firstId);
+    const workspace = new FailingControllerWorkspace(root);
+    const before = await workspace.read(firstId);
+    if (before === null) {
+      throw new Error("Expected contracted work item");
+    }
+    const run = activeRun(
+      firstRunId,
+      `${firstId}:spec:2:2:0`,
+    );
+    const lease = await workspace.acquireControllerLease(firstId, run);
+    if (lease === null) {
+      throw new Error("Expected controller lease");
+    }
+
+    await expect(
+      workspace.commitControllerMutation(
+        lease,
+        controllerMutation(lease.work_item, run, {
+          goalVersion: 2,
+          inputRevision: 2,
+        }),
+      ),
+    ).rejects.toThrow("injected controller state write failure");
+
+    expect(await workspace.read(firstId)).toEqual(before);
+    expect(await workspace.readControllerRunManifest(firstId, run.run_id)).toMatchObject({
+      run_id: run.run_id,
+      outcome: "failed",
+    });
+    const entries = await readdir(
+      join(root, ".founder", "work-items", firstId),
+    );
+    expect(entries).not.toContain(".controller.lock");
+    expect(entries.some((entry) => entry.endsWith(".tmp"))).toBe(false);
   });
 
   it("refuses a publish collision without overwriting either artifact", async () => {

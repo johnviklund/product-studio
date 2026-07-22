@@ -15,7 +15,11 @@ import { parse, stringify } from "yaml";
 import type { ZodType } from "zod";
 
 import {
+  ControllerConflictError,
   InvalidWorkspaceError,
+  activeRunSchema,
+  controllerRunIdSchema,
+  controllerRunManifestSchema,
   createCaptureInputSchema,
   createWorkItemInputSchema,
   productManifestSchema,
@@ -26,6 +30,11 @@ import {
   updateWorkItemPhaseInputSchema,
   type CreateWorkItemInput,
   type CreateCaptureInput,
+  type ActiveRun,
+  type ControllerLease,
+  type ControllerMutationInput,
+  type ControllerMutationResult,
+  type ControllerRunManifest,
   type ProductManifest,
   type WorkItem,
   type WorkItemGoal,
@@ -38,6 +47,8 @@ const FOUNDER_DIRECTORY = ".founder";
 const WORK_ITEMS_DIRECTORY = "work-items";
 const GOAL_FILE = "goal.yaml";
 const STATE_FILE = "state.json";
+const RUNS_DIRECTORY = "runs";
+const CONTROLLER_LOCK_FILE = ".controller.lock";
 const UUID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const STAGING_DIRECTORY_PATTERN = new RegExp(
@@ -424,6 +435,575 @@ export class ProductWorkspace implements WorkItemRepository {
     }
 
     await rm(join(this.workItemsDirectory, validatedId), { recursive: true });
+  }
+
+  async acquireControllerLease(
+    workItemId: string,
+    activeRun: ActiveRun,
+  ): Promise<ControllerLease | null> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedRun = activeRunSchema.parse(activeRun);
+
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return null;
+    }
+
+    const workItemDirectory = join(this.workItemsDirectory, validatedId);
+    const lockPath = join(workItemDirectory, CONTROLLER_LOCK_FILE);
+    try {
+      await writeFile(lockPath, `${JSON.stringify(validatedRun, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      if (isNodeError(error) && error.code === "EEXIST") {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedId,
+          "A controller lock already exists; retained locks require manual repair.",
+        );
+      }
+      throw error;
+    }
+
+    try {
+      const current = await this.readValidated(validatedId);
+      if (current === null) {
+        await this.unlinkIfPresent(lockPath);
+        return null;
+      }
+      if (current.state.active_run !== undefined) {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedId,
+          "Controller state already contains active_run without an available lock.",
+        );
+      }
+
+      if (current.goal.goal_version !== undefined) {
+        const leasedState = workItemStateSchema.parse({
+          ...current.state,
+          active_run: validatedRun,
+        });
+        await this.replaceStateAtomically(validatedId, leasedState);
+      }
+
+      return { work_item: current, active_run: validatedRun };
+    } catch (error) {
+      try {
+        await this.unlinkIfPresent(lockPath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Controller lease acquisition failed and its lock could not be removed",
+        );
+      }
+      throw error;
+    }
+  }
+
+  async readControllerRunManifest(
+    workItemId: string,
+    runId: string,
+  ): Promise<ControllerRunManifest | null> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(runId);
+
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return null;
+    }
+    if ((await this.readValidated(validatedId)) === null) {
+      return null;
+    }
+
+    const runsDirectory = join(
+      this.workItemsDirectory,
+      validatedId,
+      RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(runsDirectory))) {
+      return null;
+    }
+
+    const manifestPath = join(runsDirectory, `${validatedRunId}.json`);
+    const source = await this.readOptionalFile(manifestPath);
+    if (source === null) {
+      return null;
+    }
+
+    const manifest = this.parseJson(
+      source,
+      manifestPath,
+      controllerRunManifestSchema,
+    );
+    if (manifest.work_item_id !== validatedId) {
+      throw this.invalid(
+        manifestPath,
+        `work_item_id must remain ${validatedId}`,
+      );
+    }
+    if (manifest.run_id !== validatedRunId) {
+      throw this.invalid(
+        manifestPath,
+        `run_id must equal containing filename ${validatedRunId}`,
+      );
+    }
+
+    return manifest;
+  }
+
+  async commitControllerMutation(
+    lease: ControllerLease,
+    input: ControllerMutationInput,
+  ): Promise<ControllerMutationResult> {
+    const validatedLease = this.validateControllerLease(lease);
+    const validatedManifest = controllerRunManifestSchema.parse(input.manifest);
+    const nextItem = workItemSchema.parse({
+      goal: input.goal,
+      state: input.state,
+    });
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+
+    this.validateControllerMutation(
+      validatedLease,
+      nextItem,
+      validatedManifest,
+    );
+    await this.assertControllerLeaseOwnership(validatedLease);
+
+    const current = await this.readValidated(workItemId);
+    if (current === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Work item ${workItemId} disappeared while its controller lease was held.`,
+      );
+    }
+    if (!this.matchesLeasedItem(current, validatedLease)) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Durable goal/state changed after the controller lease was acquired.",
+      );
+    }
+
+    const existing = await this.readControllerRunManifest(
+      workItemId,
+      validatedManifest.run_id,
+    );
+    if (existing !== null) {
+      if (
+        existing.outcome === "applied" &&
+        this.manifestIdentityMatches(existing, validatedManifest)
+      ) {
+        return {
+          work_item: this.withoutActiveRun(current),
+          manifest: existing,
+        };
+      }
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        `Run ${validatedManifest.run_id} already has a non-matching durable manifest.`,
+      );
+    }
+
+    const pendingManifest = controllerRunManifestSchema.parse({
+      ...validatedManifest,
+      outcome: "pending",
+      completed_at: undefined,
+    });
+    const workItemDirectory = join(this.workItemsDirectory, workItemId);
+
+    try {
+      await this.writeControllerRunManifest(pendingManifest);
+      await this.writeControllerArtifacts(
+        workItemDirectory,
+        nextItem.goal,
+        nextItem.state,
+        true,
+      );
+
+      const appliedManifest = controllerRunManifestSchema.parse({
+        ...pendingManifest,
+        outcome: "applied",
+        completed_at: new Date().toISOString(),
+      });
+      await this.writeControllerRunManifest(appliedManifest);
+
+      return { work_item: nextItem, manifest: appliedManifest };
+    } catch (error) {
+      const cleanupErrors: unknown[] = [];
+      try {
+        await this.writeControllerArtifacts(
+          workItemDirectory,
+          validatedLease.work_item.goal,
+          validatedLease.work_item.state,
+          false,
+        );
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+
+      try {
+        await this.writeControllerRunManifest({
+          ...pendingManifest,
+          outcome: "failed",
+          completed_at: new Date().toISOString(),
+        });
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+
+      try {
+        await this.releaseControllerLease(validatedLease);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupErrors],
+          "Controller mutation failed and recovery was incomplete",
+        );
+      }
+      throw error;
+    }
+  }
+
+  async releaseControllerLease(lease: ControllerLease): Promise<void> {
+    const validatedLease = this.validateControllerLease(lease);
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+    const workItemDirectory = join(this.workItemsDirectory, workItemId);
+    const lockPath = join(workItemDirectory, CONTROLLER_LOCK_FILE);
+    const lockSource = await this.readOptionalFile(lockPath);
+    const current = await this.readValidated(workItemId);
+
+    if (lockSource === null) {
+      if (current?.state.active_run !== undefined) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItemId,
+          "Controller state retains active_run but its lock file is missing.",
+        );
+      }
+      return;
+    }
+
+    const lockRun = this.parseJson(lockSource, lockPath, activeRunSchema);
+    if (!this.activeRunsMatch(lockRun, validatedLease.active_run)) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Controller lock ownership does not match the releasing lease.",
+      );
+    }
+
+    if (current?.state.active_run !== undefined) {
+      if (
+        !this.activeRunsMatch(
+          current.state.active_run,
+          validatedLease.active_run,
+        )
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItemId,
+          "Controller state active_run does not match the releasing lease.",
+        );
+      }
+
+      const releasedState = { ...current.state };
+      delete releasedState.active_run;
+      await this.replaceStateAtomically(
+        workItemId,
+        workItemStateSchema.parse(releasedState),
+      );
+    }
+
+    await unlink(lockPath);
+  }
+
+  protected async afterControllerGoalReplaced(): Promise<void> {
+    return;
+  }
+
+  private validateControllerLease(lease: ControllerLease): ControllerLease {
+    return {
+      work_item: workItemSchema.parse(lease.work_item),
+      active_run: activeRunSchema.parse(lease.active_run),
+    };
+  }
+
+  private validateControllerMutation(
+    lease: ControllerLease,
+    nextItem: WorkItem,
+    manifest: ControllerRunManifest,
+  ): void {
+    const workItemId = lease.work_item.goal.work_item_id;
+
+    if (nextItem.goal.work_item_id !== workItemId) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Controller mutation cannot change work_item_id.",
+      );
+    }
+    if (
+      JSON.stringify(nextItem.goal.capture) !==
+      JSON.stringify(lease.work_item.goal.capture)
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Controller mutation cannot change capture provenance.",
+      );
+    }
+    if (nextItem.state.active_run !== undefined) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Committed controller state must not retain active_run.",
+      );
+    }
+    if (
+      manifest.outcome !== "pending" ||
+      manifest.work_item_id !== workItemId ||
+      manifest.run_id !== lease.active_run.run_id ||
+      manifest.idempotency_key !== lease.active_run.idempotency_key ||
+      manifest.phase !== nextItem.state.phase ||
+      manifest.goal_version !== nextItem.goal.goal_version ||
+      manifest.input_revision !== nextItem.state.input_revision ||
+      manifest.attempt !== nextItem.state.attempt
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Controller manifest identity must match the lease and next durable state.",
+      );
+    }
+  }
+
+  private async assertControllerLeaseOwnership(
+    lease: ControllerLease,
+  ): Promise<void> {
+    const workItemId = lease.work_item.goal.work_item_id;
+    const lockPath = join(
+      this.workItemsDirectory,
+      workItemId,
+      CONTROLLER_LOCK_FILE,
+    );
+    const lockSource = await this.readOptionalFile(lockPath);
+
+    if (lockSource === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Controller lock disappeared before the mutation was committed.",
+      );
+    }
+
+    const lockRun = this.parseJson(lockSource, lockPath, activeRunSchema);
+    if (!this.activeRunsMatch(lockRun, lease.active_run)) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Controller lock ownership does not match the mutation lease.",
+      );
+    }
+  }
+
+  private matchesLeasedItem(current: WorkItem, lease: ControllerLease): boolean {
+    return (
+      JSON.stringify(this.withoutActiveRun(current)) ===
+      JSON.stringify(lease.work_item)
+    );
+  }
+
+  private withoutActiveRun(item: WorkItem): WorkItem {
+    if (item.state.active_run === undefined) {
+      return item;
+    }
+    const state = { ...item.state };
+    delete state.active_run;
+    return workItemSchema.parse({ goal: item.goal, state });
+  }
+
+  private activeRunsMatch(left: ActiveRun, right: ActiveRun): boolean {
+    return (
+      left.run_id === right.run_id &&
+      left.idempotency_key === right.idempotency_key &&
+      left.acquired_at === right.acquired_at
+    );
+  }
+
+  private manifestIdentityMatches(
+    left: ControllerRunManifest,
+    right: ControllerRunManifest,
+  ): boolean {
+    return (
+      left.run_id === right.run_id &&
+      left.work_item_id === right.work_item_id &&
+      left.idempotency_key === right.idempotency_key &&
+      left.phase === right.phase &&
+      left.goal_version === right.goal_version &&
+      left.input_revision === right.input_revision &&
+      left.attempt === right.attempt
+    );
+  }
+
+  private async writeControllerRunManifest(
+    manifest: ControllerRunManifest,
+  ): Promise<void> {
+    const validated = controllerRunManifestSchema.parse(manifest);
+    const runsDirectory = join(
+      this.workItemsDirectory,
+      validated.work_item_id,
+      RUNS_DIRECTORY,
+    );
+    await this.ensureDirectory(runsDirectory);
+
+    const manifestPath = join(runsDirectory, `${validated.run_id}.json`);
+    await this.writeJsonAtomically(manifestPath, validated);
+  }
+
+  private async writeControllerArtifacts(
+    workItemDirectory: string,
+    goal: WorkItemGoal,
+    state: WorkItemState,
+    injectFailure: boolean,
+  ): Promise<void> {
+    const suffix = randomUUID();
+    const goalPath = join(workItemDirectory, GOAL_FILE);
+    const statePath = join(workItemDirectory, STATE_FILE);
+    const temporaryGoalPath = join(
+      workItemDirectory,
+      `.${GOAL_FILE}.${suffix}.controller.tmp`,
+    );
+    const temporaryStatePath = join(
+      workItemDirectory,
+      `.${STATE_FILE}.${suffix}.controller.tmp`,
+    );
+
+    try {
+      await writeFile(temporaryGoalPath, stringify(goal), {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await writeFile(
+        temporaryStatePath,
+        `${JSON.stringify(state, null, 2)}\n`,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await rename(temporaryGoalPath, goalPath);
+      if (injectFailure) {
+        await this.afterControllerGoalReplaced();
+      }
+      await rename(temporaryStatePath, statePath);
+    } catch (error) {
+      const cleanupErrors: unknown[] = [];
+      for (const temporaryPath of [temporaryGoalPath, temporaryStatePath]) {
+        try {
+          await this.unlinkIfPresent(temporaryPath);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupErrors],
+          "Controller artifact write failed and temporary cleanup was incomplete",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async writeJsonAtomically(
+    targetPath: string,
+    value: unknown,
+  ): Promise<void> {
+    const temporaryPath = `${targetPath}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(temporaryPath, targetPath);
+    } catch (error) {
+      try {
+        await this.unlinkIfPresent(temporaryPath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "JSON write failed and its temporary file could not be removed",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async ensureDirectory(directoryPath: string): Promise<void> {
+    try {
+      await mkdir(directoryPath);
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") {
+        throw error;
+      }
+    }
+    await this.assertDirectory(directoryPath);
+  }
+
+  private async hasSafeDirectory(directoryPath: string): Promise<boolean> {
+    let stats;
+    try {
+      stats = await lstat(directoryPath);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      throw this.invalid(
+        directoryPath,
+        "path must be a directory, not a symlink",
+      );
+    }
+    return true;
+  }
+
+  private async readOptionalFile(filePath: string): Promise<string | null> {
+    let stats;
+    try {
+      stats = await lstat(filePath);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw this.invalid(filePath, "path must be a regular file, not a symlink");
+    }
+    return readFile(filePath, "utf8");
+  }
+
+  private async unlinkIfPresent(filePath: string): Promise<void> {
+    try {
+      await unlink(filePath);
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
   }
 
   private async readValidated(workItemId: string): Promise<WorkItem | null> {

@@ -215,22 +215,6 @@ export interface WorkItemRepository {
     stagingPath: string,
   ): Promise<void>;
   removeWorkItem(workItemId: string): Promise<void>;
-  acquireControllerLease?(
-    workItemId: string,
-    activeRun: ActiveRun,
-  ): Promise<ControllerLease | null>;
-  readControllerRunManifest?(
-    workItemId: string,
-    runId: string,
-  ): Promise<ControllerRunManifest | null>;
-  commitControllerMutation?(
-    lease: ControllerLease,
-    input: ControllerMutationInput,
-  ): Promise<ControllerMutationResult>;
-  releaseControllerLease?(lease: ControllerLease): Promise<void>;
-}
-
-export interface ControllerWorkItemRepository extends WorkItemRepository {
   acquireControllerLease(
     workItemId: string,
     activeRun: ActiveRun,
@@ -245,6 +229,8 @@ export interface ControllerWorkItemRepository extends WorkItemRepository {
   ): Promise<ControllerMutationResult>;
   releaseControllerLease(lease: ControllerLease): Promise<void>;
 }
+
+export type ControllerWorkItemRepository = WorkItemRepository;
 
 export const workItemIdSchema = z
   .string()
@@ -303,6 +289,8 @@ const nonEmptyIdentifierSchema = z
     "must not have leading or trailing whitespace",
   );
 
+export const controllerRunIdSchema = z.uuid();
+
 export const productManifestSchema: z.ZodType<ProductManifest> = z.strictObject({
   schema_version: z.literal(1),
   product_name: z.string(),
@@ -355,7 +343,7 @@ export const workItemGoalSchema: z.ZodType<WorkItemGoal> = z
   });
 
 export const activeRunSchema: z.ZodType<ActiveRun> = z.strictObject({
-  run_id: nonEmptyIdentifierSchema,
+  run_id: controllerRunIdSchema,
   idempotency_key: nonEmptyIdentifierSchema,
   acquired_at: z.iso.datetime(),
 });
@@ -484,7 +472,7 @@ export const controllerTransitionInputSchema: z.ZodType<ControllerTransitionInpu
 export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
   z.strictObject({
     schema_version: z.literal(1),
-    run_id: nonEmptyIdentifierSchema,
+    run_id: controllerRunIdSchema,
     work_item_id: workItemIdSchema,
     idempotency_key: nonEmptyIdentifierSchema,
     phase: z.enum(WORK_ITEM_PHASES),
