@@ -77,6 +77,12 @@ manifest, goal, and state contract is implemented in
 [`src/domain/work-item.ts`](src/domain/work-item.ts) and demonstrated by the checked-in
 [`fixtures/sample-workspace`](fixtures/sample-workspace).
 
+The version-1 work-item schema is additive: lightweight captures omit goal-contract and
+controller fields, while governed items carry a complete `goal_version` contract plus matching
+state `goal_version`, `input_revision`, and `attempt`. Controller runs use exclusive per-item
+leases and strict durable manifests; incompatible or partial combinations fail closed. SQLite
+schema v4 is a rebuildable projection of those files, not a migration authority.
+
 ## 8. Core documents
 
 - [Design system](DESIGN.md)
@@ -91,7 +97,6 @@ manifest, goal, and state contract is implemented in
 The following remain unresolved and must be decided with implementation evidence:
 
 - Final product name.
-- Exact durable-state schema and migration mechanism.
 - The first two proof repositories for provider-neutral manual handoff.
 - Canonical mission and result-submission schemas, including which agent-specific renderers
   add real value.
