@@ -9,7 +9,7 @@ import {
   type PortfolioWorkItemIndex,
 } from "../domain/portfolio";
 
-const PORTFOLIO_CACHE_SCHEMA_VERSION = 3;
+const PORTFOLIO_CACHE_SCHEMA_VERSION = 4;
 
 const PORTFOLIO_SCHEMA = `
   CREATE TABLE IF NOT EXISTS portfolio_work_items (
@@ -27,9 +27,17 @@ const PORTFOLIO_SCHEMA = `
     priority TEXT,
     tags TEXT,
     notes TEXT,
+    goal_version INTEGER,
+    acceptance_criteria TEXT,
+    allowed_scope TEXT,
+    review_ready TEXT,
     phase TEXT NOT NULL,
     status TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    state_goal_version INTEGER,
+    input_revision INTEGER,
+    attempt INTEGER,
+    active_run TEXT,
     PRIMARY KEY (source_id, work_item_id)
   )
 `;
@@ -49,9 +57,17 @@ interface PortfolioWorkItemRow {
   priority: string | null;
   tags: string | null;
   notes: string | null;
+  goal_version: number | null;
+  acceptance_criteria: string | null;
+  allowed_scope: string | null;
+  review_ready: string | null;
   phase: string;
   status: string;
   updated_at: string;
+  state_goal_version: number | null;
+  input_revision: number | null;
+  attempt: number | null;
+  active_run: string | null;
 }
 
 export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
@@ -93,9 +109,17 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         priority,
         tags,
         notes,
+        goal_version,
+        acceptance_criteria,
+        allowed_scope,
+        review_ready,
         phase,
         status,
-        updated_at
+        updated_at,
+        state_goal_version,
+        input_revision,
+        attempt,
+        active_run
       ) VALUES (
         @source_id,
         @project_workspace_id,
@@ -111,9 +135,17 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         @priority,
         @tags,
         @notes,
+        @goal_version,
+        @acceptance_criteria,
+        @allowed_scope,
+        @review_ready,
         @phase,
         @status,
-        @updated_at
+        @updated_at,
+        @state_goal_version,
+        @input_revision,
+        @attempt,
+        @active_run
       )
     `);
 
@@ -141,9 +173,29 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
                 ? null
                 : JSON.stringify(item.work_item.goal.tags),
             notes: item.work_item.goal.notes ?? null,
+            goal_version: item.work_item.goal.goal_version ?? null,
+            acceptance_criteria:
+              item.work_item.goal.acceptance_criteria === undefined
+                ? null
+                : JSON.stringify(item.work_item.goal.acceptance_criteria),
+            allowed_scope:
+              item.work_item.goal.allowed_scope === undefined
+                ? null
+                : JSON.stringify(item.work_item.goal.allowed_scope),
+            review_ready:
+              item.work_item.goal.review_ready === undefined
+                ? null
+                : JSON.stringify(item.work_item.goal.review_ready),
             phase: item.work_item.state.phase,
             status: item.work_item.state.status,
             updated_at: item.work_item.state.updated_at,
+            state_goal_version: item.work_item.state.goal_version ?? null,
+            input_revision: item.work_item.state.input_revision ?? null,
+            attempt: item.work_item.state.attempt ?? null,
+            active_run:
+              item.work_item.state.active_run === undefined
+                ? null
+                : JSON.stringify(item.work_item.state.active_run),
           });
         }
       },
@@ -176,9 +228,17 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             priority,
             tags,
             notes,
+            goal_version,
+            acceptance_criteria,
+            allowed_scope,
+            review_ready,
             phase,
             status,
-            updated_at
+            updated_at,
+            state_goal_version,
+            input_revision,
+            attempt,
+            active_run
           FROM portfolio_work_items
           ORDER BY updated_at DESC, source_id ASC, work_item_id ASC
         `,
@@ -220,6 +280,18 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             ...(row.priority === null ? {} : { priority: row.priority }),
             ...(row.tags === null ? {} : { tags: JSON.parse(row.tags) }),
             ...(row.notes === null ? {} : { notes: row.notes }),
+            ...(row.goal_version === null
+              ? {}
+              : { goal_version: row.goal_version }),
+            ...(row.acceptance_criteria === null
+              ? {}
+              : { acceptance_criteria: JSON.parse(row.acceptance_criteria) }),
+            ...(row.allowed_scope === null
+              ? {}
+              : { allowed_scope: JSON.parse(row.allowed_scope) }),
+            ...(row.review_ready === null
+              ? {}
+              : { review_ready: JSON.parse(row.review_ready) }),
           },
           state: {
             schema_version: 1,
@@ -227,6 +299,16 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             phase: row.phase,
             status: row.status,
             updated_at: row.updated_at,
+            ...(row.state_goal_version === null
+              ? {}
+              : { goal_version: row.state_goal_version }),
+            ...(row.input_revision === null
+              ? {}
+              : { input_revision: row.input_revision }),
+            ...(row.attempt === null ? {} : { attempt: row.attempt }),
+            ...(row.active_run === null
+              ? {}
+              : { active_run: JSON.parse(row.active_run) }),
           },
         },
       });

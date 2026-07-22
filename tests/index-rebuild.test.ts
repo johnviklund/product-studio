@@ -130,24 +130,81 @@ describe("SQLitePortfolioIndex", () => {
     rebuiltIndex.close();
   });
 
-  it("recreates an older cache schema instead of migrating its rows", async () => {
+  it("round-trips contracted controller state without synthesizing optional nulls", async () => {
+    const databasePath = await createDatabasePath();
+    const contracted = portfolioItem(firstWorkspace, {
+      goal: {
+        schema_version: 1,
+        work_item_id: "wi_ffffffff-ffff-4fff-afff-ffffffffffff",
+        title: "Persist controller state",
+        type: "Feature",
+        goal_version: 2,
+        acceptance_criteria: ["Reject stale transitions"],
+        allowed_scope: ["src/domain", "src/application"],
+        review_ready: ["Checks pass"],
+      },
+      state: {
+        schema_version: 1,
+        work_item_id: "wi_ffffffff-ffff-4fff-afff-ffffffffffff",
+        phase: "plan",
+        status: "active",
+        updated_at: "2026-07-21T21:00:00.000Z",
+        goal_version: 2,
+        input_revision: 3,
+        attempt: 1,
+        active_run: {
+          run_id: "550e8400-e29b-41d4-a716-446655440000",
+          idempotency_key:
+            "wi_ffffffff-ffff-4fff-afff-ffffffffffff:plan:2:3:1",
+          acquired_at: "2026-07-21T21:01:00.000Z",
+        },
+      },
+    });
+    const uncontracted = portfolioItem(
+      null,
+      workItem(
+        "wi_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "Remain uncontracted",
+      ),
+    );
+    const index = new SQLitePortfolioIndex(databasePath);
+
+    index.rebuild([contracted, uncontracted]);
+
+    expect(index.list()).toEqual([contracted, uncontracted]);
+    expect(index.list()[1]?.work_item.goal).not.toHaveProperty("goal_version");
+    expect(index.list()[1]?.work_item.state).not.toHaveProperty(
+      "input_revision",
+    );
+    expect(index.list()[1]?.work_item.state).not.toHaveProperty("active_run");
+    index.close();
+  });
+
+  it("drops and recreates a v3 cache instead of migrating its rows", async () => {
     const databasePath = await createDatabasePath();
     const oldDatabase = new Database(databasePath);
     oldDatabase.exec(`
       CREATE TABLE portfolio_work_items (
-        workspace_id TEXT NOT NULL,
-        workspace_path TEXT NOT NULL,
-        product_name TEXT NOT NULL,
-        registered_at TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        project_workspace_id TEXT,
+        project_workspace_path TEXT,
+        project_name TEXT,
+        project_registered_at TEXT,
         work_item_id TEXT NOT NULL,
         title TEXT NOT NULL,
-        type TEXT NOT NULL,
+        type TEXT,
+        capture_kind TEXT,
+        capture_original_title TEXT,
+        capture_captured_at TEXT,
+        priority TEXT,
+        tags TEXT,
+        notes TEXT,
         phase TEXT NOT NULL,
         status TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        PRIMARY KEY (workspace_id, work_item_id)
+        PRIMARY KEY (source_id, work_item_id)
       );
-      PRAGMA user_version = 1;
+      PRAGMA user_version = 3;
     `);
     oldDatabase.close();
 
@@ -156,7 +213,7 @@ describe("SQLitePortfolioIndex", () => {
     index.close();
 
     const inspected = new Database(databasePath, { readonly: true });
-    expect(inspected.pragma("user_version", { simple: true })).toBe(3);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(4);
     expect(
       inspected
         .prepare(
@@ -189,6 +246,14 @@ describe("SQLitePortfolioIndex", () => {
         "priority",
         "tags",
         "notes",
+        "goal_version",
+        "acceptance_criteria",
+        "allowed_scope",
+        "review_ready",
+        "state_goal_version",
+        "input_revision",
+        "attempt",
+        "active_run",
       ]),
     );
     expect(
