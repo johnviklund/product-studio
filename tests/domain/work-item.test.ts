@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ControllerConflictError,
   InvalidWorkspaceError,
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
   assignWorkItemInputSchema,
+  controllerRunManifestSchema,
+  controllerTransitionInputSchema,
   createCaptureInputSchema,
   createWorkItemInputSchema,
+  goalContractUpdateInputSchema,
   productManifestSchema,
   updateWorkItemDetailsInputSchema,
   updateWorkItemPhaseInputSchema,
@@ -115,6 +119,155 @@ describe("durable work-item schemas", () => {
       }),
     ).toThrow("goal.yaml and state.json work_item_id values must agree");
   });
+
+  it("accepts a complete contracted item with matching controller state", () => {
+    const contractedGoal = {
+      ...goal,
+      goal_version: 1,
+      acceptance_criteria: ["The controller rejects stale revisions"],
+      allowed_scope: ["src/domain"],
+      review_ready: ["All deterministic checks pass"],
+    };
+    const contractedState = {
+      ...state,
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      active_run: {
+        run_id: "run-1",
+        idempotency_key: `${workItemId}:spec:1:1:0`,
+        acquired_at: "2026-07-21T20:00:00.000Z",
+      },
+    };
+
+    expect(
+      workItemSchema.parse({ goal: contractedGoal, state: contractedState }),
+    ).toEqual({ goal: contractedGoal, state: contractedState });
+  });
+
+  it.each([
+    {
+      name: "partial goal contract",
+      item: {
+        goal: { ...goal, goal_version: 1 },
+        state,
+      },
+    },
+    {
+      name: "empty contract list",
+      item: {
+        goal: {
+          ...goal,
+          goal_version: 1,
+          acceptance_criteria: [],
+          allowed_scope: ["src/domain"],
+          review_ready: ["Checks pass"],
+        },
+        state: { ...state, goal_version: 1, input_revision: 1, attempt: 0 },
+      },
+    },
+    {
+      name: "case-insensitive duplicate contract entries",
+      item: {
+        goal: {
+          ...goal,
+          goal_version: 1,
+          acceptance_criteria: ["Reject stale state", "reject stale state"],
+          allowed_scope: ["src/domain"],
+          review_ready: ["Checks pass"],
+        },
+        state: { ...state, goal_version: 1, input_revision: 1, attempt: 0 },
+      },
+    },
+    {
+      name: "malformed controller version",
+      item: {
+        goal: {
+          ...goal,
+          goal_version: 1,
+          acceptance_criteria: ["Reject stale state"],
+          allowed_scope: ["src/domain"],
+          review_ready: ["Checks pass"],
+        },
+        state: { ...state, goal_version: 1, input_revision: 0, attempt: 0 },
+      },
+    },
+    {
+      name: "cross-file version mismatch",
+      item: {
+        goal: {
+          ...goal,
+          goal_version: 2,
+          acceptance_criteria: ["Reject stale state"],
+          allowed_scope: ["src/domain"],
+          review_ready: ["Checks pass"],
+        },
+        state: { ...state, goal_version: 1, input_revision: 2, attempt: 0 },
+      },
+    },
+    {
+      name: "controller state without a contract",
+      item: {
+        goal,
+        state: { ...state, goal_version: 1, input_revision: 1, attempt: 0 },
+      },
+    },
+  ])("rejects $name", ({ item }) => {
+    expect(() => workItemSchema.parse(item)).toThrow();
+  });
+
+  it("validates strict controller inputs and run manifests", () => {
+    expect(
+      goalContractUpdateInputSchema.parse({
+        acceptance_criteria: [" Reject stale state "],
+        allowed_scope: ["src/domain"],
+        review_ready: ["Checks pass"],
+      }),
+    ).toEqual({
+      acceptance_criteria: ["Reject stale state"],
+      allowed_scope: ["src/domain"],
+      review_ready: ["Checks pass"],
+    });
+
+    expect(() =>
+      goalContractUpdateInputSchema.parse({
+        acceptance_criteria: ["Reject stale state"],
+        allowed_scope: ["src/domain"],
+        review_ready: ["Checks pass"],
+        expected_goal_version: 1,
+      }),
+    ).toThrow(
+      "expected_goal_version and expected_input_revision must be provided together",
+    );
+
+    expect(
+      controllerTransitionInputSchema.parse({
+        target_phase: "plan",
+        target_status: "active",
+        expected_phase: "spec",
+        expected_status: "active",
+        expected_schema_version: 1,
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+        attempt: 0,
+      }),
+    ).toMatchObject({ target_phase: "plan", expected_schema_version: 1 });
+
+    expect(
+      controllerRunManifestSchema.parse({
+        schema_version: 1,
+        run_id: "run-1",
+        work_item_id: workItemId,
+        idempotency_key: `${workItemId}:plan:1:1:0`,
+        phase: "plan",
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        started_at: "2026-07-21T20:00:00.000Z",
+        outcome: "pending",
+      }),
+    ).toMatchObject({ outcome: "pending" });
+  });
 });
 
 describe("capture and details inputs", () => {
@@ -197,6 +350,23 @@ describe("InvalidWorkspaceError", () => {
       kind: "invalid_workspace",
       artifactPath: ".founder/work-items/example/state.json",
       reason: "invalid JSON",
+    });
+  });
+});
+
+describe("ControllerConflictError", () => {
+  it("carries a typed conflict kind and work-item context", () => {
+    const error = new ControllerConflictError(
+      "stale_expectation",
+      workItemId,
+      "Expected goal version 1 but found 2",
+    );
+
+    expect(error).toMatchObject({
+      name: "ControllerConflictError",
+      kind: "stale_expectation",
+      workItemId,
+      reason: "Expected goal version 1 but found 2",
     });
   });
 });

@@ -35,11 +35,33 @@ export const CAPTURE_KINDS = ["idea", "todo"] as const;
 
 export const WORK_ITEM_PRIORITIES = ["low", "normal", "high"] as const;
 
+export const CONTROLLER_RUN_OUTCOMES = [
+  "pending",
+  "applied",
+  "rejected",
+  "failed",
+] as const;
+
+export const CONTROLLER_CONFLICT_KINDS = [
+  "work_item_not_found",
+  "contract_required",
+  "stale_expectation",
+  "invalid_transition",
+  "attempt_conflict",
+  "lease_held",
+  "repair_required",
+  "idempotency_conflict",
+  "contracted_details",
+] as const;
+
 export type WorkItemType = (typeof WORK_ITEM_TYPES)[number];
 export type WorkItemPhase = (typeof WORK_ITEM_PHASES)[number];
 export type WorkItemStatus = (typeof WORK_ITEM_STATUSES)[number];
 export type CaptureKind = (typeof CAPTURE_KINDS)[number];
 export type WorkItemPriority = (typeof WORK_ITEM_PRIORITIES)[number];
+export type ControllerRunOutcome = (typeof CONTROLLER_RUN_OUTCOMES)[number];
+export type ControllerConflictKind =
+  (typeof CONTROLLER_CONFLICT_KINDS)[number];
 
 export interface ProductManifest {
   schema_version: 1;
@@ -55,6 +77,10 @@ export interface WorkItemGoal {
   priority?: WorkItemPriority;
   tags?: string[];
   notes?: string;
+  goal_version?: number;
+  acceptance_criteria?: string[];
+  allowed_scope?: string[];
+  review_ready?: string[];
 }
 
 export interface WorkItemCapture {
@@ -69,6 +95,16 @@ export interface WorkItemState {
   phase: WorkItemPhase;
   status: WorkItemStatus;
   updated_at: string;
+  goal_version?: number;
+  input_revision?: number;
+  attempt?: number;
+  active_run?: ActiveRun;
+}
+
+export interface ActiveRun {
+  run_id: string;
+  idempotency_key: string;
+  acquired_at: string;
 }
 
 export interface WorkItem {
@@ -106,6 +142,55 @@ export interface UpdateWorkItemPhaseInput {
   target_phase: WorkItemPhase;
 }
 
+export interface GoalContractUpdateInput {
+  acceptance_criteria: string[];
+  allowed_scope: string[];
+  review_ready: string[];
+  expected_goal_version?: number;
+  expected_input_revision?: number;
+}
+
+export interface ControllerTransitionInput {
+  target_phase: WorkItemPhase;
+  target_status: WorkItemStatus;
+  expected_phase: WorkItemPhase;
+  expected_status: WorkItemStatus;
+  expected_schema_version: 1;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
+}
+
+export interface ControllerRunManifest {
+  schema_version: 1;
+  run_id: string;
+  work_item_id: string;
+  idempotency_key: string;
+  phase: WorkItemPhase;
+  goal_version: number;
+  input_revision: number;
+  attempt: number;
+  started_at: string;
+  completed_at?: string;
+  outcome: ControllerRunOutcome;
+}
+
+export interface ControllerLease {
+  work_item: WorkItem;
+  active_run: ActiveRun;
+}
+
+export interface ControllerMutationInput {
+  goal: WorkItemGoal;
+  state: WorkItemState;
+  manifest: ControllerRunManifest;
+}
+
+export interface ControllerMutationResult {
+  work_item: WorkItem;
+  manifest: ControllerRunManifest;
+}
+
 export interface WorkItemRepository {
   create(input: CreateWorkItemInput): Promise<WorkItem>;
   createCapture(input: CreateCaptureInput): Promise<WorkItem>;
@@ -130,6 +215,35 @@ export interface WorkItemRepository {
     stagingPath: string,
   ): Promise<void>;
   removeWorkItem(workItemId: string): Promise<void>;
+  acquireControllerLease?(
+    workItemId: string,
+    activeRun: ActiveRun,
+  ): Promise<ControllerLease | null>;
+  readControllerRunManifest?(
+    workItemId: string,
+    runId: string,
+  ): Promise<ControllerRunManifest | null>;
+  commitControllerMutation?(
+    lease: ControllerLease,
+    input: ControllerMutationInput,
+  ): Promise<ControllerMutationResult>;
+  releaseControllerLease?(lease: ControllerLease): Promise<void>;
+}
+
+export interface ControllerWorkItemRepository extends WorkItemRepository {
+  acquireControllerLease(
+    workItemId: string,
+    activeRun: ActiveRun,
+  ): Promise<ControllerLease | null>;
+  readControllerRunManifest(
+    workItemId: string,
+    runId: string,
+  ): Promise<ControllerRunManifest | null>;
+  commitControllerMutation(
+    lease: ControllerLease,
+    input: ControllerMutationInput,
+  ): Promise<ControllerMutationResult>;
+  releaseControllerLease(lease: ControllerLease): Promise<void>;
 }
 
 export const workItemIdSchema = z
@@ -160,6 +274,35 @@ const notesSchema = z
   .string()
   .refine((notes) => notes.trim().length > 0, "notes must not be empty");
 
+const positiveSafeIntegerSchema = z.number().int().positive().safe();
+const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().safe();
+
+function uniqueNonEmptyListSchema(label: string): z.ZodType<string[]> {
+  return z
+    .array(z.string().trim().min(1, `${label} entries must not be empty`))
+    .min(1, `${label} must not be empty`)
+    .refine(
+      (entries) =>
+        new Set(entries.map((entry) => entry.toLocaleLowerCase())).size ===
+        entries.length,
+      `${label} must not contain case-insensitive duplicates`,
+    );
+}
+
+const acceptanceCriteriaSchema = uniqueNonEmptyListSchema(
+  "acceptance_criteria",
+);
+const allowedScopeSchema = uniqueNonEmptyListSchema("allowed_scope");
+const reviewReadySchema = uniqueNonEmptyListSchema("review_ready");
+
+const nonEmptyIdentifierSchema = z
+  .string()
+  .refine((value) => value.trim().length > 0, "must not be empty")
+  .refine(
+    (value) => value === value.trim(),
+    "must not have leading or trailing whitespace",
+  );
+
 export const productManifestSchema: z.ZodType<ProductManifest> = z.strictObject({
   schema_version: z.literal(1),
   product_name: z.string(),
@@ -171,34 +314,187 @@ export const workItemCaptureSchema: z.ZodType<WorkItemCapture> = z.strictObject(
   captured_at: z.iso.datetime(),
 });
 
-export const workItemGoalSchema: z.ZodType<WorkItemGoal> = z.strictObject({
-  schema_version: z.literal(1),
-  work_item_id: workItemIdSchema,
-  title: titleSchema,
-  type: z.enum(WORK_ITEM_TYPES).optional(),
-  capture: workItemCaptureSchema.optional(),
-  priority: z.enum(WORK_ITEM_PRIORITIES).optional(),
-  tags: tagsSchema.optional(),
-  notes: notesSchema.optional(),
+export const workItemGoalSchema: z.ZodType<WorkItemGoal> = z
+  .strictObject({
+    schema_version: z.literal(1),
+    work_item_id: workItemIdSchema,
+    title: titleSchema,
+    type: z.enum(WORK_ITEM_TYPES).optional(),
+    capture: workItemCaptureSchema.optional(),
+    priority: z.enum(WORK_ITEM_PRIORITIES).optional(),
+    tags: tagsSchema.optional(),
+    notes: notesSchema.optional(),
+    goal_version: positiveSafeIntegerSchema.optional(),
+    acceptance_criteria: acceptanceCriteriaSchema.optional(),
+    allowed_scope: allowedScopeSchema.optional(),
+    review_ready: reviewReadySchema.optional(),
+  })
+  .superRefine((goal, context) => {
+    const contractFields = [
+      "goal_version",
+      "acceptance_criteria",
+      "allowed_scope",
+      "review_ready",
+    ] as const;
+    const presentFields = contractFields.filter(
+      (field) => goal[field] !== undefined,
+    );
+
+    if (presentFields.length > 0 && presentFields.length < contractFields.length) {
+      for (const field of contractFields) {
+        if (goal[field] === undefined) {
+          context.addIssue({
+            code: "custom",
+            message: `${field} is required when a goal contract is present`,
+            path: [field],
+            input: goal,
+          });
+        }
+      }
+    }
+  });
+
+export const activeRunSchema: z.ZodType<ActiveRun> = z.strictObject({
+  run_id: nonEmptyIdentifierSchema,
+  idempotency_key: nonEmptyIdentifierSchema,
+  acquired_at: z.iso.datetime(),
 });
 
-export const workItemStateSchema: z.ZodType<WorkItemState> = z.strictObject({
-  schema_version: z.literal(1),
-  work_item_id: workItemIdSchema,
-  phase: z.enum(WORK_ITEM_PHASES),
-  status: z.enum(WORK_ITEM_STATUSES),
-  updated_at: z.iso.datetime(),
-});
+export const workItemStateSchema: z.ZodType<WorkItemState> = z
+  .strictObject({
+    schema_version: z.literal(1),
+    work_item_id: workItemIdSchema,
+    phase: z.enum(WORK_ITEM_PHASES),
+    status: z.enum(WORK_ITEM_STATUSES),
+    updated_at: z.iso.datetime(),
+    goal_version: positiveSafeIntegerSchema.optional(),
+    input_revision: positiveSafeIntegerSchema.optional(),
+    attempt: nonNegativeSafeIntegerSchema.optional(),
+    active_run: activeRunSchema.optional(),
+  })
+  .superRefine((state, context) => {
+    const versionedFields = [
+      "goal_version",
+      "input_revision",
+      "attempt",
+    ] as const;
+    const presentFields = versionedFields.filter(
+      (field) => state[field] !== undefined,
+    );
+
+    if (presentFields.length > 0 && presentFields.length < versionedFields.length) {
+      for (const field of versionedFields) {
+        if (state[field] === undefined) {
+          context.addIssue({
+            code: "custom",
+            message: `${field} is required when controller state is present`,
+            path: [field],
+            input: state,
+          });
+        }
+      }
+    }
+  });
 
 export const workItemSchema: z.ZodType<WorkItem> = z
   .strictObject({
     goal: workItemGoalSchema,
     state: workItemStateSchema,
   })
-  .refine(
-    ({ goal, state }) => goal.work_item_id === state.work_item_id,
-    "goal.yaml and state.json work_item_id values must agree",
-  );
+  .superRefine(({ goal, state }, context) => {
+    if (goal.work_item_id !== state.work_item_id) {
+      context.addIssue({
+        code: "custom",
+        message: "goal.yaml and state.json work_item_id values must agree",
+        path: ["state", "work_item_id"],
+        input: state.work_item_id,
+      });
+    }
+
+    const hasContract = goal.goal_version !== undefined;
+    const hasControllerState =
+      state.goal_version !== undefined ||
+      state.input_revision !== undefined ||
+      state.attempt !== undefined ||
+      state.active_run !== undefined;
+
+    if (hasContract) {
+      if (state.goal_version !== goal.goal_version) {
+        context.addIssue({
+          code: "custom",
+          message: "state goal_version must match goal goal_version",
+          path: ["state", "goal_version"],
+          input: state.goal_version,
+        });
+      }
+      if (state.input_revision === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "input_revision is required for a contracted item",
+          path: ["state", "input_revision"],
+          input: state,
+        });
+      }
+      if (state.attempt === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "attempt is required for a contracted item",
+          path: ["state", "attempt"],
+          input: state,
+        });
+      }
+    } else if (hasControllerState) {
+      context.addIssue({
+        code: "custom",
+        message: "controller state requires a goal contract",
+        path: ["state"],
+        input: state,
+      });
+    }
+  });
+
+export const goalContractUpdateInputSchema: z.ZodType<GoalContractUpdateInput> =
+  z
+    .strictObject({
+      acceptance_criteria: acceptanceCriteriaSchema,
+      allowed_scope: allowedScopeSchema,
+      review_ready: reviewReadySchema,
+      expected_goal_version: positiveSafeIntegerSchema.optional(),
+      expected_input_revision: positiveSafeIntegerSchema.optional(),
+    })
+    .refine(
+      (input) =>
+        (input.expected_goal_version === undefined) ===
+        (input.expected_input_revision === undefined),
+      "expected_goal_version and expected_input_revision must be provided together",
+    );
+
+export const controllerTransitionInputSchema: z.ZodType<ControllerTransitionInput> =
+  z.strictObject({
+    target_phase: z.enum(WORK_ITEM_PHASES),
+    target_status: z.enum(WORK_ITEM_STATUSES),
+    expected_phase: z.enum(WORK_ITEM_PHASES),
+    expected_status: z.enum(WORK_ITEM_STATUSES),
+    expected_schema_version: z.literal(1),
+    expected_goal_version: positiveSafeIntegerSchema,
+    expected_input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+  });
+
+export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
+  z.strictObject({
+    schema_version: z.literal(1),
+    run_id: nonEmptyIdentifierSchema,
+    work_item_id: workItemIdSchema,
+    idempotency_key: nonEmptyIdentifierSchema,
+    phase: z.enum(WORK_ITEM_PHASES),
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+    started_at: z.iso.datetime(),
+    completed_at: z.iso.datetime().optional(),
+    outcome: z.enum(CONTROLLER_RUN_OUTCOMES),
+  });
 
 export const createWorkItemInputSchema: z.ZodType<CreateWorkItemInput> =
   z.strictObject({
@@ -249,6 +545,17 @@ export class InvalidWorkspaceError extends Error {
   ) {
     super(`${artifactPath}: ${reason}`);
     this.name = "InvalidWorkspaceError";
+  }
+}
+
+export class ControllerConflictError extends Error {
+  constructor(
+    readonly kind: ControllerConflictKind,
+    readonly workItemId: string,
+    readonly reason: string,
+  ) {
+    super(reason);
+    this.name = "ControllerConflictError";
   }
 }
 
