@@ -31,6 +31,11 @@ import {
   type RegisteredWorkspace,
 } from "../domain/portfolio";
 import {
+  compileMission as compileMissionPackage,
+  type MissionArtifactWriteResult,
+  type MissionIdentity,
+} from "../domain/mission";
+import {
   ControllerConflictError,
   InvalidWorkspaceError,
   WorkItemTargetCollisionError,
@@ -67,6 +72,8 @@ type WorkspaceGateway = Pick<
   | "removeWorkItem"
   | "acquireControllerLease"
   | "readControllerRunManifest"
+  | "findAppliedExecuteManifest"
+  | "writeMissionPackage"
   | "commitControllerMutation"
   | "releaseControllerLease"
 >;
@@ -118,6 +125,8 @@ export interface RegisterWorkspaceResult {
   workspace: RegisteredWorkspace;
   rebuild: PortfolioRebuildResult;
 }
+
+export type MissionCompilation = MissionArtifactWriteResult;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -423,6 +432,53 @@ export class PortfolioService {
     };
   }
 
+  async compileMission(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<MissionCompilation> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    if (
+      source.source_id === INBOX_SOURCE_ID ||
+      workItem.goal.goal_version === undefined ||
+      workItem.goal.acceptance_criteria === undefined ||
+      workItem.goal.allowed_scope === undefined ||
+      workItem.goal.review_ready === undefined ||
+      workItem.state.phase !== "execute" ||
+      workItem.state.status !== "active" ||
+      workItem.state.goal_version === undefined ||
+      workItem.state.input_revision === undefined ||
+      workItem.state.attempt === undefined
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Mission compilation requires an assigned, governed item in active execute.",
+      );
+    }
+
+    const identity: MissionIdentity = {
+      work_item_id: workItemId,
+      goal_version: workItem.state.goal_version,
+      input_revision: workItem.state.input_revision,
+      attempt: workItem.state.attempt,
+    };
+    const executeManifest =
+      await source.workspace.findAppliedExecuteManifest(identity);
+    if (executeManifest === null) {
+      throw this.missionNotReady(
+        workItemId,
+        "No applied execute manifest matches the governed tuple.",
+      );
+    }
+
+    return source.workspace.writeMissionPackage(identity, (paths) =>
+      compileMissionPackage(workItem, executeManifest, paths),
+    );
+  }
+
   async recoverPendingTransfers(): Promise<void> {
     const records = await this.readTransferJournals();
     for (const record of records) {
@@ -495,6 +551,17 @@ export class PortfolioService {
       project: source.project,
       work_item: workItem,
     };
+  }
+
+  private missionNotReady(
+    workItemId: string,
+    reason: string,
+  ): ControllerConflictError {
+    return new ControllerConflictError(
+      "mission_not_ready",
+      workItemId,
+      reason,
+    );
   }
 
   private async recoverTransfer(record: TransferJournalRecord): Promise<void> {

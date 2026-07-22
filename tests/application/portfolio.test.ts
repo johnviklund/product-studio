@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
@@ -25,6 +25,9 @@ import {
 import {
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
+  type ControllerRunManifest,
+  type WorkItem,
+  type WorkItemPhase,
 } from "../../src/domain/work-item";
 import { SQLitePortfolioIndex } from "../../src/index/work-item-index";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
@@ -72,6 +75,47 @@ async function createService(
     transfersRoot: service.transfersRoot,
     service,
   };
+}
+
+async function governWorkItemThrough(
+  repository: ProductWorkspace,
+  workItem: WorkItem,
+  targetPhases: WorkItemPhase[],
+): Promise<{
+  workItem: WorkItem;
+  manifests: ControllerRunManifest[];
+}> {
+  const controller = new WorkItemController(
+    repository,
+    () => new Date("2026-07-22T12:00:00.000Z"),
+  );
+  const contracted = await controller.updateGoalContract(
+    workItem.goal.work_item_id,
+    {
+      acceptance_criteria: ["The mission package is reproducible"],
+      allowed_scope: ["src/domain", "src/application"],
+      review_ready: ["All deterministic checks pass"],
+    },
+  );
+  let current = contracted.work_item;
+  const manifests = [contracted.manifest];
+
+  for (const targetPhase of targetPhases) {
+    const result = await controller.transition(current.goal.work_item_id, {
+      target_phase: targetPhase,
+      target_status: "active",
+      expected_phase: current.state.phase,
+      expected_status: current.state.status,
+      expected_schema_version: 1,
+      expected_goal_version: current.state.goal_version!,
+      expected_input_revision: current.state.input_revision!,
+      attempt: current.state.attempt!,
+    });
+    current = result.work_item;
+    manifests.push(result.manifest);
+  }
+
+  return { workItem: current, manifests };
 }
 
 async function writeTransferJournal(
@@ -661,6 +705,200 @@ describe("PortfolioService", () => {
       status: "active",
     });
     await expect(service.list()).resolves.toEqual([updated]);
+    index.close();
+  });
+
+  it("compiles and replays a source-qualified mission without rebuilding the index", async () => {
+    const root = await createWorkspace("Mission Workspace");
+    const repository = new ProductWorkspace(root);
+    const created = await repository.create({
+      title: "Compile a portable mission",
+      type: "Feature",
+    });
+    const governed = await governWorkItemThrough(repository, created, [
+      "spec",
+      "plan",
+      "execute",
+    ]);
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const rebuildSpy = vi.spyOn(index, "rebuild");
+    rebuildSpy.mockClear();
+
+    const first = await service.compileMission(
+      registration.workspace.workspace_id,
+      created.goal.work_item_id,
+    );
+    const second = await service.compileMission(
+      registration.workspace.workspace_id,
+      created.goal.work_item_id,
+    );
+
+    expect(second).toEqual(first);
+    expect(first.workspace_path).toBe(root);
+    expect(first.task_path).toBe(
+      join(
+        root,
+        ".founder",
+        "missions",
+        created.goal.work_item_id,
+        "1-1-0",
+        "TASK.md",
+      ),
+    );
+    expect(first.mission_path).toBe(
+      join(
+        root,
+        ".founder",
+        "missions",
+        created.goal.work_item_id,
+        "1-1-0",
+        "mission.json",
+      ),
+    );
+    expect(first.mission.controller_run.run_id).toBe(
+      governed.manifests.at(-1)?.run_id,
+    );
+    expect(await readFile(first.task_path, "utf8")).toContain(
+      "Return the result for validation; do not advance controller state.",
+    );
+    expect(rebuildSpy).not.toHaveBeenCalled();
+    expect(await service.list()).toHaveLength(1);
+    index.close();
+  });
+
+  it("rejects Inbox, uncontracted, and wrong-phase items without writing missions", async () => {
+    const root = await createWorkspace("Ineligible Missions");
+    const repository = new ProductWorkspace(root);
+    const uncontracted = await repository.create({
+      title: "Uncontracted item",
+      type: "Feature",
+    });
+    const wrongPhase = await repository.create({
+      title: "Still in spec",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, wrongPhase, ["spec"]);
+    const { inboxRoot, index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+
+    await expect(
+      service.compileMission(
+        registration.workspace.workspace_id,
+        "wi_123e4567-e89b-12d3-a456-426614174000",
+      ),
+    ).rejects.toBeInstanceOf(PortfolioWorkItemNotFoundError);
+
+    for (const workItemId of [
+      uncontracted.goal.work_item_id,
+      wrongPhase.goal.work_item_id,
+    ]) {
+      await expect(
+        service.compileMission(
+          registration.workspace.workspace_id,
+          workItemId,
+        ),
+      ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
+    }
+    await expect(
+      readdir(join(root, ".founder", "missions")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    await service.rebuild();
+    const inboxRepository = new ProductWorkspace(inboxRoot);
+    const inboxItem = await inboxRepository.create({
+      title: "Assigned nowhere",
+      type: "Feature",
+    });
+    await governWorkItemThrough(inboxRepository, inboxItem, [
+      "spec",
+      "plan",
+      "execute",
+    ]);
+    await expect(
+      service.compileMission(INBOX_SOURCE_ID, inboxItem.goal.work_item_id),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      workItemId: inboxItem.goal.work_item_id,
+    });
+    await expect(
+      readdir(join(inboxRoot, ".founder", "missions")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    index.close();
+  });
+
+  it("rejects missing or duplicate execute provenance without writing a package", async () => {
+    const root = await createWorkspace("Mission Provenance");
+    const repository = new ProductWorkspace(root);
+    const missingItem = await repository.create({
+      title: "Missing execute evidence",
+      type: "Feature",
+    });
+    const missingGoverned = await governWorkItemThrough(repository, missingItem, [
+      "spec",
+      "plan",
+      "execute",
+    ]);
+    const missingExecuteManifest = missingGoverned.manifests.at(-1)!;
+    await rm(
+      join(
+        root,
+        ".founder",
+        "work-items",
+        missingItem.goal.work_item_id,
+        "runs",
+        `${missingExecuteManifest.run_id}.json`,
+      ),
+    );
+
+    const duplicateItem = await repository.create({
+      title: "Duplicate execute evidence",
+      type: "Feature",
+    });
+    const duplicateGoverned = await governWorkItemThrough(
+      repository,
+      duplicateItem,
+      ["spec", "plan", "execute"],
+    );
+    const executeManifest = duplicateGoverned.manifests.at(-1)!;
+    const duplicateRunId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
+    await writeFile(
+      join(
+        root,
+        ".founder",
+        "work-items",
+        duplicateItem.goal.work_item_id,
+        "runs",
+        `${duplicateRunId}.json`,
+      ),
+      `${JSON.stringify(
+        {
+          ...executeManifest,
+          run_id: duplicateRunId,
+          idempotency_key: `${executeManifest.idempotency_key}:duplicate`,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    for (const workItemId of [
+      missingItem.goal.work_item_id,
+      duplicateItem.goal.work_item_id,
+    ]) {
+      await expect(
+        service.compileMission(
+          registration.workspace.workspace_id,
+          workItemId,
+        ),
+      ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
+    }
+    await expect(
+      readdir(join(root, ".founder", "missions")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
     index.close();
   });
 
