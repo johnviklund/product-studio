@@ -72,6 +72,16 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Traceability:** PRD §11.7, FR-007/008.
 - **Dependencies:** 2.1.
 - **Completion signal:** The same contracted work can be handed to two capable external agent products from durable artifacts.
+- **Status:** Delivered — commits `290f39a`–`0c10068` (dependency-free `domain/mission.ts`
+  compiles a strict `mission_schema_version: 1` package with a deterministic canonical-order
+  SHA-256 hash and provider-neutral `TASK.md`; the workspace selects the single applied
+  `execute` manifest by governed tuple, rejecting duplicates, and writes immutable
+  `.founder/missions/<item>/<tuple>/` snapshots atomically, failing closed on any divergence or
+  symlinked path; `PortfolioService.compileMission` stays read-only against controller state —
+  no lease, mutation, verification, import, transition, or index rebuild; a source-qualified
+  `POST .../mission` route and an eligibility-gated detail-panel handoff block expose the durable
+  paths, hash, and a neutral copy-launch instruction). Reviewed clean at `0c10068`, no P0–P3
+  findings; see `WORKLOG.md`.
 
 ### 2.3 External-result import and deterministic verification
 

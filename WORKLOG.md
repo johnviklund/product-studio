@@ -5,6 +5,28 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-22 · Provider-neutral mission compiler (roadmap 2.2)
+- Added dependency-free `domain/mission.ts`: a strict `mission_schema_version: 1` Zod package
+  (identity, controller-run provenance, full goal contract, versioned result contract) with a
+  canonical fixed-field-order SHA-256 hash (stable across key reordering/reparse) and a
+  deterministic `renderTaskMd` carrying no provider/CLI/clock terms.
+- Extended the workspace with `findAppliedExecuteManifest` (enumerates safe `runs/*.json`,
+  validates each, selects the single `execute`+`applied`+tuple match, raises `mission_not_ready`
+  on duplicates/zero) and `writeMissionPackage` (atomic staged-`rename` write of immutable
+  `.founder/missions/<item>/<goal>-<rev>-<attempt>/`, byte-exact replay on re-compile, fail-closed
+  on partial/divergent/symlinked snapshots, with a TOCTOU re-check of the durable tuple).
+- Added `PortfolioService.compileMission` — read-only against controller state (no lease,
+  mutation, attempt bump, verification, import, transition, or index rebuild); a source-qualified
+  `POST /api/portfolio/work-items/[sourceId]/[workItemId]/mission` returning 200 first + idempotent
+  replay via the shared `errorResponse` (`mission_not_ready` → 409); and an eligibility-gated
+  detail-panel handoff block (TASK.md/mission/workspace paths, hash, neutral copy-launch action).
+- Verified: lint, typecheck, 142 tests (14 files), and production build pass; artifacts survive
+  SQLite cache deletion. Phase 4 review clean at `0c10068` — no P0–P3 findings.
+- Commits: 290f39a 25d58df 26a4095 c4e0134 7792844 c16159f 0c10068
+- Why: delivers roadmap 2.2 — the same contracted work item can be handed to two external agent
+  products from durable, hashed, provider-neutral artifacts, giving 2.3 a deterministic result
+  location to import against without any state transition happening here.
+
 ## 2026-07-21 · Controller state and goal-contract foundation (roadmap 2.1)
 - Added versioned work-item goal-contract schemas (`workItemGoalSchema` + aggregate
   `workItemSchema` `superRefine`) that fail closed on partial or cross-file-mismatched contracts;
