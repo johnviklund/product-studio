@@ -52,6 +52,7 @@ export const CONTROLLER_CONFLICT_KINDS = [
   "repair_required",
   "idempotency_conflict",
   "contracted_details",
+  "mission_not_ready",
 ] as const;
 
 export type WorkItemType = (typeof WORK_ITEM_TYPES)[number];
