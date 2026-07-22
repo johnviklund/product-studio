@@ -710,6 +710,8 @@ describe("PortfolioService", () => {
 
   it("compiles and replays a source-qualified mission without rebuilding the index", async () => {
     const root = await createWorkspace("Mission Workspace");
+    const cacheRoot = await createRoot("product-studio-mission-cache-");
+    const databasePath = join(cacheRoot, "index.sqlite");
     const repository = new ProductWorkspace(root);
     const created = await repository.create({
       title: "Compile a portable mission",
@@ -720,7 +722,8 @@ describe("PortfolioService", () => {
       "plan",
       "execute",
     ]);
-    const { index, service } = await createService();
+    const index = new SQLitePortfolioIndex(databasePath);
+    const { registry, inboxRoot, service } = await createService(index);
     const registration = await service.register({ workspace_path: root });
     const rebuildSpy = vi.spyOn(index, "rebuild");
     rebuildSpy.mockClear();
@@ -765,6 +768,26 @@ describe("PortfolioService", () => {
     expect(rebuildSpy).not.toHaveBeenCalled();
     expect(await service.list()).toHaveLength(1);
     index.close();
+
+    await rm(databasePath);
+    const restartedIndex = new SQLitePortfolioIndex(databasePath);
+    const restartedService = new PortfolioService(
+      registry,
+      restartedIndex,
+      inboxRoot,
+    );
+    await restartedService.rebuild();
+
+    await expect(
+      restartedService.compileMission(
+        registration.workspace.workspace_id,
+        created.goal.work_item_id,
+      ),
+    ).resolves.toEqual(first);
+    await expect(readFile(first.task_path, "utf8")).resolves.toContain(
+      "Return the result for validation; do not advance controller state.",
+    );
+    restartedIndex.close();
   });
 
   it("rejects Inbox, uncontracted, and wrong-phase items without writing missions", async () => {
