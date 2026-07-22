@@ -460,8 +460,7 @@ describe("portfolio API routes", () => {
     expect(await response.json()).toEqual({
       error: {
         code: "invalid_transition",
-        message:
-          "Move from Todo to Plan is not allowed; move one column at a time.",
+        message: "Phase transition from idea to plan is not allowed.",
       },
     });
   });

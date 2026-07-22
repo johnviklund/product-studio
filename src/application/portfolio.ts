@@ -31,6 +31,7 @@ import {
   type RegisteredWorkspace,
 } from "../domain/portfolio";
 import {
+  ControllerConflictError,
   InvalidWorkspaceError,
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
@@ -46,7 +47,7 @@ import {
   type WorkItem,
   type WorkItemGoal,
 } from "../domain/work-item";
-import { validatePhaseTransition } from "../presentation/board";
+import { validatePhaseTransition } from "../domain/workflow-policy";
 import { ProductWorkspace } from "../workspace/product-workspace";
 import { PortfolioRegistry } from "../workspace/portfolio-registry";
 
@@ -64,6 +65,10 @@ type WorkspaceGateway = Pick<
   | "publishStagedWorkItem"
   | "discardStagedWorkItem"
   | "removeWorkItem"
+  | "acquireControllerLease"
+  | "readControllerRunManifest"
+  | "commitControllerMutation"
+  | "releaseControllerLease"
 >;
 type WorkspaceFactory = (workspacePath: string) => WorkspaceGateway;
 
@@ -219,6 +224,13 @@ export class PortfolioService {
     const current = await source.workspace.read(workItemId);
     if (current === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    if (current.goal.goal_version !== undefined) {
+      throw new ControllerConflictError(
+        "contracted_details",
+        workItemId,
+        "Contracted work items require a version-bound goal update.",
+      );
     }
 
     const nextGoal: WorkItemGoal = { ...current.goal };

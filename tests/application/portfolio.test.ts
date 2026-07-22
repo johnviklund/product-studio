@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
+import { WorkItemController } from "../../src/application/work-item-controller";
 import {
   DuplicateWorkspaceError,
   INBOX_SOURCE_ID,
@@ -360,6 +361,43 @@ describe("PortfolioService", () => {
     index.close();
   });
 
+  it("rejects unversioned details updates after a goal contract exists", async () => {
+    const { inboxRoot, index, service } = await createService();
+    const created = await service.createCapture({
+      title: "Govern this capture",
+      capture_kind: "idea",
+    });
+    const repository = new ProductWorkspace(inboxRoot);
+    const controller = new WorkItemController(
+      repository,
+      () => new Date("2026-07-21T21:30:00.000Z"),
+    );
+    await controller.updateGoalContract(created.work_item.goal.work_item_id, {
+      acceptance_criteria: ["Keep contract changes version-bound"],
+      allowed_scope: ["src/application"],
+      review_ready: ["Tests pass"],
+    });
+    await service.rebuild();
+    const before = await repository.read(created.work_item.goal.work_item_id);
+    const beforeIndex = await service.list();
+
+    await expect(
+      service.updateWorkItemDetails(
+        INBOX_SOURCE_ID,
+        created.work_item.goal.work_item_id,
+        { title: "Unversioned rewrite" },
+      ),
+    ).rejects.toMatchObject({
+      name: "ControllerConflictError",
+      kind: "contracted_details",
+    });
+    expect(await repository.read(created.work_item.goal.work_item_id)).toEqual(
+      before,
+    );
+    expect(await service.list()).toEqual(beforeIndex);
+    index.close();
+  });
+
   it("assigns a capture across workspace roots and treats same-source assignment as idempotent", async () => {
     const sourceRoot = await createWorkspace("Transfer Source");
     const targetRoot = await createWorkspace("Transfer Target");
@@ -652,7 +690,7 @@ describe("PortfolioService", () => {
       ),
     ).rejects.toMatchObject({
       kind: "invalid_transition",
-      reason: "Move from Todo to Plan is not allowed; move one column at a time.",
+      reason: "Phase transition from idea to plan is not allowed.",
     });
     expect(await readFile(statePath, "utf8")).toBe(beforeState);
     await expect(service.list()).resolves.toEqual(beforeIndex);

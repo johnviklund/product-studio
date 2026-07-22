@@ -8,6 +8,7 @@ import {
   UnknownPortfolioSourceError,
 } from "../../src/domain/portfolio";
 import {
+  ControllerConflictError,
   InvalidWorkspaceError,
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
@@ -73,6 +74,18 @@ export function errorResponse(error: unknown): Response {
   }
 
   if (error instanceof InvalidWorkItemTransitionError) {
+    return Response.json(
+      {
+        error: {
+          code: error.kind,
+          message: error.reason,
+        },
+      },
+      { status: 409 },
+    );
+  }
+
+  if (error instanceof ControllerConflictError) {
     return Response.json(
       {
         error: {
