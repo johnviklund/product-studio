@@ -14,9 +14,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { parse, stringify } from "yaml";
 
 import {
+  compileMission,
+  renderTaskMd,
+  serializeMissionPackage,
+  type MissionIdentity,
+} from "../src/domain/mission";
+import {
   InvalidWorkspaceError,
   type ActiveRun,
   type ControllerMutationInput,
+  type ControllerRunManifest,
   type WorkItem,
 } from "../src/domain/work-item";
 import { ProductWorkspace } from "../src/workspace/product-workspace";
@@ -26,6 +33,7 @@ const firstId = "wi_123e4567-e89b-12d3-a456-426614174000";
 const secondId = "wi_550e8400-e29b-41d4-a716-446655440000";
 const firstRunId = "550e8400-e29b-41d4-a716-446655440000";
 const secondRunId = "123e4567-e89b-42d3-a456-426614174000";
+const thirdRunId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
 
 async function createWorkspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-workspace-"));
@@ -112,6 +120,92 @@ async function writeContractedWorkItem(
       null,
       2,
     )}\n`,
+    "utf8",
+  );
+}
+
+async function writeMissionReadyWorkItem(
+  root: string,
+  workItemId: string,
+): Promise<WorkItem> {
+  const directory = join(root, ".founder", "work-items", workItemId);
+  const goal = {
+    schema_version: 1 as const,
+    work_item_id: workItemId,
+    title: `Mission item ${workItemId}`,
+    type: "Feature" as const,
+    goal_version: 1,
+    acceptance_criteria: ["The mission is reproducible"],
+    allowed_scope: ["src/domain"],
+    review_ready: ["Checks pass"],
+  };
+  const state = {
+    schema_version: 1 as const,
+    work_item_id: workItemId,
+    phase: "execute" as const,
+    status: "active" as const,
+    updated_at: "2026-07-22T12:00:01.000Z",
+    goal_version: 1,
+    input_revision: 1,
+    attempt: 0,
+  };
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "goal.yaml"), stringify(goal), "utf8");
+  await writeFile(
+    join(directory, "state.json"),
+    `${JSON.stringify(state, null, 2)}\n`,
+    "utf8",
+  );
+  return { goal, state };
+}
+
+function missionIdentity(
+  workItemId = firstId,
+  overrides: Partial<Omit<MissionIdentity, "work_item_id">> = {},
+): MissionIdentity {
+  return {
+    work_item_id: workItemId,
+    goal_version: overrides.goal_version ?? 1,
+    input_revision: overrides.input_revision ?? 1,
+    attempt: overrides.attempt ?? 0,
+  };
+}
+
+function appliedExecuteManifest(
+  runId = firstRunId,
+  overrides: Partial<ControllerRunManifest> = {},
+): ControllerRunManifest {
+  return {
+    schema_version: 1,
+    run_id: runId,
+    work_item_id: firstId,
+    idempotency_key: `${firstId}:execute:1:1:0:${runId}`,
+    phase: "execute",
+    goal_version: 1,
+    input_revision: 1,
+    attempt: 0,
+    started_at: "2026-07-22T12:00:00.000Z",
+    completed_at: "2026-07-22T12:00:01.000Z",
+    outcome: "applied",
+    ...overrides,
+  };
+}
+
+async function writeRunManifest(
+  root: string,
+  manifest: ControllerRunManifest,
+): Promise<void> {
+  const runsDirectory = join(
+    root,
+    ".founder",
+    "work-items",
+    manifest.work_item_id,
+    "runs",
+  );
+  await mkdir(runsDirectory, { recursive: true });
+  await writeFile(
+    join(runsDirectory, `${manifest.run_id}.json`),
+    `${JSON.stringify(manifest, null, 2)}\n`,
     "utf8",
   );
 }
@@ -463,6 +557,241 @@ describe("ProductWorkspace", () => {
         join(root, ".founder", "work-items", firstId, "runs"),
       ),
     ).toEqual([`${run.run_id}.json`]);
+  });
+
+  it("selects the one applied execute manifest matching durable controller state", async () => {
+    const root = await createWorkspace();
+    const item = await writeMissionReadyWorkItem(root, firstId);
+    const selected = appliedExecuteManifest();
+    await writeRunManifest(root, selected);
+    await writeRunManifest(
+      root,
+      appliedExecuteManifest(secondRunId, { outcome: "failed" }),
+    );
+    await writeRunManifest(
+      root,
+      appliedExecuteManifest(thirdRunId, {
+        input_revision: 2,
+        idempotency_key: `${firstId}:execute:1:2:0`,
+      }),
+    );
+
+    const result = await new ProductWorkspace(root).findAppliedExecuteManifest(
+      missionIdentity(),
+    );
+
+    expect(result).toEqual(selected);
+    expect({
+      goal_version: item.state.goal_version,
+      input_revision: item.state.input_revision,
+      attempt: item.state.attempt,
+    }).toEqual({
+      goal_version: result?.goal_version,
+      input_revision: result?.input_revision,
+      attempt: result?.attempt,
+    });
+  });
+
+  it("distinguishes missing and duplicate applied execute manifests", async () => {
+    const missingRoot = await createWorkspace();
+    await writeMissionReadyWorkItem(missingRoot, firstId);
+    const missingWorkspace = new ProductWorkspace(missingRoot);
+    expect(
+      await missingWorkspace.findAppliedExecuteManifest(missionIdentity()),
+    ).toBeNull();
+
+    const duplicateRoot = await createWorkspace();
+    await writeMissionReadyWorkItem(duplicateRoot, firstId);
+    await writeRunManifest(duplicateRoot, appliedExecuteManifest());
+    await writeRunManifest(
+      duplicateRoot,
+      appliedExecuteManifest(secondRunId),
+    );
+    await expect(
+      new ProductWorkspace(duplicateRoot).findAppliedExecuteManifest(
+        missionIdentity(),
+      ),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      workItemId: firstId,
+    });
+  });
+
+  it("validates every run manifest candidate and rejects unsafe entries", async () => {
+    const malformedRoot = await createWorkspace();
+    await writeMissionReadyWorkItem(malformedRoot, firstId);
+    const malformedRunsDirectory = join(
+      malformedRoot,
+      ".founder",
+      "work-items",
+      firstId,
+      "runs",
+    );
+    await mkdir(malformedRunsDirectory, { recursive: true });
+    await writeFile(
+      join(malformedRunsDirectory, `${firstRunId}.json`),
+      "{invalid",
+      "utf8",
+    );
+    await expect(
+      new ProductWorkspace(malformedRoot).findAppliedExecuteManifest(
+        missionIdentity(),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    const symlinkRoot = await createWorkspace();
+    const outsideRoot = await createWorkspace();
+    await writeMissionReadyWorkItem(symlinkRoot, firstId);
+    const symlinkRunsDirectory = join(
+      symlinkRoot,
+      ".founder",
+      "work-items",
+      firstId,
+      "runs",
+    );
+    await mkdir(symlinkRunsDirectory, { recursive: true });
+    const outsideManifestPath = join(outsideRoot, "manifest.json");
+    await writeFile(
+      outsideManifestPath,
+      `${JSON.stringify(appliedExecuteManifest(), null, 2)}\n`,
+      "utf8",
+    );
+    await symlink(
+      outsideManifestPath,
+      join(symlinkRunsDirectory, `${firstRunId}.json`),
+      "file",
+    );
+    await expect(
+      new ProductWorkspace(symlinkRoot).findAppliedExecuteManifest(
+        missionIdentity(),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+  });
+
+  it("publishes an immutable mission snapshot and replays identical bytes", async () => {
+    const root = await createWorkspace();
+    const item = await writeMissionReadyWorkItem(root, firstId);
+    const manifest = appliedExecuteManifest();
+    const workspace = new ProductWorkspace(root);
+    const buildPackage = (paths: Parameters<typeof compileMission>[2]) =>
+      compileMission(item, manifest, paths);
+
+    const first = await workspace.writeMissionPackage(
+      missionIdentity(),
+      buildPackage,
+    );
+    const missionSource = await readFile(first.mission_path, "utf8");
+    const taskSource = await readFile(first.task_path, "utf8");
+    const second = await workspace.writeMissionPackage(
+      missionIdentity(),
+      buildPackage,
+    );
+
+    expect(second).toEqual(first);
+    expect(first.workspace_path).toBe(root);
+    expect(first.mission.task_path).toBe(
+      `.founder/missions/${firstId}/1-1-0/TASK.md`,
+    );
+    expect(first.mission.result_contract.output_path).toBe(
+      `.founder/missions/${firstId}/1-1-0/result.json`,
+    );
+    expect(missionSource).toBe(serializeMissionPackage(first.mission));
+    expect(taskSource).toBe(renderTaskMd(first.mission));
+    expect(await readFile(second.mission_path, "utf8")).toBe(missionSource);
+    expect(await readFile(second.task_path, "utf8")).toBe(taskSource);
+    expect(
+      await readdir(join(root, ".founder", "missions", firstId)),
+    ).toEqual(["1-1-0"]);
+    expect(
+      (
+        await readdir(
+          join(root, ".founder", "missions", firstId, "1-1-0"),
+        )
+      ).sort(),
+    ).toEqual(["TASK.md", "mission.json"]);
+  });
+
+  it("fails closed for partial, malformed, or divergent mission snapshots", async () => {
+    const partialRoot = await createWorkspace();
+    const partialItem = await writeMissionReadyWorkItem(partialRoot, firstId);
+    const partialDirectory = join(
+      partialRoot,
+      ".founder",
+      "missions",
+      firstId,
+      "1-1-0",
+    );
+    await mkdir(partialDirectory, { recursive: true });
+    await writeFile(join(partialDirectory, "mission.json"), "{}\n", "utf8");
+    await expect(
+      new ProductWorkspace(partialRoot).writeMissionPackage(
+        missionIdentity(),
+        (paths) => compileMission(partialItem, appliedExecuteManifest(), paths),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    expect(await readdir(partialDirectory)).toEqual(["mission.json"]);
+
+    const malformedRoot = await createWorkspace();
+    const malformedItem = await writeMissionReadyWorkItem(malformedRoot, firstId);
+    const malformedDirectory = join(
+      malformedRoot,
+      ".founder",
+      "missions",
+      firstId,
+      "1-1-0",
+    );
+    await mkdir(malformedDirectory, { recursive: true });
+    await writeFile(
+      join(malformedDirectory, "mission.json"),
+      "{invalid",
+      "utf8",
+    );
+    await writeFile(join(malformedDirectory, "TASK.md"), "Invalid\n", "utf8");
+    await expect(
+      new ProductWorkspace(malformedRoot).writeMissionPackage(
+        missionIdentity(),
+        (paths) =>
+          compileMission(malformedItem, appliedExecuteManifest(), paths),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    const divergentRoot = await createWorkspace();
+    const divergentItem = await writeMissionReadyWorkItem(divergentRoot, firstId);
+    const divergentWorkspace = new ProductWorkspace(divergentRoot);
+    const first = await divergentWorkspace.writeMissionPackage(
+      missionIdentity(),
+      (paths) =>
+        compileMission(divergentItem, appliedExecuteManifest(), paths),
+    );
+    await writeFile(first.task_path, "Divergent task\n", "utf8");
+    await expect(
+      divergentWorkspace.writeMissionPackage(missionIdentity(), (paths) =>
+        compileMission(divergentItem, appliedExecuteManifest(), paths),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    expect(await readFile(first.task_path, "utf8")).toBe("Divergent task\n");
+  });
+
+  it("rejects a symlinked missions directory without writing outside", async () => {
+    const root = await createWorkspace();
+    const outsideRoot = await createWorkspace();
+    const item = await writeMissionReadyWorkItem(root, firstId);
+    await symlink(
+      outsideRoot,
+      join(root, ".founder", "missions"),
+      "dir",
+    );
+
+    await expect(
+      new ProductWorkspace(root).writeMissionPackage(
+        missionIdentity(),
+        (paths) => compileMission(item, appliedExecuteManifest(), paths),
+      ),
+    ).rejects.toMatchObject({
+      kind: "invalid_workspace",
+      artifactPath: ".founder/missions",
+    });
+    expect(await readdir(outsideRoot)).toEqual([".founder"]);
   });
 
   it("compensates a mid-write failure and leaves an inspectable failed manifest", async () => {

@@ -108,7 +108,16 @@ export interface MissionPaths {
   output_path: string;
 }
 
-const missionIdentitySchema: z.ZodType<MissionIdentity> = z.strictObject({
+export interface MissionArtifactWriteResult {
+  mission: MissionPackage;
+  workspace_path: string;
+  task_path: string;
+  mission_path: string;
+}
+
+export type MissionPackageBuilder = (paths: MissionPaths) => MissionPackage;
+
+export const missionIdentitySchema: z.ZodType<MissionIdentity> = z.strictObject({
   work_item_id: workItemIdSchema,
   goal_version: positiveSafeIntegerSchema,
   input_revision: positiveSafeIntegerSchema,

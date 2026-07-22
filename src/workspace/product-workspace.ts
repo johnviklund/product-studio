@@ -9,7 +9,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { join, posix, relative, resolve, sep } from "node:path";
 
 import { parse, stringify } from "yaml";
 import type { ZodType } from "zod";
@@ -42,12 +42,27 @@ import {
   type WorkItemState,
   type UpdateWorkItemPhaseInput,
 } from "../domain/work-item";
+import {
+  missionIdentitySchema,
+  missionPackageSchema,
+  renderTaskMd,
+  serializeMissionPackage,
+  type MissionArtifactWriteResult,
+  type MissionIdentity,
+  type MissionPackage,
+  type MissionPackageBuilder,
+  type MissionPaths,
+} from "../domain/mission";
 
 const FOUNDER_DIRECTORY = ".founder";
 const WORK_ITEMS_DIRECTORY = "work-items";
 const GOAL_FILE = "goal.yaml";
 const STATE_FILE = "state.json";
 const RUNS_DIRECTORY = "runs";
+const MISSIONS_DIRECTORY = "missions";
+const MISSION_JSON_FILE = "mission.json";
+const TASK_MD_FILE = "TASK.md";
+const RESULT_JSON_FILE = "result.json";
 const CONTROLLER_LOCK_FILE = ".controller.lock";
 const UUID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -536,25 +551,204 @@ export class ProductWorkspace implements WorkItemRepository {
       return null;
     }
 
-    const manifest = this.parseJson(
+    return this.parseControllerRunManifest(
       source,
       manifestPath,
-      controllerRunManifestSchema,
+      validatedId,
+      validatedRunId,
     );
-    if (manifest.work_item_id !== validatedId) {
-      throw this.invalid(
+  }
+
+  async findAppliedExecuteManifest(
+    identity: MissionIdentity,
+  ): Promise<ControllerRunManifest | null> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return null;
+    }
+    if ((await this.readValidated(validatedIdentity.work_item_id)) === null) {
+      return null;
+    }
+
+    const runsDirectory = join(
+      this.workItemsDirectory,
+      validatedIdentity.work_item_id,
+      RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(runsDirectory))) {
+      return null;
+    }
+
+    const entries = await readdir(runsDirectory, { withFileTypes: true });
+    const matches: ControllerRunManifest[] = [];
+    for (const entry of entries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      if (!entry.name.endsWith(".json")) {
+        continue;
+      }
+
+      const manifestPath = join(runsDirectory, entry.name);
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw this.invalid(
+          manifestPath,
+          "run manifest must be a regular file, not a symlink",
+        );
+      }
+
+      const runIdResult = controllerRunIdSchema.safeParse(
+        entry.name.slice(0, -".json".length),
+      );
+      if (!runIdResult.success) {
+        throw this.invalid(manifestPath, validationReason(runIdResult));
+      }
+
+      const source = await this.readOptionalFile(manifestPath);
+      if (source === null) {
+        throw this.invalid(
+          manifestPath,
+          "run manifest disappeared during scan",
+        );
+      }
+      const manifest = this.parseControllerRunManifest(
+        source,
         manifestPath,
-        `work_item_id must remain ${validatedId}`,
+        validatedIdentity.work_item_id,
+        runIdResult.data,
+      );
+      if (
+        manifest.phase === "execute" &&
+        manifest.outcome === "applied" &&
+        manifest.goal_version === validatedIdentity.goal_version &&
+        manifest.input_revision === validatedIdentity.input_revision &&
+        manifest.attempt === validatedIdentity.attempt
+      ) {
+        matches.push(manifest);
+      }
+    }
+
+    if (matches.length > 1) {
+      throw new ControllerConflictError(
+        "mission_not_ready",
+        validatedIdentity.work_item_id,
+        "More than one applied execute manifest matches the governed tuple.",
       );
     }
-    if (manifest.run_id !== validatedRunId) {
-      throw this.invalid(
-        manifestPath,
-        `run_id must equal containing filename ${validatedRunId}`,
+    return matches[0] ?? null;
+  }
+
+  async writeMissionPackage(
+    identity: MissionIdentity,
+    buildPackage: MissionPackageBuilder,
+  ): Promise<MissionArtifactWriteResult> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The source work item does not exist.",
       );
     }
 
-    return manifest;
+    const current = await this.readValidated(validatedIdentity.work_item_id);
+    if (current === null) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The source work item does not exist.",
+      );
+    }
+    if (
+      current.state.phase !== "execute" ||
+      current.state.status !== "active" ||
+      current.goal.goal_version !== validatedIdentity.goal_version ||
+      current.state.goal_version !== validatedIdentity.goal_version ||
+      current.state.input_revision !== validatedIdentity.input_revision ||
+      current.state.attempt !== validatedIdentity.attempt
+    ) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The durable work item no longer matches the active execute tuple.",
+      );
+    }
+
+    const paths = this.missionPaths(validatedIdentity);
+    const mission = missionPackageSchema.parse(buildPackage(paths));
+    if (
+      JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
+      mission.task_path !== paths.task_path ||
+      mission.result_contract.output_path !== paths.output_path
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "compiled mission identity and paths must match the workspace-derived snapshot",
+      );
+    }
+
+    const missionSource = serializeMissionPackage(mission);
+    const taskSource = renderTaskMd(mission);
+    const missionsDirectory = join(this.founderDirectory, MISSIONS_DIRECTORY);
+    const workItemMissionsDirectory = join(
+      missionsDirectory,
+      validatedIdentity.work_item_id,
+    );
+    const missionDirectory = join(
+      workItemMissionsDirectory,
+      this.missionDirectoryName(validatedIdentity),
+    );
+
+    await this.ensureDirectory(missionsDirectory);
+    await this.ensureDirectory(workItemMissionsDirectory);
+    if (await this.hasSafeDirectory(missionDirectory)) {
+      await this.assertMissionSnapshot(
+        missionDirectory,
+        mission,
+        missionSource,
+        taskSource,
+      );
+      return this.missionWriteResult(mission, missionDirectory);
+    }
+
+    const stagingDirectory = join(
+      workItemMissionsDirectory,
+      `.${this.missionDirectoryName(validatedIdentity)}.${randomUUID()}.mission.tmp`,
+    );
+    await mkdir(stagingDirectory);
+    try {
+      await writeFile(join(stagingDirectory, MISSION_JSON_FILE), missionSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await writeFile(join(stagingDirectory, TASK_MD_FILE), taskSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(stagingDirectory, missionDirectory);
+    } catch (error) {
+      await this.removeMissionStagingDirectory(stagingDirectory, error);
+      if (
+        isNodeError(error) &&
+        ["EEXIST", "ENOTEMPTY"].includes(error.code ?? "") &&
+        (await this.hasSafeDirectory(missionDirectory))
+      ) {
+        await this.assertMissionSnapshot(
+          missionDirectory,
+          mission,
+          missionSource,
+          taskSource,
+        );
+        return this.missionWriteResult(mission, missionDirectory);
+      }
+      throw error;
+    }
+
+    await this.assertMissionSnapshot(
+      missionDirectory,
+      mission,
+      missionSource,
+      taskSource,
+    );
+    return this.missionWriteResult(mission, missionDirectory);
   }
 
   async commitControllerMutation(
@@ -731,6 +925,124 @@ export class ProductWorkspace implements WorkItemRepository {
 
   protected async afterControllerGoalReplaced(): Promise<void> {
     return;
+  }
+
+  private parseControllerRunManifest(
+    source: string,
+    manifestPath: string,
+    workItemId: string,
+    runId: string,
+  ): ControllerRunManifest {
+    const manifest = this.parseJson(
+      source,
+      manifestPath,
+      controllerRunManifestSchema,
+    );
+    if (manifest.work_item_id !== workItemId) {
+      throw this.invalid(
+        manifestPath,
+        `work_item_id must remain ${workItemId}`,
+      );
+    }
+    if (manifest.run_id !== runId) {
+      throw this.invalid(
+        manifestPath,
+        `run_id must equal containing filename ${runId}`,
+      );
+    }
+    return manifest;
+  }
+
+  private missionPaths(identity: MissionIdentity): MissionPaths {
+    const relativeDirectory = posix.join(
+      FOUNDER_DIRECTORY,
+      MISSIONS_DIRECTORY,
+      identity.work_item_id,
+      this.missionDirectoryName(identity),
+    );
+    return {
+      task_path: posix.join(relativeDirectory, TASK_MD_FILE),
+      output_path: posix.join(relativeDirectory, RESULT_JSON_FILE),
+    };
+  }
+
+  private missionDirectoryName(identity: MissionIdentity): string {
+    return [
+      identity.goal_version,
+      identity.input_revision,
+      identity.attempt,
+    ].join("-");
+  }
+
+  private missionWriteResult(
+    mission: MissionPackage,
+    missionDirectory: string,
+  ): MissionArtifactWriteResult {
+    return {
+      mission,
+      workspace_path: this.workspaceRoot,
+      task_path: join(missionDirectory, TASK_MD_FILE),
+      mission_path: join(missionDirectory, MISSION_JSON_FILE),
+    };
+  }
+
+  private async assertMissionSnapshot(
+    missionDirectory: string,
+    mission: MissionPackage,
+    missionSource: string,
+    taskSource: string,
+  ): Promise<void> {
+    const missionPath = join(missionDirectory, MISSION_JSON_FILE);
+    const taskPath = join(missionDirectory, TASK_MD_FILE);
+    const existingMissionSource = await this.readOptionalFile(missionPath);
+    const existingTaskSource = await this.readOptionalFile(taskPath);
+    if (existingMissionSource === null || existingTaskSource === null) {
+      throw this.invalid(
+        missionDirectory,
+        "immutable mission snapshot must contain both mission.json and TASK.md",
+      );
+    }
+
+    const existingMission = this.parseJson(
+      existingMissionSource,
+      missionPath,
+      missionPackageSchema,
+    );
+    if (
+      JSON.stringify(existingMission) !== JSON.stringify(mission) ||
+      existingMissionSource !== missionSource ||
+      existingTaskSource !== taskSource
+    ) {
+      throw this.invalid(
+        missionDirectory,
+        "immutable mission snapshot differs from the compiled package",
+      );
+    }
+  }
+
+  private async removeMissionStagingDirectory(
+    stagingDirectory: string,
+    originalError: unknown,
+  ): Promise<void> {
+    try {
+      await rm(stagingDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [originalError, cleanupError],
+        "Mission snapshot publication failed and staging cleanup was incomplete",
+      );
+    }
+  }
+
+  private missionNotReady(
+    workItemId: string,
+    reason: string,
+  ): ControllerConflictError {
+    return new ControllerConflictError(
+      "mission_not_ready",
+      workItemId,
+      reason,
+    );
   }
 
   private validateControllerLease(lease: ControllerLease): ControllerLease {

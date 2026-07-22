@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import type {
+  MissionArtifactWriteResult,
+  MissionIdentity,
+  MissionPackageBuilder,
+} from "./mission";
 import { portfolioSourceIdSchema } from "./portfolio-source";
 
 export const WORK_ITEM_TYPES = [
@@ -224,6 +229,13 @@ export interface WorkItemRepository {
     workItemId: string,
     runId: string,
   ): Promise<ControllerRunManifest | null>;
+  findAppliedExecuteManifest(
+    identity: MissionIdentity,
+  ): Promise<ControllerRunManifest | null>;
+  writeMissionPackage(
+    identity: MissionIdentity,
+    buildPackage: MissionPackageBuilder,
+  ): Promise<MissionArtifactWriteResult>;
   commitControllerMutation(
     lease: ControllerLease,
     input: ControllerMutationInput,
