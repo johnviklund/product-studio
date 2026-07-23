@@ -22,3 +22,27 @@ delivery phases.
   picker out) — the free-text behavior was preserved as-is.*
 
 ## Open Questions
+
+### Implement Multi-Agent AG-UI Kanban Orchestrator
+
+This is an export from a short brainstorming session with Gemini. Dont strictly follow this, its only for inspiration and a baseline.
+
+#### 🎯 Objective
+Build a local web-based Kanban interface that coordinates **Codex CLI**, **Claude CLI**, and **Copilot CLI** as modular steps in a development workflow (Spec → Plan → Code → Review). The system must optimize model selection, manage token budgets, and stream full agent reasoning/terminal interactions directly to the UI.
+
+#### 🧱 Architectural Components
+
+##### 1. Frontend (AG-UI Client)
+*   **Kanban Board:** Handles card transitions. Emits `STATE_DELTA` events on card drag-and-drop actions.
+*   **Interactive Console Component:** Subscribes to the AG-UI event stream. Renders collapsible agent `thinking steps`, `TOOL_CALL` milestones, and interactive confirmation prompts (Human-in-the-Loop interrupts).
+
+##### 2. Local Backend (AG-UI Orchestrator Server)
+*   **State Evaluator:** Listens for Kanban column transitions and dynamically maps tasks to the optimal CLI tool.
+*   **Token Budget Manager:** Tracks API usage across CLIs. Enforces model-steering rules or fallbacks if thresholds are reached.
+*   **Process Wrapper:** Spawns selected CLIs as local subprocesses. Captures and translates raw standard output (`stdio`) into formatted AG-UI protocol events.
+
+#### 🚀 Implementation & Documentation Links
+*   **Project Scaffolder:** `npx create-ag-ui-app` (Initial framework setup)
+*   **Protocol Specification:** [AG-UI Introduction & Specs](https://ag-ui.com)
+*   **Python SDK:** [agent-framework-ag-ui (PyPI)](https://pypi.org)
+*   **UI Foundation:** CopilotKit components adhering to the AG-UI streaming standard.

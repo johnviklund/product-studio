@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Finn-loop lessons for Product Studio</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090a0c;
+      --surface: #101216;
+      --raised: #15181d;
+      --hover: #1b1f26;
+      --border: #252932;
+      --border-strong: #3a404d;
+      --text: #f2f4f7;
+      --secondary: #a6acb7;
+      --muted: #7f8794;
+      --primary: #2f61f5;
+      --primary-soft: #111c34;
+      --success: #34c759;
+      --success-soft: #102719;
+      --warning: #e4b93f;
+      --warning-soft: #2a2412;
+      --danger: #ff5a5f;
+      --danger-soft: #2c1518;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    a { color: #88a8ff; text-underline-offset: 3px; }
+    a:hover { color: #b7c8ff; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+
+    .page {
+      width: min(100% - 32px, 960px);
+      margin: 0 auto;
+      padding: 64px 0 40px;
+    }
+
+    header { padding-bottom: 32px; border-bottom: 1px solid var(--border); }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: #9db4ff;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { margin: 0; letter-spacing: -0.015em; }
+    h1 { max-width: 22ch; font-size: clamp(30px, 5vw, 46px); line-height: 1.12; font-weight: 600; }
+    h2 { font-size: 23px; line-height: 1.25; font-weight: 600; }
+    h3 { font-size: 18px; line-height: 1.35; font-weight: 600; }
+
+    .lede { max-width: 69ch; margin: 18px 0 0; color: var(--secondary); font-size: 17px; }
+
+    .meta, .stats, .idea-meta {
+      display: grid;
+      gap: 8px;
+      margin: 24px 0 0;
+    }
+
+    .meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .idea-meta { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .meta div, .stat, .idea-meta div {
+      min-width: 0;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+
+    dt, .stat-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+    .stat-value { display: block; margin-top: 3px; font-size: 22px; font-weight: 600; }
+
+    main > section { padding: 44px 0; border-bottom: 1px solid var(--border); }
+    .section-intro { max-width: 70ch; margin: 12px 0 0; color: var(--secondary); }
+
+    .grounding-grid, .axis-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 22px;
+    }
+
+    .grounding-card, .axis-card {
+      padding: 18px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+
+    .grounding-card p, .axis-card p { margin: 8px 0 0; color: var(--secondary); }
+
+    .decision {
+      margin-top: 22px;
+      padding: 20px;
+      border: 1px solid #2b458c;
+      border-radius: 6px;
+      background: var(--primary-soft);
+    }
+
+    .decision .eyebrow { margin-bottom: 6px; }
+    .decision p { max-width: 72ch; margin: 0; }
+
+    .jump-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 22px 0 28px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .jump-list a {
+      display: block;
+      height: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--secondary);
+      text-decoration: none;
+    }
+
+    .jump-list a:hover { border-color: var(--border-strong); background: var(--hover); color: var(--text); }
+
+    .idea {
+      margin-top: 16px;
+      padding: 24px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--raised);
+    }
+
+    .idea:first-of-type { border-color: #3555ad; background: #11182a; }
+    .idea-head { display: flex; align-items: flex-start; gap: 12px; }
+
+    .rank {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 6px;
+      background: var(--primary);
+      color: white;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .idea p { max-width: 72ch; }
+    .field { margin: 18px 0 0; }
+    .field-label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+    .field p { margin: 0; }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--secondary);
+      font-size: 12px;
+      line-height: 1.2;
+    }
+
+    .chip.high { border-color: #23663a; background: var(--success-soft); color: #8ce8a5; }
+    .chip.medium { border-color: #756121; background: var(--warning-soft); color: #f1d879; }
+
+    .diagram {
+      margin: 20px 0 0;
+      padding: 16px;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+
+    .diagram svg { display: block; min-width: 720px; width: 100%; height: auto; }
+    .diagram figcaption { max-width: 70ch; margin-top: 10px; color: var(--muted); font-size: 12px; }
+
+    .flow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 18px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .flow span {
+      flex: 0 0 auto;
+      padding: 9px 11px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--secondary);
+      font-size: 12px;
+    }
+
+    .flow b { color: var(--muted); font-weight: 500; }
+
+    .table-wrap { margin-top: 22px; overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 13px; }
+    th, td { padding: 12px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+
+    .sources { margin: 18px 0 0; padding-left: 20px; }
+    .sources li { margin: 8px 0; color: var(--secondary); }
+
+    footer { padding-top: 28px; color: var(--muted); font-size: 12px; }
+
+    @media (max-width: 720px) {
+      .page { width: min(100% - 22px, 960px); padding-top: 34px; }
+      .meta, .stats, .idea-meta, .grounding-grid, .axis-grid, .jump-list { grid-template-columns: 1fr; }
+      .idea { padding: 18px; }
+      .idea-head { align-items: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <p class="eyebrow">Ideation review</p>
+      <h1>Finn-loop lessons for Product Studio</h1>
+      <p class="lede">What Finn-loop gets right, where Product Studio is already stronger, and why the best answer is a thin custom cockpit with Linear as an optional adapter—not the workflow authority.</p>
+
+      <dl class="meta">
+        <div><dt>Date</dt><dd><time datetime="2026-07-22">2026-07-22</time></dd></div>
+        <div><dt>Topic</dt><dd>finn-loop-linear-custom-ui</dd></div>
+        <div><dt>Focus</dt><dd>Review Finn-loop and decide Linear versus a custom web UI for Product Studio.</dd></div>
+        <div><dt>Mode</dt><dd>repo-grounded</dd></div>
+      </dl>
+
+      <div class="stats" aria-label="Ideation counts">
+        <div class="stat"><span class="stat-label">Raw candidates</span><span class="stat-value">34</span></div>
+        <div class="stat"><span class="stat-label">Ranked ideas</span><span class="stat-value">7</span></div>
+        <div class="stat"><span class="stat-label">Topic axes</span><span class="stat-value">5</span></div>
+        <div class="stat"><span class="stat-label">Finn commits</span><span class="stat-value">4</span></div>
+      </div>
+    </header>
+
+    <main>
+      <section id="grounding-context">
+        <p class="eyebrow">Evidence before direction</p>
+        <h2>Grounding Context</h2>
+        <p class="section-intro">Finn-loop is useful as a sharply stated operating model, but it is a brand-new repository created and hardened in four commits on July 22, 2026, with no releases. The lessons below therefore come from its mechanics, not from demonstrated production outcomes.</p>
+
+        <div class="grounding-grid">
+          <article class="grounding-card">
+            <h3>Finn-loop's actual system</h3>
+            <p>Linear holds an editable issue contract and queue. GitHub holds pull requests and required checks. Three Claude Code skills specify, build, and review. Labels gate approval, repair, and escalation; humans merge.</p>
+          </article>
+          <article class="grounding-card">
+            <h3>Its strongest invariants</h3>
+            <p>One pass handles one unit. Repair is considered before new work. A claim and review SHA are rechecked before action. Ambiguity leaves the queue with one answerable question. Review-ready evidence never authorizes merge.</p>
+          </article>
+          <article class="grounding-card">
+            <h3>Product Studio is already stronger below the UI</h3>
+            <p>Versioned goal contracts, exact expected-state validation, exclusive leases, idempotent run manifests, immutable hashed mission packages, provider neutrality, and rebuildable projections are already delivered or specified.</p>
+          </article>
+          <article class="grounding-card">
+            <h3>The market is absorbing generic agent UI</h3>
+            <p>Linear now exposes custom workflows, MCP, webhooks, GitHub automation, delegation, Agent Sessions, plans, and visible runtime states. GitHub exposes multi-provider coding-agent sessions in issues and project views. A generic agent monitor is becoming commodity.</p>
+          </article>
+        </div>
+
+        <aside class="decision" aria-label="Recommendation">
+          <p class="eyebrow">Recommendation</p>
+          <p><strong>Continue the custom Product Studio UI, but keep it deliberately thin.</strong> Its justification is not that Kanban is hard to buy; it is that Product Studio owns versioned workflow contracts, cross-product attention, evidence-bound approvals, and portable agent handoffs. Use Linear later only as an optional mirror or collaboration adapter. If the product ever narrows to a one-repo spec → build → review queue, Finn-loop shows that Linear plus GitHub is enough.</p>
+        </aside>
+      </section>
+
+      <section id="topic-axes">
+        <p class="eyebrow">Surface map</p>
+        <h2>Topic Axes</h2>
+        <div class="axis-grid">
+          <article class="axis-card"><h3>Contract and approval model</h3><p>Who may decide, what is versioned, and what counts as review-ready versus complete.</p></article>
+          <article class="axis-card"><h3>Queue and concurrency mechanics</h3><p>Claiming, retries, repair ordering, race checks, and exits to human attention.</p></article>
+          <article class="axis-card"><h3>Review and evidence loop</h3><p>How acceptance criteria, non-goals, checks, findings, revisions, and approvals stay traceable.</p></article>
+          <article class="axis-card"><h3>Workflow optimization with LLMs</h3><p>Where model reasoning raises quality without becoming the authority for state or verification.</p></article>
+          <article class="axis-card"><h3>Product surface and source of truth</h3><p>Which work belongs in the custom cockpit and which commodity surfaces can remain in Linear, GitHub, or agent apps.</p></article>
+        </div>
+      </section>
+
+      <section id="ranked-ideas">
+        <p class="eyebrow">The cut</p>
+        <h2>Ranked Ideas</h2>
+        <ol class="jump-list">
+          <li><a href="#idea-1">1. Keep the thin cockpit; make Linear an optional mirror</a></li>
+          <li><a href="#idea-2">2. Add an LLM contract optimizer at human gates</a></li>
+          <li><a href="#idea-3">3. Encode a Finn invariants pack in the controller</a></li>
+          <li><a href="#idea-4">4. Carry an executable AC/non-goal evidence ledger</a></li>
+          <li><a href="#idea-5">5. Separate workflow phase from agent-session state</a></li>
+          <li><a href="#idea-6">6. Build a reason-coded Needs You queue</a></li>
+          <li><a href="#idea-7">7. Run a read-only Linear shadow benchmark</a></li>
+        </ol>
+
+        <article class="idea" id="idea-1">
+          <div class="idea-head"><span class="rank">1</span><h3>Keep the thin cockpit; make Linear an optional mirror</h3></div>
+          <dl class="idea-meta">
+            <div><dt>Axis</dt><dd>Product surface and source of truth</dd></div>
+            <div><dt>Confidence</dt><dd><span class="chip high">92%</span></dd></div>
+            <div><dt>Complexity</dt><dd><span class="chip medium">Medium</span></dd></div>
+          </dl>
+          <div class="field"><span class="field-label">Description</span><p>Keep Product Studio's custom Inbox, Board, Needs You, and detail surfaces because they render controller-native gates, exact-result approval, durable run evidence, portable missions, and cross-project attention. Add Linear only when collaboration or notification value is demonstrated, as an outbound projection with deep links. Goal versions, leases, approvals, attempts, and evidence remain file-owned.</p></div>
+          <div class="field"><span class="field-label">Basis</span><p><strong>direct:</strong> <code>PRODUCT.md</code> defines Product Studio as a local-first, cross-product governed-outcome control plane—not a generic project manager—and makes providers and GitHub adapters. <strong>external:</strong> Linear and GitHub now supply generic planning and agent-session visibility.</p></div>
+          <div class="field"><span class="field-label">Rationale</span><p>This gives the custom UI a defensible boundary: it exists to show why work can advance, what evidence binds to the decision, and what you need to do next. It does not compete with Linear on generic issue management or with provider apps on live session telemetry.</p></div>
+          <div class="field"><span class="field-label">Downsides</span><p>A future mirror introduces mapping and drift risk. Do not build it before a real collaboration or notification need appears; inbound Linear edits should be proposals, not state transitions.</p></div>
+
+          <figure class="diagram">
+            <svg viewBox="0 0 840 230" role="img" aria-labelledby="hybrid-title hybrid-desc">
+              <title id="hybrid-title">Thin cockpit with optional external projections</title>
+              <desc id="hybrid-desc">Product Studio owns durable files, controller policy, evidence, and next actions. It publishes optional summaries to Linear and GitHub, while exchanging portable missions and results with external agents.</desc>
+              <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#6f8ef6"></path>
+                </marker>
+              </defs>
+              <rect x="24" y="52" width="220" height="112" rx="8" fill="#15181d" stroke="#3a404d"></rect>
+              <text x="134" y="88" text-anchor="middle" fill="#f2f4f7" font-size="16" font-weight="600">Linear + GitHub</text>
+              <text x="134" y="116" text-anchor="middle" fill="#a6acb7" font-size="13">views · notifications · PRs</text>
+              <text x="134" y="138" text-anchor="middle" fill="#a6acb7" font-size="13">optional projections</text>
+
+              <rect x="310" y="28" width="220" height="160" rx="8" fill="#111c34" stroke="#2f61f5" stroke-width="2"></rect>
+              <text x="420" y="68" text-anchor="middle" fill="#f2f4f7" font-size="17" font-weight="600">Product Studio</text>
+              <text x="420" y="98" text-anchor="middle" fill="#c6d2ff" font-size="13">files · contracts · controller</text>
+              <text x="420" y="120" text-anchor="middle" fill="#c6d2ff" font-size="13">evidence · approvals</text>
+              <text x="420" y="151" text-anchor="middle" fill="#8ce8a5" font-size="12" font-weight="600">SOURCE OF TRUTH</text>
+
+              <rect x="596" y="52" width="220" height="112" rx="8" fill="#15181d" stroke="#3a404d"></rect>
+              <text x="706" y="88" text-anchor="middle" fill="#f2f4f7" font-size="16" font-weight="600">External agents</text>
+              <text x="706" y="116" text-anchor="middle" fill="#a6acb7" font-size="13">Codex · Claude · others</text>
+              <text x="706" y="138" text-anchor="middle" fill="#a6acb7" font-size="13">replaceable execution</text>
+
+              <text x="277" y="86" text-anchor="middle" fill="#9db4ff" font-size="11">mirror</text>
+              <line x1="310" y1="108" x2="247" y2="108" stroke="#6f8ef6" stroke-width="2" marker-end="url(#arrow)"></line>
+              <text x="563" y="86" text-anchor="middle" fill="#9db4ff" font-size="11">mission / result</text>
+              <line x1="533" y1="108" x2="593" y2="108" stroke="#6f8ef6" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"></line>
+            </svg>
+            <figcaption>Directional overview: external systems supply commodity surfaces and execution; Product Studio keeps the differentiated durable contract and decision layer.</figcaption>
+          </figure>
+        </article>
+
+        <article class="idea" id="idea-2">
+          <div class="idea-head"><span class="rank">2</span><h3>Add an LLM contract optimizer at human approval gates</h3></div>
+          <dl class="idea-meta">
+            <div><dt>Axis</dt><dd>Workflow optimization with LLMs</dd></div>
+            <div><dt>Confidence</dt><dd><span class="chip high">90%</span></dd></div>
+            <div><dt>Complexity</dt><dd><span class="chip medium">Medium</span></dd></div>
+          </dl>
+          <div class="field"><span class="field-label">Description</span><p>Before a human accepts a specification or plan, run an advisory LLM pass that proposes unresolved behavior forks, contradictions between acceptance criteria and non-goals, missing failure states, scope risks, and verification gaps. Suggestions never mutate the accepted contract; only the human's accepted changes create a new version.</p></div>
+          <div class="field"><span class="field-label">Basis</span><p><strong>external:</strong> Finn-spec's stopping test asks whether two engineers would ship the same observable behavior, and Finn-loop identifies spec quality as its bottleneck. <strong>direct:</strong> Product Studio already separates bounded agent reasoning from controller-owned state and human completion authority.</p></div>
+          <div class="field"><span class="field-label">Rationale</span><p>This is the cleanest expression of your differentiation: use model reasoning where ambiguity and quality benefit from it, while versioning and human approval keep the result trustworthy.</p></div>
+          <div class="field"><span class="field-label">Downsides</span><p>An optimizer can create ceremony by inventing low-value questions. Start advisory-only and evaluate accepted versus rejected findings on completed specs before making it a gate.</p></div>
+        </article>
+
+        <article class="idea" id="idea-3">
+          <div class="idea-head"><span class="rank">3</span><h3>Encode a Finn invariants pack in the controller</h3></div>
+          <dl class="idea-meta">
+            <div><dt>Axis</dt><dd>Queue and concurrency mechanics</dd></div>
+            <div><dt>Confidence</dt><dd><span class="chip high">89%</span></dd></div>
+            <div><dt>Complexity</dt><dd><span class="chip medium">Medium</span></dd></div>
+          </dl>
+          <div class="field"><span class="field-label">Description</span><p>Make one pass/one unit, repair before new work, immediate post-claim state recheck, exact-revision review, explicit exit to human attention, no silent retry, and no agent completion durable controller policy for the bounded patch loop.</p></div>
+          <div class="field"><span class="field-label">Basis</span><p><strong>external:</strong> Finn-build and Finn-review encode these as skill rules and labels. <strong>direct:</strong> Product Studio already has the stronger primitives needed to enforce them—exclusive leases, expected-state checks, attempt identity, idempotent manifests, and ROADMAP 3.2.</p></div>
+          <div class="field"><span class="field-label">Rationale</span><p>Finn-loop demonstrates which operational rules matter most. Product Studio can turn those conventions into recoverable state rather than relying on an open terminal, mutable labels, or a cooperative assignee lock.</p></div>
+          <div class="field"><span class="field-label">Downsides</span><p>Repair-first ordering needs starvation bounds so a pathological item cannot monopolize the portfolio. Scheduling policy belongs in the controller, not as a hard-coded board sort.</p></div>
+        </article>
+
+        <article class="idea" id="idea-4">
+          <div class="idea-head"><span class="rank">4</span><h3>Carry an executable AC/non-goal evidence ledger end to end</h3></div>
+          <dl class="idea-meta">
+            <div><dt>Axis</dt><dd>Review and evidence loop</dd></div>
+            <div><dt>Confidence</dt><dd><span class="chip high">88%</span></dd></div>
+            <div><dt>Complexity</dt><dd><span class="chip medium">Medium</span></dd></div>
+          </dl>
+          <div class="field"><span class="field-label">Description</span><p>Give acceptance criteria and non-goals stable identifiers that flow from the accepted spec into the mission, agent result, deterministic checks, reviewer findings, approval, and later evaluation proposal. Each verdict binds to the exact result or commit hash; changed output invalidates the verdict.</p></div>
+          <div class="field"><span class="field-label">Basis</span><p><strong>external:</strong> Finn-build requires one evidence line per AC and one preservation line per NG, while Finn-review tags findings to criteria and re-reviews changed SHAs. <strong>direct:</strong> Product Studio already stores criteria, review-ready conditions, mission hashes, and immutable run evidence.</p></div>
+          <div class="field"><span class="field-label">Rationale</span><p>The ledger makes quality traceable across independent seats. It also produces structured material for future real-work evaluations without relying on a model's narrative summary.</p></div>
+          <div class="field"><span class="field-label">Downsides</span><p>Stable ID and version semantics must be designed carefully when a contract is edited; IDs cannot silently point to different meaning across goal versions.</p></div>
+          <div class="flow" aria-label="Evidence ledger flow">
+            <span>Accepted spec · AC/NG IDs</span><b>→</b><span>Mission contract</span><b>→</b><span>Result + checks</span><b>→</b><span>Independent review</span><b>→</b><span>Hash-bound approval</span>
+          </div>
+        </article>
+
+        <article class="idea" id="idea-5">
+          <div class="idea-head"><span class="rank">5</span><h3>Separate workflow phase from agent-session state</h3></div>
+          <dl class="idea-meta">
+            <div><dt>Axis</dt><dd>Contract and approval model</dd></div>
+            <div><dt>Confidence</dt><dd><span class="chip high">95%</span></dd></div>
+            <div><dt>Complexity</dt><dd><span class="chip high">Low</span></dd></div>
+          </dl>
+          <div class="field"><span class="field-label">Description</span><p>Keep Execute, Review, Ship, and other phases as durable outcome gates. Treat queued, working, awaiting input, error, and finished as ephemeral states of one attempt. They may appear in an attempt summary or linked provider session, but never become workflow columns or transition authority.</p></div>
+          <div class="field"><span class="field-label">Basis</span><p><strong>external:</strong> Linear Agent Sessions expose six runtime states and GitHub shows coding-agent session status in issue/project views. <strong>direct:</strong> Product Studio phases represent durable lifecycle outcomes and its design explicitly keeps blocked and attention states out of permanent columns.</p></div>
+          <div class="field"><span class="field-label">Rationale</span><p>This distinction protects the domain model from whichever agent platform happens to be connected and prevents a live execution UI from swallowing the product workflow.</p></div>
+          <div class="field"><span class="field-label">Downsides</span><p>The detail panel needs clear naming for both layers. Prefer “Workflow phase” and “Current attempt” over exposing provider-specific terms.</p></div>
+        </article>
+
+        <article class="idea" id="idea-6">
+          <div class="idea-head"><span class="rank">6</span><h3>Build a reason-coded Needs You queue</h3></div>
+          <dl class="idea-meta">
+            <div><dt>Axis</dt><dd>Queue and concurrency mechanics</dd></div>
+            <div><dt>Confidence</dt><dd><span class="chip high">87%</span></dd></div>
+            <div><dt>Complexity</dt><dd><span class="chip medium">Medium</span></dd></div>
+          </dl>
+          <div class="field"><span class="field-label">Description</span><p>Every stopped item receives one durable attention reason and one answerable question. The UI groups items by a small taxonomy—product decision, scope conflict, missing or red verification, risk gate, budget exhausted, and external dependency—without adding more board columns.</p></div>
+          <div class="field"><span class="field-label">Basis</span><p><strong>external:</strong> Finn-loop removes blocked and human-review items from automated queues until a human resolves the exact cause. <strong>direct:</strong> Product Studio already has structured controller conflict reasons, planned attention handling, and a design rule that attention is a state/filter rather than a column.</p></div>
+          <div class="field"><span class="field-label">Rationale</span><p>This turns agent failure into a calm founder workflow: answer a decision, approve a risk, repair a check, or wait on an external dependency. It is much more useful than a generic “agent failed” badge.</p></div>
+          <div class="field"><span class="field-label">Downsides</span><p>Keep the taxonomy small. Low-level errors belong in evidence; the reason code should describe the human decision or operational category.</p></div>
+        </article>
+
+        <article class="idea" id="idea-7">
+          <div class="idea-head"><span class="rank">7</span><h3>Run a read-only Linear shadow benchmark</h3></div>
+          <dl class="idea-meta">
+            <div><dt>Axis</dt><dd>Product surface and source of truth</dd></div>
+            <div><dt>Confidence</dt><dd><span class="chip medium">72%</span></dd></div>
+            <div><dt>Complexity</dt><dd><span class="chip high">Low</span></dd></div>
+          </dl>
+          <div class="field"><span class="field-label">Description</span><p>After the manual handoff, evidence history, and bounded patch loop are dogfoodable, mirror a small set of Product Studio items into Linear for 30 days. Record which founder decisions remain materially better in the custom cockpit. Do not accept inbound state changes during the experiment.</p></div>
+          <div class="field"><span class="field-label">Basis</span><p><strong>reasoned:</strong> Finn-loop is a credible minimal baseline for what Linear plus GitHub can already coordinate, while Product Studio's differentiation can only be judged once its evidence and attention surfaces exist.</p></div>
+          <div class="field"><span class="field-label">Rationale</span><p>The benchmark turns “Do I really need a custom UI?” into a reversible product test. It can reveal that some surfaces should be deleted, retained, or exported without surrendering canonical state.</p></div>
+          <div class="field"><span class="field-label">Downsides</span><p>Doing this now would interrupt ROADMAP 2.3. Define the test after the MVP loop is usable, and set success criteria before writing an adapter.</p></div>
+        </article>
+      </section>
+
+      <section id="rejection-summary">
+        <p class="eyebrow">What did not survive</p>
+        <h2>Rejection Summary</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Idea</th><th>Reason rejected</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td>Contract-diff approval</td><td>Folded into the thin cockpit and executable evidence ledger.</td></tr>
+              <tr><td>2</td><td>Handoff and return receipts</td><td>Already directly covered by ROADMAP 2.3 and 2.4.</td></tr>
+              <tr><td>3</td><td>Spec ambiguity budget</td><td>Folded into the LLM contract optimizer; a numeric confidence score would be false precision.</td></tr>
+              <tr><td>4</td><td>Linear as projection, never authority</td><td>Folded into ranked idea 1.</td></tr>
+              <tr><td>5</td><td>Do not build an agent-session viewer</td><td>Adopted as a boundary inside idea 1, not a separate initiative.</td></tr>
+              <tr><td>6</td><td>Provider selection as adapter concern</td><td>Already a settled and delivered Product Studio principle.</td></tr>
+              <tr><td>7</td><td>Explicit attempts</td><td>Already specified in ROADMAP 2.3; retained as evidence for idea 3.</td></tr>
+              <tr><td>8</td><td>Return summary instead of activity feed</td><td>Already established in DESIGN.md.</td></tr>
+              <tr><td>9</td><td>Workflow debugger, not project manager</td><td>Folded into idea 1's product framing.</td></tr>
+              <tr><td>10</td><td>LLMs optimize nodes; code owns the graph</td><td>Kept as the architecture rule behind idea 2, but already stated in PRODUCT.md.</td></tr>
+              <tr><td>11</td><td>Spec as executable policy</td><td>Folded into idea 4.</td></tr>
+              <tr><td>12</td><td>Merge is not completion</td><td>Already settled by the Ship and Learn lifecycle.</td></tr>
+              <tr><td>13</td><td>Content-addressed review reuse</td><td>Folded into ideas 3 and 4.</td></tr>
+              <tr><td>14</td><td>Replay corpus</td><td>Already planned by ROADMAP 3.3; revisit when real evidence packs exist.</td></tr>
+              <tr><td>15</td><td>Air-traffic-control cockpit</td><td>Useful metaphor, but not independently actionable.</td></tr>
+              <tr><td>16</td><td>Double-entry workflow accounting</td><td>Current manifests and evidence already embody the useful part of the analogy.</td></tr>
+              <tr><td>17</td><td>Compiler pipeline</td><td>Already embodied in the mission compiler and provider-neutral contract.</td></tr>
+              <tr><td>18</td><td>Zero-custom-UI trial</td><td>Too disruptive now; the read-only shadow benchmark is safer.</td></tr>
+              <tr><td>19</td><td>Three-view product</td><td>Useful constraint inside idea 1, not a separate feature.</td></tr>
+              <tr><td>20</td><td>Hundred-agent readiness</td><td>Premature relative to the current manual handoff scope.</td></tr>
+              <tr><td>21</td><td>Must work with no LLM</td><td>Already follows from deterministic control and provider neutrality.</td></tr>
+              <tr><td>22</td><td>Recover with no UI or database</td><td>Already a settled durable-state invariant.</td></tr>
+              <tr><td>23</td><td>Evidence-to-evaluation flywheel</td><td>Already represented by ROADMAP 3.3 rather than a new Finn-derived direction.</td></tr>
+              <tr><td>24</td><td>Repair before fresh execution</td><td>Folded into the controller invariants and Needs You queue.</td></tr>
+              <tr><td>25</td><td>Attention reason taxonomy</td><td>Folded into idea 6.</td></tr>
+              <tr><td>26</td><td>Andon cord</td><td>Useful analogy; its operational behavior is captured by idea 6.</td></tr>
+              <tr><td>27</td><td>Shadow adapter benchmark</td><td>Promoted as idea 7 after narrowing it to read-only and post-MVP-loop timing.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="sources">
+        <p class="eyebrow">Primary evidence</p>
+        <h2>Sources &amp; References</h2>
+        <ul class="sources">
+          <li><a href="https://github.com/finna/Finn-loop">Finn-loop repository and README</a> — workflow overview, safety rules, daily rhythm, and project maturity.</li>
+          <li><a href="https://github.com/finna/Finn-loop/blob/main/skills/finn-spec/SKILL.md">Finn spec skill</a>, <a href="https://github.com/finna/Finn-loop/blob/main/skills/finn-build/SKILL.md">build skill</a>, and <a href="https://github.com/finna/Finn-loop/blob/main/skills/finn-review/SKILL.md">review skill</a> — exact queue, contract, and review mechanics.</li>
+          <li><a href="https://linear.app/docs/mcp">Linear MCP</a>, <a href="https://linear.app/docs/custom-views">custom views</a>, <a href="https://linear.app/developers/agents">agent platform</a>, and <a href="https://linear.app/developers/agent-interaction">Agent Sessions</a> — current official capabilities.</li>
+          <li><a href="https://docs.github.com/en/copilot/concepts/agents/about-third-party-coding-agents">GitHub third-party coding agents</a> and <a href="https://github.blog/changelog/2026-03-26-agent-activity-in-github-issues-and-projects/">agent activity in Issues and Projects</a> — evidence that generic agent-session UI is becoming platform functionality.</li>
+          <li><a href="https://github.com/johnviklund/product-studio/blob/main/PRODUCT.md">Product Studio PRODUCT.md</a>, <a href="https://github.com/johnviklund/product-studio/blob/main/DESIGN.md">DESIGN.md</a>, and <a href="https://github.com/johnviklund/product-studio/blob/main/ROADMAP.md">ROADMAP.md</a> — current product boundary, interface principles, and delivery sequence.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="composition-signal">Composed <time datetime="2026-07-23T00:06:04Z">2026-07-23T00:06:04Z</time> by ce-ideate from the current Product Studio repository, Finn-loop, and official Linear/GitHub documentation.</footer>
+  </div>
+</body>
+</html>
