@@ -7,7 +7,13 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { ArrowLeft, ArrowRight, LockKeyhole, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ChevronDown,
+  LockKeyhole,
+  X,
+} from "lucide-react";
 
 import type {
   MissionCompilation,
@@ -19,6 +25,11 @@ import {
   type PortfolioWorkItem,
   type RegisteredWorkspace,
 } from "@/src/domain/portfolio";
+import type {
+  CommandEvidenceRecord,
+  ImportEvidenceOutcome,
+  StoredImportEvidence,
+} from "@/src/domain/result";
 import {
   WORK_ITEM_PRIORITIES,
   WORK_ITEM_TYPES,
@@ -61,10 +72,36 @@ interface MissionImportState {
   result: PortfolioImportResult["evidence"];
 }
 
+interface RunEvidenceState {
+  itemKey: string;
+  result: StoredImportEvidence[];
+  loading: boolean;
+  error: string | null;
+}
+
+interface ExpandedRunEvidenceState {
+  itemKey: string;
+  runIds: Set<string>;
+}
+
+interface RunEvidenceSectionProps {
+  fieldId: string;
+  evidence: StoredImportEvidence[];
+  loading: boolean;
+  error: string | null;
+  expandedRunIds: Set<string>;
+  onToggle: (importRunId: string) => void;
+}
+
 const capturedAtFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "short",
 });
+const runCompletedAtFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+const EMPTY_RUN_IDS = new Set<string>();
 
 function tagsFromInput(value: string): string[] {
   return value
@@ -79,6 +116,307 @@ function shortEvidencePath(path: string): string {
     return path;
   }
   return `…/${segments.slice(-4).join("/")}`;
+}
+
+async function requestRunEvidence(
+  sourceId: string,
+  workItemId: string,
+  signal?: AbortSignal,
+): Promise<
+  { result: StoredImportEvidence[] | null; error: string | null } | null
+> {
+  try {
+    const response = await fetch(
+      `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/run-evidence`,
+      { signal },
+    );
+    const body = (await response.json()) as
+      | StoredImportEvidence[]
+      | MutationErrorResponse;
+    if (signal?.aborted) {
+      return null;
+    }
+    if (!response.ok) {
+      return {
+        result: null,
+        error: !Array.isArray(body)
+          ? body.error?.message ?? "Run evidence could not be loaded."
+          : "Run evidence could not be loaded.",
+      };
+    }
+    return { result: body as StoredImportEvidence[], error: null };
+  } catch {
+    if (signal?.aborted) {
+      return null;
+    }
+    return {
+      result: null,
+      error: "Run evidence could not be loaded. Check the local server and try again.",
+    };
+  }
+}
+
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1_000) {
+    return `${durationMs} ms`;
+  }
+  if (durationMs < 60_000) {
+    const seconds = durationMs / 1_000;
+    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+  }
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.round((durationMs % 60_000) / 1_000);
+  return `${minutes} min ${seconds} s`;
+}
+
+function runDuration(entry: StoredImportEvidence): string {
+  return formatDuration(
+    Math.max(
+      0,
+      new Date(entry.evidence.completed_at).getTime() -
+        new Date(entry.evidence.started_at).getTime(),
+    ),
+  );
+}
+
+function outcomeLabel(outcome: ImportEvidenceOutcome): string {
+  return `${outcome[0]?.toUpperCase()}${outcome.slice(1)}`;
+}
+
+function outcomeClassName(outcome: ImportEvidenceOutcome): string {
+  return outcome === "applied" ? "text-success" : "text-destructive";
+}
+
+function commandStatusClassName(status: CommandEvidenceRecord["status"]): string {
+  if (status === "passed") {
+    return "text-success";
+  }
+  if (status === "not_run") {
+    return "text-muted-foreground";
+  }
+  return "text-destructive";
+}
+
+function commandExitLabel(command: CommandEvidenceRecord): string {
+  if (command.signal !== null) {
+    return `Signal ${command.signal}`;
+  }
+  if (command.exit_code !== null) {
+    return `Exit ${command.exit_code}`;
+  }
+  return command.status === "not_run" ? "Not run" : "No exit code";
+}
+
+function RunEvidenceSection({
+  fieldId,
+  evidence,
+  loading,
+  error,
+  expandedRunIds,
+  onToggle,
+}: RunEvidenceSectionProps) {
+  return (
+    <section
+      aria-labelledby={`${fieldId}-run-evidence`}
+      className="border-y py-4"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 id={`${fieldId}-run-evidence`} className="text-xs font-medium">
+            Run evidence
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Immutable imported results and deterministic command records.
+          </p>
+        </div>
+        {loading && evidence.length > 0 ? (
+          <span className="text-[11px] text-muted-foreground" role="status">
+            Refreshing…
+          </span>
+        ) : null}
+      </div>
+
+      {error ? (
+        <p
+          className="mt-3 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-foreground"
+          role="alert"
+        >
+          {error}
+        </p>
+      ) : null}
+
+      {loading && evidence.length === 0 ? (
+        <p className="mt-3 text-xs text-muted-foreground" role="status">
+          Loading run evidence…
+        </p>
+      ) : null}
+
+      {!loading && error === null && evidence.length === 0 ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          No imported runs yet.
+        </p>
+      ) : null}
+
+      {evidence.length > 0 ? (
+        <div className="mt-3 space-y-2">
+          {evidence.map((entry, index) => {
+            const { evidence: run, verification } = entry;
+            const expanded = expandedRunIds.has(run.import_run_id);
+            const detailsId = `${fieldId}-run-${run.import_run_id}`;
+            const shortRunId = run.import_run_id.slice(0, 12);
+
+            return (
+              <article key={run.import_run_id} className="border bg-background">
+                <div className="p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`text-xs font-medium ${outcomeClassName(run.outcome)}`}
+                        >
+                          {outcomeLabel(run.outcome)}
+                        </span>
+                        {index === 0 ? (
+                          <span className="rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-[0.04em] text-muted-foreground uppercase">
+                            Latest
+                          </span>
+                        ) : null}
+                      </div>
+                      <p
+                        className="mt-1 truncate text-[11px] text-muted-foreground"
+                        title={run.result_commit ?? undefined}
+                      >
+                        {run.result_commit === null
+                          ? "No result commit"
+                          : `Result commit · ${run.result_commit.slice(0, 12)}`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      aria-expanded={expanded}
+                      aria-controls={detailsId}
+                      aria-label={`${expanded ? "Collapse" : "Expand"} ${outcomeLabel(run.outcome).toLowerCase()} run ${shortRunId}`}
+                      onClick={() => onToggle(run.import_run_id)}
+                      className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border bg-secondary px-2.5 text-[11px] font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    >
+                      {expanded ? "Hide details" : "View details"}
+                      <ChevronDown
+                        className={`size-3.5 transition-transform ${expanded ? "rotate-180" : ""}`}
+                        strokeWidth={1.75}
+                        aria-hidden="true"
+                      />
+                    </button>
+                  </div>
+
+                  <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-[11px]">
+                    <div>
+                      <dt className="text-muted-foreground">Governed identity</dt>
+                      <dd className="mt-0.5">
+                        Goal {run.identity.goal_version} · Revision{" "}
+                        {run.identity.input_revision} · Attempt {run.identity.attempt}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Completed</dt>
+                      <dd className="mt-0.5">
+                        {runCompletedAtFormatter.format(new Date(run.completed_at))}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Duration</dt>
+                      <dd className="mt-0.5">{runDuration(entry)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Telemetry</dt>
+                      <dd className="mt-0.5">unknown</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                {expanded ? (
+                  <div id={detailsId} className="space-y-4 border-t px-3 py-3">
+                    {run.reasons.length > 0 ? (
+                      <div>
+                        <h4 className="text-[11px] font-medium text-muted-foreground">
+                          Reasons
+                        </h4>
+                        <ul className="mt-2 space-y-1.5 text-xs leading-5">
+                          {run.reasons.map((reason, reasonIndex) => (
+                            <li
+                              key={`${run.import_run_id}-reason-${reasonIndex}`}
+                              className="border-l-2 border-destructive pl-2.5"
+                            >
+                              {reason}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+
+                    <div>
+                      <h4 className="text-[11px] font-medium text-muted-foreground">
+                        Commands
+                      </h4>
+                      {verification.length === 0 ? (
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          No verification commands recorded.
+                        </p>
+                      ) : (
+                        <div className="mt-2 space-y-3">
+                          {verification.map((command, commandIndex) => (
+                            <div
+                              key={`${run.import_run_id}-${commandIndex}`}
+                              className="border-l-2 border-border bg-muted/40 px-3 py-2.5"
+                            >
+                              <div className="flex items-center justify-between gap-3 text-xs">
+                                <span className="font-medium">{command.name}</span>
+                                <span className={commandStatusClassName(command.status)}>
+                                  {command.status.replaceAll("_", " ")}
+                                </span>
+                              </div>
+                              <p className="mt-1 break-all text-[11px] leading-5 text-muted-foreground">
+                                {command.argv.join(" ")}
+                              </p>
+                              <p className="mt-1 text-[11px] text-muted-foreground">
+                                {formatDuration(command.duration_ms)} · {commandExitLabel(command)}
+                              </p>
+                              {command.output_truncated ? (
+                                <p className="mt-2 text-[11px] text-destructive">
+                                  Captured output was truncated.
+                                </p>
+                              ) : null}
+                              <div className="mt-3 space-y-3">
+                                <div>
+                                  <p className="text-[11px] font-medium text-muted-foreground">
+                                    stdout
+                                  </p>
+                                  <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words border bg-background p-2 text-[11px] leading-5">
+                                    {command.stdout || "No stdout recorded."}
+                                  </pre>
+                                </div>
+                                <div>
+                                  <p className="text-[11px] font-medium text-muted-foreground">
+                                    stderr
+                                  </p>
+                                  <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words border bg-background p-2 text-[11px] leading-5">
+                                    {command.stderr || "No stderr recorded."}
+                                  </pre>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 export function DetailPanel({
@@ -112,6 +450,10 @@ export function DetailPanel({
     useState<MissionImportState | null>(null);
   const [copiedMissionKey, setCopiedMissionKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [runEvidenceState, setRunEvidenceState] =
+    useState<RunEvidenceState | null>(null);
+  const [expandedRunEvidenceState, setExpandedRunEvidenceState] =
+    useState<ExpandedRunEvidenceState | null>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const detailsDirty =
     title !== goal.title ||
@@ -139,6 +481,72 @@ export function DetailPanel({
     missionImportState?.itemKey === missionItemKey
       ? missionImportState.result
       : null;
+  const runEvidenceItemKey = `${item.source_id}:${goal.work_item_id}`;
+  const runEvidence =
+    mode === "governed" && runEvidenceState?.itemKey === runEvidenceItemKey
+      ? runEvidenceState.result
+      : [];
+  const runEvidenceLoading =
+    mode === "governed" &&
+    (runEvidenceState?.itemKey !== runEvidenceItemKey ||
+      runEvidenceState.loading);
+  const runEvidenceError =
+    mode === "governed" && runEvidenceState?.itemKey === runEvidenceItemKey
+      ? runEvidenceState.error
+      : null;
+  const expandedRunIds =
+    expandedRunEvidenceState?.itemKey === runEvidenceItemKey
+      ? expandedRunEvidenceState.runIds
+      : EMPTY_RUN_IDS;
+
+  const loadRunEvidence = useCallback(
+    async (signal?: AbortSignal) => {
+      const loaded = await requestRunEvidence(
+        item.source_id,
+        goal.work_item_id,
+        signal,
+      );
+      if (loaded === null) {
+        return;
+      }
+      setRunEvidenceState((current) => ({
+        itemKey: runEvidenceItemKey,
+        result:
+          loaded.result ??
+          (current?.itemKey === runEvidenceItemKey ? current.result : []),
+        loading: false,
+        error: loaded.error,
+      }));
+    },
+    [goal.work_item_id, item.source_id, runEvidenceItemKey],
+  );
+
+  const markRunEvidenceLoading = useCallback(() => {
+    setRunEvidenceState((current) => ({
+      itemKey: runEvidenceItemKey,
+      result: current?.itemKey === runEvidenceItemKey ? current.result : [],
+      loading: true,
+      error: null,
+    }));
+  }, [runEvidenceItemKey]);
+
+  const handleToggleRunEvidence = useCallback(
+    (importRunId: string) => {
+      setExpandedRunEvidenceState((current) => {
+        const runIds =
+          current?.itemKey === runEvidenceItemKey
+            ? new Set(current.runIds)
+            : new Set<string>();
+        if (runIds.has(importRunId)) {
+          runIds.delete(importRunId);
+        } else {
+          runIds.add(importRunId);
+        }
+        return { itemKey: runEvidenceItemKey, runIds };
+      });
+    },
+    [runEvidenceItemKey],
+  );
 
   const attemptClose = useCallback(() => {
     if (
@@ -162,6 +570,31 @@ export function DetailPanel({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [attemptClose]);
+
+  useEffect(() => {
+    if (mode !== "governed") {
+      return;
+    }
+    const controller = new AbortController();
+    void requestRunEvidence(
+      item.source_id,
+      goal.work_item_id,
+      controller.signal,
+    ).then((loaded) => {
+      if (loaded === null) {
+        return;
+      }
+      setRunEvidenceState((current) => ({
+        itemKey: runEvidenceItemKey,
+        result:
+          loaded.result ??
+          (current?.itemKey === runEvidenceItemKey ? current.result : []),
+        loading: false,
+        error: loaded.error,
+      }));
+    });
+    return () => controller.abort();
+  }, [goal.work_item_id, item.source_id, mode, runEvidenceItemKey]);
 
   async function handleDetailsSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -307,6 +740,8 @@ export function DetailPanel({
         itemKey: missionItemKey,
         result: imported.evidence,
       });
+      markRunEvidenceLoading();
+      await loadRunEvidence();
       onUpdated(
         imported,
         imported.evidence.outcome === "applied"
@@ -345,7 +780,10 @@ export function DetailPanel({
 
       setMissionCompilationState(null);
       setMissionImportState(null);
-      onUpdated(body as PortfolioRetryResult, "Repair attempt started.");
+      const retried = body as PortfolioRetryResult;
+      markRunEvidenceLoading();
+      await loadRunEvidence();
+      onUpdated(retried, "Repair attempt started.");
     } catch {
       setError(
         "A repair attempt could not be started. Check the local server and try again.",
@@ -761,6 +1199,15 @@ export function DetailPanel({
                       ) : null}
                     </section>
                   ) : null}
+
+                  <RunEvidenceSection
+                    fieldId={fieldId}
+                    evidence={runEvidence}
+                    loading={runEvidenceLoading}
+                    error={runEvidenceError}
+                    expandedRunIds={expandedRunIds}
+                    onToggle={handleToggleRunEvidence}
+                  />
 
                   {transitionActions.forward || transitionActions.back ? (
                     <section aria-label="Valid workflow transitions" className="flex flex-wrap gap-2">
