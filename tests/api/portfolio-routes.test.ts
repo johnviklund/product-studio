@@ -38,6 +38,7 @@ import * as workItemsRoute from "../../app/api/work-items/route";
 import { POST as createPortfolioWorkItem } from "../../app/api/portfolio/work-items/route";
 import { POST as assignPortfolioWorkItem } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/assignment/route";
 import { PATCH as updatePortfolioWorkItemDetails } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/details/route";
+import { PATCH as updatePortfolioGoalContract } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/goal-contract/route";
 import * as portfolioMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route";
 import * as portfolioMissionImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route";
 import * as portfolioMissionRetryRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route";
@@ -225,6 +226,17 @@ function captureRequest(body: unknown): Request {
 function detailsUpdateRequest(body: unknown): Request {
   return new Request(
     "http://localhost/api/portfolio/work-items/source/item/details",
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+function goalContractRequest(body: unknown): Request {
+  return new Request(
+    "http://localhost/api/portfolio/work-items/source/item/goal-contract",
     {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -425,6 +437,51 @@ describe("portfolio API routes", () => {
       source_id: targetSourceId,
       project: { workspace_path: workspacePath },
       work_item: { goal: { work_item_id: workItemId } },
+    });
+  });
+
+  it("activates and revises a goal contract through the source-qualified PATCH route", async () => {
+    await createService();
+    const createResponse = await createPortfolioWorkItem(
+      captureRequest({ title: "Contract through HTTP", capture_kind: "idea" }),
+    );
+    const created = await createResponse.json();
+    const workItemId = created.work_item.goal.work_item_id as string;
+    const input = {
+      acceptance_criteria: ["The form reaches the controller"],
+      allowed_scope: ["src/application"],
+      review_ready: ["API checks pass"],
+    };
+
+    const activatedResponse = await updatePortfolioGoalContract(
+      goalContractRequest(input),
+      phaseUpdateContext("inbox", workItemId),
+    );
+    const activated = await activatedResponse.json();
+    expect(activatedResponse.status).toBe(200);
+    expect(activated).toMatchObject({
+      source_id: "inbox",
+      work_item: {
+        goal: { ...input, goal_version: 1 },
+        state: { goal_version: 1, input_revision: 1, attempt: 0 },
+      },
+    });
+
+    const revisedResponse = await updatePortfolioGoalContract(
+      goalContractRequest({
+        ...input,
+        acceptance_criteria: ["The form revises the controller contract"],
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+      }),
+      phaseUpdateContext("inbox", workItemId),
+    );
+    expect(revisedResponse.status).toBe(200);
+    expect(await revisedResponse.json()).toMatchObject({
+      work_item: {
+        goal: { goal_version: 2 },
+        state: { goal_version: 2, input_revision: 2, attempt: 0 },
+      },
     });
   });
 
@@ -722,7 +779,7 @@ describe("portfolio API routes", () => {
     });
   });
 
-  it("returns 400 for invalid capture and detail bodies", async () => {
+  it("returns 400 for invalid capture, detail, and goal-contract bodies", async () => {
     await createService();
 
     const captureResponse = await createPortfolioWorkItem(
@@ -735,6 +792,10 @@ describe("portfolio API routes", () => {
         "wi_123e4567-e89b-12d3-a456-426614174000",
       ),
     );
+    const goalContractResponse = await updatePortfolioGoalContract(
+      goalContractRequest({ acceptance_criteria: ["Missing required lists"] }),
+      phaseUpdateContext("inbox", "wi_123e4567-e89b-12d3-a456-426614174000"),
+    );
 
     expect(captureResponse.status).toBe(400);
     expect(await captureResponse.json()).toEqual({
@@ -742,6 +803,10 @@ describe("portfolio API routes", () => {
     });
     expect(detailsResponse.status).toBe(400);
     expect(await detailsResponse.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+    expect(goalContractResponse.status).toBe(400);
+    expect(await goalContractResponse.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid request" },
     });
   });
@@ -761,6 +826,25 @@ describe("portfolio API routes", () => {
       detailsUpdateRequest({ title: "Still missing" }),
       phaseUpdateContext("inbox", workItemId),
     );
+    const unknownGoalContractResponse = await updatePortfolioGoalContract(
+      goalContractRequest({
+        acceptance_criteria: ["Valid"],
+        allowed_scope: ["src"],
+        review_ready: ["Tests pass"],
+      }),
+      phaseUpdateContext(
+        "ws_00000000-0000-4000-8000-000000000000",
+        workItemId,
+      ),
+    );
+    const missingGoalContractResponse = await updatePortfolioGoalContract(
+      goalContractRequest({
+        acceptance_criteria: ["Valid"],
+        allowed_scope: ["src"],
+        review_ready: ["Tests pass"],
+      }),
+      phaseUpdateContext("inbox", workItemId),
+    );
 
     expect(unknownResponse.status).toBe(404);
     expect(await unknownResponse.json()).toMatchObject({
@@ -769,6 +853,40 @@ describe("portfolio API routes", () => {
     expect(missingResponse.status).toBe(404);
     expect(await missingResponse.json()).toMatchObject({
       error: { code: "work_item_not_found" },
+    });
+    expect(unknownGoalContractResponse.status).toBe(404);
+    expect(await unknownGoalContractResponse.json()).toMatchObject({
+      error: { code: "unknown_source" },
+    });
+    expect(missingGoalContractResponse.status).toBe(404);
+    expect(await missingGoalContractResponse.json()).toMatchObject({
+      error: { code: "work_item_not_found" },
+    });
+  });
+
+  it("maps locked goal-contract updates to the established 409 response", async () => {
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const updateGoalContract = vi.fn().mockRejectedValue(
+      new ControllerConflictError(
+        "goal_contract_locked",
+        workItemId,
+        "Goal contracts are locked after entering execute.",
+      ),
+    );
+    getService.mockResolvedValue({ updateGoalContract });
+
+    const response = await updatePortfolioGoalContract(
+      goalContractRequest({
+        acceptance_criteria: ["Valid"],
+        allowed_scope: ["src"],
+        review_ready: ["Tests pass"],
+      }),
+      phaseUpdateContext("inbox", workItemId),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { code: "goal_contract_locked" },
     });
   });
 
