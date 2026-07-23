@@ -40,7 +40,10 @@ import {
   type WorkItemPhase,
   type WorkItemStatus,
 } from "../domain/work-item";
-import { validateWorkItemTransition } from "../domain/workflow-policy";
+import {
+  canUpdateGoalContract,
+  validateWorkItemTransition,
+} from "../domain/workflow-policy";
 import {
   scopeMatchesPath,
   workspaceRelativePosixPathSchema,
@@ -187,6 +190,13 @@ export class WorkItemController {
     }
 
     try {
+      if (!canUpdateGoalContract(lease.work_item.state.phase)) {
+        throw this.conflict(
+          "goal_contract_locked",
+          validatedId,
+          `Goal contracts are locked after entering ${lease.work_item.state.phase}.`,
+        );
+      }
       const existing = await this.repository.readControllerRunManifest(
         validatedId,
         runId,
