@@ -118,6 +118,8 @@ const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const gitCommitSchema = z.string().regex(/^[0-9a-f]{40}$/);
 const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().safe();
 
+export const importRunIdSchema = sha256Schema;
+
 export const reportedVerificationSchema: z.ZodType<ReportedVerification> =
   z.strictObject({
     name: nonEmptyTrimmedStringSchema,

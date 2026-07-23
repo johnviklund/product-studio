@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { parse, stringify } from "yaml";
@@ -20,12 +20,17 @@ import {
   type MissionIdentity,
 } from "../src/domain/mission";
 import {
+  createImportRunId,
+  hashResultContent,
+} from "../src/domain/result";
+import {
   InvalidWorkspaceError,
   type ActiveRun,
   type ControllerMutationInput,
   type ControllerRunManifest,
   type WorkItem,
 } from "../src/domain/work-item";
+import type { GitVerificationAdapter } from "../src/domain/verification";
 import { ProductWorkspace } from "../src/workspace/product-workspace";
 
 const createdRoots: string[] = [];
@@ -34,6 +39,27 @@ const secondId = "wi_550e8400-e29b-41d4-a716-446655440000";
 const firstRunId = "550e8400-e29b-41d4-a716-446655440000";
 const secondRunId = "123e4567-e89b-42d3-a456-426614174000";
 const thirdRunId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
+const testGit: GitVerificationAdapter = {
+  async resolveCommit() {
+    return "a".repeat(40);
+  },
+  async isAncestor() {
+    return true;
+  },
+  async readHeadCommit() {
+    return "a".repeat(40);
+  },
+  async isWorktreeCleanExcludingFounder() {
+    return true;
+  },
+  async listChangedFiles() {
+    return ["src/domain/result.ts"];
+  },
+};
+
+function missionWorkspace(root: string) {
+  return new ProductWorkspace(root, { git: testGit });
+}
 
 async function createWorkspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-workspace-"));
@@ -43,7 +69,19 @@ async function createWorkspace(): Promise<string> {
   await mkdir(founderDirectory, { recursive: true });
   await writeFile(
     join(founderDirectory, "product.yaml"),
-    stringify({ schema_version: 1, product_name: "Test Workspace" }),
+    stringify({
+      schema_version: 2,
+      product_name: "Test Workspace",
+      verification: {
+        required_commands: [
+          {
+            name: "Tests",
+            argv: ["npm", "test"],
+            timeout_seconds: 120,
+          },
+        ],
+      },
+    }),
     "utf8",
   );
 
@@ -280,7 +318,7 @@ afterEach(async () => {
 describe("ProductWorkspace", () => {
   it("creates, reads, and lists a durable work item", async () => {
     const root = await createWorkspace();
-    const workspace = new ProductWorkspace(root);
+    const workspace = missionWorkspace(root);
 
     const created = await workspace.create({
       title: "Prove durable files",
@@ -672,7 +710,7 @@ describe("ProductWorkspace", () => {
     const root = await createWorkspace();
     const item = await writeMissionReadyWorkItem(root, firstId);
     const manifest = appliedExecuteManifest();
-    const workspace = new ProductWorkspace(root);
+    const workspace = missionWorkspace(root);
     const buildPackage = (paths: Parameters<typeof compileMission>[2]) =>
       compileMission(item, manifest, paths);
 
@@ -711,6 +749,85 @@ describe("ProductWorkspace", () => {
     ).toEqual(["TASK.md", "mission.json"]);
   });
 
+  it("reads the mission result and publishes immutable regular-file evidence", async () => {
+    const root = await createWorkspace();
+    const item = await writeMissionReadyWorkItem(root, firstId);
+    const manifest = appliedExecuteManifest();
+    const workspace = missionWorkspace(root);
+    const artifact = await workspace.writeMissionPackage(
+      missionIdentity(),
+      (paths) => compileMission(item, manifest, paths),
+    );
+    const resultPath = join(dirname(artifact.task_path), "result.json");
+    const submissionSource = "{invalid";
+    await writeFile(resultPath, submissionSource, "utf8");
+
+    const snapshot = await workspace.readMissionResult(missionIdentity());
+    expect(snapshot.mission).toEqual(artifact.mission);
+    expect(snapshot.result_source).toBe(submissionSource);
+    expect(snapshot.result_path).toBe(
+      `.founder/missions/${firstId}/1-1-0/result.json`,
+    );
+
+    const resultContentSha256 = hashResultContent(submissionSource);
+    const importRunId = createImportRunId(
+      artifact.mission.content_sha256,
+      resultContentSha256,
+    );
+    const evidence = {
+      schema_version: 1 as const,
+      import_run_id: importRunId,
+      result_content_sha256: resultContentSha256,
+      mission_content_sha256: artifact.mission.content_sha256,
+      identity: missionIdentity(),
+      git_base_commit: artifact.mission.source_revision.git_base_commit,
+      result_commit: null,
+      controller_run_id: thirdRunId,
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:01.000Z",
+      outcome: "rejected" as const,
+      reasons: ["result.json is not valid JSON."],
+    };
+    const first = await workspace.writeImportEvidence({
+      submission_source: submissionSource,
+      evidence,
+      verification: [],
+    });
+    const second = await workspace.writeImportEvidence({
+      submission_source: submissionSource,
+      evidence,
+      verification: [],
+    });
+    expect(second).toEqual(first);
+    expect(await workspace.readImportEvidence(missionIdentity(), importRunId))
+      .toMatchObject({ evidence, summary: first, verification: [] });
+
+    const evidenceDirectory = join(root, first.evidence_path);
+    expect((await readdir(evidenceDirectory)).sort()).toEqual([
+      "import.json",
+      "submission.json",
+      "verification.json",
+    ]);
+    await expect(
+      workspace.writeImportEvidence({
+        submission_source: submissionSource,
+        evidence: { ...evidence, reasons: ["Divergent reason"] },
+        verification: [],
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    expect(
+      JSON.parse(await readFile(join(evidenceDirectory, "import.json"), "utf8")),
+    ).toEqual(evidence);
+
+    const outside = join(root, "outside-verification.json");
+    await writeFile(outside, "[]\n", "utf8");
+    await rm(join(evidenceDirectory, "verification.json"));
+    await symlink(outside, join(evidenceDirectory, "verification.json"), "file");
+    await expect(
+      workspace.readImportEvidence(missionIdentity(), importRunId),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+  });
+
   it("fails closed for partial, malformed, or divergent mission snapshots", async () => {
     const partialRoot = await createWorkspace();
     const partialItem = await writeMissionReadyWorkItem(partialRoot, firstId);
@@ -724,7 +841,7 @@ describe("ProductWorkspace", () => {
     await mkdir(partialDirectory, { recursive: true });
     await writeFile(join(partialDirectory, "mission.json"), "{}\n", "utf8");
     await expect(
-      new ProductWorkspace(partialRoot).writeMissionPackage(
+      missionWorkspace(partialRoot).writeMissionPackage(
         missionIdentity(),
         (paths) => compileMission(partialItem, appliedExecuteManifest(), paths),
       ),
@@ -748,7 +865,7 @@ describe("ProductWorkspace", () => {
     );
     await writeFile(join(malformedDirectory, "TASK.md"), "Invalid\n", "utf8");
     await expect(
-      new ProductWorkspace(malformedRoot).writeMissionPackage(
+      missionWorkspace(malformedRoot).writeMissionPackage(
         missionIdentity(),
         (paths) =>
           compileMission(malformedItem, appliedExecuteManifest(), paths),
@@ -757,7 +874,7 @@ describe("ProductWorkspace", () => {
 
     const divergentRoot = await createWorkspace();
     const divergentItem = await writeMissionReadyWorkItem(divergentRoot, firstId);
-    const divergentWorkspace = new ProductWorkspace(divergentRoot);
+    const divergentWorkspace = missionWorkspace(divergentRoot);
     const first = await divergentWorkspace.writeMissionPackage(
       missionIdentity(),
       (paths) =>
@@ -783,7 +900,7 @@ describe("ProductWorkspace", () => {
     );
 
     await expect(
-      new ProductWorkspace(root).writeMissionPackage(
+      missionWorkspace(root).writeMissionPackage(
         missionIdentity(),
         (paths) => compileMission(item, appliedExecuteManifest(), paths),
       ),
@@ -1019,7 +1136,7 @@ describe("ProductWorkspace", () => {
     const root = await createWorkspace();
     await writeFile(
       join(root, ".founder", "product.yaml"),
-      "schema_version: 2\nproduct_name: Future Workspace\n",
+      "schema_version: 1\nproduct_name: Legacy Workspace\n",
       "utf8",
     );
 

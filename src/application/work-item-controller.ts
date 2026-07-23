@@ -10,7 +10,6 @@ import {
   type ExternalResultSubmission,
   type ImportEvidenceOutcome,
   type ImportEvidenceSummary,
-  type ImportEvidenceWriteInput,
   type MissionResultSnapshot,
   type StoredImportEvidence,
 } from "../domain/result";
@@ -48,20 +47,6 @@ import {
 } from "../domain/workspace-path";
 
 type Clock = () => Date;
-
-interface ImportCapableRepository extends ControllerWorkItemRepository {
-  readManifest(): Promise<ProductManifest>;
-  readMissionResult(
-    identity: ExternalResultSubmission["identity"],
-  ): Promise<MissionResultSnapshot>;
-  readImportEvidence(
-    identity: ExternalResultSubmission["identity"],
-    importRunId: string,
-  ): Promise<StoredImportEvidence | null>;
-  writeImportEvidence(
-    input: ImportEvidenceWriteInput,
-  ): Promise<ImportEvidenceSummary>;
-}
 
 export interface ImportExternalResultResult extends ControllerMutationResult {
   evidence: ImportEvidenceSummary;
@@ -401,7 +386,7 @@ export class WorkItemController {
   ): Promise<ImportExternalResultResult> {
     const validatedId = workItemIdSchema.parse(workItemId);
     const validatedInput = importExternalResultInputSchema.parse(input);
-    const repository = this.importRepository();
+    const repository = this.repository;
     const identity = {
       work_item_id: validatedId,
       goal_version: validatedInput.expected_goal_version,
@@ -818,7 +803,7 @@ export class WorkItemController {
   }
 
   private async reconcileStoredImport(
-    repository: ImportCapableRepository,
+    repository: ControllerWorkItemRepository,
     lease: ControllerLease,
     existingManifest: ControllerRunManifest | null,
     stored: StoredImportEvidence,
@@ -957,21 +942,6 @@ export class WorkItemController {
         `Expected attempt ${input.attempt} but found ${current.state.attempt}.`,
       );
     }
-  }
-
-  private importRepository(): ImportCapableRepository {
-    const repository = this.repository as Partial<ImportCapableRepository>;
-    if (
-      typeof repository.readManifest !== "function" ||
-      typeof repository.readMissionResult !== "function" ||
-      typeof repository.readImportEvidence !== "function" ||
-      typeof repository.writeImportEvidence !== "function"
-    ) {
-      throw new Error(
-        "Work-item repository does not support external result import.",
-      );
-    }
-    return repository as ImportCapableRepository;
   }
 
   private activeRun(runId: string, idempotencyKey: string): ActiveRun {

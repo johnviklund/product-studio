@@ -6,6 +6,16 @@ import type {
   MissionPackageBuilder,
 } from "./mission";
 import { portfolioSourceIdSchema } from "./portfolio-source";
+import type {
+  ImportEvidenceSummary,
+  ImportEvidenceWriteInput,
+  MissionResultSnapshot,
+  StoredImportEvidence,
+} from "./result";
+import type {
+  GitVerificationAdapter,
+  VerificationRunner,
+} from "./verification";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
 export const WORK_ITEM_TYPES = [
@@ -226,6 +236,7 @@ export interface ControllerMutationResult {
 }
 
 export interface WorkItemRepository {
+  readManifest(): Promise<ProductManifest>;
   create(input: CreateWorkItemInput): Promise<WorkItem>;
   createCapture(input: CreateCaptureInput): Promise<WorkItem>;
   read(workItemId: string): Promise<WorkItem | null>;
@@ -264,6 +275,16 @@ export interface WorkItemRepository {
     identity: MissionIdentity,
     buildPackage: MissionPackageBuilder,
   ): Promise<MissionArtifactWriteResult>;
+  readMissionResult(identity: MissionIdentity): Promise<MissionResultSnapshot>;
+  readImportEvidence(
+    identity: MissionIdentity,
+    importRunId: string,
+  ): Promise<StoredImportEvidence | null>;
+  writeImportEvidence(
+    input: ImportEvidenceWriteInput,
+  ): Promise<ImportEvidenceSummary>;
+  gitVerificationAdapter(): GitVerificationAdapter;
+  verificationRunner(): VerificationRunner;
   commitControllerMutation(
     lease: ControllerLease,
     input: ControllerMutationInput,

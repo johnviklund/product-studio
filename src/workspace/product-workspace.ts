@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   lstat,
   mkdir,
@@ -14,7 +14,7 @@ import { join, posix, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { parse, stringify } from "yaml";
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 
 import {
   ControllerConflictError,
@@ -25,6 +25,7 @@ import {
   createCaptureInputSchema,
   createWorkItemInputSchema,
   productManifestSchema,
+  verificationCommandSchema,
   workItemGoalSchema,
   workItemIdSchema,
   workItemSchema,
@@ -43,6 +44,7 @@ import {
   type WorkItemRepository,
   type WorkItemState,
   type UpdateWorkItemPhaseInput,
+  type VerificationCommand,
 } from "../domain/work-item";
 import {
   missionIdentitySchema,
@@ -55,6 +57,23 @@ import {
   type MissionPackageBuilder,
   type MissionPaths,
 } from "../domain/mission";
+import {
+  commandEvidenceRecordSchema,
+  createImportRunId,
+  hashResultContent,
+  importEvidenceEnvelopeSchema,
+  importEvidenceSummarySchema,
+  importRunIdSchema,
+  type CommandEvidenceRecord,
+  type ImportEvidenceSummary,
+  type ImportEvidenceWriteInput,
+  type MissionResultSnapshot,
+  type StoredImportEvidence,
+} from "../domain/result";
+import type {
+  GitVerificationAdapter,
+  VerificationRunner,
+} from "../domain/verification";
 
 const FOUNDER_DIRECTORY = ".founder";
 const WORK_ITEMS_DIRECTORY = "work-items";
@@ -62,11 +81,16 @@ const GOAL_FILE = "goal.yaml";
 const STATE_FILE = "state.json";
 const RUNS_DIRECTORY = "runs";
 const MISSIONS_DIRECTORY = "missions";
+const RUN_EVIDENCE_DIRECTORY = "run-evidence";
 const MISSION_JSON_FILE = "mission.json";
 const TASK_MD_FILE = "TASK.md";
 const RESULT_JSON_FILE = "result.json";
+const SUBMISSION_JSON_FILE = "submission.json";
+const IMPORT_JSON_FILE = "import.json";
+const VERIFICATION_JSON_FILE = "verification.json";
 const CONTROLLER_LOCK_FILE = ".controller.lock";
 const execFileAsync = promisify(execFile);
+const COMMAND_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const UUID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const STAGING_DIRECTORY_PATTERN = new RegExp(
@@ -92,19 +116,307 @@ function validationReason(
     .join("; ");
 }
 
+function execFileExitCode(error: unknown): number | null {
+  if (
+    error instanceof Error &&
+    "code" in error &&
+    typeof error.code === "number"
+  ) {
+    return error.code;
+  }
+  return null;
+}
+
+export class NodeGitVerificationAdapter implements GitVerificationAdapter {
+  constructor(private readonly workspaceRoot: string) {}
+
+  async resolveCommit(revision: string): Promise<string | null> {
+    try {
+      const output = await this.run([
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${revision}^{commit}`,
+      ]);
+      const commit = output.trim();
+      return /^[0-9a-f]{40}$/.test(commit) ? commit : null;
+    } catch (error) {
+      if (execFileExitCode(error) !== null) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async isAncestor(
+    ancestorCommit: string,
+    descendantCommit: string,
+  ): Promise<boolean> {
+    try {
+      await this.run([
+        "merge-base",
+        "--is-ancestor",
+        ancestorCommit,
+        descendantCommit,
+      ]);
+      return true;
+    } catch (error) {
+      if (execFileExitCode(error) === 1) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async readHeadCommit(): Promise<string> {
+    const commit = await this.resolveCommit("HEAD");
+    if (commit === null) {
+      throw new Error("Workspace HEAD is not a resolvable Git commit.");
+    }
+    return commit;
+  }
+
+  async isWorktreeCleanExcludingFounder(): Promise<boolean> {
+    const output = await this.run([
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+      "--",
+      ".",
+      ":(exclude).founder",
+      ":(exclude).founder/**",
+    ]);
+    return output.length === 0;
+  }
+
+  async listChangedFiles(
+    baseCommit: string,
+    resultCommit: string,
+  ): Promise<string[]> {
+    const output = await this.run([
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "-z",
+      baseCommit,
+      resultCommit,
+      "--",
+    ]);
+    return output.split("\0").filter((path) => path.length > 0);
+  }
+
+  private async run(args: string[]): Promise<string> {
+    const { stdout } = await execFileAsync("git", args, {
+      cwd: this.workspaceRoot,
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return stdout;
+  }
+}
+
+interface NodeVerificationRunnerOptions {
+  environment?: NodeJS.ProcessEnv;
+  killGraceMs?: number;
+  now?: () => Date;
+}
+
+export class NodeVerificationRunner implements VerificationRunner {
+  private readonly environment: NodeJS.ProcessEnv;
+  private readonly killGraceMs: number;
+  private readonly now: () => Date;
+
+  constructor(
+    private readonly workspaceRoot: string,
+    options: NodeVerificationRunnerOptions = {},
+  ) {
+    this.environment = options.environment ?? process.env;
+    this.killGraceMs = options.killGraceMs ?? 5_000;
+    this.now = options.now ?? (() => new Date());
+  }
+
+  async run(command: VerificationCommand): Promise<CommandEvidenceRecord> {
+    const validated = verificationCommandSchema.parse(command);
+    const startedAt = this.now().toISOString();
+    const startedMs = Date.now();
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let outputTruncated = false;
+
+    const capture = (
+      chunk: Buffer | string,
+      chunks: Buffer[],
+      currentBytes: number,
+    ): number => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = COMMAND_OUTPUT_LIMIT_BYTES - currentBytes;
+      if (remaining <= 0) {
+        outputTruncated = true;
+        return currentBytes;
+      }
+      if (buffer.length > remaining) {
+        chunks.push(buffer.subarray(0, remaining));
+        outputTruncated = true;
+        return COMMAND_OUTPUT_LIMIT_BYTES;
+      }
+      chunks.push(buffer);
+      return currentBytes + buffer.length;
+    };
+
+    const environment = Object.create(null) as NodeJS.ProcessEnv;
+    environment.CI = "1";
+    for (const name of [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "LC_CTYPE",
+    ]) {
+      const value = this.environment[name];
+      if (value !== undefined) {
+        environment[name] = value;
+      }
+    }
+
+    return await new Promise<CommandEvidenceRecord>((resolveRecord) => {
+      let child;
+      try {
+        child = spawn(validated.argv[0], validated.argv.slice(1), {
+          cwd: this.workspaceRoot,
+          shell: false,
+          env: environment,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (error) {
+        const completedAt = this.now().toISOString();
+        resolveRecord(
+          commandEvidenceRecordSchema.parse({
+            name: validated.name,
+            argv: validated.argv,
+            started_at: startedAt,
+            completed_at: completedAt,
+            duration_ms: Math.max(0, Date.now() - startedMs),
+            status: "spawn_error",
+            exit_code: null,
+            signal: null,
+            stdout: "",
+            stderr: errorMessage(error),
+            output_truncated: false,
+          }),
+        );
+        return;
+      }
+
+      let settled = false;
+      let timedOut = false;
+      let killTimer: NodeJS.Timeout | undefined;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => {
+          if (!settled) {
+            child.kill("SIGKILL");
+          }
+        }, this.killGraceMs);
+        killTimer.unref();
+      }, validated.timeout_seconds * 1_000);
+      timeout.unref();
+
+      const finish = (
+        status: "passed" | "failed" | "timed_out" | "spawn_error",
+        exitCode: number | null,
+        signal: string | null,
+      ) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        if (killTimer !== undefined) {
+          clearTimeout(killTimer);
+        }
+        resolveRecord(
+          commandEvidenceRecordSchema.parse({
+            name: validated.name,
+            argv: validated.argv,
+            started_at: startedAt,
+            completed_at: this.now().toISOString(),
+            duration_ms: Math.max(0, Date.now() - startedMs),
+            status,
+            exit_code: exitCode,
+            signal,
+            stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+            stderr: Buffer.concat(stderrChunks).toString("utf8"),
+            output_truncated: outputTruncated,
+          }),
+        );
+      };
+
+      child.stdout.on("data", (chunk: Buffer | string) => {
+        stdoutBytes = capture(chunk, stdoutChunks, stdoutBytes);
+      });
+      child.stderr.on("data", (chunk: Buffer | string) => {
+        stderrBytes = capture(chunk, stderrChunks, stderrBytes);
+      });
+      child.once("error", (error) => {
+        stderrBytes = capture(error.message, stderrChunks, stderrBytes);
+        finish("spawn_error", null, null);
+      });
+      child.once("close", (code, signal) => {
+        finish(
+          timedOut
+            ? "timed_out"
+            : code === 0 && signal === null
+              ? "passed"
+              : "failed",
+          code,
+          signal,
+        );
+      });
+    });
+  }
+}
+
+export interface ProductWorkspaceOptions {
+  git?: GitVerificationAdapter;
+  verificationRunner?: VerificationRunner;
+}
+
 export class ProductWorkspace implements WorkItemRepository {
   readonly workspaceRoot: string;
 
   private readonly founderDirectory: string;
   private readonly workItemsDirectory: string;
+  private readonly gitAdapter: GitVerificationAdapter;
+  private readonly commandRunner: VerificationRunner;
 
-  constructor(workspaceRoot: string) {
+  constructor(
+    workspaceRoot: string,
+    options: ProductWorkspaceOptions = {},
+  ) {
     this.workspaceRoot = resolve(workspaceRoot);
     this.founderDirectory = join(this.workspaceRoot, FOUNDER_DIRECTORY);
     this.workItemsDirectory = join(
       this.founderDirectory,
       WORK_ITEMS_DIRECTORY,
     );
+    this.gitAdapter =
+      options.git ?? new NodeGitVerificationAdapter(this.workspaceRoot);
+    this.commandRunner =
+      options.verificationRunner ??
+      new NodeVerificationRunner(this.workspaceRoot);
+  }
+
+  gitVerificationAdapter(): GitVerificationAdapter {
+    return this.gitAdapter;
+  }
+
+  verificationRunner(): VerificationRunner {
+    return this.commandRunner;
   }
 
   async readManifest(): Promise<ProductManifest> {
@@ -757,6 +1069,188 @@ export class ProductWorkspace implements WorkItemRepository {
     return this.missionWriteResult(mission, missionDirectory);
   }
 
+  async readMissionResult(
+    identity: MissionIdentity,
+  ): Promise<MissionResultSnapshot> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    await this.readManifest();
+    const relativeDirectory = posix.join(
+      FOUNDER_DIRECTORY,
+      MISSIONS_DIRECTORY,
+      validatedIdentity.work_item_id,
+      this.missionDirectoryName(validatedIdentity),
+    );
+    const missionsDirectory = join(this.founderDirectory, MISSIONS_DIRECTORY);
+    const workItemMissionsDirectory = join(
+      missionsDirectory,
+      validatedIdentity.work_item_id,
+    );
+    const missionDirectory = join(
+      workItemMissionsDirectory,
+      this.missionDirectoryName(validatedIdentity),
+    );
+    await this.assertDirectory(missionsDirectory);
+    await this.assertDirectory(workItemMissionsDirectory);
+    await this.assertDirectory(missionDirectory);
+
+    const missionPath = join(missionDirectory, MISSION_JSON_FILE);
+    const missionSource = await this.readRequiredFile(missionPath);
+    const mission = this.parseJson(
+      missionSource,
+      missionPath,
+      missionPackageSchema,
+    );
+    const expectedPaths = this.missionPaths(
+      validatedIdentity,
+      mission.source_revision.git_base_commit,
+    );
+    if (
+      JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
+      mission.task_path !== expectedPaths.task_path ||
+      mission.result_contract.output_path !== expectedPaths.output_path
+    ) {
+      throw this.invalid(
+        missionDirectory,
+        "mission snapshot identity and paths do not match its containing directory",
+      );
+    }
+    await this.assertMissionSnapshot(
+      missionDirectory,
+      mission,
+      serializeMissionPackage(mission),
+      renderTaskMd(mission),
+    );
+    const resultPath = join(missionDirectory, RESULT_JSON_FILE);
+
+    return {
+      mission,
+      mission_path: posix.join(relativeDirectory, MISSION_JSON_FILE),
+      result_path: posix.join(relativeDirectory, RESULT_JSON_FILE),
+      result_source: await this.readRequiredFile(resultPath),
+    };
+  }
+
+  async readImportEvidence(
+    identity: MissionIdentity,
+    importRunId: string,
+  ): Promise<StoredImportEvidence | null> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    const validatedImportRunId = importRunIdSchema.parse(importRunId);
+    await this.readManifest();
+    const directories = this.evidenceDirectories(
+      validatedIdentity,
+      validatedImportRunId,
+    );
+    for (const directory of [
+      directories.root,
+      directories.workItem,
+      directories.tuple,
+      directories.target,
+    ]) {
+      if (!(await this.hasSafeDirectory(directory))) {
+        return null;
+      }
+    }
+    return this.readStoredImportEvidence(
+      directories.target,
+      validatedIdentity,
+      validatedImportRunId,
+    );
+  }
+
+  async writeImportEvidence(
+    input: ImportEvidenceWriteInput,
+  ): Promise<ImportEvidenceSummary> {
+    const evidence = importEvidenceEnvelopeSchema.parse(input.evidence);
+    const verification = z
+      .array(commandEvidenceRecordSchema)
+      .parse(input.verification);
+    const identity = missionIdentitySchema.parse(evidence.identity);
+    if (
+      hashResultContent(input.submission_source) !==
+        evidence.result_content_sha256 ||
+      createImportRunId(
+        evidence.mission_content_sha256,
+        evidence.result_content_sha256,
+      ) !== evidence.import_run_id
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "import evidence identity does not match the submitted result bytes",
+      );
+    }
+    this.validateEvidenceVerification(evidence.outcome, verification);
+    await this.readManifest();
+    const directories = this.evidenceDirectories(
+      identity,
+      evidence.import_run_id,
+    );
+    await this.ensureDirectory(directories.root);
+    await this.ensureDirectory(directories.workItem);
+    await this.ensureDirectory(directories.tuple);
+
+    const submissionSource = input.submission_source;
+    const importSource = `${JSON.stringify(evidence, null, 2)}\n`;
+    const verificationSource = `${JSON.stringify(verification, null, 2)}\n`;
+    if (await this.hasSafeDirectory(directories.target)) {
+      await this.assertEvidenceSnapshot(
+        directories.target,
+        identity,
+        evidence.import_run_id,
+        { submissionSource, importSource, verificationSource },
+      );
+      return this.evidenceSummary(evidence);
+    }
+
+    const stagingDirectory = join(
+      directories.tuple,
+      `.${evidence.import_run_id}.${randomUUID()}.evidence.tmp`,
+    );
+    await mkdir(stagingDirectory);
+    try {
+      await writeFile(
+        join(stagingDirectory, SUBMISSION_JSON_FILE),
+        submissionSource,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await writeFile(
+        join(stagingDirectory, IMPORT_JSON_FILE),
+        importSource,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await writeFile(
+        join(stagingDirectory, VERIFICATION_JSON_FILE),
+        verificationSource,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await rename(stagingDirectory, directories.target);
+    } catch (error) {
+      await this.removeEvidenceStagingDirectory(stagingDirectory, error);
+      if (
+        isNodeError(error) &&
+        ["EEXIST", "ENOTEMPTY"].includes(error.code ?? "") &&
+        (await this.hasSafeDirectory(directories.target))
+      ) {
+        await this.assertEvidenceSnapshot(
+          directories.target,
+          identity,
+          evidence.import_run_id,
+          { submissionSource, importSource, verificationSource },
+        );
+        return this.evidenceSummary(evidence);
+      }
+      throw error;
+    }
+
+    await this.assertEvidenceSnapshot(
+      directories.target,
+      identity,
+      evidence.import_run_id,
+      { submissionSource, importSource, verificationSource },
+    );
+    return this.evidenceSummary(evidence);
+  }
+
   async commitControllerMutation(
     lease: ControllerLease,
     input: ControllerMutationInput,
@@ -959,6 +1453,194 @@ export class ProductWorkspace implements WorkItemRepository {
     return manifest;
   }
 
+  private evidenceDirectories(
+    identity: MissionIdentity,
+    importRunId: string,
+  ) {
+    const root = join(this.founderDirectory, RUN_EVIDENCE_DIRECTORY);
+    const workItem = join(root, identity.work_item_id);
+    const tuple = join(workItem, this.missionDirectoryName(identity));
+    return {
+      root,
+      workItem,
+      tuple,
+      target: join(tuple, importRunId),
+    };
+  }
+
+  private evidenceSummary(
+    evidence: ImportEvidenceWriteInput["evidence"],
+  ): ImportEvidenceSummary {
+    return importEvidenceSummarySchema.parse({
+      import_run_id: evidence.import_run_id,
+      outcome: evidence.outcome,
+      evidence_path: posix.join(
+        FOUNDER_DIRECTORY,
+        RUN_EVIDENCE_DIRECTORY,
+        evidence.identity.work_item_id,
+        this.missionDirectoryName(evidence.identity),
+        evidence.import_run_id,
+      ),
+      reasons: evidence.reasons,
+    });
+  }
+
+  private async readStoredImportEvidence(
+    evidenceDirectory: string,
+    identity: MissionIdentity,
+    importRunId: string,
+  ): Promise<StoredImportEvidence> {
+    const submissionPath = join(evidenceDirectory, SUBMISSION_JSON_FILE);
+    const importPath = join(evidenceDirectory, IMPORT_JSON_FILE);
+    const verificationPath = join(
+      evidenceDirectory,
+      VERIFICATION_JSON_FILE,
+    );
+    const submissionSource = await this.readRequiredFile(submissionPath);
+    const importSource = await this.readRequiredFile(importPath);
+    const verificationSource = await this.readRequiredFile(verificationPath);
+    const evidence = this.parseJson(
+      importSource,
+      importPath,
+      importEvidenceEnvelopeSchema,
+    );
+    const verification = this.parseJson(
+      verificationSource,
+      verificationPath,
+      z.array(commandEvidenceRecordSchema),
+    );
+    if (
+      evidence.import_run_id !== importRunId ||
+      JSON.stringify(evidence.identity) !== JSON.stringify(identity) ||
+      hashResultContent(submissionSource) !== evidence.result_content_sha256 ||
+      createImportRunId(
+        evidence.mission_content_sha256,
+        evidence.result_content_sha256,
+      ) !== evidence.import_run_id
+    ) {
+      throw this.invalid(
+        evidenceDirectory,
+        "stored import evidence does not match its directory or submission bytes",
+      );
+    }
+    this.validateEvidenceVerification(evidence.outcome, verification);
+    return {
+      evidence,
+      summary: this.evidenceSummary(evidence),
+      verification,
+    };
+  }
+
+  private async assertEvidenceSnapshot(
+    evidenceDirectory: string,
+    identity: MissionIdentity,
+    importRunId: string,
+    expected: {
+      submissionSource: string;
+      importSource: string;
+      verificationSource: string;
+    },
+  ): Promise<void> {
+    await this.assertDirectory(evidenceDirectory);
+    await this.readStoredImportEvidence(
+      evidenceDirectory,
+      identity,
+      importRunId,
+    );
+    const actual = {
+      submissionSource: await this.readRequiredFile(
+        join(evidenceDirectory, SUBMISSION_JSON_FILE),
+      ),
+      importSource: await this.readRequiredFile(
+        join(evidenceDirectory, IMPORT_JSON_FILE),
+      ),
+      verificationSource: await this.readRequiredFile(
+        join(evidenceDirectory, VERIFICATION_JSON_FILE),
+      ),
+    };
+    if (
+      actual.submissionSource !== expected.submissionSource ||
+      actual.importSource !== expected.importSource ||
+      actual.verificationSource !== expected.verificationSource
+    ) {
+      throw this.invalid(
+        evidenceDirectory,
+        "immutable import evidence differs from the published snapshot",
+      );
+    }
+  }
+
+  private validateEvidenceVerification(
+    outcome: ImportEvidenceWriteInput["evidence"]["outcome"],
+    verification: CommandEvidenceRecord[],
+  ): void {
+    if (outcome === "rejected" && verification.length > 0) {
+      throw this.invalid(
+        this.founderDirectory,
+        "rejected import evidence cannot contain command results",
+      );
+    }
+    if (
+      outcome === "applied" &&
+      (verification.length === 0 ||
+        verification.some((record) => record.status !== "passed"))
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "applied import evidence requires every command to pass",
+      );
+    }
+    if (
+      outcome === "failed" &&
+      !verification.some((record) =>
+        ["failed", "timed_out", "spawn_error"].includes(record.status),
+      )
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "failed import evidence requires a red command result",
+      );
+    }
+    let redSeen = false;
+    for (const record of verification) {
+      if (["failed", "timed_out", "spawn_error"].includes(record.status)) {
+        if (redSeen) {
+          throw this.invalid(
+            this.founderDirectory,
+            "verification evidence must stop after the first red command",
+          );
+        }
+        redSeen = true;
+      } else if (record.status === "not_run") {
+        if (!redSeen) {
+          throw this.invalid(
+            this.founderDirectory,
+            "not_run verification evidence requires an earlier red command",
+          );
+        }
+      } else if (redSeen) {
+        throw this.invalid(
+          this.founderDirectory,
+          "verification evidence must mark commands after a red result not_run",
+        );
+      }
+    }
+  }
+
+  private async removeEvidenceStagingDirectory(
+    stagingDirectory: string,
+    originalError: unknown,
+  ): Promise<void> {
+    try {
+      await rm(stagingDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [originalError, cleanupError],
+        "Import evidence publication failed and staging cleanup was incomplete",
+      );
+    }
+  }
+
   private missionPaths(
     identity: MissionIdentity,
     gitBaseCommit: string,
@@ -978,16 +1660,7 @@ export class ProductWorkspace implements WorkItemRepository {
 
   private async resolveGitBaseCommit(): Promise<string> {
     try {
-      const { stdout } = await execFileAsync(
-        "git",
-        ["rev-parse", "--verify", "HEAD^{commit}"],
-        { cwd: this.workspaceRoot, encoding: "utf8" },
-      );
-      const commit = stdout.trim();
-      if (!/^[0-9a-f]{40}$/.test(commit)) {
-        throw new Error("Git returned a non-canonical commit SHA");
-      }
-      return commit;
+      return await this.gitAdapter.readHeadCommit();
     } catch (error) {
       throw this.invalid(
         ".git",
