@@ -90,6 +90,14 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Traceability:** PRD §11.7, FR-007/009/015.
 - **Dependencies:** 2.1–2.2.
 - **Completion signal:** A non-conforming result is preserved for repair but cannot advance the controller state.
+- **Status:** Delivered — commits `d252f68`–`61553dd` (versioned `ImportEvidenceEnvelope` and
+  command-evidence contracts, Git-base-bound missions, a Node local verification runner,
+  content-addressed immutable `.founder/run-evidence/` publication written before the controller
+  mutation it backs, and source-qualified `mission/import`/`mission/retry` routes gating
+  controller advancement on a fully green command run). A cross-vendor Phase 4 review later
+  found a confirmed P1 (an unbounded verification command with a hanging descendant could wedge
+  the controller lease permanently); fixed via process-group kill plus a bounded drain backstop
+  and re-reviewed clean at `f348592` — see `WORKLOG.md`.
 
 ### 2.4 Run evidence and history surface
 
