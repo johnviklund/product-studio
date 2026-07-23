@@ -15,6 +15,46 @@ idea backlog.
 
 ## Learnings
 
+### 2026-07-23 — Publish immutable import evidence before the controller mutation it backs
+
+- **Scope:** External result import (roadmap 2.3), any recoverable multi-step controller
+  operation that must not repeat an authoritative side effect on replay.
+- **Evidence:** `tests/application/work-item-controller.test.ts` imports a green result once and
+  replays immutable evidence without rerunning the underlying verification/import command; the
+  content-addressed evidence file is written and durable before the controller's state mutation
+  commits, so a crash between the two leaves evidence a replay can reconcile from without
+  re-invoking the authoritative command.
+- **Guidance:** Order any two-step "produce evidence, then mutate state" operation so the
+  content-addressed, immutable evidence publish happens strictly before the state mutation; on
+  replay, reconcile a missing mutation from the existing evidence file instead of re-running the
+  command that produced it.
+- **Supersession:** active.
+
+### 2026-07-23 — Local verification runner: process-group kill + bounded drain backstop, not just direct-child TERM/KILL
+
+- **Scope:** `NodeVerificationRunner` (`src/workspace/product-workspace.ts`) and any local
+  subprocess runner awaited under a controller lease (roadmap 2.3 external verification).
+- **Evidence:** Confirmed P1 at HEAD `61553dd` (`.workflow/review.md`, `.workflow/patch_plan.md`):
+  spawning without `detached: true` and resolving the runner promise from `'close'` let a
+  `npm run …` descendant that inherits stdout/stderr survive a direct-child kill and hold
+  `'close'` open forever — the controller lease is released only in `finally`, so a hung
+  descendant permanently wedged the work item with no stale-lock reclaim. Fixed by spawning
+  `detached: true`, killing the whole process group (`process.kill(-child.pid, signal)` with an
+  `ESRCH`-safe direct-child fallback) for both SIGTERM and the SIGKILL escalation, and adding an
+  unref'd `drainGraceMs` timer after SIGKILL that force-finishes from already-captured buffers if
+  `'close'` still hasn't fired — bounding total wall-clock to `timeout + killGrace + drainGrace`.
+  Verified by a focused runner test (TERM-ignoring child with a stdout-inheriting descendant
+  still resolves `timed_out` within budget) and a controller test (timed-out verification clears
+  the durable `active_run` and leaves no `.controller.lock`). A local verification runner should
+  also use argv-only spawn (no shell), an explicit environment allowlist, and per-stream byte
+  caps, recording every terminal outcome as structured evidence.
+- **Guidance:** Any local subprocess runner awaited under a lease/lock must (1) spawn detached
+  and kill by process group, not just the direct child, (2) resolve from a bounded timeout path
+  independent of `'close'`/`'exit'` waiting on descendant pipe holders, and (3) use argv-only
+  spawn, an env allowlist, and per-stream byte caps. POSIX-only process-group kill is an accepted
+  constraint for a Darwin/Linux-only target.
+- **Supersession:** active.
+
 ### 2026-07-21 — Break schema/cache circular deps at the value-object seam, not the aggregate
 
 - **Scope:** Domain schemas and the rebuildable SQLite cache projection (roadmap 1.4, source-qualified capture work).
