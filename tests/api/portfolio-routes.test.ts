@@ -38,6 +38,8 @@ import { POST as createPortfolioWorkItem } from "../../app/api/portfolio/work-it
 import { POST as assignPortfolioWorkItem } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/assignment/route";
 import { PATCH as updatePortfolioWorkItemDetails } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/details/route";
 import { POST as compilePortfolioMission } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route";
+import { POST as importPortfolioMission } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route";
+import { POST as retryPortfolioMission } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route";
 import {
   PATCH as updatePortfolioWorkItem,
 } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/route";
@@ -96,7 +98,19 @@ async function createWorkspace(): Promise<string> {
   await mkdir(founderDirectory, { recursive: true });
   await writeFile(
     join(founderDirectory, "product.yaml"),
-    stringify({ schema_version: 1, product_name: "API Workspace" }),
+    stringify({
+      schema_version: 2,
+      product_name: "API Workspace",
+      verification: {
+        required_commands: [
+          {
+            name: "Tests",
+            argv: ["npm", "test"],
+            timeout_seconds: 120,
+          },
+        ],
+      },
+    }),
     "utf8",
   );
   await new ProductWorkspace(root).create({
@@ -159,6 +173,11 @@ async function createService(): Promise<{
     registry,
     index,
     join(applicationRoot, ".portfolio", "inbox"),
+    (workspacePath) =>
+      new ProductWorkspace(workspacePath, {
+        git: controllerGit,
+        verificationRunner: controllerRunner,
+      }),
   );
   openIndexes.push(index);
   getService.mockResolvedValue(service);
@@ -222,6 +241,17 @@ function assignmentRequest(body: unknown): Request {
 function missionRequest(): Request {
   return new Request(
     "http://localhost/api/portfolio/work-items/source/item/mission",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{ignored-no-body-contract",
+    },
+  );
+}
+
+function missionActionRequest(action: "import" | "retry"): Request {
+  return new Request(
+    `http://localhost/api/portfolio/work-items/source/item/mission/${action}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -490,6 +520,105 @@ describe("portfolio API routes", () => {
     });
     expect(await responses[4].json()).toEqual({
       error: { code: "internal_error", message: "Unexpected server error" },
+    });
+  });
+
+  it("returns bodyless import verdicts and explicit retry results with source qualification", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const applied = {
+      source_id: sourceId,
+      project: null,
+      work_item: { state: { phase: "review", status: "active" } },
+      evidence: {
+        import_run_id: "a".repeat(64),
+        outcome: "applied",
+        evidence_path: `.founder/run-evidence/${workItemId}/1-1-0/${"a".repeat(64)}`,
+        reasons: [],
+      },
+    };
+    const rejected = {
+      ...applied,
+      work_item: { state: { phase: "execute", status: "blocked" } },
+      evidence: {
+        ...applied.evidence,
+        outcome: "rejected",
+        reasons: ["result.json is not valid JSON."],
+      },
+    };
+    const retried = {
+      source_id: sourceId,
+      project: null,
+      work_item: { state: { phase: "execute", status: "active", attempt: 1 } },
+      controller_run: { phase: "execute", outcome: "applied", attempt: 1 },
+    };
+    const importResult = vi
+      .fn()
+      .mockResolvedValueOnce(applied)
+      .mockResolvedValueOnce(rejected);
+    const retryExecuteAttempt = vi.fn().mockResolvedValue(retried);
+    getService.mockResolvedValue({ importResult, retryExecuteAttempt });
+    const context = phaseUpdateContext(sourceId, workItemId);
+
+    const appliedResponse = await importPortfolioMission(
+      missionActionRequest("import"),
+      context,
+    );
+    const rejectedResponse = await importPortfolioMission(
+      missionActionRequest("import"),
+      context,
+    );
+    const retryResponse = await retryPortfolioMission(
+      missionActionRequest("retry"),
+      context,
+    );
+
+    expect(appliedResponse.status).toBe(200);
+    expect(await appliedResponse.json()).toEqual(applied);
+    expect(rejectedResponse.status).toBe(200);
+    expect(await rejectedResponse.json()).toEqual(rejected);
+    expect(retryResponse.status).toBe(200);
+    expect(await retryResponse.json()).toEqual(retried);
+    expect(importResult).toHaveBeenNthCalledWith(1, sourceId, workItemId);
+    expect(importResult).toHaveBeenNthCalledWith(2, sourceId, workItemId);
+    expect(retryExecuteAttempt).toHaveBeenCalledWith(sourceId, workItemId);
+  });
+
+  it("maps import and retry eligibility failures to 409 instead of verdict responses", async () => {
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const importResult = vi.fn().mockRejectedValue(
+      new ControllerConflictError(
+        "mission_not_ready",
+        workItemId,
+        "Result import requires an assigned, governed item in active execute.",
+      ),
+    );
+    const retryExecuteAttempt = vi.fn().mockRejectedValue(
+      new ControllerConflictError(
+        "mission_not_ready",
+        workItemId,
+        "Repair requires an assigned, governed item in blocked execute.",
+      ),
+    );
+    getService.mockResolvedValue({ importResult, retryExecuteAttempt });
+    const context = phaseUpdateContext("inbox", workItemId);
+
+    const importResponse = await importPortfolioMission(
+      missionActionRequest("import"),
+      context,
+    );
+    const retryResponse = await retryPortfolioMission(
+      missionActionRequest("retry"),
+      context,
+    );
+
+    expect(importResponse.status).toBe(409);
+    expect(await importResponse.json()).toMatchObject({
+      error: { code: "mission_not_ready" },
+    });
+    expect(retryResponse.status).toBe(409);
+    expect(await retryResponse.json()).toMatchObject({
+      error: { code: "mission_not_ready" },
     });
   });
 
