@@ -36,6 +36,7 @@ import {
   type WorkItemPriority,
   type WorkItemType,
 } from "@/src/domain/work-item";
+import { canUpdateGoalContract } from "@/src/domain/workflow-policy";
 import {
   boardTransitionActionsForPhase,
   detailPanelModeForItem,
@@ -108,6 +109,17 @@ function tagsFromInput(value: string): string[] {
     .split(",")
     .map((tag) => tag.trim())
     .filter((tag) => tag.length > 0);
+}
+
+function goalContractLines(values: string[] | undefined): string {
+  return values?.join("\n") ?? "";
+}
+
+function goalContractValues(value: string): string[] {
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
 
 function shortEvidencePath(path: string): string {
@@ -441,6 +453,16 @@ export function DetailPanel({
   const [targetSourceId, setTargetSourceId] = useState(item.source_id);
   const [savingDetails, setSavingDetails] = useState(false);
   const [savingAssignment, setSavingAssignment] = useState(false);
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState(
+    goalContractLines(goal.acceptance_criteria),
+  );
+  const [allowedScope, setAllowedScope] = useState(
+    goalContractLines(goal.allowed_scope),
+  );
+  const [reviewReady, setReviewReady] = useState(
+    goalContractLines(goal.review_ready),
+  );
+  const [savingContract, setSavingContract] = useState(false);
   const [compilingMission, setCompilingMission] = useState(false);
   const [importingResult, setImportingResult] = useState(false);
   const [startingRepair, setStartingRepair] = useState(false);
@@ -462,6 +484,14 @@ export function DetailPanel({
     tags !== (goal.tags?.join(", ") ?? "") ||
     notes !== (goal.notes ?? "");
   const assignmentDirty = targetSourceId !== item.source_id;
+  const acceptanceCriteriaValues = goalContractValues(acceptanceCriteria);
+  const allowedScopeValues = goalContractValues(allowedScope);
+  const reviewReadyValues = goalContractValues(reviewReady);
+  const contractDirty =
+    acceptanceCriteria !== goalContractLines(goal.acceptance_criteria) ||
+    allowedScope !== goalContractLines(goal.allowed_scope) ||
+    reviewReady !== goalContractLines(goal.review_ready);
+  const canEditGoalContract = canUpdateGoalContract(state.phase);
   const missionItemKey = [
     item.source_id,
     goal.work_item_id,
@@ -551,13 +581,13 @@ export function DetailPanel({
   const attemptClose = useCallback(() => {
     if (
       mode === "capture" &&
-      (detailsDirty || assignmentDirty) &&
+      (detailsDirty || assignmentDirty || contractDirty) &&
       !window.confirm("Discard the unsaved capture changes?")
     ) {
       return;
     }
     onClose();
-  }, [assignmentDirty, detailsDirty, mode, onClose]);
+  }, [assignmentDirty, contractDirty, detailsDirty, mode, onClose]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -676,6 +706,65 @@ export function DetailPanel({
       setError("The project could not be changed. Check the local server and try again.");
     } finally {
       setSavingAssignment(false);
+    }
+  }
+
+  async function handleGoalContractSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (
+      !contractDirty ||
+      acceptanceCriteriaValues.length === 0 ||
+      allowedScopeValues.length === 0 ||
+      reviewReadyValues.length === 0
+    ) {
+      return;
+    }
+
+    setSavingContract(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/goal-contract`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            acceptance_criteria: acceptanceCriteriaValues,
+            allowed_scope: allowedScopeValues,
+            review_ready: reviewReadyValues,
+            ...(goal.goal_version === undefined
+              ? {}
+              : {
+                  expected_goal_version: state.goal_version,
+                  expected_input_revision: state.input_revision,
+                }),
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | PortfolioWorkItem
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The goal contract could not be saved."
+            : "The goal contract could not be saved.",
+        );
+        return;
+      }
+
+      const updated = body as PortfolioWorkItem;
+      setAcceptanceCriteria(goalContractLines(updated.work_item.goal.acceptance_criteria));
+      setAllowedScope(goalContractLines(updated.work_item.goal.allowed_scope));
+      setReviewReady(goalContractLines(updated.work_item.goal.review_ready));
+      onUpdated(updated, "Goal contract saved.");
+    } catch {
+      setError(
+        "The goal contract could not be saved. Check the local server and try again.",
+      );
+    } finally {
+      setSavingContract(false);
     }
   }
 
@@ -809,6 +898,115 @@ export function DetailPanel({
   }
 
   const transitionActions = boardTransitionActionsForPhase(state.phase);
+  const goalContractFields: Array<[string, string[] | undefined]> = [
+    ["Acceptance criteria", goal.acceptance_criteria],
+    ["Allowed scope", goal.allowed_scope],
+    ["Review-ready checks", goal.review_ready],
+  ];
+  const goalContractContent = canEditGoalContract ? (
+    <form
+      onSubmit={(event) => void handleGoalContractSubmit(event)}
+      className="space-y-4"
+    >
+      <div>
+        <h3 id={`${fieldId}-goal-contract`} className="text-xs font-medium">
+          Goal contract
+        </h3>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          Keep one item per line. All three lists are required before saving.
+        </p>
+      </div>
+      <div>
+        <label
+          htmlFor={`${fieldId}-acceptance-criteria`}
+          className="mb-2 block text-xs font-medium"
+        >
+          Acceptance criteria
+        </label>
+        <textarea
+          id={`${fieldId}-acceptance-criteria`}
+          value={acceptanceCriteria}
+          onChange={(event) => setAcceptanceCriteria(event.target.value)}
+          rows={4}
+          className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+        />
+      </div>
+      <div>
+        <label
+          htmlFor={`${fieldId}-allowed-scope`}
+          className="mb-2 block text-xs font-medium"
+        >
+          Allowed scope
+        </label>
+        <textarea
+          id={`${fieldId}-allowed-scope`}
+          value={allowedScope}
+          onChange={(event) => setAllowedScope(event.target.value)}
+          rows={3}
+          className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+        />
+      </div>
+      <div>
+        <label
+          htmlFor={`${fieldId}-review-ready`}
+          className="mb-2 block text-xs font-medium"
+        >
+          Review-ready checks
+        </label>
+        <textarea
+          id={`${fieldId}-review-ready`}
+          value={reviewReady}
+          onChange={(event) => setReviewReady(event.target.value)}
+          rows={3}
+          className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+        />
+      </div>
+      <div className="flex justify-end">
+        <button
+          type="submit"
+          disabled={
+            savingContract ||
+            !contractDirty ||
+            acceptanceCriteriaValues.length === 0 ||
+            allowedScopeValues.length === 0 ||
+            reviewReadyValues.length === 0
+          }
+          className="h-9 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {savingContract ? "Saving…" : "Save goal contract"}
+        </button>
+      </div>
+    </form>
+  ) : (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <h3 id={`${fieldId}-goal-contract`} className="text-xs font-medium">
+          Goal contract
+        </h3>
+        <p className="text-[11px] text-muted-foreground">
+          Version {goal.goal_version ?? "not set"}
+        </p>
+      </div>
+      <dl className="mt-3 space-y-4 text-sm">
+        {goalContractFields.map(([label, values]) => (
+          <div key={label}>
+            <dt className="text-xs text-muted-foreground">{label}</dt>
+            <dd className="mt-1">
+              {values !== undefined && values.length > 0 ? (
+                <ul className="list-disc space-y-1 pl-4">
+                  {values.map((value, index) => (
+                    <li key={`${value}-${index}`}>{value}</li>
+                  ))}
+                </ul>
+              ) : (
+                <span className="text-muted-foreground">Not recorded.</span>
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
 
   return (
     <>
@@ -1001,6 +1199,13 @@ export function DetailPanel({
               ) : null}
             </form>
 
+            <section
+              aria-labelledby={`${fieldId}-goal-contract`}
+              className="space-y-4 border-t pt-5"
+            >
+              {goalContractContent}
+            </section>
+
             {error ? (
               <p
                 className="border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-foreground"
@@ -1071,6 +1276,13 @@ export function DetailPanel({
                       Next action
                     </h3>
                     <p className="mt-1 text-sm font-medium">{nextActionForPhase(state.phase)}</p>
+                  </section>
+
+                  <section
+                    aria-labelledby={`${fieldId}-goal-contract`}
+                    className="border-y py-4"
+                  >
+                    {goalContractContent}
                   </section>
 
                   {missionEligible || repairEligible || missionImport ? (
