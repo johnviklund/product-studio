@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   missionIdentitySchema,
   type MissionIdentity,
+  type MissionPackage,
 } from "./mission";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
@@ -85,6 +86,25 @@ export interface ImportEvidenceSummary {
   outcome: ImportEvidenceOutcome;
   evidence_path: string;
   reasons: string[];
+}
+
+export interface MissionResultSnapshot {
+  mission: MissionPackage;
+  mission_path: string;
+  result_path: string;
+  result_source: string;
+}
+
+export interface ImportEvidenceWriteInput {
+  submission_source: string;
+  evidence: ImportEvidenceEnvelope;
+  verification: CommandEvidenceRecord[];
+}
+
+export interface StoredImportEvidence {
+  evidence: ImportEvidenceEnvelope;
+  summary: ImportEvidenceSummary;
+  verification: CommandEvidenceRecord[];
 }
 
 const nonEmptyTrimmedStringSchema = z

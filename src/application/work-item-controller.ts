@@ -1,24 +1,78 @@
 import { createHash } from "node:crypto";
 
 import {
+  commandEvidenceRecordSchema,
+  createImportRunId,
+  externalResultSubmissionSchema,
+  hashResultContent,
+  importEvidenceEnvelopeSchema,
+  type CommandEvidenceRecord,
+  type ExternalResultSubmission,
+  type ImportEvidenceOutcome,
+  type ImportEvidenceSummary,
+  type ImportEvidenceWriteInput,
+  type MissionResultSnapshot,
+  type StoredImportEvidence,
+} from "../domain/result";
+import type {
+  GitVerificationAdapter,
+  VerificationRunner,
+} from "../domain/verification";
+import {
   ControllerConflictError,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   goalContractUpdateInputSchema,
+  importExternalResultInputSchema,
+  retryExecuteAttemptInputSchema,
   workItemIdSchema,
   workItemSchema,
   type ActiveRun,
+  type ControllerLease,
   type ControllerMutationResult,
   type ControllerRunManifest,
   type ControllerTransitionInput,
   type ControllerWorkItemRepository,
   type GoalContractUpdateInput,
+  type ImportExternalResultInput,
+  type ProductManifest,
+  type RetryExecuteAttemptInput,
   type WorkItem,
   type WorkItemPhase,
+  type WorkItemStatus,
 } from "../domain/work-item";
 import { validateWorkItemTransition } from "../domain/workflow-policy";
+import {
+  scopeMatchesPath,
+  workspaceRelativePosixPathSchema,
+} from "../domain/workspace-path";
 
 type Clock = () => Date;
+
+interface ImportCapableRepository extends ControllerWorkItemRepository {
+  readManifest(): Promise<ProductManifest>;
+  readMissionResult(
+    identity: ExternalResultSubmission["identity"],
+  ): Promise<MissionResultSnapshot>;
+  readImportEvidence(
+    identity: ExternalResultSubmission["identity"],
+    importRunId: string,
+  ): Promise<StoredImportEvidence | null>;
+  writeImportEvidence(
+    input: ImportEvidenceWriteInput,
+  ): Promise<ImportEvidenceSummary>;
+}
+
+export interface ImportExternalResultResult extends ControllerMutationResult {
+  evidence: ImportEvidenceSummary;
+}
+
+interface ExternalResultAssessment {
+  outcome: ImportEvidenceOutcome;
+  reasons: string[];
+  result?: ExternalResultSubmission;
+  verification: CommandEvidenceRecord[];
+}
 
 export function deriveControllerIdempotencyKey(
   workItemId: string,
@@ -87,7 +141,9 @@ function manifestMatches(
 export class WorkItemController {
   constructor(
     private readonly repository: ControllerWorkItemRepository,
-    private readonly clock: Clock = () => new Date(),
+    private readonly clock: Clock,
+    private readonly git: GitVerificationAdapter,
+    private readonly verificationRunner: VerificationRunner,
   ) {}
 
   async updateGoalContract(
@@ -337,6 +393,585 @@ export class WorkItemController {
     } finally {
       await this.repository.releaseControllerLease(lease);
     }
+  }
+
+  async importExternalResult(
+    workItemId: string,
+    input: ImportExternalResultInput,
+  ): Promise<ImportExternalResultResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = importExternalResultInputSchema.parse(input);
+    const repository = this.importRepository();
+    const identity = {
+      work_item_id: validatedId,
+      goal_version: validatedInput.expected_goal_version,
+      input_revision: validatedInput.expected_input_revision,
+      attempt: validatedInput.attempt,
+    };
+    const snapshot = await repository.readMissionResult(identity);
+    const resultContentSha256 = hashResultContent(snapshot.result_source);
+    const importRunId = createImportRunId(
+      snapshot.mission.content_sha256,
+      resultContentSha256,
+    );
+    const idempotencyKey = [
+      deriveControllerIdempotencyKey(
+        validatedId,
+        "execute",
+        identity.goal_version,
+        identity.input_revision,
+        identity.attempt,
+      ),
+      "import",
+      resultContentSha256,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "import_external_result", importRunId }),
+    );
+    const storedEvidence = await repository.readImportEvidence(
+      identity,
+      importRunId,
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await repository.acquireControllerLease(validatedId, activeRun);
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const existingManifest = await repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (storedEvidence !== null) {
+        return await this.reconcileStoredImport(
+          repository,
+          lease,
+          existingManifest,
+          storedEvidence,
+          validatedInput,
+          activeRun,
+          idempotencyKey,
+        );
+      }
+      if (existingManifest !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Import run ${runId} has a controller manifest but no immutable evidence.`,
+        );
+      }
+
+      this.validateExecuteExpectation(
+        validatedId,
+        lease.work_item,
+        validatedInput,
+      );
+
+      const manifest = await repository.readManifest();
+      const assessment = await this.assessExternalResult(
+        snapshot,
+        identity,
+        manifest,
+      );
+      const targetPhase: WorkItemPhase =
+        assessment.outcome === "applied" ? "review" : "execute";
+      const targetStatus: WorkItemStatus =
+        assessment.outcome === "applied" ? "active" : "blocked";
+      const transition = validateWorkItemTransition(
+        lease.work_item.state.phase,
+        targetPhase,
+        lease.work_item.state.status,
+        targetStatus,
+      );
+      if (!transition.ok) {
+        throw this.conflict(
+          "invalid_transition",
+          validatedId,
+          transition.reason,
+        );
+      }
+
+      const completedAt = nextTimestamp(activeRun.acquired_at, this.clock);
+      const evidence = importEvidenceEnvelopeSchema.parse({
+        schema_version: 1,
+        import_run_id: importRunId,
+        result_content_sha256: resultContentSha256,
+        mission_content_sha256: snapshot.mission.content_sha256,
+        identity,
+        git_base_commit: snapshot.mission.source_revision.git_base_commit,
+        result_commit: assessment.result?.commit ?? null,
+        controller_run_id: runId,
+        started_at: activeRun.acquired_at,
+        completed_at: completedAt,
+        outcome: assessment.outcome,
+        reasons: assessment.reasons,
+      });
+      const evidenceSummary = await repository.writeImportEvidence({
+        submission_source: snapshot.result_source,
+        evidence,
+        verification: assessment.verification,
+      });
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...lease.work_item.state,
+          phase: targetPhase,
+          status: targetStatus,
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const pendingManifest = this.pendingManifest(
+        {
+          work_item_id: validatedId,
+          run_id: runId,
+          idempotency_key: idempotencyKey,
+          phase: targetPhase,
+          goal_version: identity.goal_version,
+          input_revision: identity.input_revision,
+          attempt: identity.attempt,
+        },
+        activeRun.acquired_at,
+      );
+      const mutation = await repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest: pendingManifest,
+      });
+
+      return { ...mutation, evidence: evidenceSummary };
+    } finally {
+      await repository.releaseControllerLease(lease);
+    }
+  }
+
+  async retryExecuteAttempt(
+    workItemId: string,
+    input: RetryExecuteAttemptInput,
+  ): Promise<ControllerMutationResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = retryExecuteAttemptInputSchema.parse(input);
+    const nextAttempt = this.incrementVersion(
+      validatedInput.attempt,
+      validatedId,
+      "attempt",
+    );
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      validatedId,
+      "execute",
+      validatedInput.expected_goal_version,
+      validatedInput.expected_input_revision,
+      nextAttempt,
+    );
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "retry_execute_attempt", input: validatedInput }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const manifestIdentity = {
+        work_item_id: validatedId,
+        run_id: runId,
+        idempotency_key: idempotencyKey,
+        phase: "execute" as const,
+        goal_version: validatedInput.expected_goal_version,
+        input_revision: validatedInput.expected_input_revision,
+        attempt: nextAttempt,
+      };
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (existing !== null) {
+        if (
+          manifestMatches(existing, manifestIdentity) &&
+          lease.work_item.state.phase === "execute" &&
+          lease.work_item.state.status === "active" &&
+          lease.work_item.state.goal_version ===
+            validatedInput.expected_goal_version &&
+          lease.work_item.state.input_revision ===
+            validatedInput.expected_input_revision &&
+          lease.work_item.state.attempt === nextAttempt
+        ) {
+          return { work_item: lease.work_item, manifest: existing };
+        }
+        throw this.conflict(
+          "idempotency_conflict",
+          validatedId,
+          `Run ${runId} already has a non-matching durable result.`,
+        );
+      }
+
+      this.validateExecuteExpectation(
+        validatedId,
+        lease.work_item,
+        validatedInput,
+      );
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...lease.work_item.state,
+          status: "active",
+          attempt: nextAttempt,
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const manifest = this.pendingManifest(
+        manifestIdentity,
+        activeRun.acquired_at,
+      );
+      return await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest,
+      });
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
+  }
+
+  private async assessExternalResult(
+    snapshot: MissionResultSnapshot,
+    identity: ExternalResultSubmission["identity"],
+    manifest: ProductManifest,
+  ): Promise<ExternalResultAssessment> {
+    const reasons: string[] = [];
+    if (JSON.stringify(snapshot.mission.identity) !== JSON.stringify(identity)) {
+      reasons.push("Mission identity does not match the requested governed tuple.");
+    }
+    if (snapshot.mission.result_contract.output_path !== snapshot.result_path) {
+      reasons.push("Mission result path does not match the immutable snapshot path.");
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(snapshot.result_source);
+    } catch {
+      return {
+        outcome: "rejected",
+        reasons: [...reasons, "result.json is not valid JSON."],
+        verification: [],
+      };
+    }
+    const parsedResult = externalResultSubmissionSchema.safeParse(parsedJson);
+    if (!parsedResult.success) {
+      return {
+        outcome: "rejected",
+        reasons: [
+          ...reasons,
+          ...parsedResult.error.issues.map(
+            (issue) =>
+              `result.json ${issue.path.map(String).join(".") || "value"}: ${issue.message}`,
+          ),
+        ],
+        verification: [],
+      };
+    }
+    const result = parsedResult.data;
+    if (result.mission_content_sha256 !== snapshot.mission.content_sha256) {
+      reasons.push("Result mission hash does not match the immutable mission.");
+    }
+    if (JSON.stringify(result.identity) !== JSON.stringify(identity)) {
+      reasons.push("Result identity does not match the requested governed tuple.");
+    }
+    if (reasons.length === 0) {
+      reasons.push(...(await this.validateGitProof(snapshot, result)));
+    }
+    if (reasons.length > 0) {
+      return { outcome: "rejected", reasons, result, verification: [] };
+    }
+
+    const verification: CommandEvidenceRecord[] = [];
+    for (
+      let index = 0;
+      index < manifest.verification.required_commands.length;
+      index += 1
+    ) {
+      const command = manifest.verification.required_commands[index];
+      let record: CommandEvidenceRecord;
+      try {
+        record = commandEvidenceRecordSchema.parse(
+          await this.verificationRunner.run(command),
+        );
+        if (
+          record.name !== command.name ||
+          JSON.stringify(record.argv) !== JSON.stringify(command.argv)
+        ) {
+          throw new Error(
+            "verification runner returned evidence for a different command",
+          );
+        }
+      } catch (error) {
+        const startedAt = this.clock().toISOString();
+        record = commandEvidenceRecordSchema.parse({
+          name: command.name,
+          argv: command.argv,
+          started_at: startedAt,
+          completed_at: nextTimestamp(startedAt, this.clock),
+          duration_ms: 0,
+          status: "spawn_error",
+          exit_code: null,
+          signal: null,
+          stdout: "",
+          stderr: error instanceof Error ? error.message : String(error),
+          output_truncated: false,
+        });
+      }
+      verification.push(record);
+      if (record.status !== "passed") {
+        reasons.push(
+          `Required verification command ${command.name} ended with ${record.status}.`,
+        );
+        for (
+          let remaining = index + 1;
+          remaining < manifest.verification.required_commands.length;
+          remaining += 1
+        ) {
+          verification.push(
+            this.notRunEvidence(
+              manifest.verification.required_commands[remaining],
+            ),
+          );
+        }
+        break;
+      }
+    }
+
+    return reasons.length === 0
+      ? { outcome: "applied", reasons: [], result, verification }
+      : { outcome: "failed", reasons, result, verification };
+  }
+
+  private async validateGitProof(
+    snapshot: MissionResultSnapshot,
+    result: ExternalResultSubmission,
+  ): Promise<string[]> {
+    const resolvedCommit = await this.git.resolveCommit(result.commit);
+    if (resolvedCommit === null || resolvedCommit !== result.commit) {
+      return ["Result commit is not a canonical local commit object."];
+    }
+    const baseCommit = snapshot.mission.source_revision.git_base_commit;
+    if (!(await this.git.isAncestor(baseCommit, resolvedCommit))) {
+      return ["Mission Git base is not an ancestor of the result commit."];
+    }
+    if ((await this.git.readHeadCommit()) !== resolvedCommit) {
+      return ["Workspace HEAD does not equal the submitted result commit."];
+    }
+    if (!(await this.git.isWorktreeCleanExcludingFounder())) {
+      return ["Workspace has uncommitted changes outside .founder/."];
+    }
+
+    const changedFiles = await this.git.listChangedFiles(
+      baseCommit,
+      resolvedCommit,
+    );
+    if (changedFiles.length === 0) {
+      return ["Git reports no changed files for the result commit."];
+    }
+    for (const path of changedFiles) {
+      if (!workspaceRelativePosixPathSchema.safeParse(path).success) {
+        return [`Git reported an unsafe changed path: ${path}`];
+      }
+      if (path === ".founder" || path.startsWith(".founder/")) {
+        return [`Controller-owned path is outside external result scope: ${path}`];
+      }
+      if (
+        !snapshot.mission.goal.allowed_scope.some((scopeEntry) =>
+          scopeMatchesPath(scopeEntry, path),
+        )
+      ) {
+        return [`Changed path is outside allowed_scope: ${path}`];
+      }
+    }
+    const canonicalGitFiles = [...changedFiles].sort();
+    const canonicalReportedFiles = [...result.changed_files].sort();
+    if (
+      JSON.stringify(canonicalGitFiles) !==
+      JSON.stringify(canonicalReportedFiles)
+    ) {
+      return ["Result changed_files do not exactly match the Git diff."];
+    }
+    return [];
+  }
+
+  private async reconcileStoredImport(
+    repository: ImportCapableRepository,
+    lease: ControllerLease,
+    existingManifest: ControllerRunManifest | null,
+    stored: StoredImportEvidence,
+    input: ImportExternalResultInput,
+    activeRun: ActiveRun,
+    idempotencyKey: string,
+  ): Promise<ImportExternalResultResult> {
+    const workItemId = lease.work_item.goal.work_item_id;
+    if (
+      stored.evidence.controller_run_id !== activeRun.run_id ||
+      JSON.stringify(stored.evidence.identity) !==
+        JSON.stringify({
+          work_item_id: workItemId,
+          goal_version: input.expected_goal_version,
+          input_revision: input.expected_input_revision,
+          attempt: input.attempt,
+        }) ||
+      stored.summary.import_run_id !== stored.evidence.import_run_id ||
+      stored.summary.outcome !== stored.evidence.outcome ||
+      JSON.stringify(stored.summary.reasons) !==
+        JSON.stringify(stored.evidence.reasons)
+    ) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Stored import evidence does not match its controller run or summary.",
+      );
+    }
+    const outcome = stored.evidence.outcome;
+    const targetPhase: WorkItemPhase =
+      outcome === "applied" ? "review" : "execute";
+    const targetStatus: WorkItemStatus =
+      outcome === "applied" ? "active" : "blocked";
+    const manifestIdentity = {
+      work_item_id: workItemId,
+      run_id: activeRun.run_id,
+      idempotency_key: idempotencyKey,
+      phase: targetPhase,
+      goal_version: input.expected_goal_version,
+      input_revision: input.expected_input_revision,
+      attempt: input.attempt,
+    };
+    const isTargetState =
+      lease.work_item.state.phase === targetPhase &&
+      lease.work_item.state.status === targetStatus &&
+      lease.work_item.state.goal_version === input.expected_goal_version &&
+      lease.work_item.state.input_revision === input.expected_input_revision &&
+      lease.work_item.state.attempt === input.attempt;
+    if (existingManifest !== null) {
+      if (manifestMatches(existingManifest, manifestIdentity) && isTargetState) {
+        return {
+          work_item: lease.work_item,
+          manifest: existingManifest,
+          evidence: stored.summary,
+        };
+      }
+      throw this.conflict(
+        "idempotency_conflict",
+        workItemId,
+        `Run ${activeRun.run_id} already has a non-matching durable result.`,
+      );
+    }
+    if (!isTargetState) {
+      this.validateExecuteExpectation(workItemId, lease.work_item, input);
+    }
+
+    const nextItem = workItemSchema.parse({
+      goal: lease.work_item.goal,
+      state: {
+        ...lease.work_item.state,
+        phase: targetPhase,
+        status: targetStatus,
+        updated_at: isTargetState
+          ? lease.work_item.state.updated_at
+          : nextTimestamp(lease.work_item.state.updated_at, this.clock),
+      },
+    });
+    const mutation = await repository.commitControllerMutation(lease, {
+      goal: nextItem.goal,
+      state: nextItem.state,
+      manifest: this.pendingManifest(
+        manifestIdentity,
+        activeRun.acquired_at,
+      ),
+    });
+    return { ...mutation, evidence: stored.summary };
+  }
+
+  private notRunEvidence(
+    command: ProductManifest["verification"]["required_commands"][number],
+  ): CommandEvidenceRecord {
+    return commandEvidenceRecordSchema.parse({
+      name: command.name,
+      argv: command.argv,
+      started_at: null,
+      completed_at: null,
+      duration_ms: 0,
+      status: "not_run",
+      exit_code: null,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      output_truncated: false,
+    });
+  }
+
+  private validateExecuteExpectation(
+    workItemId: string,
+    current: WorkItem,
+    input: ImportExternalResultInput | RetryExecuteAttemptInput,
+  ): void {
+    if (current.goal.goal_version === undefined) {
+      throw this.conflict(
+        "contract_required",
+        workItemId,
+        "External result operations require an active goal contract.",
+      );
+    }
+    if (
+      current.state.phase !== input.expected_phase ||
+      current.state.status !== input.expected_status ||
+      current.state.schema_version !== input.expected_schema_version ||
+      current.state.goal_version !== input.expected_goal_version ||
+      current.state.input_revision !== input.expected_input_revision
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "External result expectations do not match durable state.",
+      );
+    }
+    if (current.state.attempt !== input.attempt) {
+      throw this.conflict(
+        "attempt_conflict",
+        workItemId,
+        `Expected attempt ${input.attempt} but found ${current.state.attempt}.`,
+      );
+    }
+  }
+
+  private importRepository(): ImportCapableRepository {
+    const repository = this.repository as Partial<ImportCapableRepository>;
+    if (
+      typeof repository.readManifest !== "function" ||
+      typeof repository.readMissionResult !== "function" ||
+      typeof repository.readImportEvidence !== "function" ||
+      typeof repository.writeImportEvidence !== "function"
+    ) {
+      throw new Error(
+        "Work-item repository does not support external result import.",
+      );
+    }
+    return repository as ImportCapableRepository;
   }
 
   private activeRun(runId: string, idempotencyKey: string): ActiveRun {

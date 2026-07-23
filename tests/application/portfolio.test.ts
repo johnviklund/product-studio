@@ -28,12 +28,51 @@ import {
   type ControllerRunManifest,
   type WorkItem,
   type WorkItemPhase,
+  type VerificationCommand,
 } from "../../src/domain/work-item";
+import type {
+  GitVerificationAdapter,
+  VerificationRunner,
+} from "../../src/domain/verification";
 import { SQLitePortfolioIndex } from "../../src/index/work-item-index";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
 import { PortfolioRegistry } from "../../src/workspace/portfolio-registry";
 
 const createdRoots: string[] = [];
+const controllerGit: GitVerificationAdapter = {
+  async resolveCommit() {
+    return "a".repeat(40);
+  },
+  async isAncestor() {
+    return true;
+  },
+  async readHeadCommit() {
+    return "a".repeat(40);
+  },
+  async isWorktreeCleanExcludingFounder() {
+    return true;
+  },
+  async listChangedFiles() {
+    return ["src/application/portfolio.ts"];
+  },
+};
+const controllerRunner: VerificationRunner = {
+  async run(command: VerificationCommand) {
+    return {
+      name: command.name,
+      argv: command.argv,
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:01.000Z",
+      duration_ms: 1000,
+      status: "passed",
+      exit_code: 0,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      output_truncated: false,
+    };
+  },
+};
 
 async function createRoot(prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -88,6 +127,8 @@ async function governWorkItemThrough(
   const controller = new WorkItemController(
     repository,
     () => new Date("2026-07-22T12:00:00.000Z"),
+    controllerGit,
+    controllerRunner,
   );
   const contracted = await controller.updateGoalContract(
     workItem.goal.work_item_id,
@@ -415,6 +456,8 @@ describe("PortfolioService", () => {
     const controller = new WorkItemController(
       repository,
       () => new Date("2026-07-21T21:30:00.000Z"),
+      controllerGit,
+      controllerRunner,
     );
     await controller.updateGoalContract(created.work_item.goal.work_item_id, {
       acceptance_criteria: ["Keep contract changes version-bound"],

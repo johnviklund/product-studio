@@ -9,11 +9,74 @@ import {
   WorkItemController,
   deriveControllerIdempotencyKey,
 } from "../../src/application/work-item-controller";
-import { ControllerConflictError } from "../../src/domain/work-item";
+import {
+  compileMission,
+  type MissionIdentity,
+} from "../../src/domain/mission";
+import {
+  importEvidenceSummarySchema,
+  serializeExternalResult,
+  type ImportEvidenceWriteInput,
+  type MissionResultSnapshot,
+  type StoredImportEvidence,
+} from "../../src/domain/result";
+import type {
+  GitVerificationAdapter,
+  VerificationRunner,
+} from "../../src/domain/verification";
+import {
+  ControllerConflictError,
+  type ControllerRunManifest,
+  type VerificationCommand,
+  type WorkItem,
+} from "../../src/domain/work-item";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
 
 const createdRoots: string[] = [];
 const fixedClock = () => new Date("2026-07-21T21:00:00.000Z");
+const testCommit = "a".repeat(40);
+const passingGit: GitVerificationAdapter = {
+  async resolveCommit() {
+    return testCommit;
+  },
+  async isAncestor() {
+    return true;
+  },
+  async readHeadCommit() {
+    return testCommit;
+  },
+  async isWorktreeCleanExcludingFounder() {
+    return true;
+  },
+  async listChangedFiles() {
+    return ["src/domain/result.ts"];
+  },
+};
+const passingRunner: VerificationRunner = {
+  async run(command: VerificationCommand) {
+    return {
+      name: command.name,
+      argv: command.argv,
+      started_at: "2026-07-21T21:00:00.000Z",
+      completed_at: "2026-07-21T21:00:01.000Z",
+      duration_ms: 1000,
+      status: "passed",
+      exit_code: 0,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      output_truncated: false,
+    };
+  },
+};
+
+function createController(
+  repository: ProductWorkspace,
+  git: GitVerificationAdapter = passingGit,
+  runner: VerificationRunner = passingRunner,
+) {
+  return new WorkItemController(repository, fixedClock, git, runner);
+}
 
 async function createWorkspace(): Promise<{
   root: string;
@@ -25,10 +88,151 @@ async function createWorkspace(): Promise<{
   await mkdir(founderDirectory, { recursive: true });
   await writeFile(
     join(founderDirectory, "product.yaml"),
-    stringify({ schema_version: 1, product_name: "Controller Test" }),
+    stringify({
+      schema_version: 2,
+      product_name: "Controller Test",
+      verification: {
+        required_commands: [
+          {
+            name: "Tests",
+            argv: ["npm", "test"],
+            timeout_seconds: 120,
+          },
+          {
+            name: "Typecheck",
+            argv: ["npm", "run", "typecheck"],
+            timeout_seconds: 120,
+          },
+        ],
+      },
+    }),
     "utf8",
   );
   return { root, repository: new ProductWorkspace(root) };
+}
+
+interface ImportTestRepository extends ProductWorkspace {
+  readMissionResult(identity: MissionIdentity): Promise<MissionResultSnapshot>;
+  readImportEvidence(
+    identity: MissionIdentity,
+    importRunId: string,
+  ): Promise<StoredImportEvidence | null>;
+  writeImportEvidence(
+    input: ImportEvidenceWriteInput,
+  ): Promise<ReturnType<typeof importEvidenceSummarySchema.parse>>;
+}
+
+async function governToExecute(
+  repository: ProductWorkspace,
+): Promise<{ workItem: WorkItem; manifest: ControllerRunManifest }> {
+  const created = await createUncontractedItem(repository);
+  const controller = createController(repository);
+  let mutation = await controller.updateGoalContract(
+    created.goal.work_item_id,
+    firstContract,
+  );
+  for (const targetPhase of ["spec", "plan", "execute"] as const) {
+    mutation = await controller.transition(created.goal.work_item_id, {
+      target_phase: targetPhase,
+      target_status: "active",
+      expected_phase: mutation.work_item.state.phase,
+      expected_status: mutation.work_item.state.status,
+      expected_schema_version: 1,
+      expected_goal_version: mutation.work_item.state.goal_version!,
+      expected_input_revision: mutation.work_item.state.input_revision!,
+      attempt: mutation.work_item.state.attempt!,
+    });
+  }
+  return { workItem: mutation.work_item, manifest: mutation.manifest };
+}
+
+async function createImportFixture(options?: {
+  resultSource?: string;
+}): Promise<{
+  repository: ImportTestRepository;
+  workItem: WorkItem;
+  input: {
+    expected_phase: "execute";
+    expected_status: "active";
+    expected_schema_version: 1;
+    expected_goal_version: number;
+    expected_input_revision: number;
+    attempt: number;
+  };
+  evidence: Map<string, StoredImportEvidence>;
+  evidenceWrites: { count: number };
+}> {
+  const { repository: workspace } = await createWorkspace();
+  const { workItem, manifest } = await governToExecute(workspace);
+  const identity = {
+    work_item_id: workItem.goal.work_item_id,
+    goal_version: workItem.state.goal_version!,
+    input_revision: workItem.state.input_revision!,
+    attempt: workItem.state.attempt!,
+  };
+  const paths = {
+    task_path: `.founder/missions/${identity.work_item_id}/${identity.goal_version}-${identity.input_revision}-${identity.attempt}/TASK.md`,
+    output_path: `.founder/missions/${identity.work_item_id}/${identity.goal_version}-${identity.input_revision}-${identity.attempt}/result.json`,
+    git_base_commit: "0".repeat(40),
+  };
+  const mission = compileMission(workItem, manifest, paths);
+  const resultSource =
+    options?.resultSource ??
+    serializeExternalResult({
+      result_schema_version: 1,
+      mission_content_sha256: mission.content_sha256,
+      identity,
+      commit: testCommit,
+      summary: "Implemented result import",
+      changed_files: ["src/domain/result.ts"],
+      verification: [{ name: "Tests", status: "passed" }],
+    });
+  const snapshot: MissionResultSnapshot = {
+    mission,
+    mission_path: paths.task_path.replace(/TASK\.md$/, "mission.json"),
+    result_path: paths.output_path,
+    result_source: resultSource,
+  };
+  const evidence = new Map<string, StoredImportEvidence>();
+  const evidenceWrites = { count: 0 };
+  const repository = Object.assign(workspace, {
+    async readMissionResult() {
+      return snapshot;
+    },
+    async readImportEvidence(_identity: MissionIdentity, importRunId: string) {
+      return evidence.get(importRunId) ?? null;
+    },
+    async writeImportEvidence(input: ImportEvidenceWriteInput) {
+      evidenceWrites.count += 1;
+      const summary = importEvidenceSummarySchema.parse({
+        import_run_id: input.evidence.import_run_id,
+        outcome: input.evidence.outcome,
+        evidence_path: `.founder/run-evidence/${identity.work_item_id}/${identity.goal_version}-${identity.input_revision}-${identity.attempt}/${input.evidence.import_run_id}`,
+        reasons: input.evidence.reasons,
+      });
+      evidence.set(input.evidence.import_run_id, {
+        evidence: input.evidence,
+        summary,
+        verification: input.verification,
+      });
+      return summary;
+    },
+  }) as ImportTestRepository;
+
+  return {
+    repository,
+    workItem,
+    input: {
+      expected_phase: "execute",
+      expected_status: "active",
+      expected_schema_version: 1,
+      expected_goal_version: identity.goal_version,
+      expected_input_revision: identity.input_revision,
+      attempt: identity.attempt,
+    },
+    evidence,
+    evidenceWrites,
+  };
 }
 
 async function createUncontractedItem(repository: ProductWorkspace) {
@@ -56,7 +260,7 @@ describe("WorkItemController", () => {
   it("activates and updates a goal contract exactly once per expected revision", async () => {
     const { root, repository } = await createWorkspace();
     const created = await createUncontractedItem(repository);
-    const controller = new WorkItemController(repository, fixedClock);
+    const controller = createController(repository);
 
     const activated = await controller.updateGoalContract(
       created.goal.work_item_id,
@@ -129,7 +333,7 @@ describe("WorkItemController", () => {
   it("applies and replays an exact transition without changing durable state twice", async () => {
     const { root, repository } = await createWorkspace();
     const created = await createUncontractedItem(repository);
-    const controller = new WorkItemController(repository, fixedClock);
+    const controller = createController(repository);
     await controller.updateGoalContract(created.goal.work_item_id, firstContract);
     const input = {
       target_phase: "spec" as const,
@@ -173,7 +377,7 @@ describe("WorkItemController", () => {
   it("rejects missing contracts, stale expectations, invalid moves, and attempt conflicts", async () => {
     const { repository } = await createWorkspace();
     const created = await createUncontractedItem(repository);
-    const controller = new WorkItemController(repository, fixedClock);
+    const controller = createController(repository);
 
     await expect(
       controller.transition(created.goal.work_item_id, {
@@ -247,6 +451,148 @@ describe("WorkItemController", () => {
         contracted,
       );
     }
+  });
+
+  it("imports a green result once and replays immutable evidence without rerunning", async () => {
+    const { repository, workItem, input, evidence, evidenceWrites } =
+      await createImportFixture();
+    let commandRuns = 0;
+    const runner: VerificationRunner = {
+      async run(command) {
+        commandRuns += 1;
+        return passingRunner.run(command);
+      },
+    };
+    const controller = createController(repository, passingGit, runner);
+
+    const imported = await controller.importExternalResult(
+      workItem.goal.work_item_id,
+      input,
+    );
+    expect(imported.work_item.state).toMatchObject({
+      phase: "review",
+      status: "active",
+      attempt: 0,
+    });
+    expect(imported.evidence).toMatchObject({ outcome: "applied" });
+    expect(commandRuns).toBe(2);
+    expect(evidenceWrites.count).toBe(1);
+
+    const replay = await controller.importExternalResult(
+      imported.work_item.goal.work_item_id,
+      input,
+    );
+    expect(replay).toEqual(imported);
+    expect(commandRuns).toBe(2);
+    expect(evidenceWrites.count).toBe(1);
+    expect(evidence.size).toBe(1);
+  });
+
+  it("blocks on a red command, marks remaining checks not-run, and starts one repair attempt", async () => {
+    const { repository, workItem, input, evidence } =
+      await createImportFixture();
+    let commandRuns = 0;
+    const redRunner: VerificationRunner = {
+      async run(command) {
+        commandRuns += 1;
+        return {
+          ...(await passingRunner.run(command)),
+          status: "failed",
+          exit_code: 1,
+          stderr: "test failure",
+        };
+      },
+    };
+    const controller = createController(repository, passingGit, redRunner);
+
+    const imported = await controller.importExternalResult(
+      workItem.goal.work_item_id,
+      input,
+    );
+    expect(imported.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "blocked",
+      attempt: 0,
+    });
+    expect(imported.evidence.outcome).toBe("failed");
+    expect(imported.manifest.outcome).toBe("applied");
+    expect(commandRuns).toBe(1);
+    expect([...evidence.values()][0].verification.map((record) => record.status))
+      .toEqual(["failed", "not_run"]);
+
+    const retried = await controller.retryExecuteAttempt(
+      workItem.goal.work_item_id,
+      {
+        expected_phase: "execute",
+        expected_status: "blocked",
+        expected_schema_version: 1,
+        expected_goal_version: input.expected_goal_version,
+        expected_input_revision: input.expected_input_revision,
+        attempt: 0,
+      },
+    );
+    expect(retried.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      attempt: 1,
+    });
+    expect(
+      await controller.retryExecuteAttempt(workItem.goal.work_item_id, {
+        expected_phase: "execute",
+        expected_status: "blocked",
+        expected_schema_version: 1,
+        expected_goal_version: input.expected_goal_version,
+        expected_input_revision: input.expected_input_revision,
+        attempt: 0,
+      }),
+    ).toEqual(retried);
+  });
+
+  it("preserves malformed and out-of-scope submissions as rejected evidence", async () => {
+    const malformed = await createImportFixture({ resultSource: "{invalid" });
+    const malformedController = createController(malformed.repository);
+    const malformedResult = await malformedController.importExternalResult(
+      malformed.workItem.goal.work_item_id,
+      malformed.input,
+    );
+    expect(malformedResult.work_item.state.status).toBe("blocked");
+    expect(malformedResult.evidence).toMatchObject({ outcome: "rejected" });
+    expect(malformedResult.manifest.outcome).toBe("applied");
+    expect([...malformed.evidence.values()][0].evidence.reasons).toContain(
+      "result.json is not valid JSON.",
+    );
+
+    const outside = await createImportFixture();
+    const outsideGit: GitVerificationAdapter = {
+      ...passingGit,
+      async listChangedFiles() {
+        return ["src/outside.ts"];
+      },
+    };
+    const outsideResult = await createController(
+      outside.repository,
+      outsideGit,
+    ).importExternalResult(outside.workItem.goal.work_item_id, outside.input);
+    expect(outsideResult.work_item.state.status).toBe("blocked");
+    expect(outsideResult.evidence).toMatchObject({ outcome: "rejected" });
+    expect(outsideResult.evidence.reasons[0]).toContain("allowed_scope");
+  });
+
+  it("rejects repair attempts unless execute is blocked at the exact tuple", async () => {
+    const { repository, workItem, input } = await createImportFixture();
+    await expect(
+      createController(repository).retryExecuteAttempt(
+        workItem.goal.work_item_id,
+        {
+          expected_phase: "execute",
+          expected_status: "blocked",
+          expected_schema_version: 1,
+          expected_goal_version: input.expected_goal_version,
+          expected_input_revision: input.expected_input_revision,
+          attempt: input.attempt,
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
   });
 
   it("derives the transition idempotency key from exactly the governed tuple", () => {
