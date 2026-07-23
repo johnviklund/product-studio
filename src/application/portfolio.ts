@@ -49,12 +49,14 @@ import {
   WorkItemTransferFailedError,
   assignWorkItemInputSchema,
   createCaptureInputSchema,
+  goalContractUpdateInputSchema,
   updateWorkItemDetailsInputSchema,
   updateWorkItemPhaseInputSchema,
   workItemIdSchema,
   type AssignWorkItemInput,
   type CreateCaptureInput,
   type ControllerRunManifest,
+  type GoalContractUpdateInput,
   type UpdateWorkItemDetailsInput,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
@@ -305,6 +307,25 @@ export class PortfolioService {
 
     await this.rebuild();
     return this.toPortfolioItem(source, updated);
+  }
+
+  async updateGoalContract(
+    sourceId: string,
+    workItemId: string,
+    input: GoalContractUpdateInput,
+  ): Promise<PortfolioWorkItem> {
+    const validatedInput = goalContractUpdateInputSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const current = await source.workspace.read(workItemId);
+    if (current === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+
+    const result = await this.workItemController(
+      source.workspace,
+    ).updateGoalContract(workItemId, validatedInput);
+    await this.rebuild();
+    return this.toPortfolioItem(source, result.work_item);
   }
 
   async assignWorkItem(
