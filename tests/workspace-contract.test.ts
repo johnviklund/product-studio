@@ -22,6 +22,7 @@ import {
 import {
   createImportRunId,
   hashResultContent,
+  type ImportEvidenceEnvelope,
 } from "../src/domain/result";
 import {
   InvalidWorkspaceError,
@@ -207,6 +208,39 @@ function missionIdentity(
     input_revision: overrides.input_revision ?? 1,
     attempt: overrides.attempt ?? 0,
   };
+}
+
+async function writeRejectedEvidence(
+  workspace: ProductWorkspace,
+  identity: MissionIdentity,
+  submissionSource: string,
+  completedAt: string,
+): Promise<ImportEvidenceEnvelope> {
+  const missionContentSha256 = "b".repeat(64);
+  const resultContentSha256 = hashResultContent(submissionSource);
+  const evidence: ImportEvidenceEnvelope = {
+    schema_version: 1,
+    import_run_id: createImportRunId(
+      missionContentSha256,
+      resultContentSha256,
+    ),
+    result_content_sha256: resultContentSha256,
+    mission_content_sha256: missionContentSha256,
+    identity,
+    git_base_commit: "a".repeat(40),
+    result_commit: null,
+    controller_run_id: thirdRunId,
+    started_at: "2026-07-22T12:00:00.000Z",
+    completed_at: completedAt,
+    outcome: "rejected",
+    reasons: ["The result did not satisfy its governed contract."],
+  };
+  await workspace.writeImportEvidence({
+    submission_source: submissionSource,
+    evidence,
+    verification: [],
+  });
+  return evidence;
 }
 
 function appliedExecuteManifest(
@@ -825,6 +859,144 @@ describe("ProductWorkspace", () => {
     await symlink(outside, join(evidenceDirectory, "verification.json"), "file");
     await expect(
       workspace.readImportEvidence(missionIdentity(), importRunId),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+  });
+
+  it("lists immutable import evidence newest-first across governed identities", async () => {
+    const root = await createWorkspace();
+    const workspace = missionWorkspace(root);
+    const oldest = await writeRejectedEvidence(
+      workspace,
+      missionIdentity(),
+      '{"result":"oldest"}\n',
+      "2026-07-22T13:00:00.000Z",
+    );
+    const tiedFirst = await writeRejectedEvidence(
+      workspace,
+      missionIdentity(firstId, { input_revision: 2, attempt: 1 }),
+      '{"result":"tied-first"}\n',
+      "2026-07-22T14:00:00.000Z",
+    );
+    const tiedSecond = await writeRejectedEvidence(
+      workspace,
+      missionIdentity(),
+      '{"result":"tied-second"}\n',
+      "2026-07-22T14:00:00.000Z",
+    );
+
+    const tiedRunIds = [tiedFirst.import_run_id, tiedSecond.import_run_id].sort(
+      (left, right) => right.localeCompare(left),
+    );
+    const listed = await workspace.listImportEvidence(firstId);
+
+    expect(listed.map(({ evidence }) => evidence.import_run_id)).toEqual([
+      ...tiedRunIds,
+      oldest.import_run_id,
+    ]);
+    expect(listed.map(({ evidence }) => evidence.identity)).toContainEqual(
+      missionIdentity(firstId, { input_revision: 2, attempt: 1 }),
+    );
+    expect(await workspace.listImportEvidence(secondId)).toEqual([]);
+  });
+
+  it("fails closed when listed import evidence is unsafe or divergent", async () => {
+    const symlinkRoot = await createWorkspace();
+    const outsideRoot = await createWorkspace();
+    const symlinkTuple = join(
+      symlinkRoot,
+      ".founder",
+      "run-evidence",
+      firstId,
+      "1-1-0",
+    );
+    await mkdir(symlinkTuple, { recursive: true });
+    await symlink(outsideRoot, join(symlinkTuple, "c".repeat(64)), "dir");
+    await expect(
+      missionWorkspace(symlinkRoot).listImportEvidence(firstId),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    const malformedTupleRoot = await createWorkspace();
+    await mkdir(
+      join(
+        malformedTupleRoot,
+        ".founder",
+        "run-evidence",
+        firstId,
+        "bad-tuple",
+      ),
+      { recursive: true },
+    );
+    await expect(
+      missionWorkspace(malformedTupleRoot).listImportEvidence(firstId),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    const malformedRunRoot = await createWorkspace();
+    await mkdir(
+      join(
+        malformedRunRoot,
+        ".founder",
+        "run-evidence",
+        firstId,
+        "1-1-0",
+        "bad-run-id",
+      ),
+      { recursive: true },
+    );
+    await expect(
+      missionWorkspace(malformedRunRoot).listImportEvidence(firstId),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    const partialRoot = await createWorkspace();
+    const partialWorkspace = missionWorkspace(partialRoot);
+    const partial = await writeRejectedEvidence(
+      partialWorkspace,
+      missionIdentity(),
+      '{"result":"partial"}\n',
+      "2026-07-22T15:00:00.000Z",
+    );
+    const partialDirectory = join(
+      partialRoot,
+      ".founder",
+      "run-evidence",
+      firstId,
+      "1-1-0",
+      partial.import_run_id,
+    );
+    await rm(join(partialDirectory, "verification.json"));
+    await expect(
+      partialWorkspace.listImportEvidence(firstId),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    const divergentRoot = await createWorkspace();
+    const divergentWorkspace = missionWorkspace(divergentRoot);
+    const divergent = await writeRejectedEvidence(
+      divergentWorkspace,
+      missionIdentity(),
+      '{"result":"divergent"}\n',
+      "2026-07-22T16:00:00.000Z",
+    );
+    const divergentDirectory = join(
+      divergentRoot,
+      ".founder",
+      "run-evidence",
+      firstId,
+      "1-1-0",
+      divergent.import_run_id,
+    );
+    await writeFile(
+      join(divergentDirectory, "import.json"),
+      `${JSON.stringify(
+        {
+          ...divergent,
+          identity: missionIdentity(firstId, { attempt: 1 }),
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await expect(
+      divergentWorkspace.listImportEvidence(firstId),
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
   });
 
