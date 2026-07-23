@@ -15,6 +15,7 @@ import { isDeepStrictEqual } from "node:util";
 import { stringify } from "yaml";
 import { z } from "zod";
 
+import { WorkItemController } from "./work-item-controller";
 import {
   DuplicateWorkspaceError,
   INBOX_SOURCE_ID,
@@ -36,6 +37,11 @@ import {
   type MissionIdentity,
 } from "../domain/mission";
 import {
+  createImportRunId,
+  hashResultContent,
+  type ImportEvidenceSummary,
+} from "../domain/result";
+import {
   ControllerConflictError,
   InvalidWorkspaceError,
   WorkItemTargetCollisionError,
@@ -47,6 +53,7 @@ import {
   workItemIdSchema,
   type AssignWorkItemInput,
   type CreateCaptureInput,
+  type ControllerRunManifest,
   type UpdateWorkItemDetailsInput,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
@@ -60,6 +67,7 @@ type WorkspaceGateway = Pick<
   ProductWorkspace,
   | "workspaceRoot"
   | "readManifest"
+  | "create"
   | "list"
   | "read"
   | "createCapture"
@@ -74,6 +82,11 @@ type WorkspaceGateway = Pick<
   | "readControllerRunManifest"
   | "findAppliedExecuteManifest"
   | "writeMissionPackage"
+  | "readMissionResult"
+  | "readImportEvidence"
+  | "writeImportEvidence"
+  | "gitVerificationAdapter"
+  | "verificationRunner"
   | "commitControllerMutation"
   | "releaseControllerLease"
 >;
@@ -127,6 +140,14 @@ export interface RegisterWorkspaceResult {
 }
 
 export type MissionCompilation = MissionArtifactWriteResult;
+
+export interface PortfolioImportResult extends PortfolioWorkItem {
+  evidence: ImportEvidenceSummary;
+}
+
+export interface PortfolioRetryResult extends PortfolioWorkItem {
+  controller_run: ControllerRunManifest;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -479,6 +500,102 @@ export class PortfolioService {
     );
   }
 
+  async importResult(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PortfolioImportResult> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedExecuteIdentity(source, workItem);
+    const isActiveExecute =
+      workItem.state.phase === "execute" && workItem.state.status === "active";
+    if (!isActiveExecute) {
+      const isImportOutcomeState =
+        (workItem.state.phase === "review" &&
+          workItem.state.status === "active") ||
+        (workItem.state.phase === "execute" &&
+          workItem.state.status === "blocked");
+      if (!isImportOutcomeState) {
+        throw this.missionNotReady(
+          workItemId,
+          "Result import requires an assigned, governed item in active execute.",
+        );
+      }
+      const snapshot = await source.workspace.readMissionResult(identity);
+      const resultContentSha256 = hashResultContent(snapshot.result_source);
+      const importRunId = createImportRunId(
+        snapshot.mission.content_sha256,
+        resultContentSha256,
+      );
+      if (
+        (await source.workspace.readImportEvidence(identity, importRunId)) ===
+        null
+      ) {
+        throw this.missionNotReady(
+          workItemId,
+          "A blocked or review item only accepts an identical import replay.",
+        );
+      }
+    }
+
+    const controller = this.workItemController(source.workspace);
+    const imported = await controller.importExternalResult(workItemId, {
+      expected_phase: "execute",
+      expected_status: "active",
+      expected_schema_version: 1,
+      expected_goal_version: identity.goal_version,
+      expected_input_revision: identity.input_revision,
+      attempt: identity.attempt,
+    });
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: imported.work_item,
+      evidence: imported.evidence,
+    };
+  }
+
+  async retryExecuteAttempt(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PortfolioRetryResult> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedExecuteIdentity(source, workItem);
+    if (
+      workItem.state.phase !== "execute" ||
+      workItem.state.status !== "blocked"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Repair requires an assigned, governed item in blocked execute.",
+      );
+    }
+    const controller = this.workItemController(source.workspace);
+    const retried = await controller.retryExecuteAttempt(workItemId, {
+      expected_phase: "execute",
+      expected_status: "blocked",
+      expected_schema_version: 1,
+      expected_goal_version: identity.goal_version,
+      expected_input_revision: identity.input_revision,
+      attempt: identity.attempt,
+    });
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: retried.work_item,
+      controller_run: retried.manifest,
+    };
+  }
+
   async recoverPendingTransfers(): Promise<void> {
     const records = await this.readTransferJournals();
     for (const record of records) {
@@ -551,6 +668,42 @@ export class PortfolioService {
       project: source.project,
       work_item: workItem,
     };
+  }
+
+  private governedExecuteIdentity(
+    source: ResolvedSource,
+    workItem: WorkItem,
+  ): MissionIdentity {
+    if (
+      source.source_id === INBOX_SOURCE_ID ||
+      workItem.goal.goal_version === undefined ||
+      workItem.goal.acceptance_criteria === undefined ||
+      workItem.goal.allowed_scope === undefined ||
+      workItem.goal.review_ready === undefined ||
+      workItem.state.goal_version === undefined ||
+      workItem.state.input_revision === undefined ||
+      workItem.state.attempt === undefined
+    ) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "External result operations require an assigned, governed item.",
+      );
+    }
+    return {
+      work_item_id: workItem.goal.work_item_id,
+      goal_version: workItem.state.goal_version,
+      input_revision: workItem.state.input_revision,
+      attempt: workItem.state.attempt,
+    };
+  }
+
+  private workItemController(workspace: WorkspaceGateway): WorkItemController {
+    return new WorkItemController(
+      workspace,
+      () => new Date(),
+      workspace.gitVerificationAdapter(),
+      workspace.verificationRunner(),
+    );
   }
 
   private missionNotReady(
@@ -828,7 +981,34 @@ export class PortfolioService {
     try {
       await writeFile(
         temporaryPath,
-        stringify({ schema_version: 1, product_name: INBOX_SOURCE_LABEL }),
+        stringify({
+          schema_version: 2,
+          product_name: INBOX_SOURCE_LABEL,
+          verification: {
+            required_commands: [
+              {
+                name: "Lint",
+                argv: ["npm", "run", "lint"],
+                timeout_seconds: 300,
+              },
+              {
+                name: "Typecheck",
+                argv: ["npm", "run", "typecheck"],
+                timeout_seconds: 300,
+              },
+              {
+                name: "Test",
+                argv: ["npm", "test"],
+                timeout_seconds: 900,
+              },
+              {
+                name: "Build",
+                argv: ["npm", "run", "build"],
+                timeout_seconds: 900,
+              },
+            ],
+          },
+        }),
         { encoding: "utf8", flag: "wx" },
       );
       try {

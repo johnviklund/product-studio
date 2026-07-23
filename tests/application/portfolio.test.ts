@@ -14,6 +14,7 @@ import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
 import { WorkItemController } from "../../src/application/work-item-controller";
+import { serializeExternalResult } from "../../src/domain/result";
 import {
   DuplicateWorkspaceError,
   INBOX_SOURCE_ID,
@@ -86,7 +87,19 @@ async function createWorkspace(productName: string): Promise<string> {
   await mkdir(founderDirectory, { recursive: true });
   await writeFile(
     join(founderDirectory, "product.yaml"),
-    stringify({ schema_version: 1, product_name: productName }),
+    stringify({
+      schema_version: 2,
+      product_name: productName,
+      verification: {
+        required_commands: [
+          {
+            name: "Tests",
+            argv: ["npm", "test"],
+            timeout_seconds: 120,
+          },
+        ],
+      },
+    }),
     "utf8",
   );
   return root;
@@ -105,7 +118,12 @@ async function createService(
     registry,
     index,
     inboxRoot,
-    makeWorkspace,
+    makeWorkspace ??
+      ((workspacePath) =>
+        new ProductWorkspace(workspacePath, {
+          git: controllerGit,
+          verificationRunner: controllerRunner,
+        })),
   );
   return {
     registry,
@@ -326,8 +344,24 @@ describe("PortfolioService", () => {
     await service.rebuild();
     const inbox = new ProductWorkspace(inboxRoot);
     await expect(inbox.readManifest()).resolves.toEqual({
-      schema_version: 1,
+      schema_version: 2,
       product_name: INBOX_SOURCE_LABEL,
+      verification: {
+        required_commands: [
+          { name: "Lint", argv: ["npm", "run", "lint"], timeout_seconds: 300 },
+          {
+            name: "Typecheck",
+            argv: ["npm", "run", "typecheck"],
+            timeout_seconds: 300,
+          },
+          { name: "Test", argv: ["npm", "test"], timeout_seconds: 900 },
+          {
+            name: "Build",
+            argv: ["npm", "run", "build"],
+            timeout_seconds: 900,
+          },
+        ],
+      },
     });
     const created = await inbox.create({
       title: "Unassigned product idea",
@@ -818,6 +852,11 @@ describe("PortfolioService", () => {
       registry,
       restartedIndex,
       inboxRoot,
+      (workspacePath) =>
+        new ProductWorkspace(workspacePath, {
+          git: controllerGit,
+          verificationRunner: controllerRunner,
+        }),
     );
     await restartedService.rebuild();
 
@@ -831,6 +870,109 @@ describe("PortfolioService", () => {
       "Return the result for validation; do not advance controller state.",
     );
     restartedIndex.close();
+  });
+
+  it("imports applied and rejected results, refreshes projection, and starts repair explicitly", async () => {
+    const root = await createWorkspace("Import Workspace");
+    const repository = new ProductWorkspace(root);
+    const appliedItem = await repository.create({
+      title: "Import a verified result",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, appliedItem, [
+      "spec",
+      "plan",
+      "execute",
+    ]);
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const appliedMission = await service.compileMission(
+      sourceId,
+      appliedItem.goal.work_item_id,
+    );
+    await writeFile(
+      join(dirname(appliedMission.task_path), "result.json"),
+      serializeExternalResult({
+        result_schema_version: 1,
+        mission_content_sha256: appliedMission.mission.content_sha256,
+        identity: appliedMission.mission.identity,
+        commit: "a".repeat(40),
+        summary: "Implemented the import path",
+        changed_files: ["src/application/portfolio.ts"],
+        verification: [{ name: "Tests", status: "passed" }],
+      }),
+      "utf8",
+    );
+
+    const applied = await service.importResult(
+      sourceId,
+      appliedItem.goal.work_item_id,
+    );
+    expect(applied).toMatchObject({
+      source_id: sourceId,
+      work_item: { state: { phase: "review", status: "active" } },
+      evidence: { outcome: "applied" },
+    });
+    await expect(
+      service.importResult(sourceId, appliedItem.goal.work_item_id),
+    ).resolves.toEqual(applied);
+    expect(await service.list()).toContainEqual(
+      expect.objectContaining({
+        source_id: sourceId,
+        work_item: expect.objectContaining({
+          state: expect.objectContaining({ phase: "review", status: "active" }),
+        }),
+      }),
+    );
+
+    const rejectedItem = await repository.create({
+      title: "Preserve a malformed result",
+      type: "Fix",
+    });
+    await governWorkItemThrough(repository, rejectedItem, [
+      "spec",
+      "plan",
+      "execute",
+    ]);
+    const rejectedMission = await service.compileMission(
+      sourceId,
+      rejectedItem.goal.work_item_id,
+    );
+    await writeFile(
+      join(dirname(rejectedMission.task_path), "result.json"),
+      "{invalid",
+      "utf8",
+    );
+    const rejected = await service.importResult(
+      sourceId,
+      rejectedItem.goal.work_item_id,
+    );
+    expect(rejected).toMatchObject({
+      work_item: { state: { phase: "execute", status: "blocked", attempt: 0 } },
+      evidence: { outcome: "rejected" },
+    });
+
+    const retried = await service.retryExecuteAttempt(
+      sourceId,
+      rejectedItem.goal.work_item_id,
+    );
+    expect(retried).toMatchObject({
+      source_id: sourceId,
+      work_item: { state: { phase: "execute", status: "active", attempt: 1 } },
+      controller_run: { phase: "execute", outcome: "applied", attempt: 1 },
+    });
+    expect(await service.list()).toContainEqual(
+      expect.objectContaining({
+        work_item: expect.objectContaining({
+          goal: expect.objectContaining({
+            work_item_id: rejectedItem.goal.work_item_id,
+          }),
+          state: expect.objectContaining({ status: "active", attempt: 1 }),
+        }),
+      }),
+    );
+    index.close();
   });
 
   it("rejects Inbox, uncontracted, and wrong-phase items without writing missions", async () => {
@@ -865,6 +1007,15 @@ describe("PortfolioService", () => {
           workItemId,
         ),
       ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
+      await expect(
+        service.importResult(registration.workspace.workspace_id, workItemId),
+      ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
+      await expect(
+        service.retryExecuteAttempt(
+          registration.workspace.workspace_id,
+          workItemId,
+        ),
+      ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
     }
     await expect(
       readdir(join(root, ".founder", "missions")),
@@ -883,6 +1034,18 @@ describe("PortfolioService", () => {
     ]);
     await expect(
       service.compileMission(INBOX_SOURCE_ID, inboxItem.goal.work_item_id),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      workItemId: inboxItem.goal.work_item_id,
+    });
+    await expect(
+      service.importResult(INBOX_SOURCE_ID, inboxItem.goal.work_item_id),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      workItemId: inboxItem.goal.work_item_id,
+    });
+    await expect(
+      service.retryExecuteAttempt(INBOX_SOURCE_ID, inboxItem.goal.work_item_id),
     ).rejects.toMatchObject({
       kind: "mission_not_ready",
       workItemId: inboxItem.goal.work_item_id,
@@ -1047,7 +1210,7 @@ describe("PortfolioService", () => {
       {
         source_id: INBOX_SOURCE_ID,
         project: null,
-        reason: expect.stringContaining("schema_version"),
+        reason: expect.stringContaining("verification"),
       },
     ]);
     expect(await readFile(manifestPath, "utf8")).toBe(malformedSource);
