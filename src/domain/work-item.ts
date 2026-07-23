@@ -6,6 +6,7 @@ import type {
   MissionPackageBuilder,
 } from "./mission";
 import { portfolioSourceIdSchema } from "./portfolio-source";
+import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
 export const WORK_ITEM_TYPES = [
   "Explore",
@@ -69,9 +70,18 @@ export type ControllerRunOutcome = (typeof CONTROLLER_RUN_OUTCOMES)[number];
 export type ControllerConflictKind =
   (typeof CONTROLLER_CONFLICT_KINDS)[number];
 
+export interface VerificationCommand {
+  name: string;
+  argv: [string, ...string[]];
+  timeout_seconds: number;
+}
+
 export interface ProductManifest {
-  schema_version: 1;
+  schema_version: 2;
   product_name: string;
+  verification: {
+    required_commands: [VerificationCommand, ...VerificationCommand[]];
+  };
 }
 
 export interface WorkItemGoal {
@@ -161,6 +171,24 @@ export interface ControllerTransitionInput {
   target_status: WorkItemStatus;
   expected_phase: WorkItemPhase;
   expected_status: WorkItemStatus;
+  expected_schema_version: 1;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
+}
+
+export interface ImportExternalResultInput {
+  expected_phase: "execute";
+  expected_status: "active";
+  expected_schema_version: 1;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
+}
+
+export interface RetryExecuteAttemptInput {
+  expected_phase: "execute";
+  expected_status: "blocked";
   expected_schema_version: 1;
   expected_goal_version: number;
   expected_input_revision: number;
@@ -291,7 +319,15 @@ function uniqueNonEmptyListSchema(label: string): z.ZodType<string[]> {
 const acceptanceCriteriaSchema = uniqueNonEmptyListSchema(
   "acceptance_criteria",
 );
-const allowedScopeSchema = uniqueNonEmptyListSchema("allowed_scope");
+const allowedScopeSchema = z
+  .array(workspaceRelativePosixPathSchema)
+  .min(1, "allowed_scope must not be empty")
+  .refine(
+    (entries) =>
+      new Set(entries.map((entry) => entry.toLocaleLowerCase())).size ===
+      entries.length,
+    "allowed_scope must not contain case-insensitive duplicates",
+  );
 const reviewReadySchema = uniqueNonEmptyListSchema("review_ready");
 
 const nonEmptyIdentifierSchema = z
@@ -304,9 +340,28 @@ const nonEmptyIdentifierSchema = z
 
 export const controllerRunIdSchema = z.uuid();
 
+export const verificationCommandSchema: z.ZodType<VerificationCommand> =
+  z.strictObject({
+    name: nonEmptyIdentifierSchema,
+    argv: z.tuple([nonEmptyIdentifierSchema], z.string()),
+    timeout_seconds: z.number().int().min(1).max(900),
+  });
+
+const requiredVerificationCommandsSchema = z
+  .tuple([verificationCommandSchema], verificationCommandSchema)
+  .refine(
+    (commands) =>
+      new Set(commands.map((command) => command.name.toLocaleLowerCase()))
+        .size === commands.length,
+    "verification command names must not contain case-insensitive duplicates",
+  );
+
 export const productManifestSchema: z.ZodType<ProductManifest> = z.strictObject({
-  schema_version: z.literal(1),
+  schema_version: z.literal(2),
   product_name: z.string(),
+  verification: z.strictObject({
+    required_commands: requiredVerificationCommandsSchema,
+  }),
 });
 
 export const workItemCaptureSchema: z.ZodType<WorkItemCapture> = z.strictObject({
@@ -476,6 +531,26 @@ export const controllerTransitionInputSchema: z.ZodType<ControllerTransitionInpu
     target_status: z.enum(WORK_ITEM_STATUSES),
     expected_phase: z.enum(WORK_ITEM_PHASES),
     expected_status: z.enum(WORK_ITEM_STATUSES),
+    expected_schema_version: z.literal(1),
+    expected_goal_version: positiveSafeIntegerSchema,
+    expected_input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+  });
+
+export const importExternalResultInputSchema: z.ZodType<ImportExternalResultInput> =
+  z.strictObject({
+    expected_phase: z.literal("execute"),
+    expected_status: z.literal("active"),
+    expected_schema_version: z.literal(1),
+    expected_goal_version: positiveSafeIntegerSchema,
+    expected_input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+  });
+
+export const retryExecuteAttemptInputSchema: z.ZodType<RetryExecuteAttemptInput> =
+  z.strictObject({
+    expected_phase: z.literal("execute"),
+    expected_status: z.literal("blocked"),
     expected_schema_version: z.literal(1),
     expected_goal_version: positiveSafeIntegerSchema,
     expected_input_revision: positiveSafeIntegerSchema,

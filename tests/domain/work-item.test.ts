@@ -11,7 +11,9 @@ import {
   createCaptureInputSchema,
   createWorkItemInputSchema,
   goalContractUpdateInputSchema,
+  importExternalResultInputSchema,
   productManifestSchema,
+  retryExecuteAttemptInputSchema,
   updateWorkItemDetailsInputSchema,
   updateWorkItemPhaseInputSchema,
   workItemGoalSchema,
@@ -37,15 +39,108 @@ const state = {
   updated_at: "2026-07-17T12:00:00.000Z",
 };
 
+const productManifest = {
+  schema_version: 2 as const,
+  product_name: "Sample Workspace",
+  verification: {
+    required_commands: [
+      {
+        name: "Test",
+        argv: ["npm", "test"] as [string, ...string[]],
+        timeout_seconds: 120,
+      },
+      {
+        name: "Typecheck",
+        argv: ["npm", "run", "typecheck"] as [string, ...string[]],
+        timeout_seconds: 120,
+      },
+    ] as const,
+  },
+};
+
 describe("durable work-item schemas", () => {
-  it("accepts the complete version 1 contract", () => {
-    expect(
-      productManifestSchema.parse({
-        schema_version: 1,
-        product_name: "Sample Workspace",
-      }),
-    ).toEqual({ schema_version: 1, product_name: "Sample Workspace" });
+  it("accepts the work-item v1 and product-manifest v2 contracts", () => {
+    expect(productManifestSchema.parse(productManifest)).toEqual(
+      productManifest,
+    );
     expect(workItemSchema.parse({ goal, state })).toEqual({ goal, state });
+  });
+
+  it.each([
+    {
+      name: "a version 1 manifest",
+      manifest: { schema_version: 1, product_name: "Sample Workspace" },
+    },
+    {
+      name: "absent verification policy",
+      manifest: { schema_version: 2, product_name: "Sample Workspace" },
+    },
+    {
+      name: "no required commands",
+      manifest: {
+        ...productManifest,
+        verification: { required_commands: [] },
+      },
+    },
+    {
+      name: "duplicate command names",
+      manifest: {
+        ...productManifest,
+        verification: {
+          required_commands: [
+            productManifest.verification.required_commands[0],
+            {
+              ...productManifest.verification.required_commands[0],
+              name: "test",
+            },
+          ],
+        },
+      },
+    },
+    {
+      name: "a shell command string",
+      manifest: {
+        ...productManifest,
+        verification: {
+          required_commands: [
+            {
+              ...productManifest.verification.required_commands[0],
+              argv: "npm test",
+            },
+          ],
+        },
+      },
+    },
+    {
+      name: "an empty command name",
+      manifest: {
+        ...productManifest,
+        verification: {
+          required_commands: [
+            {
+              ...productManifest.verification.required_commands[0],
+              name: "",
+            },
+          ],
+        },
+      },
+    },
+    ...[0, 901, 1.5].map((timeoutSeconds) => ({
+      name: `timeout ${timeoutSeconds}`,
+      manifest: {
+        ...productManifest,
+        verification: {
+          required_commands: [
+            {
+              ...productManifest.verification.required_commands[0],
+              timeout_seconds: timeoutSeconds,
+            },
+          ],
+        },
+      },
+    })),
+  ])("rejects $name", ({ manifest }) => {
+    expect(() => productManifestSchema.parse(manifest)).toThrow();
   });
 
   it("accepts an untyped capture goal with optional metadata", () => {
@@ -145,6 +240,21 @@ describe("durable work-item schemas", () => {
       workItemSchema.parse({ goal: contractedGoal, state: contractedState }),
     ).toEqual({ goal: contractedGoal, state: contractedState });
   });
+
+  it.each(["../src/domain", "/src/domain", "src\\domain"])(
+    "rejects unsafe allowed_scope path %s",
+    (allowedScope) => {
+      expect(() =>
+        workItemGoalSchema.parse({
+          ...goal,
+          goal_version: 1,
+          acceptance_criteria: ["Reject unsafe scope"],
+          allowed_scope: [allowedScope],
+          review_ready: ["Checks pass"],
+        }),
+      ).toThrow();
+    },
+  );
 
   it.each([
     {
@@ -268,6 +378,32 @@ describe("durable work-item schemas", () => {
         outcome: "pending",
       }),
     ).toMatchObject({ outcome: "pending" });
+
+    const executeExpectation = {
+      expected_phase: "execute",
+      expected_schema_version: 1,
+      expected_goal_version: 1,
+      expected_input_revision: 1,
+      attempt: 0,
+    };
+    expect(
+      importExternalResultInputSchema.parse({
+        ...executeExpectation,
+        expected_status: "active",
+      }),
+    ).toMatchObject({ expected_status: "active" });
+    expect(
+      retryExecuteAttemptInputSchema.parse({
+        ...executeExpectation,
+        expected_status: "blocked",
+      }),
+    ).toMatchObject({ expected_status: "blocked" });
+    expect(() =>
+      importExternalResultInputSchema.parse({
+        ...executeExpectation,
+        expected_status: "blocked",
+      }),
+    ).toThrow();
   });
 });
 
