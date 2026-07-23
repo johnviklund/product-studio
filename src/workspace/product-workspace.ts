@@ -1196,6 +1196,99 @@ export class ProductWorkspace implements WorkItemRepository {
     );
   }
 
+  async listImportEvidence(
+    workItemId: string,
+  ): Promise<StoredImportEvidence[]> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+
+    const workItemEvidenceDirectory = join(
+      this.founderDirectory,
+      RUN_EVIDENCE_DIRECTORY,
+      validatedWorkItemId,
+    );
+    if (!(await this.hasSafeDirectory(workItemEvidenceDirectory))) {
+      return [];
+    }
+
+    const evidence: StoredImportEvidence[] = [];
+    const identityEntries = await readdir(workItemEvidenceDirectory, {
+      withFileTypes: true,
+    });
+    for (const identityEntry of identityEntries) {
+      const identityDirectory = join(
+        workItemEvidenceDirectory,
+        identityEntry.name,
+      );
+      if (!identityEntry.isDirectory() || identityEntry.isSymbolicLink()) {
+        throw this.invalid(
+          identityDirectory,
+          "evidence identity must be a directory, not a symlink",
+        );
+      }
+
+      const identityMatch = /^(\d+)-(\d+)-(\d+)$/.exec(identityEntry.name);
+      if (identityMatch === null) {
+        throw this.invalid(
+          identityDirectory,
+          "evidence identity directory must use the <goal_version>-<input_revision>-<attempt> format",
+        );
+      }
+      const identityResult = missionIdentitySchema.safeParse({
+        work_item_id: validatedWorkItemId,
+        goal_version: Number(identityMatch[1]),
+        input_revision: Number(identityMatch[2]),
+        attempt: Number(identityMatch[3]),
+      });
+      if (!identityResult.success) {
+        throw this.invalid(
+          identityDirectory,
+          validationReason(identityResult),
+        );
+      }
+
+      const runEntries = await readdir(identityDirectory, {
+        withFileTypes: true,
+      });
+      for (const runEntry of runEntries) {
+        const runDirectory = join(identityDirectory, runEntry.name);
+        if (!runEntry.isDirectory() || runEntry.isSymbolicLink()) {
+          throw this.invalid(
+            runDirectory,
+            "import run evidence must be a directory, not a symlink",
+          );
+        }
+
+        const importRunIdResult = importRunIdSchema.safeParse(runEntry.name);
+        if (!importRunIdResult.success) {
+          throw this.invalid(
+            runDirectory,
+            validationReason(importRunIdResult),
+          );
+        }
+
+        evidence.push(
+          await this.readStoredImportEvidence(
+            runDirectory,
+            identityResult.data,
+            importRunIdResult.data,
+          ),
+        );
+      }
+    }
+
+    return evidence.sort((left, right) => {
+      const completedAtOrder = right.evidence.completed_at.localeCompare(
+        left.evidence.completed_at,
+      );
+      return completedAtOrder !== 0
+        ? completedAtOrder
+        : right.evidence.import_run_id.localeCompare(
+            left.evidence.import_run_id,
+          );
+    });
+  }
+
   async writeImportEvidence(
     input: ImportEvidenceWriteInput,
   ): Promise<ImportEvidenceSummary> {
