@@ -5,6 +5,31 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-23 · Bounded verification runner timeout (roadmap 2.3, review patch cycle)
+- Cross-vendor Phase 4 review of `NodeVerificationRunner` (external-result import,
+  roadmap 2.3) found a confirmed P1: signaling only the direct child and resolving from
+  `'close'` let an `npm run …` descendant that inherits stdout/stderr survive the kill and hold
+  `'close'` open indefinitely, wedging the controller's on-disk lease permanently (no stale-lock
+  reclaim) whenever a verified command spawned a hanging descendant.
+- Fixed by spawning `detached: true` and killing the whole POSIX process group
+  (`process.kill(-child.pid, signal)`, `ESRCH`-safe direct-child fallback) for both the SIGTERM
+  and SIGKILL escalation, plus an unref'd `drainGraceMs` backstop timer that force-finishes
+  timed-out evidence from already-captured buffers if `'close'` still hasn't fired — bounding
+  total wall-clock to `timeout + killGrace + drainGrace` regardless of descendant behavior. The
+  normal (non-timeout) completion path still resolves from `'close'` unchanged.
+- Added a focused runner test (TERM-ignoring child with a stdout-inheriting descendant still
+  resolves `timed_out` within budget) and a controller test (timed-out verification yields
+  `execute/blocked` failed evidence and leaves no `.controller.lock`). Two P3 findings (compile
+  fail-fast location, subdirectory `git diff --relative` reachability) were dispositioned as
+  defer/confirm-intent and left untouched — not part of this patch.
+- Verified: lint, typecheck, 196/196 tests, and production build all green; re-review at
+  HEAD `f348592` confirmed clean (degraded same-vendor mode — the cross-vendor reviewer harness
+  that found the original P1 was unavailable for the re-review only).
+- Commits: 61553dd f348592
+- Why: closes the ROADMAP 2.3 gap where an unbounded verification command could silently and
+  permanently wedge a work item's controller lease across restarts, defeating the "bounded
+  verification" guarantee the external-result-import feature depends on.
+
 ## 2026-07-22 · Provider-neutral mission compiler (roadmap 2.2)
 - Added dependency-free `domain/mission.ts`: a strict `mission_schema_version: 1` Zod package
   (identity, controller-run provenance, full goal contract, versioned result contract) with a
