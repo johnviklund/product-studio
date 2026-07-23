@@ -14,7 +14,10 @@ import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
 import { WorkItemController } from "../../src/application/work-item-controller";
-import { serializeExternalResult } from "../../src/domain/result";
+import {
+  serializeExternalResult,
+  type StoredImportEvidence,
+} from "../../src/domain/result";
 import {
   DuplicateWorkspaceError,
   INBOX_SOURCE_ID,
@@ -870,6 +873,111 @@ describe("PortfolioService", () => {
       "Return the result for validation; do not advance controller state.",
     );
     restartedIndex.close();
+  });
+
+  it("lists source-qualified historical evidence without controller or cache mutation", async () => {
+    const root = await createWorkspace("Evidence Query Workspace");
+    const repository = new ProductWorkspace(root);
+    const created = await repository.create({
+      title: "Read historical evidence",
+      type: "Feature",
+    });
+    const workItemId = created.goal.work_item_id;
+    const history: StoredImportEvidence[] = [
+      {
+        evidence: {
+          schema_version: 1,
+          import_run_id: "f".repeat(64),
+          result_content_sha256: "c".repeat(64),
+          mission_content_sha256: "d".repeat(64),
+          identity: {
+            work_item_id: workItemId,
+            goal_version: 2,
+            input_revision: 3,
+            attempt: 1,
+          },
+          git_base_commit: "a".repeat(40),
+          result_commit: null,
+          controller_run_id: "550e8400-e29b-41d4-a716-446655440000",
+          started_at: "2026-07-22T14:00:00.000Z",
+          completed_at: "2026-07-22T14:00:01.000Z",
+          outcome: "rejected",
+          reasons: ["Rejected historical result."],
+        },
+        summary: {
+          import_run_id: "f".repeat(64),
+          outcome: "rejected",
+          evidence_path: `.founder/run-evidence/${workItemId}/2-3-1/${"f".repeat(64)}`,
+          reasons: ["Rejected historical result."],
+        },
+        verification: [],
+      },
+      {
+        evidence: {
+          schema_version: 1,
+          import_run_id: "e".repeat(64),
+          result_content_sha256: "b".repeat(64),
+          mission_content_sha256: "d".repeat(64),
+          identity: {
+            work_item_id: workItemId,
+            goal_version: 1,
+            input_revision: 1,
+            attempt: 0,
+          },
+          git_base_commit: "a".repeat(40),
+          result_commit: null,
+          controller_run_id: "123e4567-e89b-42d3-a456-426614174000",
+          started_at: "2026-07-22T13:00:00.000Z",
+          completed_at: "2026-07-22T13:00:01.000Z",
+          outcome: "rejected",
+          reasons: ["Rejected original result."],
+        },
+        summary: {
+          import_run_id: "e".repeat(64),
+          outcome: "rejected",
+          evidence_path: `.founder/run-evidence/${workItemId}/1-1-0/${"e".repeat(64)}`,
+          reasons: ["Rejected original result."],
+        },
+        verification: [],
+      },
+    ];
+    const index = new SQLitePortfolioIndex(":memory:");
+    const { service } = await createService(index, () => repository);
+    const registration = await service.register({ workspace_path: root });
+    const rebuildSpy = vi.spyOn(index, "rebuild");
+    rebuildSpy.mockClear();
+    const leaseSpy = vi.spyOn(repository, "acquireControllerLease");
+    const listEvidenceSpy = vi
+      .spyOn(repository, "listImportEvidence")
+      .mockResolvedValue(history);
+    const statePath = join(
+      root,
+      ".founder",
+      "work-items",
+      workItemId,
+      "state.json",
+    );
+    const stateBefore = await readFile(statePath, "utf8");
+
+    await expect(
+      service.listImportEvidence(
+        registration.workspace.workspace_id,
+        workItemId,
+      ),
+    ).resolves.toEqual(history);
+    await expect(
+      service.listImportEvidence(
+        registration.workspace.workspace_id,
+        "wi_00000000-0000-4000-8000-000000000000",
+      ),
+    ).rejects.toBeInstanceOf(PortfolioWorkItemNotFoundError);
+
+    expect(listEvidenceSpy).toHaveBeenCalledOnce();
+    expect(listEvidenceSpy).toHaveBeenCalledWith(workItemId);
+    expect(leaseSpy).not.toHaveBeenCalled();
+    expect(rebuildSpy).not.toHaveBeenCalled();
+    expect(await readFile(statePath, "utf8")).toBe(stateBefore);
+    index.close();
   });
 
   it("imports applied and rejected results, refreshes projection, and starts repair explicitly", async () => {

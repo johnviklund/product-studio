@@ -8,6 +8,7 @@ import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
 import { WorkItemController } from "../../src/application/work-item-controller";
+import type { StoredImportEvidence } from "../../src/domain/result";
 import {
   PortfolioWorkItemNotFoundError,
   UnknownPortfolioSourceError,
@@ -37,9 +38,10 @@ import * as workItemsRoute from "../../app/api/work-items/route";
 import { POST as createPortfolioWorkItem } from "../../app/api/portfolio/work-items/route";
 import { POST as assignPortfolioWorkItem } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/assignment/route";
 import { PATCH as updatePortfolioWorkItemDetails } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/details/route";
-import { POST as compilePortfolioMission } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route";
-import { POST as importPortfolioMission } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route";
-import { POST as retryPortfolioMission } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route";
+import * as portfolioMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route";
+import * as portfolioMissionImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route";
+import * as portfolioMissionRetryRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route";
+import { GET as getPortfolioRunEvidence } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/run-evidence/route";
 import {
   PATCH as updatePortfolioWorkItem,
 } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/route";
@@ -48,6 +50,10 @@ import {
   GET as getWorkspaces,
   POST as registerWorkspace,
 } from "../../app/api/workspaces/route";
+
+const compilePortfolioMission = portfolioMissionRoute.POST;
+const importPortfolioMission = portfolioMissionImportRoute.POST;
+const retryPortfolioMission = portfolioMissionRetryRoute.POST;
 
 const createdRoots: string[] = [];
 const openIndexes: SQLitePortfolioIndex[] = [];
@@ -257,6 +263,13 @@ function missionActionRequest(action: "import" | "retry"): Request {
       headers: { "content-type": "application/json" },
       body: "{ignored-no-body-contract",
     },
+  );
+}
+
+function runEvidenceRequest(): Request {
+  return new Request(
+    "http://localhost/api/portfolio/work-items/source/item/run-evidence",
+    { method: "GET" },
   );
 }
 
@@ -523,6 +536,81 @@ describe("portfolio API routes", () => {
     });
   });
 
+  it("returns run evidence and maps missing or invalid durable history", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const history: StoredImportEvidence[] = [
+      {
+        evidence: {
+          schema_version: 1,
+          import_run_id: "f".repeat(64),
+          result_content_sha256: "c".repeat(64),
+          mission_content_sha256: "d".repeat(64),
+          identity: {
+            work_item_id: workItemId,
+            goal_version: 1,
+            input_revision: 2,
+            attempt: 1,
+          },
+          git_base_commit: "a".repeat(40),
+          result_commit: null,
+          controller_run_id: "550e8400-e29b-41d4-a716-446655440000",
+          started_at: "2026-07-22T14:00:00.000Z",
+          completed_at: "2026-07-22T14:00:01.000Z",
+          outcome: "rejected",
+          reasons: ["Rejected imported result."],
+        },
+        summary: {
+          import_run_id: "f".repeat(64),
+          outcome: "rejected",
+          evidence_path: `.founder/run-evidence/${workItemId}/1-2-1/${"f".repeat(64)}`,
+          reasons: ["Rejected imported result."],
+        },
+        verification: [],
+      },
+    ];
+    const listImportEvidence = vi
+      .fn()
+      .mockResolvedValueOnce(history)
+      .mockRejectedValueOnce(
+        new PortfolioWorkItemNotFoundError(sourceId, workItemId),
+      )
+      .mockRejectedValueOnce(
+        new InvalidWorkspaceError(
+          `.founder/run-evidence/${workItemId}/bad-run`,
+          "invalid durable evidence",
+        ),
+      );
+    getService.mockResolvedValue({ listImportEvidence });
+    const context = phaseUpdateContext(sourceId, workItemId);
+
+    const success = await getPortfolioRunEvidence(
+      runEvidenceRequest(),
+      context,
+    );
+    const missing = await getPortfolioRunEvidence(
+      runEvidenceRequest(),
+      context,
+    );
+    const invalid = await getPortfolioRunEvidence(
+      runEvidenceRequest(),
+      context,
+    );
+
+    expect(success.status).toBe(200);
+    expect(await success.json()).toEqual(history);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({
+      error: { code: "work_item_not_found" },
+    });
+    expect(invalid.status).toBe(422);
+    expect(await invalid.json()).toMatchObject({
+      error: { code: "invalid_workspace" },
+    });
+    expect(listImportEvidence).toHaveBeenCalledTimes(3);
+    expect(listImportEvidence).toHaveBeenCalledWith(sourceId, workItemId);
+  });
+
   it("returns bodyless import verdicts and explicit retry results with source qualification", async () => {
     const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
     const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
@@ -582,6 +670,18 @@ describe("portfolio API routes", () => {
     expect(importResult).toHaveBeenNthCalledWith(1, sourceId, workItemId);
     expect(importResult).toHaveBeenNthCalledWith(2, sourceId, workItemId);
     expect(retryExecuteAttempt).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(Object.keys(portfolioMissionRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioMissionImportRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioMissionRetryRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
   });
 
   it("maps import and retry eligibility failures to 409 instead of verdict responses", async () => {
