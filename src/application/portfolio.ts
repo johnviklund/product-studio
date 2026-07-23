@@ -40,6 +40,7 @@ import {
   createImportRunId,
   hashResultContent,
   type ImportEvidenceSummary,
+  type StoredImportEvidence,
 } from "../domain/result";
 import {
   ControllerConflictError,
@@ -84,6 +85,7 @@ type WorkspaceGateway = Pick<
   | "writeMissionPackage"
   | "readMissionResult"
   | "readImportEvidence"
+  | "listImportEvidence"
   | "writeImportEvidence"
   | "gitVerificationAdapter"
   | "verificationRunner"
@@ -498,6 +500,18 @@ export class PortfolioService {
     return source.workspace.writeMissionPackage(identity, (paths) =>
       compileMissionPackage(workItem, executeManifest, paths),
     );
+  }
+
+  async listImportEvidence(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<StoredImportEvidence[]> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    return source.workspace.listImportEvidence(workItemId);
   }
 
   async importResult(
