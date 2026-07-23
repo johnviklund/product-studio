@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { VerificationCommand } from "../src/domain/work-item";
 import {
   NodeGitVerificationAdapter,
   NodeVerificationRunner,
@@ -122,5 +123,40 @@ describe("Node verification runner", () => {
       output_truncated: true,
     });
     expect(Buffer.byteLength(bounded.stdout)).toBe(64 * 1024);
+  });
+
+  it("bounds timed-out runs when a descendant holds the output pipes", async () => {
+    const root = await createRoot("product-studio-command-descendant-");
+    const killGraceMs = 25;
+    const drainGraceMs = 50;
+    const runner = new NodeVerificationRunner(root, {
+      killGraceMs,
+      drainGraceMs,
+    });
+    const descendantSource = "setTimeout(() => process.exit(0), 3000)";
+    const command: VerificationCommand = {
+      name: "Pipe-holding descendant",
+      argv: [
+        process.execPath,
+        "-e",
+        [
+          'const { spawn } = require("node:child_process")',
+          `spawn(process.execPath, ["-e", ${JSON.stringify(descendantSource)}], { stdio: "inherit" })`,
+          'process.on("SIGTERM", () => {})',
+          "setInterval(() => {}, 1000)",
+        ].join(";"),
+      ],
+      timeout_seconds: 1,
+    };
+    const maximumDurationMs =
+      command.timeout_seconds * 1_000 + killGraceMs + drainGraceMs + 500;
+
+    for (let runNumber = 0; runNumber < 2; runNumber += 1) {
+      const startedMs = Date.now();
+      const result = await runner.run(command);
+
+      expect(result.status).toBe("timed_out");
+      expect(Date.now() - startedMs).toBeLessThan(maximumDurationMs);
+    }
   });
 });

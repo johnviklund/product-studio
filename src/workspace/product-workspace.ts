@@ -219,12 +219,14 @@ export class NodeGitVerificationAdapter implements GitVerificationAdapter {
 interface NodeVerificationRunnerOptions {
   environment?: NodeJS.ProcessEnv;
   killGraceMs?: number;
+  drainGraceMs?: number;
   now?: () => Date;
 }
 
 export class NodeVerificationRunner implements VerificationRunner {
   private readonly environment: NodeJS.ProcessEnv;
   private readonly killGraceMs: number;
+  private readonly drainGraceMs: number;
   private readonly now: () => Date;
 
   constructor(
@@ -233,7 +235,32 @@ export class NodeVerificationRunner implements VerificationRunner {
   ) {
     this.environment = options.environment ?? process.env;
     this.killGraceMs = options.killGraceMs ?? 5_000;
+    this.drainGraceMs = options.drainGraceMs ?? 1_000;
     this.now = options.now ?? (() => new Date());
+  }
+
+  private killGroup(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals,
+  ): void {
+    if (child.pid !== undefined) {
+      try {
+        // Product Studio targets Darwin/Linux; detached children lead their POSIX process group.
+        process.kill(-child.pid, signal);
+        return;
+      } catch {
+        // The group may already be gone (ESRCH); fall back to the direct child below.
+      }
+    }
+
+    try {
+      child.kill(signal);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ESRCH") {
+        return;
+      }
+      // Signalling failure must not defeat the bounded drain backstop.
+    }
   }
 
   async run(command: VerificationCommand): Promise<CommandEvidenceRecord> {
@@ -287,6 +314,7 @@ export class NodeVerificationRunner implements VerificationRunner {
       try {
         child = spawn(validated.argv[0], validated.argv.slice(1), {
           cwd: this.workspaceRoot,
+          detached: true,
           shell: false,
           env: environment,
           stdio: ["ignore", "pipe", "pipe"],
@@ -314,17 +342,7 @@ export class NodeVerificationRunner implements VerificationRunner {
       let settled = false;
       let timedOut = false;
       let killTimer: NodeJS.Timeout | undefined;
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killTimer = setTimeout(() => {
-          if (!settled) {
-            child.kill("SIGKILL");
-          }
-        }, this.killGraceMs);
-        killTimer.unref();
-      }, validated.timeout_seconds * 1_000);
-      timeout.unref();
+      let drainTimer: NodeJS.Timeout | undefined;
 
       const finish = (
         status: "passed" | "failed" | "timed_out" | "spawn_error",
@@ -338,6 +356,9 @@ export class NodeVerificationRunner implements VerificationRunner {
         clearTimeout(timeout);
         if (killTimer !== undefined) {
           clearTimeout(killTimer);
+        }
+        if (drainTimer !== undefined) {
+          clearTimeout(drainTimer);
         }
         resolveRecord(
           commandEvidenceRecordSchema.parse({
@@ -355,6 +376,23 @@ export class NodeVerificationRunner implements VerificationRunner {
           }),
         );
       };
+
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        this.killGroup(child, "SIGTERM");
+        killTimer = setTimeout(() => {
+          if (settled) {
+            return;
+          }
+          this.killGroup(child, "SIGKILL");
+          drainTimer = setTimeout(() => {
+            finish("timed_out", null, "SIGKILL");
+          }, this.drainGraceMs);
+          drainTimer.unref();
+        }, this.killGraceMs);
+        killTimer.unref();
+      }, validated.timeout_seconds * 1_000);
+      timeout.unref();
 
       child.stdout.on("data", (chunk: Buffer | string) => {
         stdoutBytes = capture(chunk, stdoutChunks, stdoutBytes);

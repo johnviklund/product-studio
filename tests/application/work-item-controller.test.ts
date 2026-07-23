@@ -560,6 +560,50 @@ describe("WorkItemController", () => {
     },
   );
 
+  it("releases the controller lease after timed-out verification blocks an import", async () => {
+    const { repository, workItem, input } = await createImportFixture();
+    const timedOutRunner: VerificationRunner = {
+      async run(command) {
+        return {
+          ...(await passingRunner.run(command)),
+          status: "timed_out",
+          exit_code: null,
+          signal: "SIGKILL",
+          stderr: "timed_out verification",
+        };
+      },
+    };
+    const controller = createController(
+      repository,
+      passingGit,
+      timedOutRunner,
+    );
+
+    const imported = await controller.importExternalResult(
+      workItem.goal.work_item_id,
+      input,
+    );
+
+    expect(imported.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "blocked",
+    });
+    expect(imported.evidence.outcome).toBe("failed");
+    expect(
+      await readdir(
+        join(
+          repository.workspaceRoot,
+          ".founder",
+          "work-items",
+          workItem.goal.work_item_id,
+        ),
+      ),
+    ).not.toContain(".controller.lock");
+    expect(
+      (await repository.read(workItem.goal.work_item_id))?.state.active_run,
+    ).toBeUndefined();
+  });
+
   it("preserves malformed and out-of-scope submissions as rejected evidence", async () => {
     const malformed = await createImportFixture({ resultSource: "{invalid" });
     const malformedController = createController(malformed.repository);
