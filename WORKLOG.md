@@ -5,6 +5,29 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-23 · App-reachable goal contracts (roadmap 2.1 reachability) · Codex GPT-5.6 / Copilot Claude review
+- Added a single editability policy `canUpdateGoalContract(phase)` (`src/domain/workflow-policy.ts`,
+  true set exactly `idea|brainstorm|spec|plan`) and enforced it at the controller boundary:
+  `WorkItemController.updateGoalContract` now throws a new `goal_contract_locked`
+  `ControllerConflictError` as the first statement inside its lease `try`, so a locked-phase update
+  releases its lease and writes no manifest/durable mutation; gated on the leased reread, not the
+  pre-lock read.
+- Exposed it app-side: `PortfolioService.updateGoalContract(sourceId, workItemId, input)`
+  (source-qualified, 404 on unknown item, rebuild only after a successful mutation) behind a new
+  node-runtime `PATCH .../goal-contract` route reusing the existing schema + `errorResponse` 409 mapping.
+- Added a detail-panel goal-contract editor (`components/kanban/detail-panel.tsx`): one-per-line
+  textareas for acceptance criteria / allowed scope / review-ready in capture mode and governed
+  Overview for editable phases, read-only version + lists for locked phases; first activation omits
+  expected versions, revisions send the displayed pair; dirty/saving guards, discard-confirm awareness,
+  and `onUpdated` board refresh. Same predicate drives UI and controller, no UI-only duplicate.
+- Verified: lint, typecheck, 205/205 tests, production build all green; Phase 4 review clean at
+  `af5870c` (no P0–P2). Browser/visual QA still pending (no browser binding in this env — approved
+  fallback, not claimed as done).
+- Commits: 9d9ae2b 2d503d7 765f334 77eaf3d 8e89945 b8bc67d 9bbbdf5 4150412 4bd423b af5870c
+- Why: `updateGoalContract` (roadmap 2.1) had no HTTP/UI caller, so every downstream Milestone 2
+  surface was unreachable through the running app; this makes an assigned item drivable from a fresh
+  contract into Execute without hand-calling the controller from a test.
+
 ## 2026-07-23 · Run evidence and history surface (roadmap 2.4)
 - Added `ProductWorkspace.listImportEvidence(workItemId)`: a fail-closed, read-only durable
   listing across every historical mission identity for a work item — it enumerates only safe,
