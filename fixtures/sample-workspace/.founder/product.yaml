@@ -1,2 +1,16 @@
-schema_version: 1
+schema_version: 2
 product_name: Sample Workspace
+verification:
+  required_commands:
+    - name: Lint
+      argv: [npm, run, lint]
+      timeout_seconds: 300
+    - name: Typecheck
+      argv: [npm, run, typecheck]
+      timeout_seconds: 300
+    - name: Test
+      argv: [npm, test]
+      timeout_seconds: 900
+    - name: Build
+      argv: [npm, run, build]
+      timeout_seconds: 900

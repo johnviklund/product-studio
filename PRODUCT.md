@@ -72,8 +72,8 @@ plans, and review findings. JSON or YAML holds machine-readable state and contra
 SQLite is a disposable local cache/index that can be rebuilt from durable files; it is
 never the only copy of product or workflow state.
 
-Product workspaces use `.founder/` as the initial metadata directory. Its version-1
-manifest, goal, and state contract is implemented in
+Product workspaces use `.founder/` as the initial metadata directory. Its version-2 product
+manifest and version-1 goal and state contracts are implemented in
 [`src/domain/work-item.ts`](src/domain/work-item.ts) and demonstrated by the checked-in
 [`fixtures/sample-workspace`](fixtures/sample-workspace).
 
