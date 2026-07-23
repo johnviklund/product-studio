@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ALLOWED_PHASE_TRANSITIONS,
+  canUpdateGoalContract,
   validatePhaseTransition,
   validateStatusTransition,
   validateWorkItemTransition,
@@ -12,6 +13,14 @@ import {
 } from "../../src/domain/work-item";
 
 describe("workflow transition policy", () => {
+  it("allows goal-contract updates only before execute", () => {
+    const editablePhases = new Set(["idea", "brainstorm", "spec", "plan"]);
+
+    for (const phase of WORK_ITEM_PHASES) {
+      expect(canUpdateGoalContract(phase)).toBe(editablePhases.has(phase));
+    }
+  });
+
   it("preserves the existing board phase matrix exactly", () => {
     const expected = {
       idea: ["spec"],
