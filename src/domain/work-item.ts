@@ -68,6 +68,7 @@ export const CONTROLLER_CONFLICT_KINDS = [
   "repair_required",
   "idempotency_conflict",
   "contracted_details",
+  "goal_contract_locked",
   "mission_not_ready",
 ] as const;
 
