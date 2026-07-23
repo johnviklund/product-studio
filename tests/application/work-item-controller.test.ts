@@ -16,6 +16,7 @@ import {
 import {
   importEvidenceSummarySchema,
   serializeExternalResult,
+  type ExternalResultSubmission,
   type ImportEvidenceWriteInput,
   type MissionResultSnapshot,
   type StoredImportEvidence,
@@ -148,6 +149,9 @@ async function governToExecute(
 
 async function createImportFixture(options?: {
   resultSource?: string;
+  transformResult?: (
+    result: ExternalResultSubmission,
+  ) => ExternalResultSubmission;
 }): Promise<{
   repository: ImportTestRepository;
   workItem: WorkItem;
@@ -176,17 +180,20 @@ async function createImportFixture(options?: {
     git_base_commit: "0".repeat(40),
   };
   const mission = compileMission(workItem, manifest, paths);
+  const defaultResult: ExternalResultSubmission = {
+    result_schema_version: 1,
+    mission_content_sha256: mission.content_sha256,
+    identity,
+    commit: testCommit,
+    summary: "Implemented result import",
+    changed_files: ["src/domain/result.ts"],
+    verification: [{ name: "Tests", status: "passed" }],
+  };
   const resultSource =
     options?.resultSource ??
-    serializeExternalResult({
-      result_schema_version: 1,
-      mission_content_sha256: mission.content_sha256,
-      identity,
-      commit: testCommit,
-      summary: "Implemented result import",
-      changed_files: ["src/domain/result.ts"],
-      verification: [{ name: "Tests", status: "passed" }],
-    });
+    serializeExternalResult(
+      options?.transformResult?.(defaultResult) ?? defaultResult,
+    );
   const snapshot: MissionResultSnapshot = {
     mission,
     mission_path: paths.task_path.replace(/TASK\.md$/, "mission.json"),
@@ -456,10 +463,10 @@ describe("WorkItemController", () => {
   it("imports a green result once and replays immutable evidence without rerunning", async () => {
     const { repository, workItem, input, evidence, evidenceWrites } =
       await createImportFixture();
-    let commandRuns = 0;
+    const commandNames: string[] = [];
     const runner: VerificationRunner = {
       async run(command) {
-        commandRuns += 1;
+        commandNames.push(command.name);
         return passingRunner.run(command);
       },
     };
@@ -475,7 +482,7 @@ describe("WorkItemController", () => {
       attempt: 0,
     });
     expect(imported.evidence).toMatchObject({ outcome: "applied" });
-    expect(commandRuns).toBe(2);
+    expect(commandNames).toEqual(["Tests", "Typecheck"]);
     expect(evidenceWrites.count).toBe(1);
 
     const replay = await controller.importExternalResult(
@@ -483,70 +490,75 @@ describe("WorkItemController", () => {
       input,
     );
     expect(replay).toEqual(imported);
-    expect(commandRuns).toBe(2);
+    expect(commandNames).toEqual(["Tests", "Typecheck"]);
     expect(evidenceWrites.count).toBe(1);
     expect(evidence.size).toBe(1);
   });
 
-  it("blocks on a red command, marks remaining checks not-run, and starts one repair attempt", async () => {
-    const { repository, workItem, input, evidence } =
-      await createImportFixture();
-    let commandRuns = 0;
-    const redRunner: VerificationRunner = {
-      async run(command) {
-        commandRuns += 1;
-        return {
-          ...(await passingRunner.run(command)),
-          status: "failed",
-          exit_code: 1,
-          stderr: "test failure",
-        };
-      },
-    };
-    const controller = createController(repository, passingGit, redRunner);
+  it.each(["failed", "timed_out", "spawn_error"] as const)(
+    "blocks on a %s command, marks remaining checks not-run, and starts one repair attempt",
+    async (status) => {
+      const { repository, workItem, input, evidence } =
+        await createImportFixture();
+      let commandRuns = 0;
+      const redRunner: VerificationRunner = {
+        async run(command) {
+          commandRuns += 1;
+          return {
+            ...(await passingRunner.run(command)),
+            status,
+            exit_code: status === "failed" ? 1 : null,
+            signal: status === "timed_out" ? "SIGKILL" : null,
+            stderr: `${status} verification`,
+          };
+        },
+      };
+      const controller = createController(repository, passingGit, redRunner);
 
-    const imported = await controller.importExternalResult(
-      workItem.goal.work_item_id,
-      input,
-    );
-    expect(imported.work_item.state).toMatchObject({
-      phase: "execute",
-      status: "blocked",
-      attempt: 0,
-    });
-    expect(imported.evidence.outcome).toBe("failed");
-    expect(imported.manifest.outcome).toBe("applied");
-    expect(commandRuns).toBe(1);
-    expect([...evidence.values()][0].verification.map((record) => record.status))
-      .toEqual(["failed", "not_run"]);
+      const imported = await controller.importExternalResult(
+        workItem.goal.work_item_id,
+        input,
+      );
+      expect(imported.work_item.state).toMatchObject({
+        phase: "execute",
+        status: "blocked",
+        attempt: 0,
+      });
+      expect(imported.evidence.outcome).toBe("failed");
+      expect(imported.manifest.outcome).toBe("applied");
+      expect(commandRuns).toBe(1);
+      expect(
+        [...evidence.values()][0].verification.map((record) => record.status),
+      ).toEqual([status, "not_run"]);
 
-    const retried = await controller.retryExecuteAttempt(
-      workItem.goal.work_item_id,
-      {
-        expected_phase: "execute",
-        expected_status: "blocked",
-        expected_schema_version: 1,
-        expected_goal_version: input.expected_goal_version,
-        expected_input_revision: input.expected_input_revision,
-        attempt: 0,
-      },
-    );
-    expect(retried.work_item.state).toMatchObject({
-      phase: "execute",
-      status: "active",
-      attempt: 1,
-    });
-    expect(
-      await controller.retryExecuteAttempt(workItem.goal.work_item_id, {
-        expected_phase: "execute",
-        expected_status: "blocked",
-        expected_schema_version: 1,
-        expected_goal_version: input.expected_goal_version,
-        expected_input_revision: input.expected_input_revision,
-        attempt: 0,
-      }),
-    ).toEqual(retried);
-  });
+      const retried = await controller.retryExecuteAttempt(
+        workItem.goal.work_item_id,
+        {
+          expected_phase: "execute",
+          expected_status: "blocked",
+          expected_schema_version: 1,
+          expected_goal_version: input.expected_goal_version,
+          expected_input_revision: input.expected_input_revision,
+          attempt: 0,
+        },
+      );
+      expect(retried.work_item.state).toMatchObject({
+        phase: "execute",
+        status: "active",
+        attempt: 1,
+      });
+      expect(
+        await controller.retryExecuteAttempt(workItem.goal.work_item_id, {
+          expected_phase: "execute",
+          expected_status: "blocked",
+          expected_schema_version: 1,
+          expected_goal_version: input.expected_goal_version,
+          expected_input_revision: input.expected_input_revision,
+          attempt: 0,
+        }),
+      ).toEqual(retried);
+    },
+  );
 
   it("preserves malformed and out-of-scope submissions as rejected evidence", async () => {
     const malformed = await createImportFixture({ resultSource: "{invalid" });
@@ -576,6 +588,90 @@ describe("WorkItemController", () => {
     expect(outsideResult.work_item.state.status).toBe("blocked");
     expect(outsideResult.evidence).toMatchObject({ outcome: "rejected" });
     expect(outsideResult.evidence.reasons[0]).toContain("allowed_scope");
+  });
+
+  it.each([
+    {
+      name: "a mismatched mission hash",
+      transformResult: (result: ExternalResultSubmission) => ({
+        ...result,
+        mission_content_sha256: "f".repeat(64),
+      }),
+      git: passingGit,
+      reason: "mission hash",
+    },
+    {
+      name: "a mismatched governed tuple",
+      transformResult: (result: ExternalResultSubmission) => ({
+        ...result,
+        identity: { ...result.identity, attempt: result.identity.attempt + 1 },
+      }),
+      git: passingGit,
+      reason: "identity",
+    },
+    {
+      name: "a non-commit object",
+      git: { ...passingGit, resolveCommit: async () => null },
+      reason: "canonical local commit",
+    },
+    {
+      name: "a non-descendant commit",
+      git: { ...passingGit, isAncestor: async () => false },
+      reason: "not an ancestor",
+    },
+    {
+      name: "a commit that is not HEAD",
+      git: { ...passingGit, readHeadCommit: async () => "b".repeat(40) },
+      reason: "HEAD",
+    },
+    {
+      name: "a dirty worktree",
+      git: {
+        ...passingGit,
+        isWorktreeCleanExcludingFounder: async () => false,
+      },
+      reason: "uncommitted changes",
+    },
+    {
+      name: "an empty Git diff",
+      git: { ...passingGit, listChangedFiles: async () => [] },
+      reason: "no changed files",
+    },
+    {
+      name: "reported files that differ from Git",
+      transformResult: (result: ExternalResultSubmission) => ({
+        ...result,
+        changed_files: ["src/application/work-item-controller.ts"],
+      }),
+      git: passingGit,
+      reason: "do not exactly match",
+    },
+  ])("rejects $name before verification or state advance", async (testCase) => {
+    const fixture = await createImportFixture({
+      transformResult: testCase.transformResult,
+    });
+    let commandRuns = 0;
+    const runner: VerificationRunner = {
+      async run(command) {
+        commandRuns += 1;
+        return passingRunner.run(command);
+      },
+    };
+
+    const imported = await createController(
+      fixture.repository,
+      testCase.git,
+      runner,
+    ).importExternalResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "blocked",
+      attempt: 0,
+    });
+    expect(imported.evidence).toMatchObject({ outcome: "rejected" });
+    expect(imported.evidence.reasons.join(" ")).toContain(testCase.reason);
+    expect(commandRuns).toBe(0);
   });
 
   it("rejects repair attempts unless execute is blocked at the exact tuple", async () => {

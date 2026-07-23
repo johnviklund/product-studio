@@ -975,6 +975,100 @@ describe("PortfolioService", () => {
     index.close();
   });
 
+  it("recovers a green import evidence bundle through a fresh workspace and index rebuild", async () => {
+    const root = await createWorkspace("Import Recovery Workspace");
+    const cacheRoot = await createRoot("product-studio-import-cache-");
+    const databasePath = join(cacheRoot, "index.sqlite");
+    const repository = new ProductWorkspace(root);
+    const created = await repository.create({
+      title: "Recover imported evidence",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, [
+      "spec",
+      "plan",
+      "execute",
+    ]);
+    const index = new SQLitePortfolioIndex(databasePath);
+    const { registry, inboxRoot, service } = await createService(index);
+    const registration = await service.register({ workspace_path: root });
+    const mission = await service.compileMission(
+      registration.workspace.workspace_id,
+      created.goal.work_item_id,
+    );
+    const submissionSource = serializeExternalResult({
+      result_schema_version: 1,
+      mission_content_sha256: mission.mission.content_sha256,
+      identity: mission.mission.identity,
+      commit: "a".repeat(40),
+      summary: "Persist the import bundle",
+      changed_files: ["src/application/portfolio.ts"],
+      verification: [{ name: "Tests", status: "passed" }],
+    });
+    await writeFile(
+      join(dirname(mission.task_path), "result.json"),
+      submissionSource,
+      "utf8",
+    );
+
+    const imported = await service.importResult(
+      registration.workspace.workspace_id,
+      created.goal.work_item_id,
+    );
+    expect(imported.work_item.state).toMatchObject({
+      phase: "review",
+      status: "active",
+    });
+
+    const freshWorkspace = new ProductWorkspace(root);
+    const stored = await freshWorkspace.readImportEvidence(
+      mission.mission.identity,
+      imported.evidence.import_run_id,
+    );
+    expect(stored).toMatchObject({
+      evidence: {
+        outcome: "applied",
+        git_base_commit: mission.mission.source_revision.git_base_commit,
+        result_commit: "a".repeat(40),
+      },
+      summary: imported.evidence,
+      verification: [{ name: "Tests", status: "passed" }],
+    });
+    await expect(
+      readFile(
+        join(root, imported.evidence.evidence_path, "submission.json"),
+        "utf8",
+      ),
+    ).resolves.toBe(submissionSource);
+
+    index.close();
+    await rm(databasePath);
+    const restartedIndex = new SQLitePortfolioIndex(databasePath);
+    const restartedService = new PortfolioService(
+      registry,
+      restartedIndex,
+      inboxRoot,
+      (workspacePath) =>
+        new ProductWorkspace(workspacePath, {
+          git: controllerGit,
+          verificationRunner: controllerRunner,
+        }),
+    );
+    await restartedService.rebuild();
+    await expect(restartedService.list()).resolves.toContainEqual(
+      expect.objectContaining({
+        source_id: registration.workspace.workspace_id,
+        work_item: expect.objectContaining({
+          state: expect.objectContaining({
+            phase: "review",
+            status: "active",
+          }),
+        }),
+      }),
+    );
+    restartedIndex.close();
+  });
+
   it("rejects Inbox, uncontracted, and wrong-phase items without writing missions", async () => {
     const root = await createWorkspace("Ineligible Missions");
     const repository = new ProductWorkspace(root);

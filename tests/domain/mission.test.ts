@@ -138,6 +138,13 @@ describe("mission domain", () => {
       ...paths,
       git_base_commit: "2".repeat(40),
     });
+    const changedResultContractHash = hashMissionContent({
+      ...mission,
+      result_contract: {
+        ...mission.result_contract,
+        output_path: `.founder/missions/${workItemId}/2-3-1/alternate/result.json`,
+      },
+    });
 
     expect(nextTupleMission.identity).not.toEqual(mission.identity);
     expect(nextTupleMission.content_sha256).not.toBe(mission.content_sha256);
@@ -145,6 +152,7 @@ describe("mission domain", () => {
     expect(changedGoalMission.content_sha256).not.toBe(mission.content_sha256);
     expect(changedBaseMission.identity).toEqual(mission.identity);
     expect(changedBaseMission.content_sha256).not.toBe(mission.content_sha256);
+    expect(changedResultContractHash).not.toBe(mission.content_sha256);
   });
 
   it.each([
