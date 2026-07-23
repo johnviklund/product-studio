@@ -16,6 +16,10 @@ export type WorkflowTransitionResult =
   | { ok: true }
   | { ok: false; reason: string };
 
+export function canUpdateGoalContract(phase: WorkItemPhase): boolean {
+  return ["idea", "brainstorm", "spec", "plan"].includes(phase);
+}
+
 export function validatePhaseTransition(
   sourcePhase: WorkItemPhase,
   targetPhase: WorkItemPhase,
