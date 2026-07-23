@@ -5,6 +5,31 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-23 · Run evidence and history surface (roadmap 2.4)
+- Added `ProductWorkspace.listImportEvidence(workItemId)`: a fail-closed, read-only durable
+  listing across every historical mission identity for a work item — it enumerates only safe,
+  non-symlink directories, reconstructs candidate identities/run-ids from directory names under
+  a strict schema, and delegates to the existing private byte-authority reader so directory
+  names are never trusted over file content (a misfiled or divergent evidence directory throws
+  rather than producing a partial trustworthy-looking history).
+- Exposed `PortfolioService.listImportEvidence(sourceId, workItemId)` (source-qualified,
+  404 on unknown item, no lease/rebuild/mutation) and a bodyless node-runtime
+  `GET .../run-evidence` route mapping `PortfolioWorkItemNotFoundError` → 404 and
+  `InvalidWorkspaceError` → 422.
+- Rendered an inline governed-overview `Run evidence` section in the detail panel: newest-first
+  rows collapsed by default with an accessible disclosure control, a `Latest` marker on the
+  newest row only, `Telemetry: unknown` presentation copy, and full command-record detail
+  (argv, status, duration, exit/signal, truncation, pre-wrapped stdout/stderr) behind expansion;
+  refreshes once after a successful import/repair, never polls, and a fetch failure leaves
+  mission controls usable.
+- Verified: lint, typecheck, 200/200 tests, and production build all green; Phase 4 review clean
+  at `b8119bd` (no P0–P2, two P3s wontfixed as intentional trade-offs — fail-closed rejection of
+  a stray non-directory entry, and locale-dependent tie-break sort with no correctness impact).
+- Commits: 0eaef6a 9ed9cfa eaf8770 b1edef2 d61c22d b8119bd
+- Why: completes roadmap 2.4's evidence/history surface so the founder can inspect a work item's
+  full run provenance and outcome from the control panel without exposing raw tool detail on
+  the board or trusting unvalidated directory structure.
+
 ## 2026-07-23 · Bounded verification runner timeout (roadmap 2.3, review patch cycle)
 - Cross-vendor Phase 4 review of `NodeVerificationRunner` (external-result import,
   roadmap 2.3) found a confirmed P1: signaling only the direct child and resolving from

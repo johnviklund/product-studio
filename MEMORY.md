@@ -15,6 +15,20 @@ idea backlog.
 
 ## Learnings
 
+### 2026-07-23 — Substitute a human visual-approval checkpoint when no browser-control backend exists
+
+- **Scope:** Phase 3 browser/UI QA for any UI-facing roadmap step, when the environment has no
+  browser-automation backend and adding one solely for a QA checkpoint is out of scope.
+- **Evidence:** Roadmap 2.4's `Run evidence` panel QA (populated and fail-closed Execute cards)
+  was verified by preparing ignored local fixtures on the already-running dev app, presenting the
+  exact review states to the human, and recording their explicit approval in
+  `.workflow/plan.md`'s Deviations — the user explicitly declined a CE-specific setup dependency.
+- **Guidance:** When no browser-control backend is available, don't add a CE or browser
+  dependency solely to satisfy a QA checkpoint. Instead, prepare ignored local fixtures on the
+  already-running app, present the exact review states to the human, and record explicit visual
+  approval as a logged Deviation.
+- **Supersession:** active.
+
 ### 2026-07-23 — Publish immutable import evidence before the controller mutation it backs
 
 - **Scope:** External result import (roadmap 2.3), any recoverable multi-step controller

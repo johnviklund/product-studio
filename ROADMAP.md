@@ -98,6 +98,13 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Traceability:** PRD FR-007/015, `DESIGN.md` progressive disclosure.
 - **Dependencies:** 1.5 and 2.3.
 - **Completion signal:** The founder can inspect a run's evidence and next action from the control panel.
+- **Status:** Delivered — commits `0eaef6a`–`b8119bd` (fail-closed durable listing across every
+  historical mission identity for a work item, byte-authority reconciliation via the existing
+  private evidence reader, a read-only source-qualified `listImportEvidence` query with no
+  lease/rebuild/mutation, a bodyless node-runtime GET route, and an inline governed-overview
+  `Run evidence` panel with collapsed-by-default rows, a `Latest` marker, `Telemetry: unknown`,
+  and full command-record disclosure). Reviewed clean at `b8119bd`, no P0–P2 findings, two P3s
+  wontfixed as intentional trade-offs; see `WORKLOG.md`.
 
 **Milestone exit:** A contracted phase can be handed to an external agent, imported, verified, persisted, restarted, and inspected safely without a provider-specific runner.
 
