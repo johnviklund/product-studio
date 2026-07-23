@@ -134,13 +134,29 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Dependencies:** 2.3–2.4 and 3.1.
 - **Completion signal:** A real feature reaches review-ready, blocked, budget, or cycle-limit status without silent looping.
 
-### 3.3 Learning and evaluation proposals
+### 3.3 Learning, skill, and evaluation proposals
 
-- **Goal:** Produce reviewable product-memory and evaluation-case proposals from completed work.
-- **Primary scope:** Provenance-aware learning, evaluation-case capture, and human promotion.
+- **Goal:** Produce reviewable product-memory, evaluation-case, and skill-change proposals from completed work.
+- **Primary scope:** Provenance-aware learning classification; evaluation-case capture; candidate
+  skill creation, update, merge, or retirement; and human promotion. Repository-specific facts,
+  reusable skill guidance, model-routing evidence, and concrete regression cases remain distinct
+  destinations rather than being folded into one generic memory stream.
+- **Capture and routing:** Every phase and bounded attempt can append structured learning
+  candidates as soon as evidence appears and before its execution context is reset. Each candidate
+  is dispositioned to one canonical owner — product or design doctrine, operating policy,
+  repository context/memory, a reusable skill, a detailed solution, an evaluation case,
+  model-routing evidence, or an explicit drop with reason — rather than copied across stores.
+- **Evidence hygiene:** Preserve the smallest self-contained evidence needed to review a proposal,
+  preferably through immutable mission/run/commit handles instead of duplicated raw payloads.
+  Exclude secrets, unnecessary transcripts, and person- or customer-level data. Do not clear
+  transient learning inputs until every candidate is routed or deliberately dropped; expose a
+  bounded, human-readable recent index that points back to durable evidence rather than becoming
+  another source of truth.
 - **Traceability:** PRD §14–15, FR-018.
 - **Dependencies:** 3.2.
-- **Completion signal:** Completed work can propose, but not silently promote, one durable learning and one evaluation case.
+- **Completion signal:** Completed work can propose evidence-linked durable learning, evaluation,
+  and skill changes, every captured candidate has an explicit disposition, and none can silently
+  change the active skills or agent behavior.
 
 **Milestone exit:** A real feature can move through executor, reviewer, and patch missions until human review without restating context or manually assembling prompts.
 
@@ -154,6 +170,99 @@ Post-MVP: expand Idea through Learn, feedback routing, approval binding, autonom
 
 Post-MVP: add one deployment adapter or configurable deployment command, deployment records, Gate E, monitoring, incident workflow, and rollback/kill-switch integration. **Exit:** a prototype can be launched and recovered through the same control panel.
 
-### Milestone 6 — Evaluations and model routing
+### Milestone 6 — Skill evolution, evaluations, and model routing
 
-Post-MVP: add real-work golden cases, seat scorecards, shadow qualification, route changes, and cost/quality/latency trade-offs. **Exit:** a newly available model can be evaluated and safely promoted without redesigning the workflow.
+Product Studio's workflow phases and agent profiles remain model-neutral. Skills describe reusable
+behavior, context, constraints, and capability requirements; routing binds a currently qualified
+model and harness only when a mission is launched. A model can therefore be replaced without
+rewriting the workflow or its skills.
+
+The current personal `workflow` agent skill used for manual work across different CLIs is a
+reference for proven phase outcomes, seats, handoffs, and learning patterns. Product Studio does
+not mimic its package structure or depend on it at runtime; the product owns independent,
+provider-neutral contracts informed by evidence from that manual workflow.
+
+#### 6.1 Versioned skill registry and composable agent profiles
+
+- **Goal:** Assemble the exact reusable capabilities needed for each workflow phase and individual
+  plan step without coupling them to one model or agent product.
+- **Primary scope:** Immutable skill versions; phase-profile defaults; repository, work-item, and
+  plan-step overlays; required tool capabilities; bounded context selectors; and output and
+  verification contracts. Each compiled mission pins the resolved profile, skill versions, and
+  content digests so retries remain reproducible after the active registry changes.
+- **Dependencies:** 3.1–3.3 and the full-workflow contracts from Milestone 4.
+- **Completion signal:** The same pinned profile can be materialized for two capable agent
+  adapters, while a missing or incompatible required skill or capability fails closed.
+
+#### 6.2 Evidence-driven skill evolution
+
+- **Goal:** Improve agent behavior from repeated workflow evidence without silently self-modifying
+  the active system.
+- **Primary scope:** Convert verification outcomes, review findings, retries, interventions, and
+  operator feedback into provenance-linked proposals to create, update, merge, or retire skills.
+  Keep repository facts in repository context, concrete failures in evaluation cases, and
+  model-specific observations in routing evidence rather than growing overlapping skills.
+- **Promotion discipline:** Search the active registry and adapter-visible installed skills before
+  proposing a new one; extend an existing owner first. A new skill requires recurrence evidence,
+  reuse beyond one feature or repository-specific schema, and a genuine uncovered responsibility.
+  The current manual workflow's three-or-more-occurrences rule is the initial reference heuristic,
+  not a permanent hard-coded threshold. Strip concrete paths, object names, business data, and
+  one-off implementation logic from reusable skill guidance.
+- **Registry hygiene:** Detect name and scope collisions before publication. Keep active skills and
+  learning indexes bounded by consolidating overlaps, superseding stale versions, and retiring
+  weak or unused skills instead of treating growth as append-only.
+- **Dependencies:** 3.3 and 6.1.
+- **Completion signal:** A completed cycle can produce a reviewable candidate skill diff with its
+  supporting evidence, expected improvement, evaluation cases, and rollback target; promotion
+  remains an explicit human or authorized policy decision, and rejected proposals retain a reason
+  without entering the active profile.
+
+#### 6.3 Skill qualification and controlled promotion
+
+- **Goal:** Demonstrate that a candidate skill or profile improves outcomes without overfitting to
+  one work item or model.
+- **Primary scope:** Real-work golden cases; replay or shadow evaluation; candidate-versus-active
+  comparisons across fixed model baselines; regression thresholds; immutable publication; and
+  rollback. Measure task completion, deterministic verification, review severity, retry and human
+  intervention rates, cost, and time to completion.
+- **Golden-case intake:** Admit only cases likely to discriminate capability: an approved output
+  that required real judgment, a known-correct mechanical transform, or a confirmed failure and
+  the finding that caught it. Each case is self-contained with input, approved output, grading
+  criteria and traps, profile/skill versions, commit or run provenance, and the producing and
+  approving agents. Keep a bounded rolling set per phase/profile; when full, a stronger case
+  displaces the weakest. The manual workflow's roughly fifteen cases per seat is a reference,
+  while Product Studio owns the configurable policy.
+- **Exam protocol:** Run one candidate against one phase/profile at a time in fresh context with
+  the approved output withheld and the same tools, skill versions, and repository conditions as
+  the real seat. Grade with an independent strong reviewer, cross-vendor where practical, then
+  require human review of every failure plus a sample of passes. Record exact model, harness,
+  effort, quality, cost, latency, and any human overturn in a durable scorecard.
+- **Corpus health:** Detect malformed, stale, redundant, weak, or trivially easy cases and profiles
+  without enough discriminating evidence. Refuse to publish a meaningful-looking qualification
+  when the usable corpus is too small; identify the missing cases future workflow runs should
+  capture instead.
+- **Dependencies:** 6.1–6.2.
+- **Completion signal:** A qualified skill or profile version can be promoted with evidence while
+  prior missions remain pinned to their original versions, the evaluation corpus stays bounded
+  and healthy, and failed or partial qualification remains visible without mutating active skills.
+
+#### 6.4 Model qualification and task-shaped routing
+
+- **Goal:** Safely adopt newly released models for the workflow steps where they perform best.
+- **Primary scope:** Evaluate candidate models against fixed skill and profile versions; maintain
+  task-shaped seat scorecards; shadow qualification; availability-aware fallbacks; and explicit
+  quality, cost, and latency trade-offs. Model observations update routing evidence, not skill
+  content.
+- **Qualification controls:** Confirm the exact candidate model and effort are available in the
+  target harness and present the expected evaluation cost before running. Keep model exams
+  separate from workflow execution, qualify one seat/profile at a time, and treat grader output as
+  a hypothesis subject to the human spot check. Scorecards propose promote, fallback, demote, or
+  reject decisions; only an authorized human or policy gate changes active routing.
+- **Dependencies:** 6.1 and 6.3.
+- **Completion signal:** A newly available model can earn and assume a workflow seat without
+  changing the workflow, active skills, mission contracts, or historical evidence, and a model
+  that lacks availability or sufficient evidence cannot be silently selected.
+
+**Milestone exit:** Repeated workflow cycles produce governed skill improvements and evaluation
+cases, qualified models can be swapped by task shape, and every change remains reproducible,
+reviewable, and reversible.
