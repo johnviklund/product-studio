@@ -9,9 +9,13 @@ import type {
 } from "./work-item";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
-const MISSION_SCHEMA_VERSION = 1 as const;
-const RESULT_CONTRACT_SCHEMA_VERSION = 1 as const;
+const MISSION_SCHEMA_VERSION = 2 as const;
+const RESULT_CONTRACT_SCHEMA_VERSION = 2 as const;
 const RESULT_REQUIRED_FIELDS = [
+  "result_schema_version",
+  "mission_content_sha256",
+  "identity",
+  "commit",
   "summary",
   "changed_files",
   "verification",
@@ -45,6 +49,15 @@ const nonEmptyStringListSchema = z
       values.length,
     "must not contain case-insensitive duplicates",
   );
+const allowedScopeSchema = z
+  .array(workspaceRelativePosixPathSchema)
+  .min(1, "must not be empty")
+  .refine(
+    (values) =>
+      new Set(values.map((value) => value.toLocaleLowerCase())).size ===
+      values.length,
+    "must not contain case-insensitive duplicates",
+  );
 const workItemIdSchema = z
   .string()
   .regex(
@@ -60,7 +73,7 @@ export interface MissionIdentity {
 }
 
 export interface MissionPackage {
-  mission_schema_version: 1;
+  mission_schema_version: 2;
   identity: MissionIdentity;
   controller_run: {
     run_id: string;
@@ -76,10 +89,22 @@ export interface MissionPackage {
     allowed_scope: string[];
     review_ready: string[];
   };
+  source_revision: {
+    git_base_commit: string;
+  };
   result_contract: {
-    schema_version: 1;
+    schema_version: 2;
     output_path: string;
-    required_fields: ["summary", "changed_files", "verification"];
+    result_schema_version: 1;
+    required_fields: [
+      "result_schema_version",
+      "mission_content_sha256",
+      "identity",
+      "commit",
+      "summary",
+      "changed_files",
+      "verification",
+    ];
   };
   task_path: string;
   content_sha256: string;
@@ -88,6 +113,7 @@ export interface MissionPackage {
 export interface MissionPaths {
   task_path: string;
   output_path: string;
+  git_base_commit: string;
 }
 
 export interface MissionArtifactWriteResult {
@@ -120,16 +146,24 @@ const missionPackageBaseSchema = z.strictObject({
     title: nonEmptyTrimmedStringSchema,
     type: z.enum(missionWorkItemTypes).optional(),
     acceptance_criteria: nonEmptyStringListSchema,
-    allowed_scope: nonEmptyStringListSchema,
+    allowed_scope: allowedScopeSchema,
     review_ready: nonEmptyStringListSchema,
+  }),
+  source_revision: z.strictObject({
+    git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
   }),
   result_contract: z.strictObject({
     schema_version: z.literal(RESULT_CONTRACT_SCHEMA_VERSION),
     output_path: workspaceRelativePosixPathSchema,
+    result_schema_version: z.literal(1),
     required_fields: z.tuple([
       z.literal(RESULT_REQUIRED_FIELDS[0]),
       z.literal(RESULT_REQUIRED_FIELDS[1]),
       z.literal(RESULT_REQUIRED_FIELDS[2]),
+      z.literal(RESULT_REQUIRED_FIELDS[3]),
+      z.literal(RESULT_REQUIRED_FIELDS[4]),
+      z.literal(RESULT_REQUIRED_FIELDS[5]),
+      z.literal(RESULT_REQUIRED_FIELDS[6]),
     ]),
   }),
   task_path: workspaceRelativePosixPathSchema,
@@ -156,7 +190,7 @@ const compilableWorkItemSchema = z.object({
     type: z.enum(missionWorkItemTypes).optional(),
     goal_version: positiveSafeIntegerSchema,
     acceptance_criteria: nonEmptyStringListSchema,
-    allowed_scope: nonEmptyStringListSchema,
+    allowed_scope: allowedScopeSchema,
     review_ready: nonEmptyStringListSchema,
   }),
   state: z.object({
@@ -189,6 +223,7 @@ const missionPathsSchema = z
   .strictObject({
     task_path: workspaceRelativePosixPathSchema,
     output_path: workspaceRelativePosixPathSchema,
+    git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
   })
   .superRefine((paths, context) => {
     const taskSegments = paths.task_path.split("/");
@@ -289,9 +324,13 @@ function missionContent(
       allowed_scope: mission.goal.allowed_scope,
       review_ready: mission.goal.review_ready,
     },
+    source_revision: {
+      git_base_commit: mission.source_revision.git_base_commit,
+    },
     result_contract: {
       schema_version: mission.result_contract.schema_version,
       output_path: mission.result_contract.output_path,
+      result_schema_version: mission.result_contract.result_schema_version,
       required_fields: mission.result_contract.required_fields,
     },
     task_path: mission.task_path,
@@ -358,9 +397,13 @@ export function compileMission(
       allowed_scope: input.work_item.goal.allowed_scope,
       review_ready: input.work_item.goal.review_ready,
     },
+    source_revision: {
+      git_base_commit: input.paths.git_base_commit,
+    },
     result_contract: {
       schema_version: RESULT_CONTRACT_SCHEMA_VERSION,
       output_path: input.paths.output_path,
+      result_schema_version: 1,
       required_fields: [...RESULT_REQUIRED_FIELDS],
     },
     task_path: input.paths.task_path,
@@ -405,7 +448,30 @@ export function renderTaskMd(mission: MissionPackage): string {
     "## Result contract",
     "",
     `Write the structured result to \`${validatedMission.result_contract.output_path}\`.`,
-    `Include these fields: ${validatedMission.result_contract.required_fields.join(", ")}.`,
+    "Commit the code changes before returning the result.",
+    "Use this complete JSON shape:",
+    "",
+    "```json",
+    "{",
+    `  \"result_schema_version\": ${validatedMission.result_contract.result_schema_version},`,
+    `  \"mission_content_sha256\": \"${validatedMission.content_sha256}\",`,
+    "  \"identity\": {",
+    `    \"work_item_id\": \"${validatedMission.identity.work_item_id}\",`,
+    `    \"goal_version\": ${validatedMission.identity.goal_version},`,
+    `    \"input_revision\": ${validatedMission.identity.input_revision},`,
+    `    \"attempt\": ${validatedMission.identity.attempt}`,
+    "  },",
+    "  \"commit\": \"<full 40-character Git commit SHA>\",",
+    "  \"summary\": \"<concise implementation summary>\",",
+    "  \"changed_files\": [\"<workspace-relative POSIX path>\"],",
+    "  \"verification\": [",
+    "    { \"name\": \"<check name>\", \"status\": \"passed\", \"detail\": \"<optional detail>\" }",
+    "  ]",
+    "}",
+    "```",
+    "",
+    "Each reported verification status must be passed, failed, or not_run.",
+    "Reported verification is context only. The controller validates the commit and runs the authoritative checks.",
     "",
     "## Next gate",
     "",

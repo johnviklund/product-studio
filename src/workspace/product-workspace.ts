@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import {
   lstat,
   mkdir,
@@ -10,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, posix, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 
 import { parse, stringify } from "yaml";
 import type { ZodType } from "zod";
@@ -64,6 +66,7 @@ const MISSION_JSON_FILE = "mission.json";
 const TASK_MD_FILE = "TASK.md";
 const RESULT_JSON_FILE = "result.json";
 const CONTROLLER_LOCK_FILE = ".controller.lock";
+const execFileAsync = promisify(execFile);
 const UUID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const STAGING_DIRECTORY_PATTERN = new RegExp(
@@ -672,7 +675,10 @@ export class ProductWorkspace implements WorkItemRepository {
       );
     }
 
-    const paths = this.missionPaths(validatedIdentity);
+    const paths = this.missionPaths(
+      validatedIdentity,
+      await this.resolveGitBaseCommit(),
+    );
     const mission = missionPackageSchema.parse(buildPackage(paths));
     if (
       JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
@@ -953,7 +959,10 @@ export class ProductWorkspace implements WorkItemRepository {
     return manifest;
   }
 
-  private missionPaths(identity: MissionIdentity): MissionPaths {
+  private missionPaths(
+    identity: MissionIdentity,
+    gitBaseCommit: string,
+  ): MissionPaths {
     const relativeDirectory = posix.join(
       FOUNDER_DIRECTORY,
       MISSIONS_DIRECTORY,
@@ -963,7 +972,28 @@ export class ProductWorkspace implements WorkItemRepository {
     return {
       task_path: posix.join(relativeDirectory, TASK_MD_FILE),
       output_path: posix.join(relativeDirectory, RESULT_JSON_FILE),
+      git_base_commit: gitBaseCommit,
     };
+  }
+
+  private async resolveGitBaseCommit(): Promise<string> {
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        { cwd: this.workspaceRoot, encoding: "utf8" },
+      );
+      const commit = stdout.trim();
+      if (!/^[0-9a-f]{40}$/.test(commit)) {
+        throw new Error("Git returned a non-canonical commit SHA");
+      }
+      return commit;
+    } catch (error) {
+      throw this.invalid(
+        ".git",
+        `cannot resolve the mission Git base commit: ${errorMessage(error)}`,
+      );
+    }
   }
 
   private missionDirectoryName(identity: MissionIdentity): string {
