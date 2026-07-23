@@ -7,6 +7,7 @@ import type {
   WorkItem,
   WorkItemType,
 } from "./work-item";
+import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
 const MISSION_SCHEMA_VERSION = 1 as const;
 const RESULT_CONTRACT_SCHEMA_VERSION = 1 as const;
@@ -49,25 +50,6 @@ const workItemIdSchema = z
   .regex(
     /^wi_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     "work_item_id must use the wi_<uuid> format",
-  );
-
-function isSafeWorkspaceRelativePosixPath(value: string): boolean {
-  return (
-    !value.startsWith("/") &&
-    !value.includes("\\") &&
-    value
-      .split("/")
-      .every(
-        (segment) => segment !== "" && segment !== "." && segment !== "..",
-      )
-  );
-}
-
-const workspaceRelativePosixPathSchema = z
-  .string()
-  .refine(
-    isSafeWorkspaceRelativePosixPath,
-    "must be a safe workspace-relative POSIX path",
   );
 
 export interface MissionIdentity {
