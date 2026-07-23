@@ -483,6 +483,74 @@ describe("PortfolioService", () => {
     index.close();
   });
 
+  it("updates a goal contract through the source-qualified service and rebuilds only after success", async () => {
+    const root = await createWorkspace("Goal Contract Service");
+    const repository = new ProductWorkspace(root);
+    const created = await repository.create({
+      title: "Make contracts app-reachable",
+      type: "Feature",
+    });
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const rebuildSpy = vi.spyOn(index, "rebuild");
+    rebuildSpy.mockClear();
+    const input = {
+      acceptance_criteria: ["Goal contracts can be saved"],
+      allowed_scope: ["src/application", "app/api"],
+      review_ready: ["Portfolio tests pass"],
+    };
+
+    await expect(
+      service.updateGoalContract(
+        "ws_00000000-0000-4000-8000-000000000000",
+        created.goal.work_item_id,
+        input,
+      ),
+    ).rejects.toBeInstanceOf(UnknownPortfolioSourceError);
+    await expect(
+      service.updateGoalContract(
+        sourceId,
+        "wi_123e4567-e89b-12d3-a456-426614174000",
+        input,
+      ),
+    ).rejects.toBeInstanceOf(PortfolioWorkItemNotFoundError);
+    expect(rebuildSpy).not.toHaveBeenCalled();
+
+    const activated = await service.updateGoalContract(
+      sourceId,
+      created.goal.work_item_id,
+      input,
+    );
+    expect(activated).toMatchObject({
+      source_id: sourceId,
+      project: registration.workspace,
+      work_item: {
+        goal: { ...input, goal_version: 1 },
+        state: { goal_version: 1, input_revision: 1, attempt: 0 },
+      },
+    });
+    expect(rebuildSpy).toHaveBeenCalledOnce();
+
+    const revised = await service.updateGoalContract(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        ...input,
+        acceptance_criteria: ["Goal contracts can be revised"],
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+      },
+    );
+    expect(revised.work_item.state).toMatchObject({
+      goal_version: 2,
+      input_revision: 2,
+      attempt: 0,
+    });
+    expect(rebuildSpy).toHaveBeenCalledTimes(2);
+    index.close();
+  });
+
   it("rejects unversioned details updates after a goal contract exists", async () => {
     const { inboxRoot, index, service } = await createService();
     const created = await service.createCapture({
