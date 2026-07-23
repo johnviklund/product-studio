@@ -8,6 +8,7 @@ import {
   createDefaultBoardView,
   detailPanelModeForItem,
   isBoardSourceVisible,
+  missionHandoffModeForItem,
   nextActionForPhase,
   parseBoardItemIdentityKey,
   parseBoardView,
@@ -112,6 +113,44 @@ describe("board projection", () => {
         },
       }),
     ).toBe("governed");
+  });
+
+  it("derives active, repair, and hidden mission handoff states", () => {
+    const item = {
+      source_id: "ws_product",
+      work_item: {
+        goal: { goal_version: 3 },
+        state: {
+          phase: "execute" as const,
+          status: "active" as const,
+          input_revision: 2,
+          attempt: 1,
+        },
+      },
+    };
+
+    expect(missionHandoffModeForItem(item)).toBe("active");
+    expect(
+      missionHandoffModeForItem({
+        ...item,
+        work_item: {
+          ...item.work_item,
+          state: { ...item.work_item.state, status: "blocked" },
+        },
+      }),
+    ).toBe("repair");
+    expect(
+      missionHandoffModeForItem({
+        ...item,
+        work_item: {
+          ...item.work_item,
+          state: { ...item.work_item.state, phase: "review" },
+        },
+      }),
+    ).toBe("hidden");
+    expect(missionHandoffModeForItem({ ...item, source_id: "inbox" })).toBe(
+      "hidden",
+    );
   });
 
   it("derives only valid forward and backward board transition actions", () => {

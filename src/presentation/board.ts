@@ -4,7 +4,9 @@ import {
   workItemIdSchema,
   type WorkItemCapture,
   type WorkItemPhase,
+  type WorkItemStatus,
 } from "../domain/work-item";
+import { INBOX_SOURCE_ID } from "../domain/portfolio-source";
 import {
   ALLOWED_PHASE_TRANSITIONS,
   validatePhaseTransition as validateDomainPhaseTransition,
@@ -49,6 +51,7 @@ export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 export type BoardColumnId = BoardColumn["id"];
 
 export type DetailPanelMode = "capture" | "governed";
+export type MissionHandoffMode = "active" | "repair" | "hidden";
 
 export interface BoardTransitionAction {
   target_column_id: BoardColumnId;
@@ -199,6 +202,38 @@ export function detailPanelModeForItem(item: {
     boardColumnForPhase(item.work_item.state.phase).id === "todo"
     ? "capture"
     : "governed";
+}
+
+export function missionHandoffModeForItem(item: {
+  source_id: string;
+  work_item: {
+    goal: { goal_version?: number };
+    state: {
+      phase: WorkItemPhase;
+      status: WorkItemStatus;
+      input_revision?: number;
+      attempt?: number;
+    };
+  };
+}): MissionHandoffMode {
+  const { goal, state } = item.work_item;
+  if (
+    item.source_id === INBOX_SOURCE_ID ||
+    goal.goal_version === undefined ||
+    state.input_revision === undefined ||
+    state.attempt === undefined ||
+    state.phase !== "execute"
+  ) {
+    return "hidden";
+  }
+
+  if (state.status === "active") {
+    return "active";
+  }
+  if (state.status === "blocked") {
+    return "repair";
+  }
+  return "hidden";
 }
 
 export function boardTransitionActionsForPhase(phase: WorkItemPhase): {

@@ -9,7 +9,11 @@ import {
 } from "react";
 import { ArrowLeft, ArrowRight, LockKeyhole, X } from "lucide-react";
 
-import type { MissionCompilation } from "@/src/application/portfolio";
+import type {
+  MissionCompilation,
+  PortfolioImportResult,
+  PortfolioRetryResult,
+} from "@/src/application/portfolio";
 import {
   INBOX_SOURCE_ID,
   type PortfolioWorkItem,
@@ -24,6 +28,7 @@ import {
 import {
   boardTransitionActionsForPhase,
   detailPanelModeForItem,
+  missionHandoffModeForItem,
   nextActionForPhase,
   type BoardColumnId,
 } from "@/src/presentation/board";
@@ -32,7 +37,7 @@ interface DetailPanelProps {
   item: PortfolioWorkItem;
   workspaces: RegisteredWorkspace[];
   onClose: () => void;
-  onUpdated: (item: PortfolioWorkItem) => void;
+  onUpdated: (item: PortfolioWorkItem, message?: string) => void;
   onAssigned: (previous: PortfolioWorkItem, item: PortfolioWorkItem) => void;
   onTransition: (item: PortfolioWorkItem, targetColumnId: BoardColumnId) => void;
   transitionPending?: boolean;
@@ -51,6 +56,11 @@ interface MissionCompilationState {
   result: MissionCompilation;
 }
 
+interface MissionImportState {
+  itemKey: string;
+  result: PortfolioImportResult["evidence"];
+}
+
 const capturedAtFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "short",
@@ -61,6 +71,14 @@ function tagsFromInput(value: string): string[] {
     .split(",")
     .map((tag) => tag.trim())
     .filter((tag) => tag.length > 0);
+}
+
+function shortEvidencePath(path: string): string {
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  if (segments.length <= 4) {
+    return path;
+  }
+  return `…/${segments.slice(-4).join("/")}`;
 }
 
 export function DetailPanel({
@@ -86,8 +104,12 @@ export function DetailPanel({
   const [savingDetails, setSavingDetails] = useState(false);
   const [savingAssignment, setSavingAssignment] = useState(false);
   const [compilingMission, setCompilingMission] = useState(false);
+  const [importingResult, setImportingResult] = useState(false);
+  const [startingRepair, setStartingRepair] = useState(false);
   const [missionCompilationState, setMissionCompilationState] =
     useState<MissionCompilationState | null>(null);
+  const [missionImportState, setMissionImportState] =
+    useState<MissionImportState | null>(null);
   const [copiedMissionKey, setCopiedMissionKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
@@ -105,14 +127,17 @@ export function DetailPanel({
     state.input_revision,
     state.attempt,
   ].join(":");
-  const missionEligible =
-    item.source_id !== INBOX_SOURCE_ID &&
-    goal.goal_version !== undefined &&
-    state.phase === "execute" &&
-    state.status === "active";
+  const missionHandoffMode = missionHandoffModeForItem(item);
+  const missionEligible = missionHandoffMode === "active";
+  const repairEligible = missionHandoffMode === "repair";
+  const missionBusy = compilingMission || importingResult || startingRepair;
   const missionCompilation =
     missionCompilationState?.itemKey === missionItemKey
       ? missionCompilationState.result
+      : null;
+  const missionImport =
+    missionImportState?.itemKey === missionItemKey
+      ? missionImportState.result
       : null;
 
   const attemptClose = useCallback(() => {
@@ -253,6 +278,80 @@ export function DetailPanel({
       );
     } finally {
       setCompilingMission(false);
+    }
+  }
+
+  async function handleImportResult() {
+    setImportingResult(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/import`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | PortfolioImportResult
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The returned result could not be imported."
+            : "The returned result could not be imported.",
+        );
+        return;
+      }
+
+      const imported = body as PortfolioImportResult;
+      setMissionImportState({
+        itemKey: missionItemKey,
+        result: imported.evidence,
+      });
+      onUpdated(
+        imported,
+        imported.evidence.outcome === "applied"
+          ? "Result imported and ready for review."
+          : "Result imported; a repair attempt is required.",
+      );
+    } catch {
+      setError(
+        "The returned result could not be imported. Check the local server and try again.",
+      );
+    } finally {
+      setImportingResult(false);
+    }
+  }
+
+  async function handleStartRepair() {
+    setStartingRepair(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/retry`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | PortfolioRetryResult
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "A repair attempt could not be started."
+            : "A repair attempt could not be started.",
+        );
+        return;
+      }
+
+      setMissionCompilationState(null);
+      setMissionImportState(null);
+      onUpdated(body as PortfolioRetryResult, "Repair attempt started.");
+    } catch {
+      setError(
+        "A repair attempt could not be started. Check the local server and try again.",
+      );
+    } finally {
+      setStartingRepair(false);
     }
   }
 
@@ -536,12 +635,12 @@ export function DetailPanel({
                     <p className="mt-1 text-sm font-medium">{nextActionForPhase(state.phase)}</p>
                   </section>
 
-                  {missionEligible ? (
+                  {missionEligible || repairEligible || missionImport ? (
                     <section
                       aria-labelledby={`${fieldId}-mission-handoff`}
                       className="border-y py-4"
                     >
-                      <div className="flex items-start justify-between gap-4">
+                      <div>
                         <div>
                           <h3
                             id={`${fieldId}-mission-handoff`}
@@ -550,20 +649,71 @@ export function DetailPanel({
                             Mission handoff
                           </h3>
                           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                            Compile durable instructions for an external agent.
+                            {repairEligible
+                              ? "The last import is blocked. Prior evidence stays immutable when you create a new attempt."
+                              : missionEligible
+                                ? "Compile durable instructions, then import the result returned by the external agent."
+                                : "The returned result has been processed by the controller."}
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          disabled={compilingMission}
-                          onClick={() => void handleCompileMission()}
-                          className="h-9 shrink-0 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {compilingMission ? "Compiling…" : "Compile mission"}
-                        </button>
+                        {missionEligible ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={missionBusy}
+                              onClick={() => void handleCompileMission()}
+                              className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {compilingMission ? "Compiling…" : "Compile mission"}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={missionBusy}
+                              onClick={() => void handleImportResult()}
+                              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {importingResult ? "Importing…" : "Import result"}
+                            </button>
+                          </div>
+                        ) : null}
+                        {repairEligible ? (
+                          <button
+                            type="button"
+                            disabled={missionBusy}
+                            onClick={() => void handleStartRepair()}
+                            className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {startingRepair
+                              ? "Starting repair…"
+                              : "Start repair attempt"}
+                          </button>
+                        ) : null}
                       </div>
 
-                      {missionCompilation ? (
+                      {missionImport ? (
+                        <div
+                          className={`mt-4 border-l-2 px-3 py-3 text-xs ${
+                            missionImport.outcome === "applied"
+                              ? "border-success bg-success/10"
+                              : "border-destructive bg-destructive/10"
+                          }`}
+                          role="status"
+                        >
+                          <p className="font-medium">
+                            {missionImport.outcome === "applied"
+                              ? "Ready for review"
+                              : "Import blocked"}
+                          </p>
+                          <p
+                            className="mt-1 break-all leading-5 text-muted-foreground"
+                            title={missionImport.evidence_path}
+                          >
+                            Evidence · {shortEvidencePath(missionImport.evidence_path)}
+                          </p>
+                        </div>
+                      ) : null}
+
+                      {missionEligible && missionCompilation ? (
                         <div className="mt-4 border-l-2 border-border bg-background px-3 py-3">
                           <dl className="space-y-3 text-xs">
                             <div>

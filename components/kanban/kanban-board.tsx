@@ -338,7 +338,10 @@ export function KanbanBoard() {
     });
   }
 
-  function handleCaptureUpdated(item: PortfolioWorkItem): void {
+  function handleCaptureUpdated(
+    item: PortfolioWorkItem,
+    message = "Capture details saved.",
+  ): void {
     const itemKey = boardItemIdentityKey(identityForItem(item));
     setItems((current) =>
       current.map((candidate) =>
@@ -347,7 +350,7 @@ export function KanbanBoard() {
           : candidate,
       ),
     );
-    setTransitionMessage({ kind: "success", text: "Capture details saved." });
+    setTransitionMessage({ kind: "success", text: message });
   }
 
   function handleCaptureAssigned(
