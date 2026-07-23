@@ -337,6 +337,66 @@ describe("WorkItemController", () => {
     expect(runEntries).toHaveLength(2);
   });
 
+  it("rejects goal-contract updates in execute without mutating or retaining its lease", async () => {
+    const { root, repository } = await createWorkspace();
+    const created = await createUncontractedItem(repository);
+    const controller = createController(repository);
+    let mutation = await controller.updateGoalContract(
+      created.goal.work_item_id,
+      firstContract,
+    );
+
+    for (const targetPhase of ["spec", "plan", "execute"] as const) {
+      mutation = await controller.transition(created.goal.work_item_id, {
+        target_phase: targetPhase,
+        target_status: "active",
+        expected_phase: mutation.work_item.state.phase,
+        expected_status: mutation.work_item.state.status,
+        expected_schema_version: 1,
+        expected_goal_version: mutation.work_item.state.goal_version!,
+        expected_input_revision: mutation.work_item.state.input_revision!,
+        attempt: mutation.work_item.state.attempt!,
+      });
+    }
+
+    const before = await repository.read(created.goal.work_item_id);
+    const runsPath = join(
+      root,
+      ".founder",
+      "work-items",
+      created.goal.work_item_id,
+      "runs",
+    );
+    const runsBefore = await readdir(runsPath);
+
+    await expect(
+      controller.updateGoalContract(created.goal.work_item_id, {
+        ...firstContract,
+        acceptance_criteria: ["Execute contracts stay fixed"],
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+      }),
+    ).rejects.toMatchObject({
+      name: "ControllerConflictError",
+      kind: "goal_contract_locked",
+    });
+    expect(await repository.read(created.goal.work_item_id)).toEqual(before);
+    expect(await readdir(runsPath)).toEqual(runsBefore);
+
+    const afterRejectedUpdate = await repository.read(created.goal.work_item_id);
+    const transitioned = await controller.transition(created.goal.work_item_id, {
+      target_phase: "review",
+      target_status: "active",
+      expected_phase: afterRejectedUpdate!.state.phase,
+      expected_status: afterRejectedUpdate!.state.status,
+      expected_schema_version: 1,
+      expected_goal_version: afterRejectedUpdate!.state.goal_version!,
+      expected_input_revision: afterRejectedUpdate!.state.input_revision!,
+      attempt: afterRejectedUpdate!.state.attempt!,
+    });
+    expect(transitioned.work_item.state.phase).toBe("review");
+  });
+
   it("applies and replays an exact transition without changing durable state twice", async () => {
     const { root, repository } = await createWorkspace();
     const created = await createUncontractedItem(repository);
