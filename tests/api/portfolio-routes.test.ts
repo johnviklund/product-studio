@@ -36,9 +36,7 @@ vi.mock("../../src/application/portfolio-service", () => ({
 
 import * as workItemsRoute from "../../app/api/work-items/route";
 import { POST as createPortfolioWorkItem } from "../../app/api/portfolio/work-items/route";
-import { POST as assignPortfolioWorkItem } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/assignment/route";
-import { PATCH as updatePortfolioWorkItemDetails } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/details/route";
-import { PATCH as updatePortfolioGoalContract } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/goal-contract/route";
+import { PATCH as savePortfolioWorkItem } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route";
 import * as portfolioMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route";
 import * as portfolioMissionImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route";
 import * as portfolioMissionRetryRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route";
@@ -144,10 +142,20 @@ async function createMissionReadyWorkspace(): Promise<{
     controllerRunner,
   );
   let current = (
-    await controller.updateGoalContract(item.goal.work_item_id, {
-      acceptance_criteria: ["The mission package is reproducible"],
-      allowed_scope: ["src/application", "app/api"],
-      review_ready: ["All checks pass"],
+    await controller.saveWorkItem(item.goal.work_item_id, {
+      target_source_id: "inbox",
+      title: item.goal.title,
+      type: item.goal.type ?? null,
+      priority: item.goal.priority ?? null,
+      tags: item.goal.tags ?? [],
+      notes: item.goal.notes ?? null,
+      goal_contract: {
+        purpose: "Keep the mission package reproducible.",
+        acceptance_criteria: ["The mission package is reproducible"],
+        non_goals: ["Do not mutate the workspace."],
+        allowed_scope: ["src/application", "app/api"],
+        review_ready: ["All checks pass"],
+      },
     })
   ).work_item;
   for (const targetPhase of ["spec", "plan", "execute"] as const) {
@@ -223,33 +231,11 @@ function captureRequest(body: unknown): Request {
   });
 }
 
-function detailsUpdateRequest(body: unknown): Request {
+function saveWorkItemRequest(body: unknown): Request {
   return new Request(
-    "http://localhost/api/portfolio/work-items/source/item/details",
+    "http://localhost/api/portfolio/work-items/source/item/edit",
     {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
-}
-
-function goalContractRequest(body: unknown): Request {
-  return new Request(
-    "http://localhost/api/portfolio/work-items/source/item/goal-contract",
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
-}
-
-function assignmentRequest(body: unknown): Request {
-  return new Request(
-    "http://localhost/api/portfolio/work-items/source/item/assignment",
-    {
-      method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     },
@@ -378,7 +364,7 @@ describe("portfolio API routes", () => {
     });
   });
 
-  it("creates, refines, and assigns a source-qualified capture", async () => {
+  it("saves and assigns a source-qualified capture through the unified route", async () => {
     await createService();
     const workspacePath = await createWorkspace();
     const registrationResponse = await registerWorkspace(
@@ -409,14 +395,22 @@ describe("portfolio API routes", () => {
     });
     expect(created.work_item.goal).not.toHaveProperty("type");
 
-    const detailsResponse = await updatePortfolioWorkItemDetails(
-      detailsUpdateRequest({ type: "Feature", priority: "high" }),
+    const saveResponse = await savePortfolioWorkItem(
+      saveWorkItemRequest({
+        target_source_id: targetSourceId,
+        title: "Capture through HTTP",
+        type: "Feature",
+        priority: "high",
+        tags: [],
+        notes: null,
+      }),
       phaseUpdateContext("inbox", workItemId),
     );
-    const updated = await detailsResponse.json();
-    expect(detailsResponse.status).toBe(200);
-    expect(updated).toMatchObject({
-      source_id: "inbox",
+    const saved = await saveResponse.json();
+    expect(saveResponse.status).toBe(200);
+    expect(saved).toMatchObject({
+      source_id: targetSourceId,
+      project: { workspace_path: workspacePath },
       work_item: {
         goal: {
           work_item_id: workItemId,
@@ -425,18 +419,6 @@ describe("portfolio API routes", () => {
           capture: { original_title: "Capture through HTTP" },
         },
       },
-    });
-
-    const assignmentResponse = await assignPortfolioWorkItem(
-      assignmentRequest({ target_source_id: targetSourceId }),
-      phaseUpdateContext("inbox", workItemId),
-    );
-    const assigned = await assignmentResponse.json();
-    expect(assignmentResponse.status).toBe(200);
-    expect(assigned).toMatchObject({
-      source_id: targetSourceId,
-      project: { workspace_path: workspacePath },
-      work_item: { goal: { work_item_id: workItemId } },
     });
   });
 
@@ -447,14 +429,24 @@ describe("portfolio API routes", () => {
     );
     const created = await createResponse.json();
     const workItemId = created.work_item.goal.work_item_id as string;
-    const input = {
+    const goalContract = {
+      purpose: "Prove the unified route reaches the controller.",
       acceptance_criteria: ["The form reaches the controller"],
+      non_goals: ["Do not bypass the controller."],
       allowed_scope: ["src/application"],
       review_ready: ["API checks pass"],
     };
 
-    const activatedResponse = await updatePortfolioGoalContract(
-      goalContractRequest(input),
+    const activatedResponse = await savePortfolioWorkItem(
+      saveWorkItemRequest({
+        target_source_id: "inbox",
+        title: "Contract through HTTP",
+        type: null,
+        priority: null,
+        tags: [],
+        notes: null,
+        goal_contract: goalContract,
+      }),
       phaseUpdateContext("inbox", workItemId),
     );
     const activated = await activatedResponse.json();
@@ -462,15 +454,23 @@ describe("portfolio API routes", () => {
     expect(activated).toMatchObject({
       source_id: "inbox",
       work_item: {
-        goal: { ...input, goal_version: 1 },
+        goal: { goal_contract: { ...goalContract, goal_version: 1 } },
         state: { goal_version: 1, input_revision: 1, attempt: 0 },
       },
     });
 
-    const revisedResponse = await updatePortfolioGoalContract(
-      goalContractRequest({
-        ...input,
-        acceptance_criteria: ["The form revises the controller contract"],
+    const revisedResponse = await savePortfolioWorkItem(
+      saveWorkItemRequest({
+        target_source_id: "inbox",
+        title: "Contract through HTTP",
+        type: null,
+        priority: null,
+        tags: [],
+        notes: null,
+        goal_contract: {
+          ...goalContract,
+          acceptance_criteria: ["The form revises the controller contract"],
+        },
         expected_goal_version: 1,
         expected_input_revision: 1,
       }),
@@ -479,7 +479,7 @@ describe("portfolio API routes", () => {
     expect(revisedResponse.status).toBe(200);
     expect(await revisedResponse.json()).toMatchObject({
       work_item: {
-        goal: { goal_version: 2 },
+        goal: { goal_contract: { goal_version: 2 } },
         state: { goal_version: 2, input_revision: 2, attempt: 0 },
       },
     });
@@ -779,21 +779,14 @@ describe("portfolio API routes", () => {
     });
   });
 
-  it("returns 400 for invalid capture, detail, and goal-contract bodies", async () => {
+  it("returns 400 for invalid capture and unified-save bodies", async () => {
     await createService();
 
     const captureResponse = await createPortfolioWorkItem(
       captureRequest({ title: "Missing kind" }),
     );
-    const detailsResponse = await updatePortfolioWorkItemDetails(
-      detailsUpdateRequest({}),
-      phaseUpdateContext(
-        "inbox",
-        "wi_123e4567-e89b-12d3-a456-426614174000",
-      ),
-    );
-    const goalContractResponse = await updatePortfolioGoalContract(
-      goalContractRequest({ acceptance_criteria: ["Missing required lists"] }),
+    const saveResponse = await savePortfolioWorkItem(
+      saveWorkItemRequest({ acceptance_criteria: ["Missing required fields"] }),
       phaseUpdateContext("inbox", "wi_123e4567-e89b-12d3-a456-426614174000"),
     );
 
@@ -801,48 +794,33 @@ describe("portfolio API routes", () => {
     expect(await captureResponse.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid request" },
     });
-    expect(detailsResponse.status).toBe(400);
-    expect(await detailsResponse.json()).toEqual({
-      error: { code: "invalid_request", message: "Invalid request" },
-    });
-    expect(goalContractResponse.status).toBe(400);
-    expect(await goalContractResponse.json()).toEqual({
+    expect(saveResponse.status).toBe(400);
+    expect(await saveResponse.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid request" },
     });
   });
 
-  it("returns 404 for unknown sources and missing items on new routes", async () => {
+  it("returns 404 for unknown sources and missing items on the unified route", async () => {
     await createService();
     const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const input = {
+      target_source_id: "inbox",
+      title: "Still missing",
+      type: null,
+      priority: null,
+      tags: [],
+      notes: null,
+    };
 
-    const unknownResponse = await assignPortfolioWorkItem(
-      assignmentRequest({ target_source_id: "inbox" }),
+    const unknownResponse = await savePortfolioWorkItem(
+      saveWorkItemRequest(input),
       phaseUpdateContext(
         "ws_00000000-0000-4000-8000-000000000000",
         workItemId,
       ),
     );
-    const missingResponse = await updatePortfolioWorkItemDetails(
-      detailsUpdateRequest({ title: "Still missing" }),
-      phaseUpdateContext("inbox", workItemId),
-    );
-    const unknownGoalContractResponse = await updatePortfolioGoalContract(
-      goalContractRequest({
-        acceptance_criteria: ["Valid"],
-        allowed_scope: ["src"],
-        review_ready: ["Tests pass"],
-      }),
-      phaseUpdateContext(
-        "ws_00000000-0000-4000-8000-000000000000",
-        workItemId,
-      ),
-    );
-    const missingGoalContractResponse = await updatePortfolioGoalContract(
-      goalContractRequest({
-        acceptance_criteria: ["Valid"],
-        allowed_scope: ["src"],
-        review_ready: ["Tests pass"],
-      }),
+    const missingResponse = await savePortfolioWorkItem(
+      saveWorkItemRequest(input),
       phaseUpdateContext("inbox", workItemId),
     );
 
@@ -854,32 +832,34 @@ describe("portfolio API routes", () => {
     expect(await missingResponse.json()).toMatchObject({
       error: { code: "work_item_not_found" },
     });
-    expect(unknownGoalContractResponse.status).toBe(404);
-    expect(await unknownGoalContractResponse.json()).toMatchObject({
-      error: { code: "unknown_source" },
-    });
-    expect(missingGoalContractResponse.status).toBe(404);
-    expect(await missingGoalContractResponse.json()).toMatchObject({
-      error: { code: "work_item_not_found" },
-    });
   });
 
-  it("maps locked goal-contract updates to the established 409 response", async () => {
+  it("maps locked unified saves to the established 409 response", async () => {
     const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
-    const updateGoalContract = vi.fn().mockRejectedValue(
+    const saveWorkItem = vi.fn().mockRejectedValue(
       new ControllerConflictError(
         "goal_contract_locked",
         workItemId,
         "Goal contracts are locked after entering execute.",
       ),
     );
-    getService.mockResolvedValue({ updateGoalContract });
+    getService.mockResolvedValue({ saveWorkItem });
 
-    const response = await updatePortfolioGoalContract(
-      goalContractRequest({
-        acceptance_criteria: ["Valid"],
-        allowed_scope: ["src"],
-        review_ready: ["Tests pass"],
+    const response = await savePortfolioWorkItem(
+      saveWorkItemRequest({
+        target_source_id: "inbox",
+        title: "Locked work item",
+        type: null,
+        priority: null,
+        tags: [],
+        notes: null,
+        goal_contract: {
+          purpose: "Prove lock behavior.",
+          acceptance_criteria: ["Valid"],
+          non_goals: ["Do not change phases."],
+          allowed_scope: ["src"],
+          review_ready: ["Tests pass"],
+        },
       }),
       phaseUpdateContext("inbox", workItemId),
     );
@@ -893,7 +873,7 @@ describe("portfolio API routes", () => {
   it("maps transfer collisions and incomplete transfers to 409, never 500", async () => {
     const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
     const targetSourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
-    const assignWorkItem = vi
+    const saveWorkItem = vi
       .fn()
       .mockRejectedValueOnce(
         new WorkItemTargetCollisionError(
@@ -910,14 +890,22 @@ describe("portfolio API routes", () => {
           "source removal denied",
         ),
       );
-    getService.mockResolvedValue({ assignWorkItem });
+    getService.mockResolvedValue({ saveWorkItem });
 
-    const collisionResponse = await assignPortfolioWorkItem(
-      assignmentRequest({ target_source_id: targetSourceId }),
+    const input = {
+      target_source_id: targetSourceId,
+      title: "Transfer through unified save",
+      type: null,
+      priority: null,
+      tags: [],
+      notes: null,
+    };
+    const collisionResponse = await savePortfolioWorkItem(
+      saveWorkItemRequest(input),
       phaseUpdateContext("inbox", workItemId),
     );
-    const failedResponse = await assignPortfolioWorkItem(
-      assignmentRequest({ target_source_id: targetSourceId }),
+    const failedResponse = await savePortfolioWorkItem(
+      saveWorkItemRequest(input),
       phaseUpdateContext("inbox", workItemId),
     );
 

@@ -49,22 +49,16 @@ import {
   InvalidWorkspaceError,
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
-  assignWorkItemInputSchema,
   controllerRunIdSchema,
   controllerRunManifestSchema,
   createCaptureInputSchema,
-  goalContractUpdateInputSchema,
   saveWorkItemInputSchema,
-  updateWorkItemDetailsInputSchema,
   updateWorkItemPhaseInputSchema,
   workItemIdSchema,
   workItemSchema,
-  type AssignWorkItemInput,
   type CreateCaptureInput,
   type ControllerRunManifest,
-  type GoalContractUpdateInput,
   type SaveWorkItemInput,
-  type UpdateWorkItemDetailsInput,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
   type WorkItemGoal,
@@ -324,67 +318,6 @@ export class PortfolioService {
     return this.toPortfolioItem(source, created);
   }
 
-  async updateWorkItemDetails(
-    sourceId: string,
-    workItemId: string,
-    input: UpdateWorkItemDetailsInput,
-  ): Promise<PortfolioWorkItem> {
-    const validatedInput = updateWorkItemDetailsInputSchema.parse(input);
-    const source = await this.resolveSource(sourceId);
-    const current = await source.workspace.read(workItemId);
-    if (current === null) {
-      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
-    }
-    if (current.goal.goal_contract !== undefined) {
-      throw new ControllerConflictError(
-        "contracted_details",
-        workItemId,
-        "Contracted work items require a version-bound goal update.",
-      );
-    }
-
-    const nextGoal: WorkItemGoal = { ...current.goal };
-    if (validatedInput.title !== undefined) {
-      nextGoal.title = validatedInput.title;
-    }
-    if (validatedInput.type !== undefined) {
-      if (validatedInput.type === null) {
-        delete nextGoal.type;
-      } else {
-        nextGoal.type = validatedInput.type;
-      }
-    }
-    if (validatedInput.priority !== undefined) {
-      if (validatedInput.priority === null) {
-        delete nextGoal.priority;
-      } else {
-        nextGoal.priority = validatedInput.priority;
-      }
-    }
-    if (validatedInput.tags !== undefined) {
-      if (validatedInput.tags.length === 0) {
-        delete nextGoal.tags;
-      } else {
-        nextGoal.tags = validatedInput.tags;
-      }
-    }
-    if (validatedInput.notes !== undefined) {
-      if (validatedInput.notes === null) {
-        delete nextGoal.notes;
-      } else {
-        nextGoal.notes = validatedInput.notes;
-      }
-    }
-
-    const updated = await source.workspace.updateGoal(workItemId, nextGoal);
-    if (updated === null) {
-      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
-    }
-
-    await this.rebuild();
-    return this.toPortfolioItem(source, updated);
-  }
-
   async saveWorkItem(
     sourceId: string,
     workItemId: string,
@@ -463,53 +396,6 @@ export class PortfolioService {
       kind: "save",
       manifest: saved.manifest,
     });
-  }
-
-  async updateGoalContract(
-    sourceId: string,
-    workItemId: string,
-    input: GoalContractUpdateInput,
-  ): Promise<PortfolioWorkItem> {
-    const validatedInput = goalContractUpdateInputSchema.parse(input);
-    const source = await this.resolveSource(sourceId);
-    const current = await source.workspace.read(workItemId);
-    if (current === null) {
-      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
-    }
-
-    const result = await this.workItemController(
-      source.workspace,
-    ).updateGoalContract(workItemId, validatedInput);
-    await this.rebuild();
-    return this.toPortfolioItem(source, result.work_item);
-  }
-
-  async assignWorkItem(
-    sourceId: string,
-    workItemId: string,
-    input: AssignWorkItemInput,
-  ): Promise<PortfolioWorkItem> {
-    const validatedInput = assignWorkItemInputSchema.parse(input);
-    const validatedId = workItemIdSchema.parse(workItemId);
-    const source = await this.resolveSource(sourceId);
-    const target = await this.resolveSource(validatedInput.target_source_id);
-    const current = await source.workspace.read(validatedId);
-
-    if (current === null) {
-      throw new PortfolioWorkItemNotFoundError(sourceId, validatedId);
-    }
-    if (source.source_id === target.source_id) {
-      return this.toPortfolioItem(source, current);
-    }
-    if (current.goal.goal_contract !== undefined) {
-      throw new ControllerConflictError(
-        "project_locked",
-        validatedId,
-        "A contracted work item cannot change projects.",
-      );
-    }
-
-    return this.transferWorkItem(source, target, current, { kind: "move" });
   }
 
   async updateWorkItemPhase(

@@ -1,5 +1,5 @@
 import { getPortfolioService } from "../../../../../../../src/application/portfolio-service";
-import { updateWorkItemDetailsInputSchema } from "../../../../../../../src/domain/work-item";
+import { saveWorkItemInputSchema } from "../../../../../../../src/domain/work-item";
 import { errorResponse } from "../../../../../responses";
 
 export const runtime = "nodejs";
@@ -17,10 +17,10 @@ export async function PATCH(
 ): Promise<Response> {
   try {
     const input: unknown = await request.json();
-    const validatedInput = updateWorkItemDetailsInputSchema.parse(input);
+    const validatedInput = saveWorkItemInputSchema.parse(input);
     const { sourceId, workItemId } = await context.params;
     const service = await getPortfolioService();
-    const updated = await service.updateWorkItemDetails(
+    const updated = await service.saveWorkItem(
       sourceId,
       workItemId,
       validatedInput,

@@ -177,14 +177,6 @@ export interface UpdateWorkItemPhaseInput {
   target_phase: WorkItemPhase;
 }
 
-export interface GoalContractUpdateInput {
-  acceptance_criteria: string[];
-  allowed_scope: string[];
-  review_ready: string[];
-  expected_goal_version?: number;
-  expected_input_revision?: number;
-}
-
 export interface SaveWorkItemInput {
   target_source_id: string;
   title: string;
@@ -554,22 +546,6 @@ export const workItemSchema: z.ZodType<WorkItem> = z
       });
     }
   });
-
-export const goalContractUpdateInputSchema: z.ZodType<GoalContractUpdateInput> =
-  z
-    .strictObject({
-      acceptance_criteria: acceptanceCriteriaSchema,
-      allowed_scope: allowedScopeSchema,
-      review_ready: reviewReadySchema,
-      expected_goal_version: positiveSafeIntegerSchema.optional(),
-      expected_input_revision: positiveSafeIntegerSchema.optional(),
-    })
-    .refine(
-      (input) =>
-        (input.expected_goal_version === undefined) ===
-        (input.expected_input_revision === undefined),
-      "expected_goal_version and expected_input_revision must be provided together",
-    );
 
 export const saveWorkItemInputSchema: z.ZodType<SaveWorkItemInput> = z
   .strictObject({
