@@ -6,6 +6,42 @@ delivery phases.
 
 ## Active Initiatives
 
+### Expose the goal contract as an app-reachable route + UI form
+
+- **User story:** As the founder, I want to define and update a work item's goal contract
+  (acceptance criteria, allowed scope, review-ready commands) from the detail panel, so I can
+  actually drive a work item through Execute → mission compile → import → review without
+  hand-calling the controller in a test file.
+- **Purpose:** `WorkItemController.updateGoalContract` (roadmap 2.1) is fully implemented and
+  tested (`tests/application/work-item-controller.test.ts`), but no HTTP route or UI ever calls
+  it. Every other Milestone 2 surface — mission compile, result import/retry, run evidence — is
+  gated on an item having an active goal contract, so right now Milestone 2 cannot be exercised
+  at all through the running app; only via unit tests calling the controller in-process.
+  Discovered 2026-07-23 while trying to manually test Milestone 2 via the UI.
+- **Definition of done:** A source-qualified route (e.g. `PATCH .../goal-contract`) exposes
+  `updateGoalContract` with the existing expected-version/lease semantics and mapped errors, and
+  a detail-panel form (acceptance criteria / allowed scope / review-ready lists) that calls it —
+  enough to take an assigned item from a fresh contract through Execute without touching test
+  code.
+- **Details:** Input shape is `GoalContractUpdateInput` (`acceptance_criteria: string[]`,
+  `allowed_scope: string[]`, `review_ready: string[]`, optional `expected_goal_version`/
+  `expected_input_revision`) in `src/domain/work-item.ts`. No existing route under
+  `app/api/portfolio/work-items/[sourceId]/[workItemId]/` covers it (only `assignment`,
+  `details`, `mission*`, `run-evidence`). Mission-handoff visibility also requires the item be
+  assigned to a real project (not Inbox) — worth covering in the same pass since both currently
+  block Milestone 2 testing.
+
+## Deferred Initiatives
+
+### Add an Inbox page for review and approvals
+
+- **Status:** Revisit after the Kanban view and full workflow cycle work end to end.
+- **Idea:** Add an inbox-style, cross-project review page inspired by T3 Code. It should let the
+  founder quickly scan items needing attention, open the relevant update, and approve or choose
+  the next step without using the Kanban view.
+- **Boundary:** This is an alternate view over Product Studio's existing workflow state and
+  evidence, not a replacement for the Kanban or a second workflow.
+
 ## Small UI Changes
 
 - **Replace the free-text tags box with a token/chip picker (capture panel + editor).**
@@ -46,3 +82,7 @@ Build a local web-based Kanban interface that coordinates **Codex CLI**, **Claud
 *   **Protocol Specification:** [AG-UI Introduction & Specs](https://ag-ui.com)
 *   **Python SDK:** [agent-framework-ag-ui (PyPI)](https://pypi.org)
 *   **UI Foundation:** CopilotKit components adhering to the AG-UI streaming standard.
+
+### Price per task metric
+
+- The main metric that matters is price per task completion. Second is speed to task completion.
