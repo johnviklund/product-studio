@@ -14,7 +14,7 @@ not archived — they remain in git history).
   use the recoverable transfer journal and contracted items cannot be moved between projects.
 - Updated missions, the board handoff gate, the SQLite v5 rebuildable cache, checked-in fixtures,
   and test fixtures to consume the nested contract consistently.
-- Verified: lint, TypeScript, 205/205 tests, and production build pass. The initial build sandbox
+- Verified: lint, TypeScript, the full test suite, and production build pass. The initial build sandbox
   port-bind failure was environmental; the approved host rerun passed. Browser/visual QA was not
   run in this execution step.
 - Commits: `8eb7c47` through `e3fb448` (implementation slices; review remains the next phase).
