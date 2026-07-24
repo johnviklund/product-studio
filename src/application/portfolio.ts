@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   link,
   lstat,
@@ -10,12 +10,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 
 import { stringify } from "yaml";
 import { z } from "zod";
 
-import { WorkItemController } from "./work-item-controller";
+import {
+  deriveControllerIdempotencyKey,
+  WorkItemController,
+} from "./work-item-controller";
 import {
   DuplicateWorkspaceError,
   INBOX_SOURCE_ID,
@@ -48,21 +50,29 @@ import {
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
   assignWorkItemInputSchema,
+  controllerRunIdSchema,
+  controllerRunManifestSchema,
   createCaptureInputSchema,
   goalContractUpdateInputSchema,
+  saveWorkItemInputSchema,
   updateWorkItemDetailsInputSchema,
   updateWorkItemPhaseInputSchema,
   workItemIdSchema,
+  workItemSchema,
   type AssignWorkItemInput,
   type CreateCaptureInput,
   type ControllerRunManifest,
   type GoalContractUpdateInput,
+  type SaveWorkItemInput,
   type UpdateWorkItemDetailsInput,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
   type WorkItemGoal,
 } from "../domain/work-item";
-import { validatePhaseTransition } from "../domain/workflow-policy";
+import {
+  canUpdateGoalContract,
+  validatePhaseTransition,
+} from "../domain/workflow-policy";
 import { ProductWorkspace } from "../workspace/product-workspace";
 import { PortfolioRegistry } from "../workspace/portfolio-registry";
 
@@ -106,7 +116,7 @@ const TRANSFER_STAGES = ["staged", "published", "source_removed"] as const;
 const TRANSFER_TEMP_FILE_PATTERN =
   /^\.tr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
 
-interface TransferJournalRecord {
+interface TransferJournalRecordBase {
   schema_version: 1;
   transfer_id: string;
   work_item_id: string;
@@ -117,26 +127,92 @@ interface TransferJournalRecord {
   stage: (typeof TRANSFER_STAGES)[number];
 }
 
+interface MoveTransferJournalRecord extends TransferJournalRecordBase {
+  kind: "move";
+}
+
+interface SaveTransferJournalRecord extends TransferJournalRecordBase {
+  kind: "save";
+  target_sha256: string;
+  staged_manifest_run_id?: string;
+}
+
+type TransferJournalRecord =
+  | MoveTransferJournalRecord
+  | SaveTransferJournalRecord;
+
+const transferJournalBaseShape = {
+  schema_version: z.literal(1),
+  transfer_id: z
+    .string()
+    .regex(
+      /^tr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      "transfer_id must use the tr_<uuid> format",
+    ),
+  work_item_id: workItemIdSchema,
+  from_source_id: portfolioSourceIdSchema,
+  from_path: z.string().refine(isAbsolute, "from_path must be absolute"),
+  to_source_id: portfolioSourceIdSchema,
+  to_path: z.string().refine(isAbsolute, "to_path must be absolute"),
+  stage: z.enum(TRANSFER_STAGES),
+};
+
 const transferJournalRecordSchema: z.ZodType<TransferJournalRecord> = z
-  .strictObject({
-    schema_version: z.literal(1),
-    transfer_id: z
-      .string()
-      .regex(
-        /^tr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-        "transfer_id must use the tr_<uuid> format",
-      ),
-    work_item_id: workItemIdSchema,
-    from_source_id: portfolioSourceIdSchema,
-    from_path: z.string().refine(isAbsolute, "from_path must be absolute"),
-    to_source_id: portfolioSourceIdSchema,
-    to_path: z.string().refine(isAbsolute, "to_path must be absolute"),
-    stage: z.enum(TRANSFER_STAGES),
-  })
+  .discriminatedUnion("kind", [
+    z.strictObject({
+      ...transferJournalBaseShape,
+      kind: z.literal("move"),
+    }),
+    z.strictObject({
+      ...transferJournalBaseShape,
+      kind: z.literal("save"),
+      target_sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+      staged_manifest_run_id: controllerRunIdSchema.optional(),
+    }),
+  ])
   .refine(
     (record) => record.from_source_id !== record.to_source_id,
     "transfer sources must differ",
   );
+
+function fingerprintWorkItem(item: WorkItem): string {
+  return createHash("sha256").update(JSON.stringify(item)).digest("hex");
+}
+
+function nextTimestamp(currentTimestamp: string): string {
+  return new Date(
+    Math.max(Date.now(), Date.parse(currentTimestamp) + 1),
+  ).toISOString();
+}
+
+function manifestMatchesWorkItem(
+  manifest: ControllerRunManifest,
+  item: WorkItem,
+): boolean {
+  const contract = item.goal.goal_contract;
+  const inputRevision = item.state.input_revision;
+  const attempt = item.state.attempt;
+  return (
+    contract !== undefined &&
+    inputRevision !== undefined &&
+    attempt !== undefined &&
+    manifest.outcome === "applied" &&
+    manifest.completed_at !== undefined &&
+    manifest.work_item_id === item.goal.work_item_id &&
+    manifest.phase === item.state.phase &&
+    manifest.goal_version === contract.goal_version &&
+    manifest.input_revision === inputRevision &&
+    manifest.attempt === attempt &&
+    manifest.idempotency_key ===
+      deriveControllerIdempotencyKey(
+        item.goal.work_item_id,
+        item.state.phase,
+        contract.goal_version,
+        inputRevision,
+        attempt,
+      )
+  );
+}
 
 export interface RegisterWorkspaceResult {
   workspace: RegisteredWorkspace;
@@ -259,7 +335,7 @@ export class PortfolioService {
     if (current === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
-    if (current.goal.goal_version !== undefined) {
+    if (current.goal.goal_contract !== undefined) {
       throw new ControllerConflictError(
         "contracted_details",
         workItemId,
@@ -309,6 +385,86 @@ export class PortfolioService {
     return this.toPortfolioItem(source, updated);
   }
 
+  async saveWorkItem(
+    sourceId: string,
+    workItemId: string,
+    input: SaveWorkItemInput,
+  ): Promise<PortfolioWorkItem> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = saveWorkItemInputSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const target =
+      validatedInput.target_source_id === source.source_id
+        ? source
+        : await this.resolveSource(validatedInput.target_source_id);
+    const current = await source.workspace.read(validatedId);
+    if (current === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, validatedId);
+    }
+
+    if (target.source_id === source.source_id) {
+      if (validatedInput.goal_contract !== undefined) {
+        const result = await this.workItemController(
+          source.workspace,
+        ).saveWorkItem(validatedId, validatedInput);
+        await this.rebuild();
+        return this.toPortfolioItem(source, result.work_item);
+      }
+      if (current.goal.goal_contract !== undefined) {
+        throw new ControllerConflictError(
+          "contract_required",
+          validatedId,
+          "A unified save cannot remove an existing goal contract.",
+        );
+      }
+
+      const nextItem = this.buildUncontractedSave(current, validatedInput);
+      const updated = await source.workspace.updateGoal(
+        validatedId,
+        nextItem.goal,
+      );
+      if (updated === null) {
+        throw new PortfolioWorkItemNotFoundError(sourceId, validatedId);
+      }
+      await this.rebuild();
+      return this.toPortfolioItem(source, updated);
+    }
+
+    if (current.goal.goal_contract !== undefined) {
+      throw new ControllerConflictError(
+        "project_locked",
+        validatedId,
+        "A contracted work item cannot change projects.",
+      );
+    }
+    if (
+      validatedInput.expected_goal_version !== undefined ||
+      validatedInput.expected_input_revision !== undefined
+    ) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        validatedId,
+        "First contract activation requires absent expected versions.",
+      );
+    }
+    if (
+      validatedInput.goal_contract !== undefined &&
+      !canUpdateGoalContract(current.state.phase)
+    ) {
+      throw new ControllerConflictError(
+        "goal_contract_locked",
+        validatedId,
+        `Goal contracts are locked after entering ${current.state.phase}.`,
+      );
+    }
+
+    const saved = this.buildCrossSourceSave(current, validatedInput);
+    return this.transferWorkItem(source, target, saved.work_item, {
+      kind: "save",
+      manifest: saved.manifest,
+    });
+  }
+
   async updateGoalContract(
     sourceId: string,
     workItemId: string,
@@ -334,104 +490,26 @@ export class PortfolioService {
     input: AssignWorkItemInput,
   ): Promise<PortfolioWorkItem> {
     const validatedInput = assignWorkItemInputSchema.parse(input);
+    const validatedId = workItemIdSchema.parse(workItemId);
     const source = await this.resolveSource(sourceId);
     const target = await this.resolveSource(validatedInput.target_source_id);
-    const current = await source.workspace.read(workItemId);
+    const current = await source.workspace.read(validatedId);
 
     if (current === null) {
-      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+      throw new PortfolioWorkItemNotFoundError(sourceId, validatedId);
     }
     if (source.source_id === target.source_id) {
       return this.toPortfolioItem(source, current);
     }
-    if (await target.workspace.hasWorkItem(workItemId)) {
-      throw new WorkItemTargetCollisionError(
-        source.source_id,
-        workItemId,
-        target.source_id,
+    if (current.goal.goal_contract !== undefined) {
+      throw new ControllerConflictError(
+        "project_locked",
+        validatedId,
+        "A contracted work item cannot change projects.",
       );
     }
 
-    const transferId = `tr_${randomUUID()}`;
-    let record: TransferJournalRecord | null = null;
-
-    try {
-      const stagingPath = await target.workspace.stageIncomingWorkItem(current);
-      record = transferJournalRecordSchema.parse({
-        schema_version: 1,
-        transfer_id: transferId,
-        work_item_id: workItemId,
-        from_source_id: source.source_id,
-        from_path: source.workspace.workspaceRoot,
-        to_source_id: target.source_id,
-        to_path: stagingPath,
-        stage: "staged",
-      });
-      await this.writeTransferJournal(record);
-
-      await target.workspace.publishStagedWorkItem(workItemId, stagingPath);
-      record = { ...record, stage: "published" };
-      await this.writeTransferJournal(record);
-
-      await source.workspace.removeWorkItem(workItemId);
-      record = { ...record, stage: "source_removed" };
-      await this.writeTransferJournal(record);
-      await this.deleteTransferJournal(record.transfer_id);
-
-      await this.rebuild();
-      return this.toPortfolioItem(target, current);
-    } catch (error) {
-      let cleanupError: unknown;
-      if (record?.stage === "staged") {
-        try {
-          const targetItem = await target.workspace.read(workItemId);
-          if (targetItem === null) {
-            await target.workspace.discardStagedWorkItem(
-              workItemId,
-              record.to_path,
-            );
-            await this.deleteTransferJournal(record.transfer_id);
-          } else if (!isDeepStrictEqual(targetItem, current)) {
-            await target.workspace.discardStagedWorkItem(
-              workItemId,
-              record.to_path,
-            );
-            await this.deleteTransferJournal(record.transfer_id);
-          }
-        } catch (candidateCleanupError) {
-          cleanupError = candidateCleanupError;
-        }
-      }
-
-      if (
-        cleanupError === undefined &&
-        error instanceof InvalidWorkspaceError &&
-        error.reason === "target work-item already exists"
-      ) {
-        throw new WorkItemTargetCollisionError(
-          source.source_id,
-          workItemId,
-          target.source_id,
-        );
-      }
-      if (
-        error instanceof WorkItemTargetCollisionError ||
-        error instanceof WorkItemTransferFailedError
-      ) {
-        throw error;
-      }
-
-      const reason =
-        cleanupError === undefined
-          ? errorMessage(error)
-          : `${errorMessage(error)}; cleanup also failed: ${errorMessage(cleanupError)}`;
-      throw new WorkItemTransferFailedError(
-        source.source_id,
-        workItemId,
-        target.source_id,
-        reason,
-      );
-    }
+    return this.transferWorkItem(source, target, current, { kind: "move" });
   }
 
   async updateWorkItemPhase(
@@ -487,10 +565,7 @@ export class PortfolioService {
     }
     if (
       source.source_id === INBOX_SOURCE_ID ||
-      workItem.goal.goal_version === undefined ||
-      workItem.goal.acceptance_criteria === undefined ||
-      workItem.goal.allowed_scope === undefined ||
-      workItem.goal.review_ready === undefined ||
+      workItem.goal.goal_contract === undefined ||
       workItem.state.phase !== "execute" ||
       workItem.state.status !== "active" ||
       workItem.state.goal_version === undefined ||
@@ -694,6 +769,292 @@ export class PortfolioService {
     return { items: this.index.list(), failures };
   }
 
+  private buildSavedGoal(
+    current: WorkItem,
+    input: SaveWorkItemInput,
+    goalContract?: WorkItemGoal["goal_contract"],
+  ): WorkItemGoal {
+    return {
+      schema_version: 2,
+      work_item_id: current.goal.work_item_id,
+      title: input.title,
+      ...(input.type === null ? {} : { type: input.type }),
+      ...(current.goal.capture === undefined
+        ? {}
+        : { capture: current.goal.capture }),
+      ...(input.priority === null ? {} : { priority: input.priority }),
+      ...(input.tags.length === 0 ? {} : { tags: input.tags }),
+      ...(input.notes === null ? {} : { notes: input.notes }),
+      ...(goalContract === undefined ? {} : { goal_contract: goalContract }),
+    };
+  }
+
+  private buildUncontractedSave(
+    current: WorkItem,
+    input: SaveWorkItemInput,
+  ): WorkItem {
+    return workItemSchema.parse({
+      goal: this.buildSavedGoal(current, input),
+      state: current.state,
+    });
+  }
+
+  private buildCrossSourceSave(
+    current: WorkItem,
+    input: SaveWorkItemInput,
+  ): { work_item: WorkItem; manifest?: ControllerRunManifest } {
+    const contractInput = input.goal_contract;
+    if (contractInput === undefined) {
+      return { work_item: this.buildUncontractedSave(current, input) };
+    }
+
+    const completedAt = nextTimestamp(current.state.updated_at);
+    const runId = randomUUID();
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      current.goal.work_item_id,
+      current.state.phase,
+      1,
+      1,
+      0,
+    );
+    const workItem = workItemSchema.parse({
+      goal: this.buildSavedGoal(current, input, {
+        schema_version: 1,
+        goal_version: 1,
+        purpose: contractInput.purpose,
+        acceptance_criteria: contractInput.acceptance_criteria,
+        non_goals: contractInput.non_goals,
+        allowed_scope: contractInput.allowed_scope,
+        review_ready: contractInput.review_ready,
+      }),
+      state: {
+        ...current.state,
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        updated_at: completedAt,
+      },
+    });
+    const manifest = controllerRunManifestSchema.parse({
+      schema_version: 1,
+      run_id: runId,
+      work_item_id: current.goal.work_item_id,
+      idempotency_key: idempotencyKey,
+      phase: current.state.phase,
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      started_at: completedAt,
+      completed_at: completedAt,
+      outcome: "applied",
+    });
+
+    return { work_item: workItem, manifest };
+  }
+
+  private async transferWorkItem(
+    source: ResolvedSource,
+    target: ResolvedSource,
+    targetItem: WorkItem,
+    operation:
+      | { kind: "move" }
+      | { kind: "save"; manifest?: ControllerRunManifest },
+  ): Promise<PortfolioWorkItem> {
+    const workItemId = targetItem.goal.work_item_id;
+    if (await target.workspace.hasWorkItem(workItemId)) {
+      throw new WorkItemTargetCollisionError(
+        source.source_id,
+        workItemId,
+        target.source_id,
+      );
+    }
+
+    const transferId = `tr_${randomUUID()}`;
+    const targetSha256 = fingerprintWorkItem(targetItem);
+    let stagingPath: string | null = null;
+    let record: TransferJournalRecord | null = null;
+
+    try {
+      stagingPath = await target.workspace.stageIncomingWorkItem(
+        targetItem,
+        operation.kind === "save" ? operation.manifest : undefined,
+      );
+      record = transferJournalRecordSchema.parse(
+        operation.kind === "move"
+          ? {
+              schema_version: 1,
+              kind: "move",
+              transfer_id: transferId,
+              work_item_id: workItemId,
+              from_source_id: source.source_id,
+              from_path: source.workspace.workspaceRoot,
+              to_source_id: target.source_id,
+              to_path: stagingPath,
+              stage: "staged",
+            }
+          : {
+              schema_version: 1,
+              kind: "save",
+              transfer_id: transferId,
+              work_item_id: workItemId,
+              from_source_id: source.source_id,
+              from_path: source.workspace.workspaceRoot,
+              to_source_id: target.source_id,
+              to_path: stagingPath,
+              stage: "staged",
+              target_sha256: targetSha256,
+              ...(operation.manifest === undefined
+                ? {}
+                : { staged_manifest_run_id: operation.manifest.run_id }),
+            },
+      );
+      await this.writeTransferJournal(record);
+
+      await target.workspace.publishStagedWorkItem(workItemId, stagingPath);
+      const published = await target.workspace.read(workItemId);
+      if (published === null) {
+        throw new WorkItemTransferFailedError(
+          source.source_id,
+          workItemId,
+          target.source_id,
+          "published target could not be read",
+        );
+      }
+      await this.validatePublishedTransferTarget(
+        record,
+        target,
+        published,
+        targetItem,
+      );
+      record = { ...record, stage: "published" };
+      await this.writeTransferJournal(record);
+
+      await source.workspace.removeWorkItem(workItemId);
+      if ((await source.workspace.read(workItemId)) !== null) {
+        throw new WorkItemTransferFailedError(
+          source.source_id,
+          workItemId,
+          target.source_id,
+          "source work item still exists after removal",
+        );
+      }
+      record = { ...record, stage: "source_removed" };
+      await this.writeTransferJournal(record);
+      await this.deleteTransferJournal(record.transfer_id);
+
+      await this.rebuild();
+      return this.toPortfolioItem(target, published);
+    } catch (error) {
+      let cleanupError: unknown;
+      const targetCollision =
+        error instanceof InvalidWorkspaceError &&
+        error.reason === "target work-item already exists";
+      try {
+        const durableTarget = await target.workspace.read(workItemId);
+        if (
+          targetCollision ||
+          durableTarget === null ||
+          fingerprintWorkItem(durableTarget) !== targetSha256
+        ) {
+          if (stagingPath !== null) {
+            await target.workspace.discardStagedWorkItem(
+              workItemId,
+              stagingPath,
+            );
+          }
+          if (record !== null) {
+            await this.deleteTransferJournal(record.transfer_id);
+          }
+        }
+      } catch (candidateCleanupError) {
+        cleanupError = candidateCleanupError;
+      }
+
+      if (cleanupError === undefined && targetCollision) {
+        throw new WorkItemTargetCollisionError(
+          source.source_id,
+          workItemId,
+          target.source_id,
+        );
+      }
+      if (
+        cleanupError === undefined &&
+        (error instanceof WorkItemTargetCollisionError ||
+          error instanceof WorkItemTransferFailedError)
+      ) {
+        throw error;
+      }
+
+      const reason =
+        cleanupError === undefined
+          ? errorMessage(error)
+          : `${errorMessage(error)}; cleanup also failed: ${errorMessage(cleanupError)}`;
+      throw new WorkItemTransferFailedError(
+        source.source_id,
+        workItemId,
+        target.source_id,
+        reason,
+      );
+    }
+  }
+
+  private async validatePublishedTransferTarget(
+    record: TransferJournalRecord,
+    target: ResolvedSource,
+    targetItem: WorkItem,
+    expectedItem?: WorkItem,
+  ): Promise<void> {
+    const expectedSha256 =
+      record.kind === "save"
+        ? record.target_sha256
+        : expectedItem === undefined
+          ? undefined
+          : fingerprintWorkItem(expectedItem);
+    if (
+      expectedSha256 !== undefined &&
+      fingerprintWorkItem(targetItem) !== expectedSha256
+    ) {
+      throw new WorkItemTransferFailedError(
+        record.from_source_id,
+        record.work_item_id,
+        record.to_source_id,
+        "published target does not match the staged work item",
+      );
+    }
+
+    if (record.kind !== "save") {
+      return;
+    }
+    if (record.staged_manifest_run_id === undefined) {
+      if (targetItem.goal.goal_contract !== undefined) {
+        throw new WorkItemTransferFailedError(
+          record.from_source_id,
+          record.work_item_id,
+          record.to_source_id,
+          "published target has a contract without a staged manifest reference",
+        );
+      }
+      return;
+    }
+
+    const manifest = await target.workspace.readControllerRunManifest(
+      record.work_item_id,
+      record.staged_manifest_run_id,
+    );
+    if (
+      manifest === null ||
+      manifest.run_id !== record.staged_manifest_run_id ||
+      !manifestMatchesWorkItem(manifest, targetItem)
+    ) {
+      throw new WorkItemTransferFailedError(
+        record.from_source_id,
+        record.work_item_id,
+        record.to_source_id,
+        "published target manifest is missing or does not match the saved work item",
+      );
+    }
+  }
+
   private toPortfolioItem(
     source: ResolvedSource,
     workItem: WorkItem,
@@ -711,10 +1072,7 @@ export class PortfolioService {
   ): MissionIdentity {
     if (
       source.source_id === INBOX_SOURCE_ID ||
-      workItem.goal.goal_version === undefined ||
-      workItem.goal.acceptance_criteria === undefined ||
-      workItem.goal.allowed_scope === undefined ||
-      workItem.goal.review_ready === undefined ||
+      workItem.goal.goal_contract === undefined ||
       workItem.state.goal_version === undefined ||
       workItem.state.input_revision === undefined ||
       workItem.state.attempt === undefined
@@ -767,13 +1125,13 @@ export class PortfolioService {
     const sourceItem = await source.workspace.read(record.work_item_id);
     const targetItem = await target.workspace.read(record.work_item_id);
 
-    if (record.stage === "staged" && targetItem === null) {
+    if (targetItem === null) {
       if (sourceItem === null) {
         throw new WorkItemTransferFailedError(
           record.from_source_id,
           record.work_item_id,
           record.to_source_id,
-          "staged transfer has neither a source item nor a published target",
+          "transfer has neither a source item nor a published target",
         );
       }
       await target.workspace.discardStagedWorkItem(
@@ -784,25 +1142,34 @@ export class PortfolioService {
       return;
     }
 
-    if (targetItem === null) {
+    if (
+      sourceItem !== null &&
+      sourceItem.goal.goal_contract !== undefined
+    ) {
       throw new WorkItemTransferFailedError(
         record.from_source_id,
         record.work_item_id,
         record.to_source_id,
-        `${record.stage} transfer is missing its published target`,
+        "transfer source unexpectedly contains a locked goal contract",
       );
     }
-    if (sourceItem !== null && !isDeepStrictEqual(sourceItem, targetItem)) {
-      throw new WorkItemTransferFailedError(
-        record.from_source_id,
-        record.work_item_id,
-        record.to_source_id,
-        "source and published target content differ",
-      );
-    }
+    await this.validatePublishedTransferTarget(
+      record,
+      target,
+      targetItem,
+      record.kind === "move" ? (sourceItem ?? undefined) : undefined,
+    );
 
     if (sourceItem !== null) {
       await source.workspace.removeWorkItem(record.work_item_id);
+      if ((await source.workspace.read(record.work_item_id)) !== null) {
+        throw new WorkItemTransferFailedError(
+          record.from_source_id,
+          record.work_item_id,
+          record.to_source_id,
+          "source work item still exists after recovery removal",
+        );
+      }
     }
     const completedRecord: TransferJournalRecord = {
       ...record,
