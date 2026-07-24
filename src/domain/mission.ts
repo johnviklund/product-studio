@@ -40,6 +40,10 @@ const nonEmptyTrimmedStringSchema = z
     (value) => value === value.trim(),
     "must not have leading or trailing whitespace",
   );
+const purposeSchema = nonEmptyTrimmedStringSchema.refine(
+  (value) => !/[\r\n]/u.test(value),
+  "must not contain line breaks",
+);
 const nonEmptyStringListSchema = z
   .array(nonEmptyTrimmedStringSchema)
   .min(1, "must not be empty")
@@ -85,7 +89,9 @@ export interface MissionPackage {
   goal: {
     title: string;
     type?: WorkItemType;
+    purpose: string;
     acceptance_criteria: string[];
+    non_goals: string[];
     allowed_scope: string[];
     review_ready: string[];
   };
@@ -145,7 +151,9 @@ const missionPackageBaseSchema = z.strictObject({
   goal: z.strictObject({
     title: nonEmptyTrimmedStringSchema,
     type: z.enum(missionWorkItemTypes).optional(),
+    purpose: purposeSchema,
     acceptance_criteria: nonEmptyStringListSchema,
+    non_goals: nonEmptyStringListSchema,
     allowed_scope: allowedScopeSchema,
     review_ready: nonEmptyStringListSchema,
   }),
@@ -184,14 +192,19 @@ export const missionPackageSchema: z.ZodType<MissionPackage> =
 
 const compilableWorkItemSchema = z.object({
   goal: z.object({
-    schema_version: z.literal(1),
+    schema_version: z.literal(2),
     work_item_id: workItemIdSchema,
     title: nonEmptyTrimmedStringSchema,
     type: z.enum(missionWorkItemTypes).optional(),
-    goal_version: positiveSafeIntegerSchema,
-    acceptance_criteria: nonEmptyStringListSchema,
-    allowed_scope: allowedScopeSchema,
-    review_ready: nonEmptyStringListSchema,
+    goal_contract: z.object({
+      schema_version: z.literal(1),
+      goal_version: positiveSafeIntegerSchema,
+      purpose: purposeSchema,
+      acceptance_criteria: nonEmptyStringListSchema,
+      non_goals: nonEmptyStringListSchema,
+      allowed_scope: allowedScopeSchema,
+      review_ready: nonEmptyStringListSchema,
+    }),
   }),
   state: z.object({
     schema_version: z.literal(1),
@@ -266,7 +279,7 @@ const missionCompileInputSchema = z
   .superRefine(({ work_item: workItem, execute_manifest: manifest }, context) => {
     const expected = {
       work_item_id: workItem.goal.work_item_id,
-      goal_version: workItem.goal.goal_version,
+      goal_version: workItem.goal.goal_contract.goal_version,
       input_revision: workItem.state.input_revision,
       attempt: workItem.state.attempt,
     };
@@ -320,7 +333,9 @@ function missionContent(
     goal: {
       title: mission.goal.title,
       ...(mission.goal.type === undefined ? {} : { type: mission.goal.type }),
+      purpose: mission.goal.purpose,
       acceptance_criteria: mission.goal.acceptance_criteria,
+      non_goals: mission.goal.non_goals,
       allowed_scope: mission.goal.allowed_scope,
       review_ready: mission.goal.review_ready,
     },
@@ -377,7 +392,7 @@ export function compileMission(
     mission_schema_version: MISSION_SCHEMA_VERSION,
     identity: {
       work_item_id: input.work_item.goal.work_item_id,
-      goal_version: input.work_item.goal.goal_version,
+      goal_version: input.work_item.goal.goal_contract.goal_version,
       input_revision: input.work_item.state.input_revision,
       attempt: input.work_item.state.attempt,
     },
@@ -393,9 +408,12 @@ export function compileMission(
       ...(input.work_item.goal.type === undefined
         ? {}
         : { type: input.work_item.goal.type }),
-      acceptance_criteria: input.work_item.goal.acceptance_criteria,
-      allowed_scope: input.work_item.goal.allowed_scope,
-      review_ready: input.work_item.goal.review_ready,
+      purpose: input.work_item.goal.goal_contract.purpose,
+      acceptance_criteria:
+        input.work_item.goal.goal_contract.acceptance_criteria,
+      non_goals: input.work_item.goal.goal_contract.non_goals,
+      allowed_scope: input.work_item.goal.goal_contract.allowed_scope,
+      review_ready: input.work_item.goal.goal_contract.review_ready,
     },
     source_revision: {
       git_base_commit: input.paths.git_base_commit,
@@ -433,9 +451,17 @@ export function renderTaskMd(mission: MissionPackage): string {
     `Package hash: ${validatedMission.content_sha256}`,
     "",
     ...typeLine,
+    "## Purpose",
+    "",
+    validatedMission.goal.purpose,
+    "",
     "## Acceptance criteria",
     "",
     renderList(validatedMission.goal.acceptance_criteria),
+    "",
+    "## Non-goals",
+    "",
+    renderList(validatedMission.goal.non_goals),
     "",
     "## Allowed scope",
     "",
