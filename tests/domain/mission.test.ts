@@ -18,14 +18,19 @@ const runId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
 
 const workItem: WorkItem = {
   goal: {
-    schema_version: 1,
+    schema_version: 2,
     work_item_id: workItemId,
     title: "Compile a portable mission",
     type: "Feature",
-    goal_version: 2,
-    acceptance_criteria: ["The package is deterministic"],
-    allowed_scope: ["src/domain", "tests/domain"],
-    review_ready: ["All deterministic checks pass"],
+    goal_contract: {
+      schema_version: 1,
+      goal_version: 2,
+      purpose: "Keep the package deterministic.",
+      acceptance_criteria: ["The package is deterministic"],
+      non_goals: ["Do not depend on provider-specific behavior."],
+      allowed_scope: ["src/domain", "tests/domain"],
+      review_ready: ["All deterministic checks pass"],
+    },
   },
   state: {
     schema_version: 1,
@@ -68,7 +73,7 @@ describe("mission domain", () => {
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(renderTaskMd(second)).toBe(renderTaskMd(first));
     expect(first.content_sha256).toBe(
-      "1a1f78241c310faac7f31888ea03f1707de0fb94b68f90a7ea2d6a33d4be52f7",
+      "65dba7f5232567bff41c025cdfbf3643e6dc61d7aad865e6963c65ac52380563",
     );
     expect(first.mission_schema_version).toBe(2);
     expect(first.source_revision.git_base_commit).toBe(paths.git_base_commit);
@@ -160,7 +165,13 @@ describe("mission domain", () => {
       name: "an incomplete goal contract",
       item: {
         ...workItem,
-        goal: { ...workItem.goal, acceptance_criteria: undefined },
+        goal: {
+          ...workItem.goal,
+          goal_contract: {
+            ...workItem.goal.goal_contract,
+            acceptance_criteria: undefined,
+          },
+        },
       },
       manifest: executeManifest,
       missionPaths: paths,
@@ -169,7 +180,7 @@ describe("mission domain", () => {
       name: "an invalid work-item schema version",
       item: {
         ...workItem,
-        goal: { ...workItem.goal, schema_version: 2 },
+        goal: { ...workItem.goal, schema_version: 1 },
       },
       manifest: executeManifest,
       missionPaths: paths,

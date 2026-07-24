@@ -76,7 +76,38 @@ function createController(
   git: GitVerificationAdapter = passingGit,
   runner: VerificationRunner = passingRunner,
 ) {
-  return new WorkItemController(repository, fixedClock, git, runner);
+  const controller = new WorkItemController(repository, fixedClock, git, runner);
+  return Object.assign(controller, {
+    updateGoalContract(
+      workItemId: string,
+      input: (typeof firstContract) & {
+        expected_goal_version?: number;
+        expected_input_revision?: number;
+      },
+    ) {
+      return controller.saveWorkItem(workItemId, {
+        target_source_id: "inbox",
+        title: "Build the controller foundation",
+        type: "Feature",
+        priority: null,
+        tags: [],
+        notes: null,
+        goal_contract: {
+          purpose: "Keep controller transitions safe.",
+          acceptance_criteria: input.acceptance_criteria,
+          non_goals: ["Do not bypass the controller."],
+          allowed_scope: input.allowed_scope,
+          review_ready: input.review_ready,
+        },
+        ...(input.expected_goal_version === undefined
+          ? {}
+          : {
+              expected_goal_version: input.expected_goal_version,
+              expected_input_revision: input.expected_input_revision,
+            }),
+      });
+    },
+  });
 }
 
 async function createWorkspace(): Promise<{
@@ -274,8 +305,12 @@ describe("WorkItemController", () => {
       firstContract,
     );
     expect(activated.work_item.goal).toMatchObject({
-      ...firstContract,
-      goal_version: 1,
+      goal_contract: {
+        ...firstContract,
+        purpose: "Keep controller transitions safe.",
+        non_goals: ["Do not bypass the controller."],
+        goal_version: 1,
+      },
     });
     expect(activated.work_item.state).toMatchObject({
       goal_version: 1,
@@ -295,7 +330,7 @@ describe("WorkItemController", () => {
       created.goal.work_item_id,
       secondInput,
     );
-    expect(updated.work_item.goal.goal_version).toBe(2);
+    expect(updated.work_item.goal.goal_contract?.goal_version).toBe(2);
     expect(updated.work_item.state).toMatchObject({
       goal_version: 2,
       input_revision: 2,

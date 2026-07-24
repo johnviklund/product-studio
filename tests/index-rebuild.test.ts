@@ -32,7 +32,7 @@ const secondWorkspace: RegisteredWorkspace = {
 function workItem(workItemId: string, title: string): WorkItem {
   return {
     goal: {
-      schema_version: 1,
+      schema_version: 2,
       work_item_id: workItemId,
       title,
       type: "Explore",
@@ -97,7 +97,7 @@ describe("SQLitePortfolioIndex", () => {
     const databasePath = await createDatabasePath();
     const capture = portfolioItem(null, {
       goal: {
-        schema_version: 1,
+        schema_version: 2,
         work_item_id: "wi_550e8400-e29b-41d4-a716-446655440000",
         title: "Capture a calmer idea",
         capture: {
@@ -134,14 +134,19 @@ describe("SQLitePortfolioIndex", () => {
     const databasePath = await createDatabasePath();
     const contracted = portfolioItem(firstWorkspace, {
       goal: {
-        schema_version: 1,
+        schema_version: 2,
         work_item_id: "wi_ffffffff-ffff-4fff-afff-ffffffffffff",
         title: "Persist controller state",
         type: "Feature",
-        goal_version: 2,
-        acceptance_criteria: ["Reject stale transitions"],
-        allowed_scope: ["src/domain", "src/application"],
-        review_ready: ["Checks pass"],
+        goal_contract: {
+          schema_version: 1,
+          goal_version: 2,
+          purpose: "Keep cache projections complete.",
+          acceptance_criteria: ["Reject stale transitions"],
+          non_goals: ["Do not invent optional values."],
+          allowed_scope: ["src/domain", "src/application"],
+          review_ready: ["Checks pass"],
+        },
       },
       state: {
         schema_version: 1,
@@ -213,7 +218,7 @@ describe("SQLitePortfolioIndex", () => {
     index.close();
 
     const inspected = new Database(databasePath, { readonly: true });
-    expect(inspected.pragma("user_version", { simple: true })).toBe(4);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(5);
     expect(
       inspected
         .prepare(

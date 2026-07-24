@@ -20,7 +20,7 @@ const workspace = {
 
 const workItem = {
   goal: {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     work_item_id: "wi_550e8400-e29b-41d4-a716-446655440000",
     title: "Project the portfolio",
     type: "Feature" as const,

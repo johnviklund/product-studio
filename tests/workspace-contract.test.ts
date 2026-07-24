@@ -99,7 +99,7 @@ async function writeWorkItem(
   await writeFile(
     join(directory, "goal.yaml"),
     stringify({
-      schema_version: 1,
+      schema_version: 2,
       work_item_id: workItemId,
       title: `Item ${workItemId}`,
       type: "Explore",
@@ -132,14 +132,19 @@ async function writeContractedWorkItem(
   await writeFile(
     join(directory, "goal.yaml"),
     stringify({
-      schema_version: 1,
+      schema_version: 2,
       work_item_id: workItemId,
       title: `Item ${workItemId}`,
       type: "Explore",
-      goal_version: 1,
-      acceptance_criteria: ["Reject stale state"],
-      allowed_scope: ["src/domain"],
-      review_ready: ["Checks pass"],
+      goal_contract: {
+        schema_version: 1,
+        goal_version: 1,
+        purpose: "Keep workspace contracts strict.",
+        acceptance_criteria: ["Reject stale state"],
+        non_goals: ["Do not infer missing state."],
+        allowed_scope: ["src/domain"],
+        review_ready: ["Checks pass"],
+      },
     }),
     "utf8",
   );
@@ -169,14 +174,19 @@ async function writeMissionReadyWorkItem(
 ): Promise<WorkItem> {
   const directory = join(root, ".founder", "work-items", workItemId);
   const goal = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     work_item_id: workItemId,
     title: `Mission item ${workItemId}`,
     type: "Feature" as const,
-    goal_version: 1,
-    acceptance_criteria: ["The mission is reproducible"],
-    allowed_scope: ["src/domain"],
-    review_ready: ["Checks pass"],
+    goal_contract: {
+      schema_version: 1 as const,
+      goal_version: 1,
+      purpose: "Keep the mission reproducible.",
+      acceptance_criteria: ["The mission is reproducible"],
+      non_goals: ["Do not mutate unrelated state."],
+      allowed_scope: ["src/domain"],
+      review_ready: ["Checks pass"],
+    },
   };
   const state = {
     schema_version: 1 as const,
@@ -309,10 +319,15 @@ function controllerMutation(
   return {
     goal: {
       ...current.goal,
-      goal_version: goalVersion,
-      acceptance_criteria: ["Reject stale state"],
-      allowed_scope: ["src/domain"],
-      review_ready: ["Checks pass"],
+      goal_contract: {
+        schema_version: 1,
+        goal_version: goalVersion,
+        purpose: "Keep controller mutations safe.",
+        acceptance_criteria: ["Reject stale state"],
+        non_goals: ["Do not bypass controller checks."],
+        allowed_scope: ["src/domain"],
+        review_ready: ["Checks pass"],
+      },
     },
     state: {
       ...current.state,
@@ -394,7 +409,7 @@ describe("ProductWorkspace", () => {
     });
 
     expect(created.goal).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
       title: "Capture this exact sentence",
       capture: {
         kind: "todo",
@@ -499,13 +514,13 @@ describe("ProductWorkspace", () => {
     ]);
 
     const cleared = await workspace.updateGoal(created.goal.work_item_id, {
-      schema_version: 1,
+      schema_version: 2,
       work_item_id: created.goal.work_item_id,
       title: "Refined capture",
       capture: created.goal.capture,
     });
     expect(cleared?.goal).toEqual({
-      schema_version: 1,
+      schema_version: 2,
       work_item_id: created.goal.work_item_id,
       title: "Refined capture",
       capture: created.goal.capture,
@@ -1202,14 +1217,24 @@ describe("ProductWorkspace", () => {
 
     await writeFile(
       goalPath,
-      stringify({ ...originalGoal, goal_version: 1 }),
+      stringify({
+        ...originalGoal,
+        goal_contract: {
+          schema_version: 1,
+          goal_version: 1,
+          purpose: "Keep workspace contracts strict.",
+          non_goals: ["Do not infer missing state."],
+          allowed_scope: ["src/domain"],
+          review_ready: ["Checks pass"],
+        },
+      }),
       "utf8",
     );
     await expect(workspace.read(firstId)).rejects.toMatchObject({
       kind: "invalid_workspace",
       artifactPath: `.founder/work-items/${firstId}/goal.yaml`,
       reason: expect.stringContaining(
-        "acceptance_criteria is required when a goal contract is present",
+        "goal_contract.acceptance_criteria",
       ),
     });
 
@@ -1217,10 +1242,15 @@ describe("ProductWorkspace", () => {
       goalPath,
       stringify({
         ...originalGoal,
-        goal_version: 1,
-        acceptance_criteria: ["Reject stale state"],
-        allowed_scope: ["src/domain"],
-        review_ready: ["Checks pass"],
+        goal_contract: {
+          schema_version: 1,
+          goal_version: 1,
+          purpose: "Keep workspace contracts strict.",
+          acceptance_criteria: ["Reject stale state"],
+          non_goals: ["Do not infer missing state."],
+          allowed_scope: ["src/domain"],
+          review_ready: ["Checks pass"],
+        },
       }),
       "utf8",
     );
@@ -1228,7 +1258,7 @@ describe("ProductWorkspace", () => {
       kind: "invalid_workspace",
       artifactPath: `.founder/work-items/${firstId}`,
       reason: expect.stringContaining(
-        "state.goal_version: state goal_version must match goal goal_version",
+        "state.goal_version: state goal_version must match goal contract goal_version",
       ),
     });
   });

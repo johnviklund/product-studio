@@ -10,7 +10,7 @@ import {
   controllerTransitionInputSchema,
   createCaptureInputSchema,
   createWorkItemInputSchema,
-  goalContractUpdateInputSchema,
+  saveWorkItemInputSchema,
   importExternalResultInputSchema,
   productManifestSchema,
   retryExecuteAttemptInputSchema,
@@ -25,7 +25,7 @@ const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
 const runId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
 
 const goal = {
-  schema_version: 1 as const,
+  schema_version: 2 as const,
   work_item_id: workItemId,
   title: "Prove the durable contract",
   type: "Explore" as const,
@@ -59,7 +59,7 @@ const productManifest = {
 };
 
 describe("durable work-item schemas", () => {
-  it("accepts the work-item v1 and product-manifest v2 contracts", () => {
+  it("accepts the work-item v2 and product-manifest v2 contracts", () => {
     expect(productManifestSchema.parse(productManifest)).toEqual(
       productManifest,
     );
@@ -145,7 +145,7 @@ describe("durable work-item schemas", () => {
 
   it("accepts an untyped capture goal with optional metadata", () => {
     const captureGoal = {
-      schema_version: 1 as const,
+      schema_version: 2 as const,
       work_item_id: workItemId,
       title: "Explore a calmer capture flow",
       capture: {
@@ -219,10 +219,15 @@ describe("durable work-item schemas", () => {
   it("accepts a complete contracted item with matching controller state", () => {
     const contractedGoal = {
       ...goal,
-      goal_version: 1,
-      acceptance_criteria: ["The controller rejects stale revisions"],
-      allowed_scope: ["src/domain"],
-      review_ready: ["All deterministic checks pass"],
+      goal_contract: {
+        schema_version: 1 as const,
+        goal_version: 1,
+        purpose: "Keep controller revisions safe.",
+        acceptance_criteria: ["The controller rejects stale revisions"],
+        non_goals: ["Do not bypass revision checks."],
+        allowed_scope: ["src/domain"],
+        review_ready: ["All deterministic checks pass"],
+      },
     };
     const contractedState = {
       ...state,
@@ -329,22 +334,48 @@ describe("durable work-item schemas", () => {
 
   it("validates strict controller inputs and run manifests", () => {
     expect(
-      goalContractUpdateInputSchema.parse({
-        acceptance_criteria: [" Reject stale state "],
+      saveWorkItemInputSchema.parse({
+        target_source_id: "inbox",
+        title: "Reject stale state",
+        type: null,
+        priority: null,
+        tags: [],
+        notes: null,
+        goal_contract: {
+          purpose: "Keep stale state rejected.",
+          acceptance_criteria: [" Reject stale state "],
+          non_goals: ["Do not accept stale revisions."],
+          allowed_scope: ["src/domain"],
+          review_ready: ["Checks pass"],
+        },
+      }),
+    ).toMatchObject({
+      target_source_id: "inbox",
+      title: "Reject stale state",
+      goal_contract: {
+        purpose: "Keep stale state rejected.",
+        acceptance_criteria: ["Reject stale state"],
+        non_goals: ["Do not accept stale revisions."],
         allowed_scope: ["src/domain"],
         review_ready: ["Checks pass"],
-      }),
-    ).toEqual({
-      acceptance_criteria: ["Reject stale state"],
-      allowed_scope: ["src/domain"],
-      review_ready: ["Checks pass"],
+      },
     });
 
     expect(() =>
-      goalContractUpdateInputSchema.parse({
-        acceptance_criteria: ["Reject stale state"],
-        allowed_scope: ["src/domain"],
-        review_ready: ["Checks pass"],
+      saveWorkItemInputSchema.parse({
+        target_source_id: "inbox",
+        title: "Reject stale state",
+        type: null,
+        priority: null,
+        tags: [],
+        notes: null,
+        goal_contract: {
+          purpose: "Keep stale state rejected.",
+          acceptance_criteria: ["Reject stale state"],
+          non_goals: ["Do not accept stale revisions."],
+          allowed_scope: ["src/domain"],
+          review_ready: ["Checks pass"],
+        },
         expected_goal_version: 1,
       }),
     ).toThrow(

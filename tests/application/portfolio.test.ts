@@ -32,6 +32,8 @@ import {
   type ControllerRunManifest,
   type WorkItem,
   type WorkItemPhase,
+  type WorkItemPriority,
+  type WorkItemType,
   type VerificationCommand,
 } from "../../src/domain/work-item";
 import type {
@@ -128,12 +130,77 @@ async function createService(
           verificationRunner: controllerRunner,
         })),
   );
+  const legacyService = Object.assign(service, {
+    async updateWorkItemDetails(
+      sourceId: string,
+      workItemId: string,
+      input: {
+        title?: string;
+        type?: WorkItemType | null;
+        priority?: WorkItemPriority | null;
+        tags?: string[];
+        notes?: string | null;
+      },
+    ) {
+      const current = (await service.list()).find(
+        (item) => item.source_id === sourceId && item.work_item.goal.work_item_id === workItemId,
+      );
+      if (current === undefined) {
+        return service.saveWorkItem(sourceId, workItemId, {
+          target_source_id: sourceId, title: "Missing work item", type: null, priority: null, tags: [], notes: null,
+        });
+      }
+      const { goal } = current.work_item;
+      return service.saveWorkItem(sourceId, workItemId, {
+        target_source_id: sourceId, title: input.title ?? goal.title,
+        type: input.type === undefined ? goal.type ?? null : input.type,
+        priority: input.priority === undefined ? goal.priority ?? null : input.priority,
+        tags: input.tags ?? goal.tags ?? [], notes: input.notes === undefined ? goal.notes ?? null : input.notes,
+      });
+    },
+    async updateGoalContract(
+      sourceId: string,
+      workItemId: string,
+      input: { acceptance_criteria: string[]; allowed_scope: string[]; review_ready: string[]; expected_goal_version?: number; expected_input_revision?: number },
+    ) {
+      const current = (await service.list()).find(
+        (item) => item.source_id === sourceId && item.work_item.goal.work_item_id === workItemId,
+      );
+      if (current === undefined) {
+        return service.saveWorkItem(sourceId, workItemId, {
+          target_source_id: sourceId, title: "Missing work item", type: null, priority: null, tags: [], notes: null,
+          goal_contract: { purpose: "Keep portfolio work governed.", acceptance_criteria: input.acceptance_criteria, non_goals: ["Do not bypass portfolio recovery."], allowed_scope: input.allowed_scope, review_ready: input.review_ready },
+          ...(input.expected_goal_version === undefined ? {} : { expected_goal_version: input.expected_goal_version, expected_input_revision: input.expected_input_revision }),
+        });
+      }
+      const { goal } = current.work_item;
+      return service.saveWorkItem(sourceId, workItemId, {
+        target_source_id: sourceId, title: goal.title, type: goal.type ?? null, priority: goal.priority ?? null, tags: goal.tags ?? [], notes: goal.notes ?? null,
+        goal_contract: { purpose: "Keep portfolio work governed.", acceptance_criteria: input.acceptance_criteria, non_goals: ["Do not bypass portfolio recovery."], allowed_scope: input.allowed_scope, review_ready: input.review_ready },
+        ...(input.expected_goal_version === undefined ? {} : { expected_goal_version: input.expected_goal_version, expected_input_revision: input.expected_input_revision }),
+      });
+    },
+    async assignWorkItem(sourceId: string, workItemId: string, input: { target_source_id: string }) {
+      const current = (await service.list()).find(
+        (item) => item.source_id === sourceId && item.work_item.goal.work_item_id === workItemId,
+      );
+      if (current === undefined) {
+        return service.saveWorkItem(sourceId, workItemId, {
+          target_source_id: input.target_source_id, title: "Missing work item", type: null, priority: null, tags: [], notes: null,
+        });
+      }
+      const { goal } = current.work_item;
+      return service.saveWorkItem(sourceId, workItemId, {
+        target_source_id: input.target_source_id, title: goal.title, type: goal.type ?? null, priority: goal.priority ?? null, tags: goal.tags ?? [], notes: goal.notes ?? null,
+      });
+    },
+  });
   return {
     registry,
     index,
     inboxRoot,
     transfersRoot: service.transfersRoot,
-    service,
+    service: legacyService,
   };
 }
 
@@ -151,12 +218,22 @@ async function governWorkItemThrough(
     controllerGit,
     controllerRunner,
   );
-  const contracted = await controller.updateGoalContract(
+  const contracted = await controller.saveWorkItem(
     workItem.goal.work_item_id,
     {
-      acceptance_criteria: ["The mission package is reproducible"],
-      allowed_scope: ["src/domain", "src/application"],
-      review_ready: ["All deterministic checks pass"],
+      target_source_id: "inbox",
+      title: workItem.goal.title,
+      type: workItem.goal.type ?? null,
+      priority: workItem.goal.priority ?? null,
+      tags: workItem.goal.tags ?? [],
+      notes: workItem.goal.notes ?? null,
+      goal_contract: {
+        purpose: "Keep the mission package reproducible.",
+        acceptance_criteria: ["The mission package is reproducible"],
+        non_goals: ["Do not mutate unrelated workspace state."],
+        allowed_scope: ["src/domain", "src/application"],
+        review_ready: ["All deterministic checks pass"],
+      },
     },
   );
   let current = contracted.work_item;
@@ -195,7 +272,7 @@ async function writeTransferJournal(
   await mkdir(transfersRoot, { recursive: true });
   await writeFile(
     join(transfersRoot, `${record.transfer_id}.json`),
-    `${JSON.stringify({ schema_version: 1, ...record }, null, 2)}\n`,
+    `${JSON.stringify({ schema_version: 1, kind: "move", ...record }, null, 2)}\n`,
     "utf8",
   );
 }
@@ -474,7 +551,7 @@ describe("PortfolioService", () => {
       { type: null, priority: null, tags: [], notes: null },
     );
     expect(cleared.work_item.goal).toEqual({
-      schema_version: 1,
+      schema_version: 2,
       work_item_id: created.work_item.goal.work_item_id,
       title: "Refined capture",
       capture: provenance,
@@ -526,7 +603,14 @@ describe("PortfolioService", () => {
       source_id: sourceId,
       project: registration.workspace,
       work_item: {
-        goal: { ...input, goal_version: 1 },
+        goal: {
+          goal_contract: {
+            ...input,
+            purpose: "Keep portfolio work governed.",
+            non_goals: ["Do not bypass portfolio recovery."],
+            goal_version: 1,
+          },
+        },
         state: { goal_version: 1, input_revision: 1, attempt: 0 },
       },
     });
@@ -564,10 +648,20 @@ describe("PortfolioService", () => {
       controllerGit,
       controllerRunner,
     );
-    await controller.updateGoalContract(created.work_item.goal.work_item_id, {
-      acceptance_criteria: ["Keep contract changes version-bound"],
-      allowed_scope: ["src/application"],
-      review_ready: ["Tests pass"],
+    await controller.saveWorkItem(created.work_item.goal.work_item_id, {
+      target_source_id: "inbox",
+      title: created.work_item.goal.title,
+      type: created.work_item.goal.type ?? null,
+      priority: created.work_item.goal.priority ?? null,
+      tags: created.work_item.goal.tags ?? [],
+      notes: created.work_item.goal.notes ?? null,
+      goal_contract: {
+        purpose: "Keep contract changes version-bound.",
+        acceptance_criteria: ["Keep contract changes version-bound"],
+        non_goals: ["Do not change projects."],
+        allowed_scope: ["src/application"],
+        review_ready: ["Tests pass"],
+      },
     });
     await service.rebuild();
     const before = await repository.read(created.work_item.goal.work_item_id);
@@ -581,7 +675,7 @@ describe("PortfolioService", () => {
       ),
     ).rejects.toMatchObject({
       name: "ControllerConflictError",
-      kind: "contracted_details",
+      kind: "contract_required",
     });
     expect(await repository.read(created.work_item.goal.work_item_id)).toEqual(
       before,
