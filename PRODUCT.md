@@ -73,15 +73,17 @@ SQLite is a disposable local cache/index that can be rebuilt from durable files;
 never the only copy of product or workflow state.
 
 Product workspaces use `.founder/` as the initial metadata directory. Its version-2 product
-manifest and version-1 goal and state contracts are implemented in
+manifest, version-2 goal contract, and version-1 state contract are implemented in
 [`src/domain/work-item.ts`](src/domain/work-item.ts) and demonstrated by the checked-in
 [`fixtures/sample-workspace`](fixtures/sample-workspace).
 
-The version-1 work-item schema is additive: lightweight captures omit goal-contract and
-controller fields, while governed items carry a complete `goal_version` contract plus matching
-state `goal_version`, `input_revision`, and `attempt`. Controller runs use exclusive per-item
-leases and strict durable manifests; incompatible or partial combinations fail closed. SQLite
-schema v4 is a rebuildable projection of those files, not a migration authority.
+The version-2 work-item goal schema is additive: lightweight captures omit `goal_contract` and
+controller fields, while governed items carry a complete nested version-1 goal contract with a
+purpose, acceptance criteria, non-goals, allowed scope, and review readiness. Its `goal_version`
+must match state `goal_version`, `input_revision`, and `attempt`. Controller runs use exclusive
+per-item leases and strict durable manifests; incompatible or partial combinations fail closed.
+SQLite schema v5 is a rebuildable projection of those files, including purpose and non-goals, not
+a migration authority.
 
 ## 8. Core documents
 

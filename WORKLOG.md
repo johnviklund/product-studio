@@ -5,6 +5,20 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-24 · Clear goal contracts and unified card editing (roadmap 2.5) · Codex GPT-5.6
+- Replaced the flat v1 goal contract with a strict v2 work-item goal and nested version-1 contract
+  carrying purpose, acceptance criteria, non-goals, allowed scope, and review readiness. Lightweight
+  captures remain contract-less; incomplete and cross-file-mismatched durable artifacts fail closed.
+- Consolidated project, details, and optional contract changes into one source-qualified `/edit`
+  save flow. The controller retains lease, exact-replay, and revision semantics; cross-source saves
+  use the recoverable transfer journal and contracted items cannot be moved between projects.
+- Updated missions, the board handoff gate, the SQLite v5 rebuildable cache, checked-in fixtures,
+  and test fixtures to consume the nested contract consistently.
+- Verified: lint, TypeScript, 205/205 tests, and production build pass. The initial build sandbox
+  port-bind failure was environmental; the approved host rerun passed. Browser/visual QA was not
+  run in this execution step.
+- Commits: `8eb7c47` through `e3fb448` (implementation slices; review remains the next phase).
+
 ## 2026-07-23 · App-reachable goal contracts (roadmap 2.1 reachability) · Codex GPT-5.6 / Copilot Claude review
 - Added a single editability policy `canUpdateGoalContract(phase)` (`src/domain/workflow-policy.ts`,
   true set exactly `idea|brainstorm|spec|plan`) and enforced it at the controller boundary:
