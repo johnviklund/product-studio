@@ -30,7 +30,9 @@ delivery phases.
   where free text is parsed into structure. Small and isolated; not urgent. *Pointer updated
   2026-07-21 (ROADMAP 1.5): `capture-editor.tsx` was deleted and its capture-mode field folded
   into `detail-panel.tsx`; this item was deliberately not folded into 1.5 (spec scoped the chip
-  picker out) — the free-text behavior was preserved as-is.*
+  picker out) — the free-text behavior was preserved as-is. Pointer updated 2026-07-24 (ROADMAP 2.5): the
+  unified `/edit` save flow rewrote `detail-panel.tsx`'s save handlers but left `tagsFromInput`
+  and the free-text tags input untouched — this item still applies as written.*
 
 ## Open Questions
 

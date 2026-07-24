@@ -114,25 +114,38 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
   and full command-record disclosure). Reviewed clean at `b8119bd`, no P0–P2 findings, two P3s
   wontfixed as intentional trade-offs; see `WORKLOG.md`.
 
-**Milestone exit:** A contracted phase can be handed to an external agent, imported, verified, persisted, restarted, and inspected safely without a provider-specific runner.
+### 2.5 Clear goal contracts and unified card editing
+
+- **Goal:** Make governed work easy to define and edit so every mission has a clear why, an observable target, and an explicit boundary.
+- **Primary scope:** A concise, plain-language goal contract covering purpose, acceptance criteria, non-goals, scope, and review readiness; the product manages stable references and versioning. Project, details, and goal contract share one detail-panel editing flow with a single Save action. Initial capture remains one sentence; LLM refinement remains a proposal until the founder accepts it.
+- **Traceability:** `PRODUCT.md` lifecycle and gates, `DESIGN.md` detail panel, and the versioned goal-contract foundation from 2.1.
+- **Dependencies:** 1.5 and 2.1–2.4.
+- **Completion signal:** The founder can prepare a governed item for execution in one editing flow, and subsequent missions and evidence bind to the exact accepted goal version.
+- **Status:** Delivered — commits `8eb7c47`–`d666423` (strict v2 nested goal contracts with purpose
+  and non-goals; one source-qualified save/edit flow for project, card details, and contract;
+  v5 rebuildable cache; updated mission/board/fixture consumers). Deterministic verification is
+  green: lint, typecheck, 203 tests, and production build. Phase 4 review passed clean — ship
+  as-is, no P0–P2 findings; see `WORKLOG.md`.
+
+**Milestone exit:** A clear, accepted contract can be edited without unnecessary form boundaries, then handed to an external agent, imported, verified, persisted, restarted, and inspected safely without a provider-specific runner.
 
 ## Milestone 3 — Cross-agent review loop
 
 ### 3.1 Independent review mission and finding contract
 
-- **Goal:** Add read-only review packaging, independence checks, and structured findings.
-- **Primary scope:** Reviewer missions, review contracts, and normalized evidence.
+- **Goal:** Review an exact result against its accepted goal contract without allowing the reviewer to modify the implementation.
+- **Primary scope:** Reviewer missions, independence checks, exact-result binding, and structured findings linked to acceptance criteria, non-goals, defects, security, or deterministic checks.
 - **Traceability:** PRD §8.6, FR-010.
-- **Dependencies:** 2.2–2.4.
-- **Completion signal:** An independent reviewer returns structured findings without modifying the implementation.
+- **Dependencies:** 2.2–2.5.
+- **Completion signal:** An independent reviewer returns criteria-linked findings for the exact result under review without modifying the implementation or authorizing completion.
 
 ### 3.2 Bounded patch loop and attention inbox
 
 - **Goal:** Drive executor, verification, review, and patch transitions within explicit limits and show one clear next action.
-- **Primary scope:** Loop/budget bounds, escalation, patch-plan routing, and attention handling.
+- **Primary scope:** One bounded work or repair unit per pass, repair-first routing within explicit limits, lease revalidation, patch-plan routing, and exact human-answerable escalation questions.
 - **Traceability:** PRD §11, §12, §9.7, FR-011/012.
 - **Dependencies:** 2.3–2.4 and 3.1.
-- **Completion signal:** A real feature reaches review-ready, blocked, budget, or cycle-limit status without silent looping.
+- **Completion signal:** A real feature reaches review-ready, blocked, budget, or cycle-limit status without silent looping, repeated ambiguous retries, or lost contract context.
 
 ### 3.3 Learning, skill, and evaluation proposals
 

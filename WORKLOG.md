@@ -17,7 +17,8 @@ not archived — they remain in git history).
 - Verified: lint, TypeScript, the full test suite, and production build pass. The initial build sandbox
   port-bind failure was environmental; the approved host rerun passed. Browser/visual QA was not
   run in this execution step.
-- Commits: `8eb7c47` through `e3fb448` (implementation slices; review remains the next phase).
+- Commits: `8eb7c47` through `d666423`. Phase 4 review passed clean — ship as-is, no P0–P2
+  findings (one cosmetic P3: empty leftover route dirs, not committed).
 
 ## 2026-07-23 · App-reachable goal contracts (roadmap 2.1 reachability) · Codex GPT-5.6 / Copilot Claude review
 - Added a single editability policy `canUpdateGoalContract(phase)` (`src/domain/workflow-policy.ts`,
