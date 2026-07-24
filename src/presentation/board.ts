@@ -207,7 +207,7 @@ export function detailPanelModeForItem(item: {
 export function missionHandoffModeForItem(item: {
   source_id: string;
   work_item: {
-    goal: { goal_version?: number };
+    goal: { goal_contract?: { goal_version: number } };
     state: {
       phase: WorkItemPhase;
       status: WorkItemStatus;
@@ -219,7 +219,7 @@ export function missionHandoffModeForItem(item: {
   const { goal, state } = item.work_item;
   if (
     item.source_id === INBOX_SOURCE_ID ||
-    goal.goal_version === undefined ||
+    goal.goal_contract === undefined ||
     state.input_revision === undefined ||
     state.attempt === undefined ||
     state.phase !== "execute"

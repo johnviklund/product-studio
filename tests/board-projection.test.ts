@@ -119,7 +119,7 @@ describe("board projection", () => {
     const item = {
       source_id: "ws_product",
       work_item: {
-        goal: { goal_version: 3 },
+        goal: { goal_contract: { goal_version: 3 } },
         state: {
           phase: "execute" as const,
           status: "active" as const,
@@ -151,6 +151,15 @@ describe("board projection", () => {
     expect(missionHandoffModeForItem({ ...item, source_id: "inbox" })).toBe(
       "hidden",
     );
+    expect(
+      missionHandoffModeForItem({
+        ...item,
+        work_item: {
+          ...item.work_item,
+          goal: {},
+        },
+      }),
+    ).toBe("hidden");
   });
 
   it("derives only valid forward and backward board transition actions", () => {
