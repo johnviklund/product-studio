@@ -451,18 +451,21 @@ export function DetailPanel({
   const [tags, setTags] = useState(goal.tags?.join(", ") ?? "");
   const [notes, setNotes] = useState(goal.notes ?? "");
   const [targetSourceId, setTargetSourceId] = useState(item.source_id);
-  const [savingDetails, setSavingDetails] = useState(false);
-  const [savingAssignment, setSavingAssignment] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const goalContract = goal.goal_contract;
+  const [purpose, setPurpose] = useState(goalContract?.purpose ?? "");
   const [acceptanceCriteria, setAcceptanceCriteria] = useState(
-    goalContractLines(goal.acceptance_criteria),
+    goalContractLines(goalContract?.acceptance_criteria),
+  );
+  const [nonGoals, setNonGoals] = useState(
+    goalContractLines(goalContract?.non_goals),
   );
   const [allowedScope, setAllowedScope] = useState(
-    goalContractLines(goal.allowed_scope),
+    goalContractLines(goalContract?.allowed_scope),
   );
   const [reviewReady, setReviewReady] = useState(
-    goalContractLines(goal.review_ready),
+    goalContractLines(goalContract?.review_ready),
   );
-  const [savingContract, setSavingContract] = useState(false);
   const [compilingMission, setCompilingMission] = useState(false);
   const [importingResult, setImportingResult] = useState(false);
   const [startingRepair, setStartingRepair] = useState(false);
@@ -485,17 +488,33 @@ export function DetailPanel({
     notes !== (goal.notes ?? "");
   const assignmentDirty = targetSourceId !== item.source_id;
   const acceptanceCriteriaValues = goalContractValues(acceptanceCriteria);
+  const nonGoalsValues = goalContractValues(nonGoals);
   const allowedScopeValues = goalContractValues(allowedScope);
   const reviewReadyValues = goalContractValues(reviewReady);
   const contractDirty =
-    acceptanceCriteria !== goalContractLines(goal.acceptance_criteria) ||
-    allowedScope !== goalContractLines(goal.allowed_scope) ||
-    reviewReady !== goalContractLines(goal.review_ready);
+    purpose !== (goalContract?.purpose ?? "") ||
+    acceptanceCriteria !== goalContractLines(goalContract?.acceptance_criteria) ||
+    nonGoals !== goalContractLines(goalContract?.non_goals) ||
+    allowedScope !== goalContractLines(goalContract?.allowed_scope) ||
+    reviewReady !== goalContractLines(goalContract?.review_ready);
   const canEditGoalContract = canUpdateGoalContract(state.phase);
+  const hasContractInput =
+    goalContract !== undefined ||
+    purpose.trim().length > 0 ||
+    acceptanceCriteriaValues.length > 0 ||
+    nonGoalsValues.length > 0 ||
+    allowedScopeValues.length > 0 ||
+    reviewReadyValues.length > 0;
+  const contractComplete =
+    purpose.trim().length > 0 &&
+    acceptanceCriteriaValues.length > 0 &&
+    nonGoalsValues.length > 0 &&
+    allowedScopeValues.length > 0 &&
+    reviewReadyValues.length > 0;
   const missionItemKey = [
     item.source_id,
     goal.work_item_id,
-    goal.goal_version,
+    goalContract?.goal_version,
     state.input_revision,
     state.attempt,
   ].join(":");
@@ -626,23 +645,57 @@ export function DetailPanel({
     return () => controller.abort();
   }, [goal.work_item_id, item.source_id, mode, runEvidenceItemKey]);
 
-  async function handleDetailsSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setSavingDetails(true);
+    if (!canEditGoalContract || title.trim().length === 0) {
+      return;
+    }
+    if (hasContractInput && !contractComplete) {
+      setError("Complete every goal contract field before saving it.");
+      return;
+    }
+    if (
+      goalContract === undefined &&
+      hasContractInput &&
+      targetSourceId === INBOX_SOURCE_ID
+    ) {
+      setError("Choose a project before activating a goal contract.");
+      return;
+    }
+
+    setSaving(true);
     setError(null);
 
     try {
       const response = await fetch(
-        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/details`,
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/edit`,
         {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
+            target_source_id: targetSourceId,
             title: title.trim(),
             type: type === "" ? null : type,
             priority: priority === "" ? null : priority,
             tags: tagsFromInput(tags),
             notes: notes.trim().length === 0 ? null : notes,
+            ...(hasContractInput
+              ? {
+                  goal_contract: {
+                    purpose: purpose.trim(),
+                    acceptance_criteria: acceptanceCriteriaValues,
+                    non_goals: nonGoalsValues,
+                    allowed_scope: allowedScopeValues,
+                    review_ready: reviewReadyValues,
+                  },
+                  ...(goalContract === undefined
+                    ? {}
+                    : {
+                        expected_goal_version: goalContract.goal_version,
+                        expected_input_revision: state.input_revision,
+                      }),
+                }
+              : {}),
           }),
         },
       );
@@ -652,8 +705,8 @@ export function DetailPanel({
       if (!response.ok) {
         setError(
           "error" in body
-            ? body.error?.message ?? "The details could not be saved."
-            : "The details could not be saved.",
+            ? body.error?.message ?? "The work item could not be saved."
+            : "The work item could not be saved.",
         );
         return;
       }
@@ -664,107 +717,23 @@ export function DetailPanel({
       setPriority(updated.work_item.goal.priority ?? "");
       setTags(updated.work_item.goal.tags?.join(", ") ?? "");
       setNotes(updated.work_item.goal.notes ?? "");
-      onUpdated(updated);
-    } catch {
-      setError("The details could not be saved. Check the local server and try again.");
-    } finally {
-      setSavingDetails(false);
-    }
-  }
-
-  async function handleAssignmentSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!assignmentDirty) {
-      return;
-    }
-    setSavingAssignment(true);
-    setError(null);
-
-    try {
-      const response = await fetch(
-        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/assignment`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ target_source_id: targetSourceId }),
-        },
+      setTargetSourceId(updated.source_id);
+      setPurpose(updated.work_item.goal.goal_contract?.purpose ?? "");
+      setAcceptanceCriteria(
+        goalContractLines(updated.work_item.goal.goal_contract?.acceptance_criteria),
       );
-      const body = (await response.json()) as
-        | PortfolioWorkItem
-        | MutationErrorResponse;
-      if (!response.ok) {
-        setError(
-          "error" in body
-            ? body.error?.message ?? "The project could not be changed."
-            : "The project could not be changed.",
-        );
-        return;
+      setNonGoals(goalContractLines(updated.work_item.goal.goal_contract?.non_goals));
+      setAllowedScope(goalContractLines(updated.work_item.goal.goal_contract?.allowed_scope));
+      setReviewReady(goalContractLines(updated.work_item.goal.goal_contract?.review_ready));
+      if (updated.source_id === item.source_id) {
+        onUpdated(updated, "Work item saved.");
+      } else {
+        onAssigned(item, updated);
       }
-
-      onAssigned(item, body as PortfolioWorkItem);
     } catch {
-      setError("The project could not be changed. Check the local server and try again.");
+      setError("The work item could not be saved. Check the local server and try again.");
     } finally {
-      setSavingAssignment(false);
-    }
-  }
-
-  async function handleGoalContractSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (
-      !contractDirty ||
-      acceptanceCriteriaValues.length === 0 ||
-      allowedScopeValues.length === 0 ||
-      reviewReadyValues.length === 0
-    ) {
-      return;
-    }
-
-    setSavingContract(true);
-    setError(null);
-
-    try {
-      const response = await fetch(
-        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/goal-contract`,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            acceptance_criteria: acceptanceCriteriaValues,
-            allowed_scope: allowedScopeValues,
-            review_ready: reviewReadyValues,
-            ...(goal.goal_version === undefined
-              ? {}
-              : {
-                  expected_goal_version: state.goal_version,
-                  expected_input_revision: state.input_revision,
-                }),
-          }),
-        },
-      );
-      const body = (await response.json()) as
-        | PortfolioWorkItem
-        | MutationErrorResponse;
-      if (!response.ok) {
-        setError(
-          "error" in body
-            ? body.error?.message ?? "The goal contract could not be saved."
-            : "The goal contract could not be saved.",
-        );
-        return;
-      }
-
-      const updated = body as PortfolioWorkItem;
-      setAcceptanceCriteria(goalContractLines(updated.work_item.goal.acceptance_criteria));
-      setAllowedScope(goalContractLines(updated.work_item.goal.allowed_scope));
-      setReviewReady(goalContractLines(updated.work_item.goal.review_ready));
-      onUpdated(updated, "Goal contract saved.");
-    } catch {
-      setError(
-        "The goal contract could not be saved. Check the local server and try again.",
-      );
-    } finally {
-      setSavingContract(false);
+      setSaving(false);
     }
   }
 
@@ -899,95 +868,30 @@ export function DetailPanel({
 
   const transitionActions = boardTransitionActionsForPhase(state.phase);
   const goalContractFields: Array<[string, string[] | undefined]> = [
-    ["Acceptance criteria", goal.acceptance_criteria],
-    ["Allowed scope", goal.allowed_scope],
-    ["Review-ready checks", goal.review_ready],
+    ["Acceptance criteria", goalContract?.acceptance_criteria],
+    ["Non-goals", goalContract?.non_goals],
+    ["Allowed scope", goalContract?.allowed_scope],
+    ["Review-ready checks", goalContract?.review_ready],
   ];
-  const goalContractContent = canEditGoalContract ? (
-    <form
-      onSubmit={(event) => void handleGoalContractSubmit(event)}
-      className="space-y-4"
-    >
-      <div>
-        <h3 id={`${fieldId}-goal-contract`} className="text-xs font-medium">
-          Goal contract
-        </h3>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          Keep one item per line. All three lists are required before saving.
-        </p>
-      </div>
-      <div>
-        <label
-          htmlFor={`${fieldId}-acceptance-criteria`}
-          className="mb-2 block text-xs font-medium"
-        >
-          Acceptance criteria
-        </label>
-        <textarea
-          id={`${fieldId}-acceptance-criteria`}
-          value={acceptanceCriteria}
-          onChange={(event) => setAcceptanceCriteria(event.target.value)}
-          rows={4}
-          className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-        />
-      </div>
-      <div>
-        <label
-          htmlFor={`${fieldId}-allowed-scope`}
-          className="mb-2 block text-xs font-medium"
-        >
-          Allowed scope
-        </label>
-        <textarea
-          id={`${fieldId}-allowed-scope`}
-          value={allowedScope}
-          onChange={(event) => setAllowedScope(event.target.value)}
-          rows={3}
-          className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-        />
-      </div>
-      <div>
-        <label
-          htmlFor={`${fieldId}-review-ready`}
-          className="mb-2 block text-xs font-medium"
-        >
-          Review-ready checks
-        </label>
-        <textarea
-          id={`${fieldId}-review-ready`}
-          value={reviewReady}
-          onChange={(event) => setReviewReady(event.target.value)}
-          rows={3}
-          className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-        />
-      </div>
-      <div className="flex justify-end">
-        <button
-          type="submit"
-          disabled={
-            savingContract ||
-            !contractDirty ||
-            acceptanceCriteriaValues.length === 0 ||
-            allowedScopeValues.length === 0 ||
-            reviewReadyValues.length === 0
-          }
-          className="h-9 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {savingContract ? "Saving…" : "Save goal contract"}
-        </button>
-      </div>
-    </form>
-  ) : (
+  const goalContractContent = (
     <div>
       <div className="flex items-baseline justify-between gap-3">
         <h3 id={`${fieldId}-goal-contract`} className="text-xs font-medium">
           Goal contract
         </h3>
         <p className="text-[11px] text-muted-foreground">
-          Version {goal.goal_version ?? "not set"}
+          Version {goalContract?.goal_version ?? "not set"}
         </p>
       </div>
       <dl className="mt-3 space-y-4 text-sm">
+        <div>
+          <dt className="text-xs text-muted-foreground">Purpose</dt>
+          <dd className="mt-1">
+            {goalContract?.purpose ?? (
+              <span className="text-muted-foreground">Not recorded.</span>
+            )}
+          </dd>
+        </div>
         {goalContractFields.map(([label, values]) => (
           <div key={label}>
             <dt className="text-xs text-muted-foreground">{label}</dt>
@@ -1007,6 +911,88 @@ export function DetailPanel({
       </dl>
     </div>
   );
+  const workItemEditor = canEditGoalContract ? (
+    <form onSubmit={(event) => void handleSave(event)} className="space-y-4 border-t pt-5">
+      <div>
+        <label htmlFor={`${fieldId}-project`} className="mb-2 block text-xs font-medium">
+          Project
+        </label>
+        <select
+          id={`${fieldId}-project`}
+          value={targetSourceId}
+          disabled={goalContract !== undefined}
+          onChange={(event) => setTargetSourceId(event.target.value)}
+          className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-70"
+        >
+          <option value={INBOX_SOURCE_ID}>Unassigned</option>
+          {workspaces.map((workspace) => (
+            <option key={workspace.workspace_id} value={workspace.workspace_id}>
+              {workspace.product_name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label htmlFor={`${fieldId}-title`} className="mb-2 block text-xs font-medium">Current title</label>
+        <input id={`${fieldId}-title`} value={title} onChange={(event) => setTitle(event.target.value)} required className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label htmlFor={`${fieldId}-type`} className="mb-2 block text-xs font-medium">Work type</label>
+          <select id={`${fieldId}-type`} value={type} onChange={(event) => setType(event.target.value as WorkItemType | "")} className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary">
+            <option value="">Unclassified</option>
+            {WORK_ITEM_TYPES.map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+        </div>
+        <div>
+          <label htmlFor={`${fieldId}-priority`} className="mb-2 block text-xs font-medium">Priority</label>
+          <select id={`${fieldId}-priority`} value={priority} onChange={(event) => setPriority(event.target.value as WorkItemPriority | "")} className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary">
+            <option value="">Not set</option>
+            {WORK_ITEM_PRIORITIES.map((option) => <option key={option} value={option} className="capitalize">{option[0]?.toUpperCase()}{option.slice(1)}</option>)}
+          </select>
+        </div>
+      </div>
+      <div>
+        <label htmlFor={`${fieldId}-tags`} className="mb-2 block text-xs font-medium">Tags</label>
+        <input id={`${fieldId}-tags`} value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Question, Front-end" className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none placeholder:text-[#7f8794] focus:border-primary focus:ring-1 focus:ring-primary" />
+      </div>
+      <div>
+        <label htmlFor={`${fieldId}-notes`} className="mb-2 block text-xs font-medium">Context</label>
+        <textarea id={`${fieldId}-notes`} value={notes} onChange={(event) => setNotes(event.target.value)} rows={5} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+      </div>
+      <section aria-labelledby={`${fieldId}-goal-contract`} className="space-y-4 border-t pt-5">
+        <div>
+          <h3 id={`${fieldId}-goal-contract`} className="text-xs font-medium">Goal contract</h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">Complete every field to govern this item. Keep list entries one per line.</p>
+        </div>
+        <div>
+          <label htmlFor={`${fieldId}-purpose`} className="mb-2 block text-xs font-medium">Purpose</label>
+          <input id={`${fieldId}-purpose`} value={purpose} onChange={(event) => setPurpose(event.target.value)} className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+        </div>
+        <div>
+          <label htmlFor={`${fieldId}-acceptance-criteria`} className="mb-2 block text-xs font-medium">Acceptance criteria</label>
+          <textarea id={`${fieldId}-acceptance-criteria`} value={acceptanceCriteria} onChange={(event) => setAcceptanceCriteria(event.target.value)} rows={4} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+        </div>
+        <div>
+          <label htmlFor={`${fieldId}-non-goals`} className="mb-2 block text-xs font-medium">Non-goals</label>
+          <textarea id={`${fieldId}-non-goals`} value={nonGoals} onChange={(event) => setNonGoals(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+        </div>
+        <div>
+          <label htmlFor={`${fieldId}-allowed-scope`} className="mb-2 block text-xs font-medium">Allowed scope</label>
+          <textarea id={`${fieldId}-allowed-scope`} value={allowedScope} onChange={(event) => setAllowedScope(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+        </div>
+        <div>
+          <label htmlFor={`${fieldId}-review-ready`} className="mb-2 block text-xs font-medium">Review-ready checks</label>
+          <textarea id={`${fieldId}-review-ready`} value={reviewReady} onChange={(event) => setReviewReady(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+        </div>
+      </section>
+      <div className="flex justify-end">
+        <button type="submit" disabled={saving || (!detailsDirty && !assignmentDirty && !contractDirty) || title.trim().length === 0 || (hasContractInput && !contractComplete) || (goalContract === undefined && hasContractInput && targetSourceId === INBOX_SOURCE_ID)} className="h-9 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50">
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+      </div>
+    </form>
+  ) : null;
 
   return (
     <>
@@ -1064,147 +1050,7 @@ export function DetailPanel({
               </div>
             </section>
 
-            <form
-              onSubmit={(event) => void handleDetailsSubmit(event)}
-              className="space-y-4 border-t pt-5"
-            >
-              <div>
-                <label htmlFor={`${fieldId}-title`} className="mb-2 block text-xs font-medium">
-                  Current title
-                </label>
-                <input
-                  id={`${fieldId}-title`}
-                  value={title}
-                  onChange={(event) => setTitle(event.target.value)}
-                  required
-                  className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label htmlFor={`${fieldId}-type`} className="mb-2 block text-xs font-medium">
-                    Work type
-                  </label>
-                  <select
-                    id={`${fieldId}-type`}
-                    value={type}
-                    onChange={(event) => setType(event.target.value as WorkItemType | "")}
-                    className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-                  >
-                    <option value="">Unclassified</option>
-                    {WORK_ITEM_TYPES.map((option) => (
-                      <option key={option} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label htmlFor={`${fieldId}-priority`} className="mb-2 block text-xs font-medium">
-                    Priority
-                  </label>
-                  <select
-                    id={`${fieldId}-priority`}
-                    value={priority}
-                    onChange={(event) =>
-                      setPriority(event.target.value as WorkItemPriority | "")
-                    }
-                    className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-                  >
-                    <option value="">Not set</option>
-                    {WORK_ITEM_PRIORITIES.map((option) => (
-                      <option key={option} value={option} className="capitalize">
-                        {option[0]?.toUpperCase()}{option.slice(1)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label htmlFor={`${fieldId}-tags`} className="mb-2 block text-xs font-medium">
-                  Tags
-                </label>
-                <input
-                  id={`${fieldId}-tags`}
-                  value={tags}
-                  onChange={(event) => setTags(event.target.value)}
-                  placeholder="Question, Front-end"
-                  className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none placeholder:text-[#7f8794] focus:border-primary focus:ring-1 focus:ring-primary"
-                />
-              </div>
-
-              <div>
-                <label htmlFor={`${fieldId}-notes`} className="mb-2 block text-xs font-medium">
-                  Context
-                </label>
-                <textarea
-                  id={`${fieldId}-notes`}
-                  value={notes}
-                  onChange={(event) => setNotes(event.target.value)}
-                  rows={5}
-                  className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-                />
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  disabled={savingDetails || !detailsDirty || title.trim().length === 0}
-                  className="h-9 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {savingDetails ? "Saving…" : "Save details"}
-                </button>
-              </div>
-            </form>
-
-            <form
-              onSubmit={(event) => void handleAssignmentSubmit(event)}
-              className="space-y-3 border-t pt-5"
-            >
-              <div>
-                <label htmlFor={`${fieldId}-project`} className="mb-2 block text-xs font-medium">
-                  Project assignment
-                </label>
-                <select
-                  id={`${fieldId}-project`}
-                  value={targetSourceId}
-                  onChange={(event) => setTargetSourceId(event.target.value)}
-                  className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-                >
-                  <option value={INBOX_SOURCE_ID}>Unassigned</option>
-                  {workspaces.map((workspace) => (
-                    <option key={workspace.workspace_id} value={workspace.workspace_id}>
-                      {workspace.product_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  disabled={savingAssignment || !assignmentDirty || detailsDirty}
-                  className="flex h-9 items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {savingAssignment ? "Moving…" : "Change project"}
-                  <ArrowRight className="size-3.5" strokeWidth={1.75} />
-                </button>
-              </div>
-              {detailsDirty && assignmentDirty ? (
-                <p className="text-right text-[11px] text-muted-foreground">
-                  Save detail changes before moving this capture.
-                </p>
-              ) : null}
-            </form>
-
-            <section
-              aria-labelledby={`${fieldId}-goal-contract`}
-              className="space-y-4 border-t pt-5"
-            >
-              {goalContractContent}
-            </section>
+            {workItemEditor}
 
             {error ? (
               <p
@@ -1247,6 +1093,7 @@ export function DetailPanel({
               ) : null}
               {activeTab === "overview" ? (
                 <>
+                  {workItemEditor}
                   <section aria-labelledby={`${fieldId}-summary`}>
                     <h3 id={`${fieldId}-summary`} className="text-xs font-medium text-muted-foreground">
                       Summary
