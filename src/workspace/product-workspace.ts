@@ -511,7 +511,7 @@ export class ProductWorkspace implements WorkItemRepository {
 
     const item = workItemSchema.parse({
       goal: {
-        schema_version: 1,
+        schema_version: 2,
         work_item_id: workItemId,
         ...goalFields,
       },
@@ -697,8 +697,20 @@ export class ProductWorkspace implements WorkItemRepository {
     return true;
   }
 
-  async stageIncomingWorkItem(item: WorkItem): Promise<string> {
+  async stageIncomingWorkItem(
+    item: WorkItem,
+    manifest?: ControllerRunManifest,
+  ): Promise<string> {
     const validatedItem = workItemSchema.parse(item);
+    const validatedManifest =
+      manifest === undefined
+        ? undefined
+        : controllerRunManifestSchema.parse(manifest);
+    this.validateIncomingControllerManifest(
+      validatedItem,
+      validatedManifest,
+      join(this.workItemsDirectory, validatedItem.goal.work_item_id),
+    );
     await this.readManifest();
     await this.ensureWorkItemsDirectory();
     await this.assertWorkItemAbsent(validatedItem.goal.work_item_id);
@@ -715,6 +727,12 @@ export class ProductWorkspace implements WorkItemRepository {
         validatedItem.goal,
         validatedItem.state,
       );
+      if (validatedManifest !== undefined) {
+        await this.writeControllerRunManifestToDirectory(
+          stagingPath,
+          validatedManifest,
+        );
+      }
     } catch (error) {
       try {
         await rm(stagingPath, { recursive: true, force: true });
@@ -741,7 +759,19 @@ export class ProductWorkspace implements WorkItemRepository {
       validatedId,
       stagingPath,
     );
-    await this.readValidatedDirectory(validatedStagingPath, validatedId);
+    const stagedItem = await this.readValidatedDirectory(
+      validatedStagingPath,
+      validatedId,
+    );
+    const stagedManifest = await this.readStagedControllerManifest(
+      validatedStagingPath,
+      validatedId,
+    );
+    this.validateIncomingControllerManifest(
+      stagedItem,
+      stagedManifest,
+      validatedStagingPath,
+    );
     await this.assertWorkItemAbsent(validatedId);
 
     const targetPath = join(this.workItemsDirectory, validatedId);
@@ -852,7 +882,7 @@ export class ProductWorkspace implements WorkItemRepository {
         );
       }
 
-      if (current.goal.goal_version !== undefined) {
+      if (current.goal.goal_contract !== undefined) {
         const leasedState = workItemStateSchema.parse({
           ...current.state,
           active_run: validatedRun,
@@ -920,7 +950,17 @@ export class ProductWorkspace implements WorkItemRepository {
     if (!(await this.hasSafeWorkItemsDirectory())) {
       return null;
     }
-    if ((await this.readValidated(validatedIdentity.work_item_id)) === null) {
+    const current = await this.readValidated(validatedIdentity.work_item_id);
+    if (current === null) {
+      return null;
+    }
+    if (
+      current.goal.goal_contract?.goal_version !==
+        validatedIdentity.goal_version ||
+      current.state.goal_version !== validatedIdentity.goal_version ||
+      current.state.input_revision !== validatedIdentity.input_revision ||
+      current.state.attempt !== validatedIdentity.attempt
+    ) {
       return null;
     }
 
@@ -1014,7 +1054,8 @@ export class ProductWorkspace implements WorkItemRepository {
     if (
       current.state.phase !== "execute" ||
       current.state.status !== "active" ||
-      current.goal.goal_version !== validatedIdentity.goal_version ||
+      current.goal.goal_contract?.goal_version !==
+        validatedIdentity.goal_version ||
       current.state.goal_version !== validatedIdentity.goal_version ||
       current.state.input_revision !== validatedIdentity.input_revision ||
       current.state.attempt !== validatedIdentity.attempt
@@ -1923,7 +1964,8 @@ export class ProductWorkspace implements WorkItemRepository {
       manifest.run_id !== lease.active_run.run_id ||
       manifest.idempotency_key !== lease.active_run.idempotency_key ||
       manifest.phase !== nextItem.state.phase ||
-      manifest.goal_version !== nextItem.goal.goal_version ||
+      manifest.goal_version !==
+        nextItem.goal.goal_contract?.goal_version ||
       manifest.input_revision !== nextItem.state.input_revision ||
       manifest.attempt !== nextItem.state.attempt
     ) {
@@ -2003,19 +2045,132 @@ export class ProductWorkspace implements WorkItemRepository {
     );
   }
 
+  private validateIncomingControllerManifest(
+    item: WorkItem,
+    manifest: ControllerRunManifest | undefined,
+    artifactPath: string,
+  ): void {
+    if (item.state.active_run !== undefined) {
+      throw this.invalid(
+        artifactPath,
+        "staged work items must not carry an active controller lease",
+      );
+    }
+
+    const contract = item.goal.goal_contract;
+    if (contract === undefined) {
+      if (manifest !== undefined) {
+        throw this.invalid(
+          artifactPath,
+          "an uncontracted staged work item cannot carry a controller manifest",
+        );
+      }
+      return;
+    }
+
+    if (manifest === undefined) {
+      throw this.invalid(
+        artifactPath,
+        "a contracted staged work item requires an applied controller manifest",
+      );
+    }
+    if (
+      manifest.outcome !== "applied" ||
+      manifest.completed_at === undefined ||
+      manifest.work_item_id !== item.goal.work_item_id ||
+      manifest.phase !== item.state.phase ||
+      manifest.goal_version !== contract.goal_version ||
+      manifest.input_revision !== item.state.input_revision ||
+      manifest.attempt !== item.state.attempt
+    ) {
+      throw this.invalid(
+        artifactPath,
+        "staged controller manifest must be applied and match the durable work-item identity",
+      );
+    }
+  }
+
+  private async readStagedControllerManifest(
+    workItemDirectory: string,
+    workItemId: string,
+  ): Promise<ControllerRunManifest | undefined> {
+    if (
+      (await this.readOptionalFile(
+        join(workItemDirectory, CONTROLLER_LOCK_FILE),
+      )) !== null
+    ) {
+      throw this.invalid(
+        workItemDirectory,
+        "staged work items must not contain a controller lock",
+      );
+    }
+
+    const runsDirectory = join(workItemDirectory, RUNS_DIRECTORY);
+    if (!(await this.hasSafeDirectory(runsDirectory))) {
+      return undefined;
+    }
+
+    const entries = await readdir(runsDirectory, { withFileTypes: true });
+    if (entries.length !== 1) {
+      throw this.invalid(
+        runsDirectory,
+        "staged work items must contain exactly one controller manifest",
+      );
+    }
+
+    const [entry] = entries;
+    const manifestPath = join(runsDirectory, entry.name);
+    if (
+      !entry.isFile() ||
+      entry.isSymbolicLink() ||
+      !entry.name.endsWith(".json")
+    ) {
+      throw this.invalid(
+        manifestPath,
+        "staged controller manifest must be a regular JSON file",
+      );
+    }
+
+    const runIdResult = controllerRunIdSchema.safeParse(
+      entry.name.slice(0, -".json".length),
+    );
+    if (!runIdResult.success) {
+      throw this.invalid(manifestPath, validationReason(runIdResult));
+    }
+    const source = await this.readRequiredFile(manifestPath);
+    return this.parseControllerRunManifest(
+      source,
+      manifestPath,
+      workItemId,
+      runIdResult.data,
+    );
+  }
+
   private async writeControllerRunManifest(
     manifest: ControllerRunManifest,
   ): Promise<void> {
     const validated = controllerRunManifestSchema.parse(manifest);
+    await this.writeControllerRunManifestToDirectory(
+      join(
+        this.workItemsDirectory,
+        validated.work_item_id,
+      ),
+      validated,
+    );
+  }
+
+  private async writeControllerRunManifestToDirectory(
+    workItemDirectory: string,
+    manifest: ControllerRunManifest,
+  ): Promise<void> {
     const runsDirectory = join(
-      this.workItemsDirectory,
-      validated.work_item_id,
+      workItemDirectory,
       RUNS_DIRECTORY,
     );
     await this.ensureDirectory(runsDirectory);
 
-    const manifestPath = join(runsDirectory, `${validated.run_id}.json`);
-    await this.writeJsonAtomically(manifestPath, validated);
+    const manifestPath = join(runsDirectory, `${manifest.run_id}.json`);
+    await this.writeJsonAtomically(manifestPath, manifest);
   }
 
   private async writeControllerArtifacts(

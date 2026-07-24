@@ -277,7 +277,10 @@ export interface WorkItemRepository {
     input: UpdateWorkItemPhaseInput,
   ): Promise<WorkItem | null>;
   hasWorkItem(workItemId: string): Promise<boolean>;
-  stageIncomingWorkItem(item: WorkItem): Promise<string>;
+  stageIncomingWorkItem(
+    item: WorkItem,
+    manifest?: ControllerRunManifest,
+  ): Promise<string>;
   publishStagedWorkItem(
     workItemId: string,
     stagingPath: string,
