@@ -21,9 +21,9 @@ import {
   ControllerConflictError,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
-  goalContractUpdateInputSchema,
   importExternalResultInputSchema,
   retryExecuteAttemptInputSchema,
+  saveWorkItemInputSchema,
   workItemIdSchema,
   workItemSchema,
   type ActiveRun,
@@ -32,10 +32,10 @@ import {
   type ControllerRunManifest,
   type ControllerTransitionInput,
   type ControllerWorkItemRepository,
-  type GoalContractUpdateInput,
   type ImportExternalResultInput,
   type ProductManifest,
   type RetryExecuteAttemptInput,
+  type SaveWorkItemInput,
   type WorkItem,
   type WorkItemPhase,
   type WorkItemStatus,
@@ -126,6 +126,32 @@ function manifestMatches(
   );
 }
 
+function goalMatchesSaveInput(
+  goal: WorkItem["goal"],
+  input: SaveWorkItemInput,
+  goalVersion: number,
+): boolean {
+  const contract = goal.goal_contract;
+  return (
+    goal.title === input.title &&
+    goal.type === (input.type ?? undefined) &&
+    goal.priority === (input.priority ?? undefined) &&
+    JSON.stringify(goal.tags ?? []) === JSON.stringify(input.tags) &&
+    goal.notes === (input.notes ?? undefined) &&
+    contract?.schema_version === 1 &&
+    contract.goal_version === goalVersion &&
+    contract.purpose === input.goal_contract?.purpose &&
+    JSON.stringify(contract.acceptance_criteria) ===
+      JSON.stringify(input.goal_contract?.acceptance_criteria) &&
+    JSON.stringify(contract.non_goals) ===
+      JSON.stringify(input.goal_contract?.non_goals) &&
+    JSON.stringify(contract.allowed_scope) ===
+      JSON.stringify(input.goal_contract?.allowed_scope) &&
+    JSON.stringify(contract.review_ready) ===
+      JSON.stringify(input.goal_contract?.review_ready)
+  );
+}
+
 export class WorkItemController {
   constructor(
     private readonly repository: ControllerWorkItemRepository,
@@ -134,18 +160,26 @@ export class WorkItemController {
     private readonly verificationRunner: VerificationRunner,
   ) {}
 
-  async updateGoalContract(
+  async saveWorkItem(
     workItemId: string,
-    input: GoalContractUpdateInput,
+    input: SaveWorkItemInput,
   ): Promise<ControllerMutationResult> {
     const validatedId = workItemIdSchema.parse(workItemId);
-    const validatedInput = goalContractUpdateInputSchema.parse(input);
+    const validatedInput = saveWorkItemInputSchema.parse(input);
     const preLockItem = await this.repository.read(validatedId);
     if (preLockItem === null) {
       throw this.conflict(
         "work_item_not_found",
         validatedId,
         `Work item ${validatedId} was not found.`,
+      );
+    }
+    const contractInput = validatedInput.goal_contract;
+    if (contractInput === undefined) {
+      throw this.conflict(
+        "contract_required",
+        validatedId,
+        "Controller saves require a goal contract.",
       );
     }
 
@@ -174,7 +208,7 @@ export class WorkItemController {
     );
     const runId = deriveControllerRunId(
       idempotencyKey,
-      JSON.stringify({ operation: "goal_contract", input: validatedInput }),
+      JSON.stringify({ operation: "save_work_item", input: validatedInput }),
     );
     const activeRun = this.activeRun(runId, idempotencyKey);
     const lease = await this.repository.acquireControllerLease(
@@ -213,16 +247,14 @@ export class WorkItemController {
       if (existing !== null) {
         if (
           manifestMatches(existing, manifestIdentity) &&
-          lease.work_item.goal.goal_version === nextGoalVersion &&
+          goalMatchesSaveInput(
+            lease.work_item.goal,
+            validatedInput,
+            nextGoalVersion,
+          ) &&
           lease.work_item.state.goal_version === nextGoalVersion &&
           lease.work_item.state.input_revision === nextInputRevision &&
-          lease.work_item.state.attempt === 0 &&
-          JSON.stringify(lease.work_item.goal.acceptance_criteria) ===
-            JSON.stringify(validatedInput.acceptance_criteria) &&
-          JSON.stringify(lease.work_item.goal.allowed_scope) ===
-            JSON.stringify(validatedInput.allowed_scope) &&
-          JSON.stringify(lease.work_item.goal.review_ready) ===
-            JSON.stringify(validatedInput.review_ready)
+          lease.work_item.state.attempt === 0
         ) {
           return { work_item: lease.work_item, manifest: existing };
         }
@@ -233,7 +265,7 @@ export class WorkItemController {
         );
       }
 
-      this.validateGoalContractExpectations(
+      this.validateSaveExpectations(
         validatedId,
         lease.work_item,
         validatedInput,
@@ -242,17 +274,39 @@ export class WorkItemController {
         throw this.conflict(
           "stale_expectation",
           validatedId,
-          "Work-item phase changed while the contract update was acquiring its lease.",
+          "Work-item phase changed while the save was acquiring its lease.",
         );
       }
 
       const nextItem = workItemSchema.parse({
         goal: {
-          ...lease.work_item.goal,
-          goal_version: nextGoalVersion,
-          acceptance_criteria: validatedInput.acceptance_criteria,
-          allowed_scope: validatedInput.allowed_scope,
-          review_ready: validatedInput.review_ready,
+          schema_version: 2,
+          work_item_id: lease.work_item.goal.work_item_id,
+          title: validatedInput.title,
+          ...(validatedInput.type === null
+            ? {}
+            : { type: validatedInput.type }),
+          ...(lease.work_item.goal.capture === undefined
+            ? {}
+            : { capture: lease.work_item.goal.capture }),
+          ...(validatedInput.priority === null
+            ? {}
+            : { priority: validatedInput.priority }),
+          ...(validatedInput.tags.length === 0
+            ? {}
+            : { tags: validatedInput.tags }),
+          ...(validatedInput.notes === null
+            ? {}
+            : { notes: validatedInput.notes }),
+          goal_contract: {
+            schema_version: 1,
+            goal_version: nextGoalVersion,
+            purpose: contractInput.purpose,
+            acceptance_criteria: contractInput.acceptance_criteria,
+            non_goals: contractInput.non_goals,
+            allowed_scope: contractInput.allowed_scope,
+            review_ready: contractInput.review_ready,
+          },
         },
         state: {
           ...lease.work_item.state,
@@ -925,7 +979,7 @@ export class WorkItemController {
     current: WorkItem,
     input: ImportExternalResultInput | RetryExecuteAttemptInput,
   ): void {
-    if (current.goal.goal_version === undefined) {
+    if (current.goal.goal_contract === undefined) {
       throw this.conflict(
         "contract_required",
         workItemId,
@@ -977,12 +1031,13 @@ export class WorkItemController {
     });
   }
 
-  private validateGoalContractExpectations(
+  private validateSaveExpectations(
     workItemId: string,
     current: WorkItem,
-    input: GoalContractUpdateInput,
+    input: SaveWorkItemInput,
   ): void {
-    if (current.goal.goal_version === undefined) {
+    const currentGoalVersion = current.goal.goal_contract?.goal_version;
+    if (currentGoalVersion === undefined) {
       if (
         input.expected_goal_version !== undefined ||
         input.expected_input_revision !== undefined
@@ -999,13 +1054,13 @@ export class WorkItemController {
     if (
       input.expected_goal_version === undefined ||
       input.expected_input_revision === undefined ||
-      input.expected_goal_version !== current.goal.goal_version ||
+      input.expected_goal_version !== currentGoalVersion ||
       input.expected_input_revision !== current.state.input_revision
     ) {
       throw this.conflict(
         "stale_expectation",
         workItemId,
-        `Expected goal/input versions ${String(input.expected_goal_version)}/${String(input.expected_input_revision)} but found ${current.goal.goal_version}/${current.state.input_revision}.`,
+        `Expected goal/input versions ${String(input.expected_goal_version)}/${String(input.expected_input_revision)} but found ${currentGoalVersion}/${current.state.input_revision}.`,
       );
     }
   }
@@ -1015,7 +1070,7 @@ export class WorkItemController {
     current: WorkItem,
     input: ControllerTransitionInput,
   ): void {
-    if (current.goal.goal_version === undefined) {
+    if (current.goal.goal_contract === undefined) {
       throw this.conflict(
         "contract_required",
         workItemId,
