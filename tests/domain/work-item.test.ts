@@ -5,7 +5,6 @@ import {
   InvalidWorkspaceError,
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
-  assignWorkItemInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   createCaptureInputSchema,
@@ -14,7 +13,6 @@ import {
   importExternalResultInputSchema,
   productManifestSchema,
   retryExecuteAttemptInputSchema,
-  updateWorkItemDetailsInputSchema,
   updateWorkItemPhaseInputSchema,
   workItemGoalSchema,
   workItemSchema,
@@ -479,31 +477,6 @@ describe("capture and details inputs", () => {
     ).toThrow("tags must not contain case-insensitive duplicates");
   });
 
-  it("distinguishes omitted details from explicit clearing", () => {
-    expect(updateWorkItemDetailsInputSchema.parse({ title: "Retitled" })).toEqual({
-      title: "Retitled",
-    });
-    expect(
-      updateWorkItemDetailsInputSchema.parse({
-        type: null,
-        priority: null,
-        tags: [],
-        notes: null,
-      }),
-    ).toEqual({ type: null, priority: null, tags: [], notes: null });
-  });
-
-  it("rejects empty details, provenance edits, and invalid sources", () => {
-    expect(() => updateWorkItemDetailsInputSchema.parse({})).toThrow(
-      "details update must contain at least one field",
-    );
-    expect(() =>
-      updateWorkItemDetailsInputSchema.parse({ capture_kind: "todo" }),
-    ).toThrow();
-    expect(() =>
-      assignWorkItemInputSchema.parse({ target_source_id: "unknown" }),
-    ).toThrow();
-  });
 });
 
 describe("InvalidWorkspaceError", () => {

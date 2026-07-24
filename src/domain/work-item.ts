@@ -161,18 +161,6 @@ export interface CreateCaptureInput {
   notes?: string;
 }
 
-export interface UpdateWorkItemDetailsInput {
-  title?: string;
-  type?: WorkItemType | null;
-  priority?: WorkItemPriority | null;
-  tags?: string[];
-  notes?: string | null;
-}
-
-export interface AssignWorkItemInput {
-  target_source_id: string;
-}
-
 export interface UpdateWorkItemPhaseInput {
   target_phase: WorkItemPhase;
 }
@@ -658,25 +646,6 @@ export const createCaptureInputSchema: z.ZodType<CreateCaptureInput> =
     priority: z.enum(WORK_ITEM_PRIORITIES).optional(),
     tags: tagsSchema.optional(),
     notes: notesSchema.optional(),
-  });
-
-export const updateWorkItemDetailsInputSchema: z.ZodType<UpdateWorkItemDetailsInput> =
-  z
-    .strictObject({
-      title: titleSchema.optional(),
-      type: z.enum(WORK_ITEM_TYPES).nullable().optional(),
-      priority: z.enum(WORK_ITEM_PRIORITIES).nullable().optional(),
-      tags: tagsSchema.optional(),
-      notes: notesSchema.nullable().optional(),
-    })
-    .refine(
-      (input) => Object.values(input).some((value) => value !== undefined),
-      "details update must contain at least one field",
-    );
-
-export const assignWorkItemInputSchema: z.ZodType<AssignWorkItemInput> =
-  z.strictObject({
-    target_source_id: portfolioSourceIdSchema,
   });
 
 export const updateWorkItemPhaseInputSchema: z.ZodType<UpdateWorkItemPhaseInput> =
