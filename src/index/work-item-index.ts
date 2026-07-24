@@ -9,7 +9,7 @@ import {
   type PortfolioWorkItemIndex,
 } from "../domain/portfolio";
 
-const PORTFOLIO_CACHE_SCHEMA_VERSION = 4;
+const PORTFOLIO_CACHE_SCHEMA_VERSION = 5;
 
 const PORTFOLIO_SCHEMA = `
   CREATE TABLE IF NOT EXISTS portfolio_work_items (
@@ -28,7 +28,9 @@ const PORTFOLIO_SCHEMA = `
     tags TEXT,
     notes TEXT,
     goal_version INTEGER,
+    purpose TEXT,
     acceptance_criteria TEXT,
+    non_goals TEXT,
     allowed_scope TEXT,
     review_ready TEXT,
     phase TEXT NOT NULL,
@@ -58,7 +60,9 @@ interface PortfolioWorkItemRow {
   tags: string | null;
   notes: string | null;
   goal_version: number | null;
+  purpose: string | null;
   acceptance_criteria: string | null;
+  non_goals: string | null;
   allowed_scope: string | null;
   review_ready: string | null;
   phase: string;
@@ -110,7 +114,9 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         tags,
         notes,
         goal_version,
+        purpose,
         acceptance_criteria,
+        non_goals,
         allowed_scope,
         review_ready,
         phase,
@@ -136,7 +142,9 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         @tags,
         @notes,
         @goal_version,
+        @purpose,
         @acceptance_criteria,
+        @non_goals,
         @allowed_scope,
         @review_ready,
         @phase,
@@ -153,6 +161,7 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
       (items: PortfolioWorkItem[]) => {
         clearStatement.run();
         for (const item of items) {
+          const goalContract = item.work_item.goal.goal_contract;
           insertStatement.run({
             source_id: item.source_id,
             project_workspace_id: item.project?.workspace_id ?? null,
@@ -173,19 +182,24 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
                 ? null
                 : JSON.stringify(item.work_item.goal.tags),
             notes: item.work_item.goal.notes ?? null,
-            goal_version: item.work_item.goal.goal_version ?? null,
+            goal_version: goalContract?.goal_version ?? null,
+            purpose: goalContract?.purpose ?? null,
             acceptance_criteria:
-              item.work_item.goal.acceptance_criteria === undefined
+              goalContract === undefined
                 ? null
-                : JSON.stringify(item.work_item.goal.acceptance_criteria),
+                : JSON.stringify(goalContract.acceptance_criteria),
+            non_goals:
+              goalContract === undefined
+                ? null
+                : JSON.stringify(goalContract.non_goals),
             allowed_scope:
-              item.work_item.goal.allowed_scope === undefined
+              goalContract === undefined
                 ? null
-                : JSON.stringify(item.work_item.goal.allowed_scope),
+                : JSON.stringify(goalContract.allowed_scope),
             review_ready:
-              item.work_item.goal.review_ready === undefined
+              goalContract === undefined
                 ? null
-                : JSON.stringify(item.work_item.goal.review_ready),
+                : JSON.stringify(goalContract.review_ready),
             phase: item.work_item.state.phase,
             status: item.work_item.state.status,
             updated_at: item.work_item.state.updated_at,
@@ -229,7 +243,9 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             tags,
             notes,
             goal_version,
+            purpose,
             acceptance_criteria,
+            non_goals,
             allowed_scope,
             review_ready,
             phase,
@@ -250,6 +266,23 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         row.capture_kind !== null ||
         row.capture_original_title !== null ||
         row.capture_captured_at !== null;
+      const goalContract =
+        row.goal_version !== null &&
+        row.purpose !== null &&
+        row.acceptance_criteria !== null &&
+        row.non_goals !== null &&
+        row.allowed_scope !== null &&
+        row.review_ready !== null
+          ? {
+              schema_version: 1 as const,
+              goal_version: row.goal_version,
+              purpose: row.purpose,
+              acceptance_criteria: JSON.parse(row.acceptance_criteria),
+              non_goals: JSON.parse(row.non_goals),
+              allowed_scope: JSON.parse(row.allowed_scope),
+              review_ready: JSON.parse(row.review_ready),
+            }
+          : undefined;
 
       return portfolioWorkItemSchema.parse({
         source_id: row.source_id,
@@ -264,7 +297,7 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
               },
         work_item: {
           goal: {
-            schema_version: 1,
+            schema_version: 2,
             work_item_id: row.work_item_id,
             title: row.title,
             ...(row.type === null ? {} : { type: row.type }),
@@ -280,18 +313,9 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             ...(row.priority === null ? {} : { priority: row.priority }),
             ...(row.tags === null ? {} : { tags: JSON.parse(row.tags) }),
             ...(row.notes === null ? {} : { notes: row.notes }),
-            ...(row.goal_version === null
+            ...(goalContract === undefined
               ? {}
-              : { goal_version: row.goal_version }),
-            ...(row.acceptance_criteria === null
-              ? {}
-              : { acceptance_criteria: JSON.parse(row.acceptance_criteria) }),
-            ...(row.allowed_scope === null
-              ? {}
-              : { allowed_scope: JSON.parse(row.allowed_scope) }),
-            ...(row.review_ready === null
-              ? {}
-              : { review_ready: JSON.parse(row.review_ready) }),
+              : { goal_contract: goalContract }),
           },
           state: {
             schema_version: 1,
