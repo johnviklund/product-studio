@@ -95,8 +95,18 @@ export interface ProductManifest {
   };
 }
 
-export interface WorkItemGoal {
+export interface GoalContract {
   schema_version: 1;
+  goal_version: number;
+  purpose: string;
+  acceptance_criteria: string[];
+  non_goals: string[];
+  allowed_scope: string[];
+  review_ready: string[];
+}
+
+export interface WorkItemGoal {
+  schema_version: 2;
   work_item_id: string;
   title: string;
   type?: WorkItemType;
@@ -104,10 +114,7 @@ export interface WorkItemGoal {
   priority?: WorkItemPriority;
   tags?: string[];
   notes?: string;
-  goal_version?: number;
-  acceptance_criteria?: string[];
-  allowed_scope?: string[];
-  review_ready?: string[];
+  goal_contract?: GoalContract;
 }
 
 export interface WorkItemCapture {
@@ -341,6 +348,18 @@ function uniqueNonEmptyListSchema(label: string): z.ZodType<string[]> {
 const acceptanceCriteriaSchema = uniqueNonEmptyListSchema(
   "acceptance_criteria",
 );
+const purposeSchema = z
+  .string()
+  .refine((purpose) => purpose.trim().length > 0, "purpose must not be empty")
+  .refine(
+    (purpose) => purpose === purpose.trim(),
+    "purpose must not have leading or trailing whitespace",
+  )
+  .refine(
+    (purpose) => !/[\r\n]/u.test(purpose),
+    "purpose must not contain line breaks",
+  );
+const nonGoalsSchema = uniqueNonEmptyListSchema("non_goals");
 const allowedScopeSchema = z
   .array(workspaceRelativePosixPathSchema)
   .min(1, "allowed_scope must not be empty")
@@ -392,45 +411,27 @@ export const workItemCaptureSchema: z.ZodType<WorkItemCapture> = z.strictObject(
   captured_at: z.iso.datetime(),
 });
 
-export const workItemGoalSchema: z.ZodType<WorkItemGoal> = z
-  .strictObject({
-    schema_version: z.literal(1),
-    work_item_id: workItemIdSchema,
-    title: titleSchema,
-    type: z.enum(WORK_ITEM_TYPES).optional(),
-    capture: workItemCaptureSchema.optional(),
-    priority: z.enum(WORK_ITEM_PRIORITIES).optional(),
-    tags: tagsSchema.optional(),
-    notes: notesSchema.optional(),
-    goal_version: positiveSafeIntegerSchema.optional(),
-    acceptance_criteria: acceptanceCriteriaSchema.optional(),
-    allowed_scope: allowedScopeSchema.optional(),
-    review_ready: reviewReadySchema.optional(),
-  })
-  .superRefine((goal, context) => {
-    const contractFields = [
-      "goal_version",
-      "acceptance_criteria",
-      "allowed_scope",
-      "review_ready",
-    ] as const;
-    const presentFields = contractFields.filter(
-      (field) => goal[field] !== undefined,
-    );
+export const goalContractSchema: z.ZodType<GoalContract> = z.strictObject({
+  schema_version: z.literal(1),
+  goal_version: positiveSafeIntegerSchema,
+  purpose: purposeSchema,
+  acceptance_criteria: acceptanceCriteriaSchema,
+  non_goals: nonGoalsSchema,
+  allowed_scope: allowedScopeSchema,
+  review_ready: reviewReadySchema,
+});
 
-    if (presentFields.length > 0 && presentFields.length < contractFields.length) {
-      for (const field of contractFields) {
-        if (goal[field] === undefined) {
-          context.addIssue({
-            code: "custom",
-            message: `${field} is required when a goal contract is present`,
-            path: [field],
-            input: goal,
-          });
-        }
-      }
-    }
-  });
+export const workItemGoalSchema: z.ZodType<WorkItemGoal> = z.strictObject({
+  schema_version: z.literal(2),
+  work_item_id: workItemIdSchema,
+  title: titleSchema,
+  type: z.enum(WORK_ITEM_TYPES).optional(),
+  capture: workItemCaptureSchema.optional(),
+  priority: z.enum(WORK_ITEM_PRIORITIES).optional(),
+  tags: tagsSchema.optional(),
+  notes: notesSchema.optional(),
+  goal_contract: goalContractSchema.optional(),
+});
 
 export const activeRunSchema: z.ZodType<ActiveRun> = z.strictObject({
   run_id: controllerRunIdSchema,
@@ -489,7 +490,7 @@ export const workItemSchema: z.ZodType<WorkItem> = z
       });
     }
 
-    const hasContract = goal.goal_version !== undefined;
+    const hasContract = goal.goal_contract !== undefined;
     const hasControllerState =
       state.goal_version !== undefined ||
       state.input_revision !== undefined ||
@@ -497,10 +498,10 @@ export const workItemSchema: z.ZodType<WorkItem> = z
       state.active_run !== undefined;
 
     if (hasContract) {
-      if (state.goal_version !== goal.goal_version) {
+      if (state.goal_version !== goal.goal_contract.goal_version) {
         context.addIssue({
           code: "custom",
-          message: "state goal_version must match goal goal_version",
+          message: "state goal_version must match goal contract goal_version",
           path: ["state", "goal_version"],
           input: state.goal_version,
         });
