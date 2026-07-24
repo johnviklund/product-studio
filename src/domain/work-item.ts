@@ -69,6 +69,7 @@ export const CONTROLLER_CONFLICT_KINDS = [
   "idempotency_conflict",
   "contracted_details",
   "goal_contract_locked",
+  "project_locked",
   "mission_not_ready",
 ] as const;
 
@@ -180,6 +181,24 @@ export interface GoalContractUpdateInput {
   acceptance_criteria: string[];
   allowed_scope: string[];
   review_ready: string[];
+  expected_goal_version?: number;
+  expected_input_revision?: number;
+}
+
+export interface SaveWorkItemInput {
+  target_source_id: string;
+  title: string;
+  type: WorkItemType | null;
+  priority: WorkItemPriority | null;
+  tags: string[];
+  notes: string | null;
+  goal_contract?: {
+    purpose: string;
+    acceptance_criteria: string[];
+    non_goals: string[];
+    allowed_scope: string[];
+    review_ready: string[];
+  };
   expected_goal_version?: number;
   expected_input_revision?: number;
 }
@@ -490,7 +509,8 @@ export const workItemSchema: z.ZodType<WorkItem> = z
       });
     }
 
-    const hasContract = goal.goal_contract !== undefined;
+    const goalContract = goal.goal_contract;
+    const hasContract = goalContract !== undefined;
     const hasControllerState =
       state.goal_version !== undefined ||
       state.input_revision !== undefined ||
@@ -498,7 +518,7 @@ export const workItemSchema: z.ZodType<WorkItem> = z
       state.active_run !== undefined;
 
     if (hasContract) {
-      if (state.goal_version !== goal.goal_contract.goal_version) {
+      if (state.goal_version !== goalContract.goal_version) {
         context.addIssue({
           code: "custom",
           message: "state goal_version must match goal contract goal_version",
@@ -547,6 +567,56 @@ export const goalContractUpdateInputSchema: z.ZodType<GoalContractUpdateInput> =
         (input.expected_input_revision === undefined),
       "expected_goal_version and expected_input_revision must be provided together",
     );
+
+export const saveWorkItemInputSchema: z.ZodType<SaveWorkItemInput> = z
+  .strictObject({
+    target_source_id: portfolioSourceIdSchema,
+    title: titleSchema,
+    type: z.enum(WORK_ITEM_TYPES).nullable(),
+    priority: z.enum(WORK_ITEM_PRIORITIES).nullable(),
+    tags: tagsSchema,
+    notes: notesSchema.nullable(),
+    goal_contract: z
+      .strictObject({
+        purpose: purposeSchema,
+        acceptance_criteria: acceptanceCriteriaSchema,
+        non_goals: nonGoalsSchema,
+        allowed_scope: allowedScopeSchema,
+        review_ready: reviewReadySchema,
+      })
+      .optional(),
+    expected_goal_version: positiveSafeIntegerSchema.optional(),
+    expected_input_revision: positiveSafeIntegerSchema.optional(),
+  })
+  .superRefine((input, context) => {
+    const hasExpectedGoalVersion = input.expected_goal_version !== undefined;
+    const hasExpectedInputRevision =
+      input.expected_input_revision !== undefined;
+
+    if (hasExpectedGoalVersion !== hasExpectedInputRevision) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "expected_goal_version and expected_input_revision must be provided together",
+        path: hasExpectedGoalVersion
+          ? ["expected_input_revision"]
+          : ["expected_goal_version"],
+        input,
+      });
+    }
+
+    if (
+      (hasExpectedGoalVersion || hasExpectedInputRevision) &&
+      input.goal_contract === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "expected versions require a goal contract",
+        path: ["goal_contract"],
+        input,
+      });
+    }
+  });
 
 export const controllerTransitionInputSchema: z.ZodType<ControllerTransitionInput> =
   z.strictObject({
