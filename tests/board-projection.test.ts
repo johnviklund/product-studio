@@ -220,6 +220,9 @@ describe("board projection", () => {
       ]),
     ).toMatchObject({ mode: "hidden" });
     expect(
+      reviewHandoffForItem(item, [appliedExecute, appliedExecute]),
+    ).toMatchObject({ mode: "hidden", can_compile: false, can_import: false });
+    expect(
       reviewHandoffForItem(
         {
           ...item,

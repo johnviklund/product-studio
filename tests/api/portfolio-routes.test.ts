@@ -590,6 +590,13 @@ describe("portfolio API routes", () => {
       reviewMissionRequest({ independence_attested: false }),
       context,
     );
+    const extended = await compilePortfolioReviewMission(
+      reviewMissionRequest({
+        independence_attested: true,
+        model: "must-not-enter-the-contract",
+      }),
+      context,
+    );
     const compiled = await compilePortfolioReviewMission(
       reviewMissionRequest({ independence_attested: true }),
       context,
@@ -601,6 +608,10 @@ describe("portfolio API routes", () => {
 
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+    expect(extended.status).toBe(400);
+    expect(await extended.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid request" },
     });
     expect(compiled.status).toBe(200);

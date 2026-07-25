@@ -281,6 +281,15 @@ export function reviewHandoffForItem(
   }[],
 ): ReviewHandoffProjection {
   const { goal, state } = item.work_item;
+  const matchingAppliedExecuteSubjects = evidence.filter(
+    (stored) =>
+      stored.evidence.phase === "execute" &&
+      stored.evidence.outcome === "applied" &&
+      stored.evidence.identity.work_item_id === goal.work_item_id &&
+      stored.evidence.identity.goal_version === state.goal_version &&
+      stored.evidence.identity.input_revision === state.input_revision &&
+      stored.evidence.identity.attempt === state.attempt,
+  ).length;
   const eligible =
     item.source_id !== INBOX_SOURCE_ID &&
     goal.goal_contract !== undefined &&
@@ -289,15 +298,7 @@ export function reviewHandoffForItem(
     state.goal_version !== undefined &&
     state.input_revision !== undefined &&
     state.attempt !== undefined &&
-    evidence.some(
-      (stored) =>
-        stored.evidence.phase === "execute" &&
-        stored.evidence.outcome === "applied" &&
-        stored.evidence.identity.work_item_id === goal.work_item_id &&
-        stored.evidence.identity.goal_version === state.goal_version &&
-        stored.evidence.identity.input_revision === state.input_revision &&
-        stored.evidence.identity.attempt === state.attempt,
-    );
+    matchingAppliedExecuteSubjects === 1;
 
   return eligible
     ? {
