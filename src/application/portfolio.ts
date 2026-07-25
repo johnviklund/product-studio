@@ -32,18 +32,26 @@ import {
   type PortfolioWorkItem,
   type PortfolioWorkItemIndex,
   type RegisteredWorkspace,
+  portfolioWorkItemSchema,
 } from "../domain/portfolio";
 import {
   compileMission as compileMissionPackage,
+  compilePatchMission as compilePatchMissionPackage,
   compileReviewMission as compileReviewMissionPackage,
+  patchSubjectSchema,
   type MissionArtifactWriteResult,
   type MissionIdentity,
+  type PatchMissionPackage,
   type ReviewMissionPackage,
 } from "../domain/mission";
 import {
   createImportRunId,
   hashResultContent,
+  reviewExternalResultSubmissionForSubjectSchema,
+  reviewFindingSchema,
   type ImportEvidenceSummary,
+  type PatchExternalResultSubmission,
+  type ReviewFinding,
   type ReviewExternalResultSubmission,
   type StoredImportEvidence,
 } from "../domain/result";
@@ -57,6 +65,7 @@ import {
   createCaptureInputSchema,
   saveWorkItemInputSchema,
   updateWorkItemPhaseInputSchema,
+  workItemAttentionSchema,
   workItemIdSchema,
   workItemSchema,
   type CreateCaptureInput,
@@ -64,6 +73,7 @@ import {
   type SaveWorkItemInput,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
+  type WorkItemAttention,
   type WorkItemGoal,
 } from "../domain/work-item";
 import {
@@ -91,6 +101,7 @@ type WorkspaceGateway = Pick<
   | "acquireControllerLease"
   | "readControllerRunManifest"
   | "findAppliedExecuteManifest"
+  | "findAppliedPatchManifest"
   | "readAppliedExecuteReviewSubject"
   | "readAppliedPatchReviewSubject"
   | "writePatchMissionPackage"
@@ -223,6 +234,8 @@ export interface RegisterWorkspaceResult {
 export type MissionCompilation = MissionArtifactWriteResult;
 export type ReviewMissionCompilation =
   MissionArtifactWriteResult<ReviewMissionPackage>;
+export type PatchMissionCompilation =
+  MissionArtifactWriteResult<PatchMissionPackage>;
 
 export interface PortfolioImportResult extends PortfolioWorkItem {
   evidence: ImportEvidenceSummary;
@@ -231,6 +244,32 @@ export interface PortfolioImportResult extends PortfolioWorkItem {
 export interface PortfolioReviewImportResult extends PortfolioWorkItem {
   evidence: ImportEvidenceSummary;
   result?: ReviewExternalResultSubmission;
+}
+
+export interface PortfolioPatchImportResult extends PortfolioWorkItem {
+  evidence: ImportEvidenceSummary;
+  result?: PatchExternalResultSubmission;
+}
+
+export interface PortfolioPatchPlanResult extends PortfolioWorkItem {
+  controller_run: ControllerRunManifest;
+}
+
+export interface PortfolioAttentionItem {
+  item: PortfolioWorkItem;
+  attention: WorkItemAttention;
+  acceptance_criteria: {
+    criterion: string;
+    status: "reviewed" | "needs_attention" | "unknown";
+  }[];
+  verification: {
+    status: "passed" | "unknown";
+    commands: { name: string; status: "passed" }[];
+  };
+  findings: ReviewFinding[];
+  patch_cycle_limit: 3;
+  elapsed_ms?: number;
+  cost_capacity: "unknown";
 }
 
 export interface PortfolioRetryResult extends PortfolioWorkItem {
@@ -244,6 +283,31 @@ function errorMessage(error: unknown): string {
 export const compileReviewMissionInputSchema = z.strictObject({
   independence_attested: z.literal(true),
 });
+
+const portfolioAttentionItemSchema: z.ZodType<PortfolioAttentionItem> =
+  z.strictObject({
+    item: portfolioWorkItemSchema,
+    attention: workItemAttentionSchema,
+    acceptance_criteria: z.array(
+      z.strictObject({
+        criterion: z.string().trim().min(1),
+        status: z.enum(["reviewed", "needs_attention", "unknown"]),
+      }),
+    ),
+    verification: z.strictObject({
+      status: z.enum(["passed", "unknown"]),
+      commands: z.array(
+        z.strictObject({
+          name: z.string().trim().min(1),
+          status: z.literal("passed"),
+        }),
+      ),
+    }),
+    findings: z.array(reviewFindingSchema),
+    patch_cycle_limit: z.literal(3),
+    elapsed_ms: z.number().int().nonnegative().safe().optional(),
+    cost_capacity: z.literal("unknown"),
+  });
 
 function validationReason(error: z.ZodError): string {
   return error.issues
@@ -525,10 +589,18 @@ export class PortfolioService {
       );
     }
 
-    const applied = await source.workspace.readAppliedExecuteReviewSubject({
-      ...identity,
-      phase: "execute",
-    });
+    const patchCycle = workItem.state.patch_cycle!;
+    const applied =
+      patchCycle === 0
+        ? await source.workspace.readAppliedExecuteReviewSubject({
+            ...identity,
+            phase: "execute",
+          })
+        : await source.workspace.readAppliedPatchReviewSubject({
+            ...identity,
+            phase: "patch",
+            patch_cycle: patchCycle,
+          });
     const controllerRun = await source.workspace.readControllerRunManifest(
       workItemId,
       applied.evidence.controller_run_id,
@@ -541,7 +613,7 @@ export class PortfolioService {
     ) {
       throw this.missionNotReady(
         workItemId,
-        "Applied execute evidence is missing its review transition controller run.",
+        "Applied result evidence is missing its review transition controller run.",
       );
     }
     const reviewRun = {
@@ -558,16 +630,121 @@ export class PortfolioService {
       outcome: "applied" as const,
     };
 
+    const reviewSubject = applied.review_subject;
     return source.workspace.writeReviewMissionPackage(
       identity,
-      applied.review_subject,
+      reviewSubject,
       (paths) =>
-        compileReviewMissionPackage({
+        reviewSubject.source === "execute"
+          ? compileReviewMissionPackage({
+              work_item: workItem,
+              controller_run: reviewRun,
+              review_subject: reviewSubject,
+              paths,
+              independence_attested: validatedInput.independence_attested,
+            })
+          : compileReviewMissionPackage({
+              work_item: workItem,
+              controller_run: reviewRun,
+              review_subject: reviewSubject,
+              paths,
+              independence_attested: validatedInput.independence_attested,
+            }),
+    );
+  }
+
+  async compilePatchMission(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PatchMissionCompilation> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedPatchIdentity(source, workItem);
+    if (
+      workItem.state.phase !== "patch" ||
+      workItem.state.status !== "active"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Patch mission compilation requires an assigned, governed item in active patch.",
+      );
+    }
+
+    const appliedReview = await this.readAppliedReviewResult(
+      source,
+      workItem,
+      identity.patch_cycle - 1,
+    );
+    const patchPlanIdempotencyKey = [
+      deriveControllerIdempotencyKey(
+        workItemId,
+        "patch",
+        identity.goal_version,
+        identity.input_revision,
+        identity.attempt,
+      ),
+      `cycle-${identity.patch_cycle}`,
+      "accept-plan",
+      appliedReview.resultContentSha256,
+    ].join(":");
+    const patchManifest = await source.workspace.findAppliedPatchManifest(
+      identity,
+    );
+    if (
+      patchManifest === null ||
+      patchManifest.completed_at === undefined ||
+      patchManifest.idempotency_key !== patchPlanIdempotencyKey
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "No applied patch-plan manifest matches the governed cycle and review result.",
+      );
+    }
+    if (appliedReview.result.verdict !== "findings") {
+      throw this.missionNotReady(
+        workItemId,
+        "Patch mission compilation requires an applied review with findings.",
+      );
+    }
+    const patchSubject = patchSubjectSchema.parse({
+      review_mission_content_sha256:
+        appliedReview.snapshot.mission.content_sha256,
+      review_result_content_sha256: appliedReview.resultContentSha256,
+      review_mission_path: appliedReview.snapshot.mission_path,
+      review_result_path: appliedReview.snapshot.result_path,
+      review_evidence_path: appliedReview.evidence.summary.evidence_path,
+      reviewed_commit: appliedReview.result.accepted_result_commit,
+      findings: [...appliedReview.result.findings].sort((left, right) =>
+        left.finding_id.localeCompare(right.finding_id),
+      ),
+      prior_review_subject: appliedReview.snapshot.mission.review_subject,
+    });
+    const patchRun = {
+      schema_version: patchManifest.schema_version,
+      run_id: patchManifest.run_id,
+      work_item_id: patchManifest.work_item_id,
+      idempotency_key: patchManifest.idempotency_key,
+      phase: "patch" as const,
+      goal_version: patchManifest.goal_version,
+      input_revision: patchManifest.input_revision,
+      attempt: patchManifest.attempt,
+      started_at: patchManifest.started_at,
+      completed_at: patchManifest.completed_at,
+      outcome: "applied" as const,
+    };
+
+    return source.workspace.writePatchMissionPackage(
+      identity,
+      patchSubject,
+      (paths) =>
+        compilePatchMissionPackage({
           work_item: workItem,
-          controller_run: reviewRun,
-          review_subject: applied.review_subject,
+          controller_run: patchRun,
+          patch_subject: patchSubject,
           paths,
-          independence_attested: validatedInput.independence_attested,
         }),
     );
   }
@@ -682,6 +859,140 @@ export class PortfolioService {
       evidence: imported.evidence,
       ...(imported.result === undefined ? {} : { result: imported.result }),
     };
+  }
+
+  async acceptPatchPlan(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PortfolioPatchPlanResult> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedReviewIdentity(source, workItem);
+    const patchCycle = workItem.state.patch_cycle!;
+    const expectedPatchCycle =
+      workItem.state.phase === "patch" ? patchCycle - 1 : patchCycle;
+    if (
+      workItem.state.status !== "active" ||
+      !["review", "patch"].includes(workItem.state.phase) ||
+      expectedPatchCycle < 0
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Patch-plan approval requires an assigned, governed item in active review.",
+      );
+    }
+
+    const accepted = await this.workItemController(
+      source.workspace,
+    ).acceptPatchPlan(workItemId, {
+      expected_phase: "review",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: identity.goal_version,
+      expected_input_revision: identity.input_revision,
+      attempt: identity.attempt,
+      expected_patch_cycle: expectedPatchCycle,
+    });
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: accepted.work_item,
+      controller_run: accepted.manifest,
+    };
+  }
+
+  async importPatchResult(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PortfolioPatchImportResult> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedPatchIdentity(source, workItem);
+    const isActivePatch =
+      workItem.state.phase === "patch" && workItem.state.status === "active";
+    if (!isActivePatch) {
+      const isReplayState =
+        workItem.state.phase === "review" &&
+        workItem.state.status === "active";
+      if (!isReplayState) {
+        throw this.missionNotReady(
+          workItemId,
+          "Patch result import requires an assigned, governed item in active patch.",
+        );
+      }
+      const snapshot = await source.workspace.readMissionResult(identity);
+      const resultContentSha256 = hashResultContent(snapshot.result_source);
+      const importRunId = createImportRunId(
+        snapshot.mission.content_sha256,
+        resultContentSha256,
+      );
+      if (
+        (await source.workspace.readImportEvidence(identity, importRunId)) ===
+        null
+      ) {
+        throw this.missionNotReady(
+          workItemId,
+          "An active review item only accepts an identical patch import replay.",
+        );
+      }
+    }
+
+    const imported = await this.workItemController(
+      source.workspace,
+    ).importPatchResult(workItemId, {
+      expected_phase: "patch",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: identity.goal_version,
+      expected_input_revision: identity.input_revision,
+      attempt: identity.attempt,
+      expected_patch_cycle: identity.patch_cycle,
+    });
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: imported.work_item,
+      evidence: imported.evidence,
+      ...(imported.result === undefined ? {} : { result: imported.result }),
+    };
+  }
+
+  async listAttention(): Promise<PortfolioAttentionItem[]> {
+    const attentionItems: PortfolioAttentionItem[] = [];
+    for (const project of await this.registry.read()) {
+      const source: ResolvedSource = {
+        source_id: project.workspace_id,
+        project,
+        workspace: this.makeWorkspace(project.workspace_path),
+      };
+      for (const workItem of await source.workspace.list()) {
+        const attentionItem = await this.projectAttention(source, workItem);
+        if (attentionItem !== null) {
+          attentionItems.push(attentionItem);
+        }
+      }
+    }
+
+    return z.array(portfolioAttentionItemSchema).parse(
+      attentionItems.sort(
+        (left, right) =>
+          right.attention.created_at.localeCompare(
+            left.attention.created_at,
+          ) ||
+          left.item.source_id.localeCompare(right.item.source_id) ||
+          left.item.work_item.goal.work_item_id.localeCompare(
+            right.item.work_item.goal.work_item_id,
+          ),
+      ),
+    );
   }
 
   async retryExecuteAttempt(
@@ -1081,6 +1392,248 @@ export class PortfolioService {
     };
   }
 
+  private async readAppliedReviewResult(
+    source: ResolvedSource,
+    workItem: WorkItem,
+    reviewPatchCycle: number,
+  ) {
+    const identity = this.governedReviewIdentity(source, workItem);
+    const snapshot = await source.workspace.readMissionResult(
+      identity,
+      reviewPatchCycle === 0 ? undefined : reviewPatchCycle,
+    );
+    if (
+      snapshot.mission.mission_schema_version !== 4 ||
+      !("review_subject" in snapshot.mission)
+    ) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Applied review evidence must bind an active review mission.",
+      );
+    }
+    const reviewMission = snapshot.mission;
+    const reviewSnapshot = { ...snapshot, mission: reviewMission };
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(snapshot.result_source);
+    } catch {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Applied review result is not valid JSON.",
+      );
+    }
+    const resultParse = reviewExternalResultSubmissionForSubjectSchema(
+      reviewMission.review_subject,
+    ).safeParse(parsedJson);
+    if (!resultParse.success) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Applied review result no longer satisfies its pinned subject contract.",
+      );
+    }
+    const result = resultParse.data;
+    const resultContentSha256 = hashResultContent(snapshot.result_source);
+    const importRunId = createImportRunId(
+      snapshot.mission.content_sha256,
+      resultContentSha256,
+    );
+    const evidence = await source.workspace.readImportEvidence(
+      identity,
+      importRunId,
+    );
+    if (
+      evidence === null ||
+      evidence.evidence.phase !== "review" ||
+      evidence.evidence.outcome !== "applied" ||
+      evidence.evidence.mission_content_sha256 !==
+        reviewMission.content_sha256 ||
+      evidence.evidence.result_content_sha256 !== resultContentSha256 ||
+      evidence.evidence.git_base_commit !==
+        reviewMission.review_subject.git_base_commit ||
+      evidence.evidence.result_commit !== result.accepted_result_commit ||
+      JSON.stringify(evidence.evidence.identity) !== JSON.stringify(identity)
+    ) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Applied review mission, result, and evidence do not match.",
+      );
+    }
+    const controllerRun = await source.workspace.readControllerRunManifest(
+      workItem.goal.work_item_id,
+      evidence.evidence.controller_run_id,
+    );
+    if (
+      controllerRun === null ||
+      controllerRun.phase !== "review" ||
+      controllerRun.outcome !== "applied" ||
+      controllerRun.goal_version !== identity.goal_version ||
+      controllerRun.input_revision !== identity.input_revision ||
+      controllerRun.attempt !== identity.attempt
+    ) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Applied review evidence is missing its matching controller run.",
+      );
+    }
+
+    return {
+      snapshot: reviewSnapshot,
+      result,
+      resultContentSha256,
+      evidence,
+    };
+  }
+
+  private async projectAttention(
+    source: ResolvedSource,
+    workItem: WorkItem,
+  ): Promise<PortfolioAttentionItem | null> {
+    const contract = workItem.goal.goal_contract;
+    const state = workItem.state;
+    if (
+      contract === undefined ||
+      state.status !== "active" ||
+      state.goal_version === undefined ||
+      state.input_revision === undefined ||
+      state.attempt === undefined ||
+      state.patch_cycle === undefined
+    ) {
+      return null;
+    }
+
+    const attention =
+      state.attention ?? this.phaseApprovalAttention(workItem);
+    if (attention === null) {
+      return null;
+    }
+    const acceptanceCriteria: PortfolioAttentionItem["acceptance_criteria"] =
+      contract.acceptance_criteria.map(
+      (criterion) => ({
+        criterion,
+        status: "unknown" as const,
+      }),
+      );
+    let verification: PortfolioAttentionItem["verification"] = {
+      status: "unknown",
+      commands: [],
+    };
+    let findings: ReviewFinding[] = [];
+    let elapsedMs: number | undefined;
+
+    if (state.attention !== undefined && state.phase === "review") {
+      const appliedReview = await this.readAppliedReviewResult(
+        source,
+        workItem,
+        state.patch_cycle,
+      );
+      const expectedArtifactPaths = [
+        appliedReview.snapshot.mission_path,
+        appliedReview.snapshot.result_path,
+      ];
+      if (
+        JSON.stringify(attention.pins.artifact_paths) !==
+          JSON.stringify(expectedArtifactPaths) ||
+        JSON.stringify(attention.pins.evidence_paths) !==
+          JSON.stringify([appliedReview.evidence.summary.evidence_path]) ||
+        attention.pins.git_commit !==
+          appliedReview.result.accepted_result_commit ||
+        attention.pins.mission_content_sha256 !==
+          appliedReview.snapshot.mission.content_sha256 ||
+        attention.pins.result_content_sha256 !==
+          appliedReview.resultContentSha256
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItem.goal.work_item_id,
+          "Current attention does not match its pinned review evidence.",
+        );
+      }
+      verification = {
+        status: "passed",
+        commands:
+          appliedReview.snapshot.mission.review_subject.command_evidence.map(
+            (record) => ({ name: record.name, status: "passed" as const }),
+          ),
+      };
+      findings = appliedReview.result.findings;
+      const needsAttention = new Set(
+        findings.flatMap((finding) =>
+          finding.link.type === "acceptance_criteria"
+            ? [finding.link.criterion]
+            : [],
+        ),
+      );
+      for (const criterion of acceptanceCriteria) {
+        criterion.status =
+          appliedReview.result.verdict === "clean"
+            ? "reviewed"
+            : needsAttention.has(criterion.criterion)
+              ? "needs_attention"
+              : "unknown";
+      }
+      elapsedMs = Math.max(
+        0,
+        Date.parse(appliedReview.evidence.evidence.completed_at) -
+          Date.parse(appliedReview.evidence.evidence.started_at),
+      );
+    }
+
+    return portfolioAttentionItemSchema.parse({
+      item: this.toPortfolioItem(source, workItem),
+      attention,
+      acceptance_criteria: acceptanceCriteria,
+      verification,
+      findings,
+      patch_cycle_limit: 3,
+      ...(elapsedMs === undefined ? {} : { elapsed_ms: elapsedMs }),
+      cost_capacity: "unknown",
+    });
+  }
+
+  private phaseApprovalAttention(workItem: WorkItem): WorkItemAttention | null {
+    const state = workItem.state;
+    if (
+      state.phase !== "spec" &&
+      state.phase !== "plan"
+    ) {
+      return null;
+    }
+    const tuple = {
+      goal_version: state.goal_version!,
+      input_revision: state.input_revision!,
+      attempt: state.attempt!,
+      patch_cycle: state.patch_cycle!,
+    };
+    const artifactPaths = [
+      `.founder/work-items/${state.work_item_id}/goal.yaml`,
+      `.founder/work-items/${state.work_item_id}/state.json`,
+    ] as [string, ...string[]];
+    return workItemAttentionSchema.parse(
+      state.phase === "spec"
+        ? {
+            kind: "spec_approval",
+            question:
+              "Does the current goal contract authorize planning this work?",
+            recommendation:
+              "Open the item and approve its existing transition to Plan.",
+            created_at: state.updated_at,
+            governed_tuple: tuple,
+            pins: { artifact_paths: artifactPaths, evidence_paths: [] },
+          }
+        : {
+            kind: "plan_approval",
+            question:
+              "Does the current goal contract and allowed scope authorize execution?",
+            recommendation:
+              "Open the item and approve its existing transition to Execute.",
+            created_at: state.updated_at,
+            governed_tuple: tuple,
+            pins: { artifact_paths: artifactPaths, evidence_paths: [] },
+          },
+    );
+  }
+
   private governedExecuteIdentity(
     source: ResolvedSource,
     workItem: WorkItem,
@@ -1128,6 +1681,34 @@ export class PortfolioService {
       goal_version: workItem.state.goal_version,
       input_revision: workItem.state.input_revision,
       attempt: workItem.state.attempt,
+    };
+  }
+
+  private governedPatchIdentity(
+    source: ResolvedSource,
+    workItem: WorkItem,
+  ): MissionIdentity<"patch"> {
+    if (
+      source.source_id === INBOX_SOURCE_ID ||
+      workItem.goal.goal_contract === undefined ||
+      workItem.state.goal_version === undefined ||
+      workItem.state.input_revision === undefined ||
+      workItem.state.attempt === undefined ||
+      workItem.state.patch_cycle === undefined ||
+      workItem.state.patch_cycle < 1
+    ) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Patch operations require an assigned, governed item with an active patch cycle.",
+      );
+    }
+    return {
+      phase: "patch",
+      work_item_id: workItem.goal.work_item_id,
+      goal_version: workItem.state.goal_version,
+      input_revision: workItem.state.input_revision,
+      attempt: workItem.state.attempt,
+      patch_cycle: workItem.state.patch_cycle,
     };
   }
 

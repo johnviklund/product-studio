@@ -359,6 +359,9 @@ export interface WorkItemRepository {
   findAppliedExecuteManifest(
     identity: MissionIdentity<"execute">,
   ): Promise<ControllerRunManifest | null>;
+  findAppliedPatchManifest(
+    identity: MissionIdentity<"patch">,
+  ): Promise<ControllerRunManifest | null>;
   writeMissionPackage(
     identity: MissionIdentity,
     buildPackage: MissionPackageBuilder,

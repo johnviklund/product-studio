@@ -82,6 +82,20 @@ const controllerRunner: VerificationRunner = {
   },
 };
 
+function createMemoryIndex() {
+  let items: Parameters<PortfolioWorkItemIndex["rebuild"]>[0] = [];
+  return {
+    rebuild: vi.fn((nextItems: typeof items) => {
+      items = [...nextItems];
+    }),
+    list: vi.fn(() => [...items]),
+    clear: vi.fn(() => {
+      items = [];
+    }),
+    close: vi.fn(),
+  } satisfies PortfolioWorkItemIndex;
+}
+
 async function createRoot(prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   createdRoots.push(root);
@@ -1253,7 +1267,7 @@ describe("PortfolioService", () => {
     index.close();
   });
 
-  it("compiles and imports an attested review without verdict-driven routing", async () => {
+  it("runs the source-qualified patch loop and projects exact review attention", async () => {
     const root = await createWorkspace("Review Mission Workspace");
     const repository = new ProductWorkspace(root);
     const created = await repository.create({
@@ -1265,7 +1279,25 @@ describe("PortfolioService", () => {
       "plan",
       "execute",
     ]);
-    const { index, service } = await createService();
+    const index = createMemoryIndex();
+    const cleanWorktree = vi.fn(async () => true);
+    const runVerification = vi.fn(async (command: VerificationCommand) =>
+      controllerRunner.run(command),
+    );
+    const verificationRunner: VerificationRunner = {
+      run: runVerification,
+    };
+    const { service } = await createService(
+      index,
+      (workspacePath) =>
+        new ProductWorkspace(workspacePath, {
+          git: {
+            ...controllerGit,
+            isWorktreeCleanExcludingFounder: cleanWorktree,
+          },
+          verificationRunner,
+        }),
+    );
     const registration = await service.register({ workspace_path: root });
     const sourceId = registration.workspace.workspace_id;
     const executeMission = await service.compileMission(
@@ -1372,32 +1404,34 @@ describe("PortfolioService", () => {
             },
             required_action: "Preserve review/active after import.",
             link: {
-              type: "non_goals",
-              non_goal: "Do not mutate unrelated workspace state.",
+              type: "acceptance_criteria",
+              criterion: "The mission package is reproducible",
             },
           },
         ],
       }),
       "utf8",
     );
-    const stateBefore = await repository.read(created.goal.work_item_id);
     const imported = await service.importReviewResult(
       sourceId,
       created.goal.work_item_id,
     );
     expect(imported).toMatchObject({
       source_id: sourceId,
-      work_item: { state: { phase: "review", status: "active", attempt: 0 } },
       evidence: { phase: "review", outcome: "applied" },
+      work_item: {
+        state: {
+          phase: "review",
+          status: "active",
+          attempt: 0,
+          attention: { kind: "patch_plan_approval" },
+        },
+      },
       result: {
         verdict: "findings",
         findings: [{ finding_id: "F-portfolio-1" }],
       },
     });
-    expect(imported.work_item).toEqual(stateBefore);
-    expect(await repository.read(created.goal.work_item_id)).toEqual(
-      stateBefore,
-    );
     await expect(
       service.importReviewResult(sourceId, created.goal.work_item_id),
     ).resolves.toEqual(imported);
@@ -1416,6 +1450,317 @@ describe("PortfolioService", () => {
       verdict: "findings",
       findings: [{ finding_id: "F-portfolio-1" }],
     });
+
+    const rebuildCallsBeforeAttention = index.rebuild.mock.calls.length;
+    expect(await service.listAttention()).toMatchObject([
+      {
+        item: {
+          source_id: sourceId,
+          work_item: {
+            goal: { work_item_id: created.goal.work_item_id },
+          },
+        },
+        attention: {
+          kind: "patch_plan_approval",
+          governed_tuple: { patch_cycle: 0 },
+        },
+        acceptance_criteria: [
+          {
+            criterion: "The mission package is reproducible",
+            status: "needs_attention",
+          },
+        ],
+        verification: {
+          status: "passed",
+          commands: [{ name: "Tests", status: "passed" }],
+        },
+        findings: [{ finding_id: "F-portfolio-1" }],
+        patch_cycle_limit: 3,
+        cost_capacity: "unknown",
+      },
+    ]);
+    expect(index.rebuild).toHaveBeenCalledTimes(rebuildCallsBeforeAttention);
+
+    const accepted = await service.acceptPatchPlan(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(accepted).toMatchObject({
+      source_id: sourceId,
+      work_item: {
+        state: {
+          phase: "patch",
+          status: "active",
+          patch_cycle: 1,
+        },
+      },
+      controller_run: { phase: "patch", outcome: "applied" },
+    });
+    await expect(
+      service.acceptPatchPlan(sourceId, created.goal.work_item_id),
+    ).resolves.toEqual(accepted);
+
+    const patchManifestPath = join(
+      root,
+      ".founder",
+      "work-items",
+      created.goal.work_item_id,
+      "runs",
+      `${accepted.controller_run.run_id}.json`,
+    );
+    await writeFile(
+      patchManifestPath,
+      `${JSON.stringify(
+        {
+          ...accepted.controller_run,
+          idempotency_key: `${accepted.controller_run.idempotency_key.slice(0, -64)}${"f".repeat(64)}`,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await expect(
+      service.compilePatchMission(sourceId, created.goal.work_item_id),
+    ).rejects.toThrow("governed cycle and review result");
+    await writeFile(
+      patchManifestPath,
+      `${JSON.stringify(accepted.controller_run, null, 2)}\n`,
+      "utf8",
+    );
+
+    const patchMission = await service.compilePatchMission(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(patchMission.mission).toMatchObject({
+      identity: { phase: "patch", patch_cycle: 1 },
+      patch_subject: {
+        findings: [{ finding_id: "F-portfolio-1" }],
+      },
+    });
+    expect(patchMission.task_path).toContain("/patch-1-1-0-1/TASK.md");
+    await expect(
+      service.compilePatchMission(sourceId, created.goal.work_item_id),
+    ).resolves.toEqual(patchMission);
+
+    const writePatchResult = (summary: string) =>
+      writeFile(
+        join(dirname(patchMission.task_path), "result.json"),
+        serializeExternalResult({
+          result_schema_version: 2,
+          patch_mission_content_sha256:
+            patchMission.mission.content_sha256,
+          identity: patchMission.mission.identity,
+          commit: "a".repeat(40),
+          summary,
+          changed_files: ["src/application/portfolio.ts"],
+          verification: [{ name: "Tests", status: "passed" }],
+        }),
+        "utf8",
+      );
+    await writePatchResult("Reject the dirty patch result.");
+    cleanWorktree.mockResolvedValueOnce(false);
+    const dirty = await service.importPatchResult(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(dirty).toMatchObject({
+      work_item: { state: { phase: "patch", patch_cycle: 1 } },
+      evidence: { phase: "patch", outcome: "rejected" },
+    });
+
+    await writePatchResult("Reject the patch with a red authoritative check.");
+    runVerification.mockResolvedValueOnce({
+      name: "Tests",
+      argv: ["npm", "test"],
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:01.000Z",
+      duration_ms: 1000,
+      status: "failed",
+      exit_code: 1,
+      signal: null,
+      stdout: "",
+      stderr: "failed",
+      output_truncated: false,
+    });
+    const red = await service.importPatchResult(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(red).toMatchObject({
+      work_item: { state: { phase: "patch", patch_cycle: 1 } },
+      evidence: { phase: "patch", outcome: "rejected" },
+    });
+
+    await writePatchResult("Applied the bounded portfolio patch.");
+    const patched = await service.importPatchResult(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(patched).toMatchObject({
+      source_id: sourceId,
+      work_item: {
+        state: {
+          phase: "review",
+          status: "active",
+          patch_cycle: 1,
+        },
+      },
+      evidence: { phase: "patch", outcome: "applied" },
+      result: { identity: { phase: "patch", patch_cycle: 1 } },
+    });
+    expect(cleanWorktree).toHaveBeenCalled();
+    expect(runVerification).toHaveBeenCalled();
+    await expect(
+      service.importPatchResult(sourceId, created.goal.work_item_id),
+    ).resolves.toEqual(patched);
+
+    const patchReview = await service.compileReviewMission(
+      sourceId,
+      created.goal.work_item_id,
+      { independence_attested: true },
+    );
+    expect(patchReview.task_path).toContain(
+      "/review-1-1-0-patch-1/TASK.md",
+    );
+    expect(patchReview.mission.review_subject).toMatchObject({
+      source: "patch",
+      patch_cycle: 1,
+      resolved_from: { finding_ids: ["F-portfolio-1"] },
+    });
+    if (patchReview.mission.review_subject.source !== "patch") {
+      throw new Error("Patch review mission must bind patch evidence.");
+    }
+    await writeFile(
+      join(dirname(patchReview.task_path), "result.json"),
+      serializeExternalResult({
+        result_schema_version: 2,
+        review_mission_content_sha256:
+          patchReview.mission.content_sha256,
+        identity: patchReview.mission.identity,
+        patch_mission_content_sha256:
+          patchReview.mission.review_subject
+            .patch_mission_content_sha256,
+        patch_result_content_sha256:
+          patchReview.mission.review_subject
+            .patch_result_content_sha256,
+        git_base_commit:
+          patchReview.mission.review_subject.git_base_commit,
+        accepted_result_commit:
+          patchReview.mission.review_subject.accepted_result_commit,
+        summary: "The bounded patch resolves the assigned finding.",
+        verdict: "clean",
+        findings: [],
+        resolutions: [
+          { finding_id: "F-portfolio-1", status: "resolved" },
+        ],
+      }),
+      "utf8",
+    );
+    const rereviewed = await service.importReviewResult(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(rereviewed.work_item.state.attention).toMatchObject({
+      kind: "review_ready",
+      governed_tuple: { patch_cycle: 1 },
+    });
+    expect(await service.listAttention()).toMatchObject([
+      {
+        attention: { kind: "review_ready" },
+        findings: [],
+        acceptance_criteria: [{ status: "reviewed" }],
+      },
+    ]);
+    index.close();
+  });
+
+  it("keeps the attention query empty and patch operations unavailable for Inbox captures", async () => {
+    const index = createMemoryIndex();
+    const { inboxRoot, service } = await createService(index);
+    await expect(service.listAttention()).resolves.toEqual([]);
+    const captured = await service.createCapture({
+      title: "Keep this unassigned capture lightweight",
+      capture_kind: "todo",
+    });
+    const inbox = new ProductWorkspace(inboxRoot);
+    const before = await inbox.read(captured.work_item.goal.work_item_id);
+
+    await expect(
+      service.acceptPatchPlan(
+        INBOX_SOURCE_ID,
+        captured.work_item.goal.work_item_id,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      service.compilePatchMission(
+        INBOX_SOURCE_ID,
+        captured.work_item.goal.work_item_id,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      service.importPatchResult(
+        INBOX_SOURCE_ID,
+        captured.work_item.goal.work_item_id,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(service.listAttention()).resolves.toEqual([]);
+    expect(await inbox.read(captured.work_item.goal.work_item_id)).toEqual(
+      before,
+    );
+    await expect(
+      readdir(join(inboxRoot, ".founder", "missions")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    index.close();
+  });
+
+  it("projects one durable approval decision for each active Spec and Plan item", async () => {
+    const root = await createWorkspace("Phase Approval Attention");
+    const repository = new ProductWorkspace(root);
+    const specItem = await repository.create({
+      title: "Approve the specification",
+      type: "Feature",
+    });
+    const planItem = await repository.create({
+      title: "Approve the execution plan",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, specItem, ["spec"]);
+    await governWorkItemThrough(repository, planItem, ["spec", "plan"]);
+    const index = createMemoryIndex();
+    const { service } = await createService(index);
+    await service.register({ workspace_path: root });
+    const rebuildCallsBeforeAttention = index.rebuild.mock.calls.length;
+
+    const attention = await service.listAttention();
+
+    expect(attention.map((item) => item.attention.kind).sort()).toEqual([
+      "plan_approval",
+      "spec_approval",
+    ]);
+    expect(attention).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          attention: expect.objectContaining({
+            kind: "spec_approval",
+            question:
+              "Does the current goal contract authorize planning this work?",
+          }),
+          verification: { status: "unknown", commands: [] },
+          findings: [],
+          cost_capacity: "unknown",
+        }),
+        expect.objectContaining({
+          attention: expect.objectContaining({
+            kind: "plan_approval",
+            question:
+              "Does the current goal contract and allowed scope authorize execution?",
+          }),
+        }),
+      ]),
+    );
+    expect(index.rebuild).toHaveBeenCalledTimes(rebuildCallsBeforeAttention);
     index.close();
   });
 

@@ -989,68 +989,82 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       return null;
     }
 
-    const runsDirectory = join(
-      this.workItemsDirectory,
-      validatedIdentity.work_item_id,
-      RUNS_DIRECTORY,
-    );
-    if (!(await this.hasSafeDirectory(runsDirectory))) {
-      return null;
-    }
-
-    const entries = await readdir(runsDirectory, { withFileTypes: true });
-    const matches: ControllerRunManifest[] = [];
-    for (const entry of entries.sort((left, right) =>
-      left.name.localeCompare(right.name),
-    )) {
-      if (!entry.name.endsWith(".json")) {
-        continue;
-      }
-
-      const manifestPath = join(runsDirectory, entry.name);
-      if (!entry.isFile() || entry.isSymbolicLink()) {
-        throw this.invalid(
-          manifestPath,
-          "run manifest must be a regular file, not a symlink",
-        );
-      }
-
-      const runIdResult = controllerRunIdSchema.safeParse(
-        entry.name.slice(0, -".json".length),
-      );
-      if (!runIdResult.success) {
-        throw this.invalid(manifestPath, validationReason(runIdResult));
-      }
-
-      const source = await this.readOptionalFile(manifestPath);
-      if (source === null) {
-        throw this.invalid(
-          manifestPath,
-          "run manifest disappeared during scan",
-        );
-      }
-      const manifest = this.parseControllerRunManifest(
-        source,
-        manifestPath,
-        validatedIdentity.work_item_id,
-        runIdResult.data,
-      );
-      if (
+    const matches = (
+      await this.readControllerRunManifests(validatedIdentity.work_item_id)
+    ).filter(
+      (manifest) =>
         manifest.phase === "execute" &&
         manifest.outcome === "applied" &&
         manifest.goal_version === validatedIdentity.goal_version &&
         manifest.input_revision === validatedIdentity.input_revision &&
-        manifest.attempt === validatedIdentity.attempt
-      ) {
-        matches.push(manifest);
-      }
-    }
+        manifest.attempt === validatedIdentity.attempt,
+    );
 
     if (matches.length > 1) {
       throw new ControllerConflictError(
         "mission_not_ready",
         validatedIdentity.work_item_id,
         "More than one applied execute manifest matches the governed tuple.",
+      );
+    }
+    return matches[0] ?? null;
+  }
+
+  async findAppliedPatchManifest(
+    identity: MissionIdentity<"patch">,
+  ): Promise<ControllerRunManifest | null> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    if (validatedIdentity.phase !== "patch") {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "Applied patch manifest lookup requires patch identity.",
+      );
+    }
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return null;
+    }
+    const current = await this.readValidated(validatedIdentity.work_item_id);
+    if (
+      current === null ||
+      current.goal.goal_contract?.goal_version !==
+        validatedIdentity.goal_version ||
+      current.state.phase !== "patch" ||
+      current.state.status !== "active" ||
+      current.state.goal_version !== validatedIdentity.goal_version ||
+      current.state.input_revision !== validatedIdentity.input_revision ||
+      current.state.attempt !== validatedIdentity.attempt ||
+      current.state.patch_cycle !== validatedIdentity.patch_cycle
+    ) {
+      return null;
+    }
+
+    const idempotencyPrefix = [
+      validatedIdentity.work_item_id,
+      "patch",
+      validatedIdentity.goal_version,
+      validatedIdentity.input_revision,
+      validatedIdentity.attempt,
+      `cycle-${validatedIdentity.patch_cycle}`,
+      "accept-plan",
+      "",
+    ].join(":");
+    const matches = (
+      await this.readControllerRunManifests(validatedIdentity.work_item_id)
+    ).filter(
+      (manifest) =>
+        manifest.phase === "patch" &&
+        manifest.outcome === "applied" &&
+        manifest.goal_version === validatedIdentity.goal_version &&
+        manifest.input_revision === validatedIdentity.input_revision &&
+        manifest.attempt === validatedIdentity.attempt &&
+        manifest.idempotency_key.startsWith(idempotencyPrefix),
+    );
+    if (matches.length > 1) {
+      throw new ControllerConflictError(
+        "mission_not_ready",
+        validatedIdentity.work_item_id,
+        "More than one applied patch-plan manifest matches the governed cycle.",
       );
     }
     return matches[0] ?? null;
@@ -1945,6 +1959,59 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return;
   }
 
+  private async readControllerRunManifests(
+    workItemId: string,
+  ): Promise<ControllerRunManifest[]> {
+    const runsDirectory = join(
+      this.workItemsDirectory,
+      workItemId,
+      RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(runsDirectory))) {
+      return [];
+    }
+
+    const entries = await readdir(runsDirectory, { withFileTypes: true });
+    const manifests: ControllerRunManifest[] = [];
+    for (const entry of entries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      if (!entry.name.endsWith(".json")) {
+        continue;
+      }
+
+      const manifestPath = join(runsDirectory, entry.name);
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw this.invalid(
+          manifestPath,
+          "run manifest must be a regular file, not a symlink",
+        );
+      }
+      const runIdResult = controllerRunIdSchema.safeParse(
+        entry.name.slice(0, -".json".length),
+      );
+      if (!runIdResult.success) {
+        throw this.invalid(manifestPath, validationReason(runIdResult));
+      }
+      const source = await this.readOptionalFile(manifestPath);
+      if (source === null) {
+        throw this.invalid(
+          manifestPath,
+          "run manifest disappeared during scan",
+        );
+      }
+      manifests.push(
+        this.parseControllerRunManifest(
+          source,
+          manifestPath,
+          workItemId,
+          runIdResult.data,
+        ),
+      );
+    }
+    return manifests;
+  }
+
   private parseControllerRunManifest(
     source: string,
     manifestPath: string,
@@ -2115,10 +2182,28 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       return;
     }
     const { outcome } = evidence;
-    if (outcome === "rejected" && verification.length > 0) {
+    const hasRedCommand = verification.some((record) =>
+      ["failed", "timed_out", "spawn_error"].includes(record.status),
+    );
+    if (
+      outcome === "rejected" &&
+      verification.length > 0 &&
+      evidence.phase !== "patch"
+    ) {
       throw this.invalid(
         this.founderDirectory,
         "rejected import evidence cannot contain command results",
+      );
+    }
+    if (
+      evidence.phase === "patch" &&
+      outcome === "rejected" &&
+      verification.length > 0 &&
+      !hasRedCommand
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "rejected patch import evidence with command results requires a red command",
       );
     }
     if (
@@ -2133,9 +2218,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
     if (
       outcome === "failed" &&
-      !verification.some((record) =>
-        ["failed", "timed_out", "spawn_error"].includes(record.status),
-      )
+      !hasRedCommand
     ) {
       throw this.invalid(
         this.founderDirectory,
