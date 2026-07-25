@@ -205,6 +205,43 @@ export interface MissionPaths {
   git_base_commit: string;
 }
 
+type MissionPathBoundPackage = Pick<
+  MissionPackageBase<MissionPhase>,
+  "identity" | "task_path"
+> & {
+  result_contract: Pick<
+    MissionResultContract<readonly string[]>,
+    "output_path"
+  >;
+};
+
+function validateMissionPackagePaths(
+  mission: MissionPathBoundPackage,
+  context: z.RefinementCtx,
+): void {
+  const identity = mission.identity;
+  const directory = `.founder/missions/${identity.work_item_id}/${identity.phase}-${identity.goal_version}-${identity.input_revision}-${identity.attempt}`;
+  const expectedTaskPath = `${directory}/TASK.md`;
+  const expectedOutputPath = `${directory}/result.json`;
+
+  if (mission.task_path !== expectedTaskPath) {
+    context.addIssue({
+      code: "custom",
+      message: "task_path must match the phase-qualified mission identity",
+      path: ["task_path"],
+      input: mission.task_path,
+    });
+  }
+  if (mission.result_contract.output_path !== expectedOutputPath) {
+    context.addIssue({
+      code: "custom",
+      message: "output_path must match the phase-qualified mission identity",
+      path: ["result_contract", "output_path"],
+      input: mission.result_contract.output_path,
+    });
+  }
+}
+
 export interface MissionArtifactWriteResult<
   TMission extends MissionPackage = MissionPackage,
 > {
@@ -365,18 +402,20 @@ const missionPackageCommonShape = {
 };
 
 const executeMissionPackageSchema: z.ZodType<ExecuteMissionPackage> =
-  z.strictObject({
-    ...missionPackageCommonShape,
-    identity: executeMissionIdentitySchema,
-    controller_run: z.strictObject({
-      run_id: z.uuid(),
-      idempotency_key: nonEmptyTrimmedStringSchema,
-      phase: z.literal("execute"),
-      started_at: z.iso.datetime(),
-      completed_at: z.iso.datetime(),
-    }),
-    result_contract: executeResultContractSchema,
-  });
+  z
+    .strictObject({
+      ...missionPackageCommonShape,
+      identity: executeMissionIdentitySchema,
+      controller_run: z.strictObject({
+        run_id: z.uuid(),
+        idempotency_key: nonEmptyTrimmedStringSchema,
+        phase: z.literal("execute"),
+        started_at: z.iso.datetime(),
+        completed_at: z.iso.datetime(),
+      }),
+      result_contract: executeResultContractSchema,
+    })
+    .superRefine(validateMissionPackagePaths);
 
 const reviewMissionPackageSchema: z.ZodType<ReviewMissionPackage> =
   z
@@ -395,6 +434,7 @@ const reviewMissionPackageSchema: z.ZodType<ReviewMissionPackage> =
       result_contract: reviewResultContractSchema,
     })
     .superRefine((mission, context) => {
+      validateMissionPackagePaths(mission, context);
       if (
         mission.source_revision.git_base_commit !==
         mission.review_subject.git_base_commit
@@ -983,7 +1023,10 @@ function renderReviewTaskMd(mission: ReviewMissionPackage): string {
     "      \"title\": \"<finding title>\",",
     "      \"evidence\": { \"summary\": \"<concrete evidence>\" },",
     "      \"required_action\": \"<required correction>\",",
-    "      \"link\": { \"type\": \"defect\" }",
+    '      "link": {',
+    '        "type": "defect",',
+    '        "evidence_summary": "<concrete defect evidence>"',
+    "      }",
     "    }",
     "  ]",
     "}",

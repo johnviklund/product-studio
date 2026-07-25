@@ -132,6 +132,9 @@ describe("external result domain", () => {
     expect(
       reviewExternalResultSubmissionSchema.parse(JSON.parse(serialized)),
     ).toEqual(reviewSubmission);
+    expect(externalResultSubmissionSchema.parse(JSON.parse(serialized))).toEqual(
+      reviewSubmission,
+    );
     expect(hashExternalResult(reviewSubmission)).toBe(
       "a215c3e52af91389c5abd40fac2535a1fa6147a807dca6bced6eda95be6c0f86",
     );
@@ -148,6 +151,42 @@ describe("external result domain", () => {
     );
   });
 
+  it("binds canonical review hashes to the exact immutable subject", () => {
+    const reordered: ReviewExternalResultSubmission = {
+      findings: reviewSubmission.findings,
+      verdict: reviewSubmission.verdict,
+      summary: reviewSubmission.summary,
+      accepted_result_commit: reviewSubmission.accepted_result_commit,
+      git_base_commit: reviewSubmission.git_base_commit,
+      execute_result_content_sha256:
+        reviewSubmission.execute_result_content_sha256,
+      execute_mission_content_sha256:
+        reviewSubmission.execute_mission_content_sha256,
+      identity: reviewSubmission.identity,
+      review_mission_content_sha256:
+        reviewSubmission.review_mission_content_sha256,
+      result_schema_version: reviewSubmission.result_schema_version,
+    };
+    const originalHash = hashExternalResult(reviewSubmission);
+    const reboundSubjects: ReviewExternalResultSubmission[] = [
+      {
+        ...reviewSubmission,
+        execute_mission_content_sha256: "1".repeat(64),
+      },
+      {
+        ...reviewSubmission,
+        execute_result_content_sha256: "2".repeat(64),
+      },
+      { ...reviewSubmission, git_base_commit: "3".repeat(40) },
+      { ...reviewSubmission, accepted_result_commit: "4".repeat(40) },
+    ];
+
+    expect(hashExternalResult(reordered)).toBe(originalHash);
+    for (const rebound of reboundSubjects) {
+      expect(hashExternalResult(rebound)).not.toBe(originalHash);
+    }
+  });
+
   it.each([
     {
       name: "changed_files",
@@ -159,7 +198,18 @@ describe("external result domain", () => {
       value: { ...reviewSubmission, verification: [] },
     },
     { name: "extension", value: { ...reviewSubmission, provider: "external" } },
-  ])("rejects review result with execute-only or extra $name", ({ value }) => {
+    {
+      name: "legacy result version",
+      value: { ...reviewSubmission, result_schema_version: 1 },
+    },
+    {
+      name: "tuple-only identity",
+      value: {
+        ...reviewSubmission,
+        identity: { ...reviewSubmission.identity, phase: undefined },
+      },
+    },
+  ])("rejects review result with $name", ({ value }) => {
     expect(() => reviewExternalResultSubmissionSchema.parse(value)).toThrow();
   });
 
@@ -202,6 +252,27 @@ describe("external result domain", () => {
     { type: "deterministic_checks", command: "npm test" },
   ])("accepts exact $type finding links", (link) => {
     expect(reviewFindingLinkSchema.parse(link)).toEqual(link);
+  });
+
+  it.each([
+    {
+      name: "cross-variant field",
+      value: {
+        type: "acceptance_criteria",
+        criterion: "The result is deterministic.",
+        non_goal: "Do not add a provider adapter.",
+      },
+    },
+    {
+      name: "missing discriminator field",
+      value: { type: "non_goals", criterion: "Not the non-goal field." },
+    },
+    {
+      name: "non-canonical command target",
+      value: { type: "deterministic_checks", command: " npm test" },
+    },
+  ])("rejects inexact finding link with $name", ({ value }) => {
+    expect(() => reviewFindingLinkSchema.parse(value)).toThrow();
   });
 
   it("derives stable content hashes and import run IDs", () => {

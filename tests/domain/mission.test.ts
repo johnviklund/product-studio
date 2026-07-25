@@ -343,6 +343,69 @@ describe("mission domain", () => {
     expect(first.result_contract.schema_version).toBe(3);
   });
 
+  it("binds the review package hash to the immutable review subject", () => {
+    const input = {
+      work_item: reviewWorkItem,
+      controller_run: reviewControllerRun,
+      review_subject: reviewSubject,
+      paths: reviewPaths,
+      independence_attested: true as const,
+    };
+    const original = compileReviewMission(input);
+    const changedSubject = compileReviewMission({
+      ...input,
+      review_subject: {
+        ...reviewSubject,
+        accepted_result_commit: "f".repeat(40),
+      },
+    });
+
+    expect(changedSubject.identity).toEqual(original.identity);
+    expect(changedSubject.content_sha256).not.toBe(original.content_sha256);
+    expect(changedSubject.review_subject.accepted_result_commit).toBe(
+      "f".repeat(40),
+    );
+    expect(changedSubject.independence_attested).toBe(true);
+  });
+
+  it("rejects legacy tuple-only mission paths", () => {
+    const tupleDirectory = `.founder/missions/${workItemId}/2-3-1`;
+    const tuplePaths = {
+      ...paths,
+      task_path: `${tupleDirectory}/TASK.md`,
+      output_path: `${tupleDirectory}/result.json`,
+    };
+
+    expect(() => compileMission(workItem, executeManifest, tuplePaths)).toThrow(
+      "task_path must match the phase-qualified mission identity",
+    );
+    expect(() =>
+      compileReviewMission({
+        work_item: reviewWorkItem,
+        controller_run: reviewControllerRun,
+        review_subject: reviewSubject,
+        paths: tuplePaths,
+        independence_attested: true,
+      }),
+    ).toThrow("task_path must match the phase-qualified mission identity");
+
+    const mission = compileMission(workItem, executeManifest, paths);
+    const legacyPackage = {
+      ...mission,
+      task_path: tuplePaths.task_path,
+      result_contract: {
+        ...mission.result_contract,
+        output_path: tuplePaths.output_path,
+      },
+    };
+    expect(() =>
+      missionPackageSchema.parse({
+        ...legacyPackage,
+        content_sha256: hashMissionContent(legacyPackage),
+      }),
+    ).toThrow("task_path must match the phase-qualified mission identity");
+  });
+
   it("renders review as a pinned read-only assessment without execution instructions", () => {
     const mission = compileReviewMission({
       work_item: reviewWorkItem,
@@ -357,6 +420,9 @@ describe("mission domain", () => {
     expect(task).toContain(reviewSubject.execute_mission_path);
     expect(task).toContain(reviewSubject.execute_evidence_path);
     expect(task).toContain("Do not modify workspace files");
+    expect(task).toContain('"evidence_summary"');
+    expect(task).not.toContain('"changed_files"');
+    expect(task).not.toContain('"verification"');
     expect(task).not.toContain("Commit the code changes");
     expect(task).not.toMatch(/run (?:the )?checks/i);
     expect(task.toLowerCase()).not.toMatch(
