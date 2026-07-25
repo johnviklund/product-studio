@@ -464,7 +464,7 @@ export class PortfolioService {
       );
     }
 
-    const identity: MissionIdentity = {
+    const identity: MissionIdentity<"execute"> = {
       phase: "execute",
       work_item_id: workItemId,
       goal_version: workItem.state.goal_version,

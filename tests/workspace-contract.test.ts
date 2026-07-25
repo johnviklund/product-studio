@@ -15,13 +15,16 @@ import { parse, stringify } from "yaml";
 
 import {
   compileMission,
+  compileReviewMission,
   renderTaskMd,
   serializeMissionPackage,
   type MissionIdentity,
+  type ReviewMissionControllerRun,
 } from "../src/domain/mission";
 import {
   createImportRunId,
   hashResultContent,
+  serializeExternalResult,
   type ImportEvidenceEnvelope,
 } from "../src/domain/result";
 import {
@@ -171,6 +174,7 @@ async function writeContractedWorkItem(
 async function writeMissionReadyWorkItem(
   root: string,
   workItemId: string,
+  phase: "execute" | "review" = "execute",
 ): Promise<WorkItem> {
   const directory = join(root, ".founder", "work-items", workItemId);
   const goal = {
@@ -191,7 +195,7 @@ async function writeMissionReadyWorkItem(
   const state = {
     schema_version: 1 as const,
     work_item_id: workItemId,
-    phase: "execute" as const,
+    phase,
     status: "active" as const,
     updated_at: "2026-07-22T12:00:01.000Z",
     goal_version: 1,
@@ -879,6 +883,363 @@ describe("ProductWorkspace", () => {
     await symlink(outside, join(evidenceDirectory, "verification.json"), "file");
     await expect(
       workspace.readImportEvidence(missionIdentity(), importRunId),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+  });
+
+  it("builds one immutable execute subject and writes a phase-distinct review mission", async () => {
+    const root = await createWorkspace();
+    const executeItem = await writeMissionReadyWorkItem(root, firstId);
+    const workspace = missionWorkspace(root);
+    const executeArtifact = await workspace.writeMissionPackage(
+      missionIdentity(),
+      (paths) =>
+        compileMission(executeItem, appliedExecuteManifest(), paths),
+    );
+    const submissionSource = serializeExternalResult({
+      result_schema_version: 2,
+      mission_content_sha256: executeArtifact.mission.content_sha256,
+      identity: missionIdentity(),
+      commit: "a".repeat(40),
+      summary: "Implement the accepted execute result.",
+      changed_files: ["src/domain/result.ts"],
+      verification: [{ name: "Tests", status: "passed" }],
+    });
+    const resultContentSha256 = hashResultContent(submissionSource);
+    const importRunId = createImportRunId(
+      executeArtifact.mission.content_sha256,
+      resultContentSha256,
+    );
+    const evidence = {
+      schema_version: 2 as const,
+      phase: "execute" as const,
+      import_run_id: importRunId,
+      result_content_sha256: resultContentSha256,
+      mission_content_sha256: executeArtifact.mission.content_sha256,
+      identity: missionIdentity(),
+      git_base_commit:
+        executeArtifact.mission.source_revision.git_base_commit,
+      result_commit: "a".repeat(40),
+      controller_run_id: thirdRunId,
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:01.000Z",
+      outcome: "applied" as const,
+      reasons: [],
+    };
+    const verification = [
+      {
+        name: "Tests",
+        argv: ["npm", "test"] as [string, ...string[]],
+        started_at: "2026-07-22T12:00:00.000Z",
+        completed_at: "2026-07-22T12:00:01.000Z",
+        duration_ms: 1_000,
+        status: "passed" as const,
+        exit_code: 0,
+        signal: null,
+        stdout: "green",
+        stderr: "",
+        output_truncated: false,
+      },
+    ];
+    await workspace.writeImportEvidence({
+      submission_source: submissionSource,
+      evidence,
+      verification,
+    });
+    await writeRunManifest(root, {
+      schema_version: 1,
+      run_id: thirdRunId,
+      work_item_id: firstId,
+      idempotency_key: `${firstId}:execute:1:1:0:import`,
+      phase: "review",
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      started_at: evidence.started_at,
+      completed_at: evidence.completed_at,
+      outcome: "applied",
+    });
+    await writeMissionReadyWorkItem(root, firstId, "review");
+
+    const subject = await workspace.readAppliedExecuteReviewSubject(
+      missionIdentity(),
+    );
+    expect(subject.submission_source).toBe(submissionSource);
+    expect(subject.evidence).toEqual(evidence);
+    expect(subject.review_subject).toMatchObject({
+      execute_mission_content_sha256: executeArtifact.mission.content_sha256,
+      execute_result_content_sha256: resultContentSha256,
+      accepted_result_commit: "a".repeat(40),
+      changed_files: ["src/domain/result.ts"],
+      execute_mission_path: `.founder/missions/${firstId}/execute-1-1-0/mission.json`,
+      execute_evidence_path: `.founder/run-evidence/${firstId}/execute-1-1-0/${importRunId}`,
+    });
+
+    const reviewItem = await workspace.read(firstId);
+    if (reviewItem === null) {
+      throw new Error("Expected review work item");
+    }
+    const reviewIdentity = {
+      ...missionIdentity(),
+      phase: "review" as const,
+    };
+    const reviewRun: ReviewMissionControllerRun = {
+      schema_version: 1,
+      run_id: thirdRunId,
+      work_item_id: firstId,
+      idempotency_key: `${firstId}:review:1:1:0`,
+      phase: "review",
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      started_at: evidence.started_at,
+      completed_at: evidence.completed_at,
+      outcome: "applied",
+    };
+    const buildReview = (paths: Parameters<typeof compileMission>[2]) =>
+      compileReviewMission({
+        work_item: reviewItem,
+        controller_run: reviewRun,
+        review_subject: subject.review_subject,
+        paths,
+        independence_attested: true,
+      });
+    const first = await workspace.writeReviewMissionPackage(
+      reviewIdentity,
+      subject.review_subject,
+      buildReview,
+    );
+    const second = await workspace.writeReviewMissionPackage(
+      reviewIdentity,
+      subject.review_subject,
+      buildReview,
+    );
+
+    expect(second).toEqual(first);
+    expect(first.mission.identity.phase).toBe("review");
+    expect(first.mission.review_subject).toEqual(subject.review_subject);
+    expect(
+      (await readdir(join(root, ".founder", "missions", firstId))).sort(),
+    ).toEqual(["execute-1-1-0", "review-1-1-0"]);
+  });
+
+  it("fails closed when applied execute evidence is absent or duplicated", async () => {
+    const root = await createWorkspace();
+    await writeMissionReadyWorkItem(root, firstId, "review");
+    const workspace = missionWorkspace(root);
+    await expect(
+      workspace.readAppliedExecuteReviewSubject(missionIdentity()),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+
+    const executeItem = await writeMissionReadyWorkItem(
+      root,
+      firstId,
+      "execute",
+    );
+    const artifact = await workspace.writeMissionPackage(
+      missionIdentity(),
+      (paths) =>
+        compileMission(executeItem, appliedExecuteManifest(), paths),
+    );
+    await writeRunManifest(root, {
+      ...appliedExecuteManifest(thirdRunId),
+      phase: "review",
+    });
+    const verification = [
+      {
+        name: "Tests",
+        argv: ["npm", "test"] as [string, ...string[]],
+        started_at: "2026-07-22T12:00:00.000Z",
+        completed_at: "2026-07-22T12:00:01.000Z",
+        duration_ms: 1_000,
+        status: "passed" as const,
+        exit_code: 0,
+        signal: null,
+        stdout: "green",
+        stderr: "",
+        output_truncated: false,
+      },
+    ];
+    for (const summary of ["First accepted result", "Second accepted result"]) {
+      const submissionSource = serializeExternalResult({
+        result_schema_version: 2,
+        mission_content_sha256: artifact.mission.content_sha256,
+        identity: missionIdentity(),
+        commit: "a".repeat(40),
+        summary,
+        changed_files: ["src/domain/result.ts"],
+        verification: [{ name: "Tests", status: "passed" }],
+      });
+      const resultHash = hashResultContent(submissionSource);
+      await workspace.writeImportEvidence({
+        submission_source: submissionSource,
+        evidence: {
+          schema_version: 2,
+          phase: "execute",
+          import_run_id: createImportRunId(
+            artifact.mission.content_sha256,
+            resultHash,
+          ),
+          result_content_sha256: resultHash,
+          mission_content_sha256: artifact.mission.content_sha256,
+          identity: missionIdentity(),
+          git_base_commit: artifact.mission.source_revision.git_base_commit,
+          result_commit: "a".repeat(40),
+          controller_run_id: thirdRunId,
+          started_at: "2026-07-22T12:00:00.000Z",
+          completed_at: "2026-07-22T12:00:01.000Z",
+          outcome: "applied",
+          reasons: [],
+        },
+        verification,
+      });
+    }
+    await expect(
+      workspace.readAppliedExecuteReviewSubject(missionIdentity()),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+  });
+
+  it("rejects an applied execute subject whose evidence names a different command", async () => {
+    const root = await createWorkspace();
+    const executeItem = await writeMissionReadyWorkItem(root, firstId);
+    const workspace = missionWorkspace(root);
+    const artifact = await workspace.writeMissionPackage(
+      missionIdentity(),
+      (paths) =>
+        compileMission(executeItem, appliedExecuteManifest(), paths),
+    );
+    const submissionSource = serializeExternalResult({
+      result_schema_version: 2,
+      mission_content_sha256: artifact.mission.content_sha256,
+      identity: missionIdentity(),
+      commit: "a".repeat(40),
+      summary: "Accepted result with divergent command evidence.",
+      changed_files: ["src/domain/result.ts"],
+      verification: [{ name: "Tests", status: "passed" }],
+    });
+    const resultHash = hashResultContent(submissionSource);
+    await workspace.writeImportEvidence({
+      submission_source: submissionSource,
+      evidence: {
+        schema_version: 2,
+        phase: "execute",
+        import_run_id: createImportRunId(
+          artifact.mission.content_sha256,
+          resultHash,
+        ),
+        result_content_sha256: resultHash,
+        mission_content_sha256: artifact.mission.content_sha256,
+        identity: missionIdentity(),
+        git_base_commit: artifact.mission.source_revision.git_base_commit,
+        result_commit: "a".repeat(40),
+        controller_run_id: thirdRunId,
+        started_at: "2026-07-22T12:00:00.000Z",
+        completed_at: "2026-07-22T12:00:01.000Z",
+        outcome: "applied",
+        reasons: [],
+      },
+      verification: [
+        {
+          name: "Different command",
+          argv: ["npm", "run", "different"],
+          started_at: "2026-07-22T12:00:00.000Z",
+          completed_at: "2026-07-22T12:00:01.000Z",
+          duration_ms: 1_000,
+          status: "passed",
+          exit_code: 0,
+          signal: null,
+          stdout: "green",
+          stderr: "",
+          output_truncated: false,
+        },
+      ],
+    });
+    await writeRunManifest(root, {
+      ...appliedExecuteManifest(thirdRunId),
+      phase: "review",
+    });
+
+    await expect(
+      workspace.readAppliedExecuteReviewSubject(missionIdentity()),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+  });
+
+  it("stores applied review evidence without command results", async () => {
+    const root = await createWorkspace();
+    const workspace = missionWorkspace(root);
+    const identity = { ...missionIdentity(), phase: "review" as const };
+    const submissionSource = '{"verdict":"clean"}\n';
+    const resultHash = hashResultContent(submissionSource);
+    const evidence = {
+      schema_version: 2 as const,
+      phase: "review" as const,
+      import_run_id: createImportRunId("f".repeat(64), resultHash),
+      result_content_sha256: resultHash,
+      mission_content_sha256: "f".repeat(64),
+      identity,
+      git_base_commit: "a".repeat(40),
+      result_commit: "a".repeat(40),
+      controller_run_id: thirdRunId,
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:01.000Z",
+      outcome: "applied" as const,
+      reasons: [],
+    };
+
+    const summary = await workspace.writeImportEvidence({
+      submission_source: submissionSource,
+      evidence,
+      verification: [],
+    });
+    expect(summary.phase).toBe("review");
+    expect(await workspace.readImportEvidence(identity, evidence.import_run_id))
+      .toMatchObject({ evidence, verification: [] });
+    await expect(
+      workspace.writeImportEvidence({
+        submission_source: submissionSource,
+        evidence,
+        verification: [
+          {
+            name: "Tests",
+            argv: ["npm", "test"],
+            started_at: "2026-07-22T12:00:00.000Z",
+            completed_at: "2026-07-22T12:00:01.000Z",
+            duration_ms: 1_000,
+            status: "passed",
+            exit_code: 0,
+            signal: null,
+            stdout: "green",
+            stderr: "",
+            output_truncated: false,
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    const evidenceDirectory = join(root, summary.evidence_path);
+    await writeFile(
+      join(evidenceDirectory, "import.json"),
+      `${JSON.stringify({ ...evidence, phase: "execute" }, null, 2)}\n`,
+      "utf8",
+    );
+    await expect(
+      workspace.readImportEvidence(identity, evidence.import_run_id),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    await writeFile(
+      join(evidenceDirectory, "import.json"),
+      `${JSON.stringify(evidence, null, 2)}\n`,
+      "utf8",
+    );
+    const outsideSubmission = join(root, "outside-review-submission.json");
+    await writeFile(outsideSubmission, submissionSource, "utf8");
+    await rm(join(evidenceDirectory, "submission.json"));
+    await symlink(
+      outsideSubmission,
+      join(evidenceDirectory, "submission.json"),
+      "file",
+    );
+    await expect(
+      workspace.readImportEvidence(identity, evidence.import_run_id),
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
   });
 

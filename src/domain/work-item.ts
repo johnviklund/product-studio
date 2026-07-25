@@ -320,6 +320,7 @@ export interface ReviewWorkItemRepository extends WorkItemRepository {
   ): Promise<AppliedExecuteReviewSubject>;
   writeReviewMissionPackage(
     identity: MissionIdentity<"review">,
+    reviewSubject: ReviewMissionPackage["review_subject"],
     buildPackage: MissionPackageBuilder<ReviewMissionPackage>,
   ): Promise<MissionArtifactWriteResult<ReviewMissionPackage>>;
 }

@@ -41,7 +41,7 @@ import {
   type ProductManifest,
   type WorkItem,
   type WorkItemGoal,
-  type WorkItemRepository,
+  type ReviewWorkItemRepository,
   type WorkItemState,
   type UpdateWorkItemPhaseInput,
   type VerificationCommand,
@@ -50,21 +50,27 @@ import {
   missionIdentitySchema,
   missionPackageSchema,
   renderTaskMd,
+  reviewSubjectSchema,
   serializeMissionPackage,
   type MissionArtifactWriteResult,
   type MissionIdentity,
   type MissionPackage,
   type MissionPackageBuilder,
   type MissionPaths,
+  type ReviewMissionPackage,
+  type ReviewSubject,
 } from "../domain/mission";
 import {
   commandEvidenceRecordSchema,
   createImportRunId,
+  executeExternalResultSubmissionSchema,
   hashResultContent,
   importEvidenceEnvelopeSchema,
   importEvidenceSummarySchema,
   importRunIdSchema,
+  type AppliedExecuteReviewSubject,
   type CommandEvidenceRecord,
+  type ExecuteImportEvidenceEnvelope,
   type ImportEvidenceSummary,
   type ImportEvidenceWriteInput,
   type MissionResultSnapshot,
@@ -424,7 +430,7 @@ export interface ProductWorkspaceOptions {
   verificationRunner?: VerificationRunner;
 }
 
-export class ProductWorkspace implements WorkItemRepository {
+export class ProductWorkspace implements ReviewWorkItemRepository {
   readonly workspaceRoot: string;
 
   private readonly founderDirectory: string;
@@ -943,9 +949,15 @@ export class ProductWorkspace implements WorkItemRepository {
   }
 
   async findAppliedExecuteManifest(
-    identity: MissionIdentity,
+    identity: MissionIdentity<"execute">,
   ): Promise<ControllerRunManifest | null> {
     const validatedIdentity = missionIdentitySchema.parse(identity);
+    if (validatedIdentity.phase !== "execute") {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "Applied execute manifest lookup requires execute identity.",
+      );
+    }
     await this.readManifest();
     if (!(await this.hasSafeWorkItemsDirectory())) {
       return null;
@@ -1052,6 +1064,7 @@ export class ProductWorkspace implements WorkItemRepository {
       );
     }
     if (
+      validatedIdentity.phase !== "execute" ||
       current.state.phase !== "execute" ||
       current.state.status !== "active" ||
       current.goal.goal_contract?.goal_version !==
@@ -1082,129 +1095,215 @@ export class ProductWorkspace implements WorkItemRepository {
       );
     }
 
-    const missionSource = serializeMissionPackage(mission);
-    const taskSource = renderTaskMd(mission);
-    const missionsDirectory = join(this.founderDirectory, MISSIONS_DIRECTORY);
-    const workItemMissionsDirectory = join(
-      missionsDirectory,
-      validatedIdentity.work_item_id,
-    );
-    const missionDirectory = join(
-      workItemMissionsDirectory,
-      this.missionDirectoryName(validatedIdentity),
-    );
+    return this.publishMissionSnapshot(validatedIdentity, mission);
+  }
 
-    await this.ensureDirectory(missionsDirectory);
-    await this.ensureDirectory(workItemMissionsDirectory);
-    if (await this.hasSafeDirectory(missionDirectory)) {
-      await this.assertMissionSnapshot(
-        missionDirectory,
-        mission,
-        missionSource,
-        taskSource,
+  async readAppliedExecuteReviewSubject(
+    identity: MissionIdentity<"execute">,
+  ): Promise<AppliedExecuteReviewSubject> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    if (validatedIdentity.phase !== "execute") {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "Review subjects require execute identity.",
       );
-      return this.missionWriteResult(mission, missionDirectory);
     }
 
-    const stagingDirectory = join(
-      workItemMissionsDirectory,
-      `.${this.missionDirectoryName(validatedIdentity)}.${randomUUID()}.mission.tmp`,
-    );
-    await mkdir(stagingDirectory);
-    try {
-      await writeFile(join(stagingDirectory, MISSION_JSON_FILE), missionSource, {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      await writeFile(join(stagingDirectory, TASK_MD_FILE), taskSource, {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      await rename(stagingDirectory, missionDirectory);
-    } catch (error) {
-      await this.removeMissionStagingDirectory(stagingDirectory, error);
-      if (
-        isNodeError(error) &&
-        ["EEXIST", "ENOTEMPTY"].includes(error.code ?? "") &&
-        (await this.hasSafeDirectory(missionDirectory))
-      ) {
-        await this.assertMissionSnapshot(
-          missionDirectory,
-          mission,
-          missionSource,
-          taskSource,
-        );
-        return this.missionWriteResult(mission, missionDirectory);
-      }
-      throw error;
+    const matches = (await this.listImportEvidence(validatedIdentity.work_item_id))
+      .filter(
+        (stored) =>
+          stored.evidence.phase === "execute" &&
+          stored.evidence.outcome === "applied" &&
+          JSON.stringify(stored.evidence.identity) ===
+            JSON.stringify(validatedIdentity),
+      );
+    if (matches.length !== 1) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        matches.length === 0
+          ? "No applied execute import matches the governed tuple."
+          : "More than one applied execute import matches the governed tuple.",
+      );
     }
 
-    await this.assertMissionSnapshot(
-      missionDirectory,
-      mission,
-      missionSource,
-      taskSource,
+    const stored = matches[0];
+    if (stored.evidence.phase !== "execute") {
+      throw this.invalid(
+        stored.summary.evidence_path,
+        "applied execute subject has a non-execute evidence envelope",
+      );
+    }
+    const evidence: ExecuteImportEvidenceEnvelope = stored.evidence;
+    const controllerRun = await this.readControllerRunManifest(
+      validatedIdentity.work_item_id,
+      evidence.controller_run_id,
     );
-    return this.missionWriteResult(mission, missionDirectory);
+    if (
+      controllerRun === null ||
+      controllerRun.phase !== "review" ||
+      controllerRun.outcome !== "applied" ||
+      controllerRun.goal_version !== validatedIdentity.goal_version ||
+      controllerRun.input_revision !== validatedIdentity.input_revision ||
+      controllerRun.attempt !== validatedIdentity.attempt
+    ) {
+      throw this.invalid(
+        stored.summary.evidence_path,
+        "applied execute evidence does not match its review transition controller run",
+      );
+    }
+    const evidenceDirectory = this.evidenceDirectories(
+      validatedIdentity,
+      evidence.import_run_id,
+    ).target;
+    const submissionPath = join(evidenceDirectory, SUBMISSION_JSON_FILE);
+    const submissionSource = await this.readRequiredFile(submissionPath);
+    const submission = this.parseJson(
+      submissionSource,
+      submissionPath,
+      executeExternalResultSubmissionSchema,
+    );
+    const missionSnapshot = await this.readMissionPackageSnapshot(
+      validatedIdentity,
+    );
+    if ("review_subject" in missionSnapshot.mission) {
+      throw this.invalid(
+        missionSnapshot.missionPath,
+        "execute evidence cannot bind to a review mission",
+      );
+    }
+    if (
+      missionSnapshot.mission.content_sha256 !==
+        evidence.mission_content_sha256 ||
+      missionSnapshot.mission.source_revision.git_base_commit !==
+        evidence.git_base_commit ||
+      submission.mission_content_sha256 !== evidence.mission_content_sha256 ||
+      JSON.stringify(submission.identity) !==
+        JSON.stringify(validatedIdentity) ||
+      submission.commit !== evidence.result_commit
+    ) {
+      throw this.invalid(
+        evidenceDirectory,
+        "applied execute evidence is not bound to its immutable mission and submission",
+      );
+    }
+    if (evidence.result_commit === null) {
+      throw this.invalid(
+        evidenceDirectory,
+        "applied execute evidence requires an accepted result commit",
+      );
+    }
+    const requiredCommands = (await this.readManifest()).verification
+      .required_commands;
+    if (
+      stored.verification.length !== requiredCommands.length ||
+      stored.verification.some(
+        (record, index) =>
+          record.name !== requiredCommands[index]?.name ||
+          JSON.stringify(record.argv) !==
+            JSON.stringify(requiredCommands[index]?.argv),
+      )
+    ) {
+      throw this.invalid(
+        evidenceDirectory,
+        "applied execute evidence does not match the required command set",
+      );
+    }
+
+    const reviewSubject = reviewSubjectSchema.parse({
+      execute_mission_content_sha256: evidence.mission_content_sha256,
+      execute_result_content_sha256: evidence.result_content_sha256,
+      git_base_commit: evidence.git_base_commit,
+      accepted_result_commit: evidence.result_commit,
+      changed_files: [...submission.changed_files].sort(),
+      execute_mission_path: missionSnapshot.relativeMissionPath,
+      execute_evidence_path: stored.summary.evidence_path,
+      command_evidence: stored.verification,
+    });
+    return {
+      review_subject: reviewSubject,
+      submission_source: submissionSource,
+      evidence,
+      verification: stored.verification,
+    };
+  }
+
+  async writeReviewMissionPackage(
+    identity: MissionIdentity<"review">,
+    reviewSubject: ReviewSubject,
+    buildPackage: MissionPackageBuilder<ReviewMissionPackage>,
+  ): Promise<MissionArtifactWriteResult<ReviewMissionPackage>> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    if (validatedIdentity.phase !== "review") {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "Review mission writes require review identity.",
+      );
+    }
+    await this.readManifest();
+    const current = await this.readValidated(validatedIdentity.work_item_id);
+    if (
+      current === null ||
+      current.state.phase !== "review" ||
+      current.state.status !== "active" ||
+      current.goal.goal_contract?.goal_version !==
+        validatedIdentity.goal_version ||
+      current.state.goal_version !== validatedIdentity.goal_version ||
+      current.state.input_revision !== validatedIdentity.input_revision ||
+      current.state.attempt !== validatedIdentity.attempt
+    ) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The durable work item no longer matches the active review tuple.",
+      );
+    }
+
+    const freshSubject = await this.readAppliedExecuteReviewSubject({
+      ...validatedIdentity,
+      phase: "execute",
+    });
+    const validatedSubject = reviewSubjectSchema.parse(reviewSubject);
+    if (
+      JSON.stringify(validatedSubject) !==
+      JSON.stringify(freshSubject.review_subject)
+    ) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "Review subject does not match the current applied execute evidence.",
+      );
+    }
+
+    const paths = this.missionPaths(
+      validatedIdentity,
+      validatedSubject.git_base_commit,
+    );
+    const mission = missionPackageSchema.parse(buildPackage(paths));
+    if (
+      !("review_subject" in mission) ||
+      JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
+      JSON.stringify(mission.review_subject) !==
+        JSON.stringify(validatedSubject) ||
+      mission.task_path !== paths.task_path ||
+      mission.result_contract.output_path !== paths.output_path
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "compiled review mission must match the workspace-derived identity, subject, and paths",
+      );
+    }
+    return this.publishMissionSnapshot(validatedIdentity, mission);
   }
 
   async readMissionResult(
     identity: MissionIdentity,
   ): Promise<MissionResultSnapshot> {
     const validatedIdentity = missionIdentitySchema.parse(identity);
-    await this.readManifest();
-    const relativeDirectory = posix.join(
-      FOUNDER_DIRECTORY,
-      MISSIONS_DIRECTORY,
-      validatedIdentity.work_item_id,
-      this.missionDirectoryName(validatedIdentity),
-    );
-    const missionsDirectory = join(this.founderDirectory, MISSIONS_DIRECTORY);
-    const workItemMissionsDirectory = join(
-      missionsDirectory,
-      validatedIdentity.work_item_id,
-    );
-    const missionDirectory = join(
-      workItemMissionsDirectory,
-      this.missionDirectoryName(validatedIdentity),
-    );
-    await this.assertDirectory(missionsDirectory);
-    await this.assertDirectory(workItemMissionsDirectory);
-    await this.assertDirectory(missionDirectory);
-
-    const missionPath = join(missionDirectory, MISSION_JSON_FILE);
-    const missionSource = await this.readRequiredFile(missionPath);
-    const mission = this.parseJson(
-      missionSource,
-      missionPath,
-      missionPackageSchema,
-    );
-    const expectedPaths = this.missionPaths(
-      validatedIdentity,
-      mission.source_revision.git_base_commit,
-    );
-    if (
-      JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
-      mission.task_path !== expectedPaths.task_path ||
-      mission.result_contract.output_path !== expectedPaths.output_path
-    ) {
-      throw this.invalid(
-        missionDirectory,
-        "mission snapshot identity and paths do not match its containing directory",
-      );
-    }
-    await this.assertMissionSnapshot(
-      missionDirectory,
-      mission,
-      serializeMissionPackage(mission),
-      renderTaskMd(mission),
-    );
-    const resultPath = join(missionDirectory, RESULT_JSON_FILE);
+    const snapshot = await this.readMissionPackageSnapshot(validatedIdentity);
+    const resultPath = join(snapshot.missionDirectory, RESULT_JSON_FILE);
 
     return {
-      mission,
-      mission_path: posix.join(relativeDirectory, MISSION_JSON_FILE),
-      result_path: posix.join(relativeDirectory, RESULT_JSON_FILE),
+      mission: snapshot.mission,
+      mission_path: snapshot.relativeMissionPath,
+      result_path: posix.join(snapshot.relativeDirectory, RESULT_JSON_FILE),
       result_source: await this.readRequiredFile(resultPath),
     };
   }
@@ -1354,7 +1453,7 @@ export class ProductWorkspace implements WorkItemRepository {
         "import evidence identity does not match the submitted result bytes",
       );
     }
-    this.validateEvidenceVerification(evidence.outcome, verification);
+    this.validateEvidenceVerification(evidence, verification);
     await this.readManifest();
     const directories = this.evidenceDirectories(
       identity,
@@ -1699,7 +1798,7 @@ export class ProductWorkspace implements WorkItemRepository {
         "stored import evidence does not match its directory or submission bytes",
       );
     }
-    this.validateEvidenceVerification(evidence.outcome, verification);
+    this.validateEvidenceVerification(evidence, verification);
     return {
       evidence,
       summary: this.evidenceSummary(evidence),
@@ -1747,9 +1846,19 @@ export class ProductWorkspace implements WorkItemRepository {
   }
 
   private validateEvidenceVerification(
-    outcome: ImportEvidenceWriteInput["evidence"]["outcome"],
+    evidence: ImportEvidenceWriteInput["evidence"],
     verification: CommandEvidenceRecord[],
   ): void {
+    if (evidence.phase === "review") {
+      if (verification.length > 0) {
+        throw this.invalid(
+          this.founderDirectory,
+          "review import evidence cannot contain command results",
+        );
+      }
+      return;
+    }
+    const { outcome } = evidence;
     if (outcome === "rejected" && verification.length > 0) {
       throw this.invalid(
         this.founderDirectory,
@@ -1817,6 +1926,142 @@ export class ProductWorkspace implements WorkItemRepository {
     }
   }
 
+  private async publishMissionSnapshot<TMission extends MissionPackage>(
+    identity: MissionIdentity,
+    mission: TMission,
+  ): Promise<MissionArtifactWriteResult<TMission>> {
+    const missionSource = serializeMissionPackage(mission);
+    const taskSource = renderTaskMd(mission);
+    const missionsDirectory = join(this.founderDirectory, MISSIONS_DIRECTORY);
+    const workItemMissionsDirectory = join(
+      missionsDirectory,
+      identity.work_item_id,
+    );
+    const missionDirectory = join(
+      workItemMissionsDirectory,
+      this.missionDirectoryName(identity),
+    );
+
+    await this.ensureDirectory(missionsDirectory);
+    await this.ensureDirectory(workItemMissionsDirectory);
+    if (await this.hasSafeDirectory(missionDirectory)) {
+      await this.assertMissionSnapshot(
+        missionDirectory,
+        mission,
+        missionSource,
+        taskSource,
+      );
+      return this.missionWriteResult(mission, missionDirectory);
+    }
+
+    const stagingDirectory = join(
+      workItemMissionsDirectory,
+      `.${this.missionDirectoryName(identity)}.${randomUUID()}.mission.tmp`,
+    );
+    await mkdir(stagingDirectory);
+    try {
+      await writeFile(join(stagingDirectory, MISSION_JSON_FILE), missionSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await writeFile(join(stagingDirectory, TASK_MD_FILE), taskSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(stagingDirectory, missionDirectory);
+    } catch (error) {
+      await this.removeMissionStagingDirectory(stagingDirectory, error);
+      if (
+        isNodeError(error) &&
+        ["EEXIST", "ENOTEMPTY"].includes(error.code ?? "") &&
+        (await this.hasSafeDirectory(missionDirectory))
+      ) {
+        await this.assertMissionSnapshot(
+          missionDirectory,
+          mission,
+          missionSource,
+          taskSource,
+        );
+        return this.missionWriteResult(mission, missionDirectory);
+      }
+      throw error;
+    }
+
+    await this.assertMissionSnapshot(
+      missionDirectory,
+      mission,
+      missionSource,
+      taskSource,
+    );
+    return this.missionWriteResult(mission, missionDirectory);
+  }
+
+  private async readMissionPackageSnapshot(identity: MissionIdentity): Promise<{
+    mission: MissionPackage;
+    missionDirectory: string;
+    missionPath: string;
+    relativeDirectory: string;
+    relativeMissionPath: string;
+  }> {
+    await this.readManifest();
+    const relativeDirectory = posix.join(
+      FOUNDER_DIRECTORY,
+      MISSIONS_DIRECTORY,
+      identity.work_item_id,
+      this.missionDirectoryName(identity),
+    );
+    const missionsDirectory = join(this.founderDirectory, MISSIONS_DIRECTORY);
+    const workItemMissionsDirectory = join(
+      missionsDirectory,
+      identity.work_item_id,
+    );
+    const missionDirectory = join(
+      workItemMissionsDirectory,
+      this.missionDirectoryName(identity),
+    );
+    await this.assertDirectory(missionsDirectory);
+    await this.assertDirectory(workItemMissionsDirectory);
+    await this.assertDirectory(missionDirectory);
+
+    const missionPath = join(missionDirectory, MISSION_JSON_FILE);
+    const missionSource = await this.readRequiredFile(missionPath);
+    const mission = this.parseJson(
+      missionSource,
+      missionPath,
+      missionPackageSchema,
+    );
+    const expectedPaths = this.missionPaths(
+      identity,
+      mission.source_revision.git_base_commit,
+    );
+    if (
+      JSON.stringify(mission.identity) !== JSON.stringify(identity) ||
+      mission.task_path !== expectedPaths.task_path ||
+      mission.result_contract.output_path !== expectedPaths.output_path
+    ) {
+      throw this.invalid(
+        missionDirectory,
+        "mission snapshot identity and paths do not match its containing directory",
+      );
+    }
+    await this.assertMissionSnapshot(
+      missionDirectory,
+      mission,
+      serializeMissionPackage(mission),
+      renderTaskMd(mission),
+    );
+    return {
+      mission,
+      missionDirectory,
+      missionPath,
+      relativeDirectory,
+      relativeMissionPath: posix.join(
+        relativeDirectory,
+        MISSION_JSON_FILE,
+      ),
+    };
+  }
+
   private missionPaths(
     identity: MissionIdentity,
     gitBaseCommit: string,
@@ -1854,10 +2099,10 @@ export class ProductWorkspace implements WorkItemRepository {
     ].join("-");
   }
 
-  private missionWriteResult(
-    mission: MissionPackage,
+  private missionWriteResult<TMission extends MissionPackage>(
+    mission: TMission,
     missionDirectory: string,
-  ): MissionArtifactWriteResult {
+  ): MissionArtifactWriteResult<TMission> {
     return {
       mission,
       workspace_path: this.workspaceRoot,
