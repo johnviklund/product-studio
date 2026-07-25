@@ -173,6 +173,7 @@ export interface StoredImportEvidence {
   evidence: ImportEvidenceEnvelope;
   summary: ImportEvidenceSummary;
   verification: CommandEvidenceRecord[];
+  submission?: ExternalResultSubmission;
 }
 
 export interface AppliedExecuteReviewSubject {

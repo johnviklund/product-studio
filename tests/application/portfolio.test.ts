@@ -1373,11 +1373,21 @@ describe("PortfolioService", () => {
     await expect(
       service.importReviewResult(sourceId, created.goal.work_item_id),
     ).resolves.toEqual(imported);
+    const history = await service.listImportEvidence(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(history.map((stored) => stored.evidence.phase).sort()).toEqual([
+      "execute",
+      "review",
+    ]);
     expect(
-      (await service.listImportEvidence(sourceId, created.goal.work_item_id))
-        .map((stored) => stored.evidence.phase)
-        .sort(),
-    ).toEqual(["execute", "review"]);
+      history.find((stored) => stored.evidence.phase === "review")?.submission,
+    ).toMatchObject({
+      identity: { phase: "review" },
+      verdict: "findings",
+      findings: [{ finding_id: "F-portfolio-1" }],
+    });
     index.close();
   });
 

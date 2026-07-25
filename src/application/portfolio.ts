@@ -239,7 +239,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const compileReviewMissionInputSchema = z.strictObject({
+export const compileReviewMissionInputSchema = z.strictObject({
   independence_attested: z.literal(true),
 });
 

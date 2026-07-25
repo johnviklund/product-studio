@@ -39,6 +39,8 @@ import { POST as createPortfolioWorkItem } from "../../app/api/portfolio/work-it
 import { PATCH as savePortfolioWorkItem } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route";
 import * as portfolioMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route";
 import * as portfolioMissionImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route";
+import * as portfolioReviewMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route";
+import * as portfolioReviewMissionImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route";
 import * as portfolioMissionRetryRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route";
 import { GET as getPortfolioRunEvidence } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/run-evidence/route";
 import {
@@ -52,6 +54,8 @@ import {
 
 const compilePortfolioMission = portfolioMissionRoute.POST;
 const importPortfolioMission = portfolioMissionImportRoute.POST;
+const compilePortfolioReviewMission = portfolioReviewMissionRoute.POST;
+const importPortfolioReviewMission = portfolioReviewMissionImportRoute.POST;
 const retryPortfolioMission = portfolioMissionRetryRoute.POST;
 
 const createdRoots: string[] = [];
@@ -256,6 +260,28 @@ function missionRequest(): Request {
 function missionActionRequest(action: "import" | "retry"): Request {
   return new Request(
     `http://localhost/api/portfolio/work-items/source/item/mission/${action}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{ignored-no-body-contract",
+    },
+  );
+}
+
+function reviewMissionRequest(body: unknown): Request {
+  return new Request(
+    "http://localhost/api/portfolio/work-items/source/item/mission/review",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+function reviewMissionImportRequest(): Request {
+  return new Request(
+    "http://localhost/api/portfolio/work-items/source/item/mission/review/import",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -536,6 +562,58 @@ describe("portfolio API routes", () => {
     });
   });
 
+  it("requires attestation for review compile and keeps review import bodyless", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const mission = {
+      mission: {
+        identity: { phase: "review", work_item_id: workItemId },
+        independence_attested: true,
+      },
+    };
+    const imported = {
+      source_id: sourceId,
+      project: null,
+      work_item: { state: { phase: "review", status: "active" } },
+      evidence: { phase: "review", outcome: "applied" },
+      result: { verdict: "clean", findings: [] },
+    };
+    const compileReviewMission = vi.fn().mockResolvedValue(mission);
+    const importReviewResult = vi.fn().mockResolvedValue(imported);
+    getService.mockResolvedValue({
+      compileReviewMission,
+      importReviewResult,
+    });
+    const context = phaseUpdateContext(sourceId, workItemId);
+
+    const invalid = await compilePortfolioReviewMission(
+      reviewMissionRequest({ independence_attested: false }),
+      context,
+    );
+    const compiled = await compilePortfolioReviewMission(
+      reviewMissionRequest({ independence_attested: true }),
+      context,
+    );
+    const importedResponse = await importPortfolioReviewMission(
+      reviewMissionImportRequest(),
+      context,
+    );
+
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+    expect(compiled.status).toBe(200);
+    expect(await compiled.json()).toEqual(mission);
+    expect(importedResponse.status).toBe(200);
+    expect(await importedResponse.json()).toEqual(imported);
+    expect(compileReviewMission).toHaveBeenCalledOnce();
+    expect(compileReviewMission).toHaveBeenCalledWith(sourceId, workItemId, {
+      independence_attested: true,
+    });
+    expect(importReviewResult).toHaveBeenCalledWith(sourceId, workItemId);
+  });
+
   it("maps mission compile failures through the established response contract", async () => {
     const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
     const compileMission = vi
@@ -623,10 +701,59 @@ describe("portfolio API routes", () => {
           phase: "execute",
           import_run_id: "f".repeat(64),
           outcome: "rejected",
-          evidence_path: `.founder/run-evidence/${workItemId}/1-2-1/${"f".repeat(64)}`,
+          evidence_path: `.founder/run-evidence/${workItemId}/execute-1-2-1/${"f".repeat(64)}`,
           reasons: ["Rejected imported result."],
         },
         verification: [],
+      },
+      {
+        evidence: {
+          schema_version: 2,
+          phase: "review",
+          import_run_id: "e".repeat(64),
+          result_content_sha256: "b".repeat(64),
+          mission_content_sha256: "a".repeat(64),
+          identity: {
+            phase: "review",
+            work_item_id: workItemId,
+            goal_version: 1,
+            input_revision: 2,
+            attempt: 1,
+          },
+          git_base_commit: "a".repeat(40),
+          result_commit: "a".repeat(40),
+          controller_run_id: "650e8400-e29b-41d4-a716-446655440000",
+          started_at: "2026-07-22T15:00:00.000Z",
+          completed_at: "2026-07-22T15:00:01.000Z",
+          outcome: "applied",
+          reasons: [],
+        },
+        summary: {
+          phase: "review",
+          import_run_id: "e".repeat(64),
+          outcome: "applied",
+          evidence_path: `.founder/run-evidence/${workItemId}/review-1-2-1/${"e".repeat(64)}`,
+          reasons: [],
+        },
+        verification: [],
+        submission: {
+          result_schema_version: 2,
+          review_mission_content_sha256: "a".repeat(64),
+          identity: {
+            phase: "review",
+            work_item_id: workItemId,
+            goal_version: 1,
+            input_revision: 2,
+            attempt: 1,
+          },
+          execute_mission_content_sha256: "d".repeat(64),
+          execute_result_content_sha256: "c".repeat(64),
+          git_base_commit: "a".repeat(40),
+          accepted_result_commit: "a".repeat(40),
+          summary: "No findings.",
+          verdict: "clean",
+          findings: [],
+        },
       },
     ];
     const listImportEvidence = vi
@@ -658,7 +785,12 @@ describe("portfolio API routes", () => {
     );
 
     expect(success.status).toBe(200);
-    expect(await success.json()).toEqual(history);
+    const successBody = (await success.json()) as StoredImportEvidence[];
+    expect(successBody).toEqual(history);
+    expect(successBody.map((stored) => stored.evidence.phase)).toEqual([
+      "execute",
+      "review",
+    ]);
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({
       error: { code: "work_item_not_found" },
@@ -742,6 +874,14 @@ describe("portfolio API routes", () => {
       "POST",
       "runtime",
     ]);
+    expect(Object.keys(portfolioReviewMissionRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioReviewMissionImportRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
   });
 
   it("maps import and retry eligibility failures to 409 instead of verdict responses", async () => {
@@ -760,7 +900,25 @@ describe("portfolio API routes", () => {
         "Repair requires an assigned, governed item in blocked execute.",
       ),
     );
-    getService.mockResolvedValue({ importResult, retryExecuteAttempt });
+    const compileReviewMission = vi.fn().mockRejectedValue(
+      new ControllerConflictError(
+        "mission_not_ready",
+        workItemId,
+        "Review mission compilation requires active review.",
+      ),
+    );
+    const importReviewResult = vi.fn().mockRejectedValue(
+      new InvalidWorkspaceError(
+        `.founder/missions/${workItemId}/review-1-1-0/result.json`,
+        "invalid review result",
+      ),
+    );
+    getService.mockResolvedValue({
+      importResult,
+      retryExecuteAttempt,
+      compileReviewMission,
+      importReviewResult,
+    });
     const context = phaseUpdateContext("inbox", workItemId);
 
     const importResponse = await importPortfolioMission(
@@ -771,6 +929,14 @@ describe("portfolio API routes", () => {
       missionActionRequest("retry"),
       context,
     );
+    const reviewCompileResponse = await compilePortfolioReviewMission(
+      reviewMissionRequest({ independence_attested: true }),
+      context,
+    );
+    const reviewImportResponse = await importPortfolioReviewMission(
+      reviewMissionImportRequest(),
+      context,
+    );
 
     expect(importResponse.status).toBe(409);
     expect(await importResponse.json()).toMatchObject({
@@ -779,6 +945,14 @@ describe("portfolio API routes", () => {
     expect(retryResponse.status).toBe(409);
     expect(await retryResponse.json()).toMatchObject({
       error: { code: "mission_not_ready" },
+    });
+    expect(reviewCompileResponse.status).toBe(409);
+    expect(await reviewCompileResponse.json()).toMatchObject({
+      error: { code: "mission_not_ready" },
+    });
+    expect(reviewImportResponse.status).toBe(422);
+    expect(await reviewImportResponse.json()).toMatchObject({
+      error: { code: "invalid_workspace" },
     });
   });
 

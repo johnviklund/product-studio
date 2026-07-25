@@ -64,6 +64,7 @@ import {
   commandEvidenceRecordSchema,
   createImportRunId,
   executeExternalResultSubmissionSchema,
+  externalResultSubmissionSchema,
   hashResultContent,
   importEvidenceEnvelopeSchema,
   importEvidenceSummarySchema,
@@ -1799,10 +1800,22 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
     this.validateEvidenceVerification(evidence, verification);
+    let submission: StoredImportEvidence["submission"];
+    try {
+      const parsed = externalResultSubmissionSchema.safeParse(
+        JSON.parse(submissionSource),
+      );
+      if (parsed.success && parsed.data.identity.phase === evidence.phase) {
+        submission = parsed.data;
+      }
+    } catch {
+      submission = undefined;
+    }
     return {
       evidence,
       summary: this.evidenceSummary(evidence),
       verification,
+      ...(submission === undefined ? {} : { submission }),
     };
   }
 
