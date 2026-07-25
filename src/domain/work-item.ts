@@ -37,6 +37,7 @@ export const WORK_ITEM_PHASES = [
   "plan",
   "execute",
   "review",
+  "patch",
   "test",
   "ship",
   "learn",

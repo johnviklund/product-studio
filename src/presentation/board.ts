@@ -35,7 +35,7 @@ export const BOARD_COLUMNS = [
   {
     id: "review",
     label: "Review",
-    phases: ["review", "test"],
+    phases: ["review", "patch", "test"],
     target_phase: "review",
   },
   { id: "ship", label: "Ship", phases: ["ship"], target_phase: "ship" },
@@ -80,6 +80,7 @@ const NEXT_ACTION_BY_PHASE = {
   plan: "Execute the plan",
   execute: "Review the result",
   review: "Test the result",
+  patch: "Review the patch",
   test: "Ship the result",
   ship: "Capture the learning",
   learn: "Review the completed work",

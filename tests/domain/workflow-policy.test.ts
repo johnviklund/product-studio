@@ -28,7 +28,8 @@ describe("workflow transition policy", () => {
       spec: ["brainstorm", "plan"],
       plan: ["spec", "execute"],
       execute: ["plan", "review"],
-      review: ["execute", "ship"],
+      review: ["execute", "ship", "patch"],
+      patch: ["review"],
       test: ["execute", "ship"],
       ship: ["review", "learn"],
       learn: ["ship"],
@@ -41,6 +42,18 @@ describe("workflow transition policy", () => {
         expect(validatePhaseTransition(source, target).ok).toBe(
           (expected[source] as readonly WorkItemPhase[]).includes(target),
         );
+      }
+    }
+  });
+
+  it("allows only review-to-patch and patch-to-review patch edges", () => {
+    expect(validatePhaseTransition("review", "patch")).toEqual({ ok: true });
+    expect(validatePhaseTransition("patch", "review")).toEqual({ ok: true });
+
+    for (const phase of WORK_ITEM_PHASES) {
+      if (phase !== "review" && phase !== "patch") {
+        expect(validatePhaseTransition("patch", phase).ok).toBe(false);
+        expect(validatePhaseTransition(phase, "patch").ok).toBe(false);
       }
     }
   });
