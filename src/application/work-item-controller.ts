@@ -946,7 +946,45 @@ export class WorkItemController {
         reasons.push(`Review result ${field} does not match the immutable subject.`);
       }
     }
-    if ((await this.git.readHeadCommit()) !== currentSubject.accepted_result_commit) {
+    const deterministicChecks = new Set(
+      mission.review_subject.command_evidence.map((record) =>
+        record.argv.join(" "),
+      ),
+    );
+    for (const finding of result.findings) {
+      switch (finding.link.type) {
+        case "acceptance_criteria":
+          if (
+            !mission.goal.acceptance_criteria.includes(finding.link.criterion)
+          ) {
+            reasons.push(
+              `Review finding ${finding.finding_id} does not name an exact pinned acceptance criterion.`,
+            );
+          }
+          break;
+        case "non_goals":
+          if (!mission.goal.non_goals.includes(finding.link.non_goal)) {
+            reasons.push(
+              `Review finding ${finding.finding_id} does not name an exact pinned non-goal.`,
+            );
+          }
+          break;
+        case "deterministic_checks":
+          if (!deterministicChecks.has(finding.link.command)) {
+            reasons.push(
+              `Review finding ${finding.finding_id} does not name an exact pinned deterministic check.`,
+            );
+          }
+          break;
+        case "defect":
+        case "security":
+          break;
+      }
+    }
+    if (
+      (await this.git.readHeadCommit()) !==
+      currentSubject.accepted_result_commit
+    ) {
       reasons.push("Workspace HEAD no longer equals the accepted execute commit.");
     }
     if (!(await this.git.isWorktreeCleanExcludingFounder())) {

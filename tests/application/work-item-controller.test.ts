@@ -23,6 +23,7 @@ import {
   type ImportEvidenceWriteInput,
   type MissionResultSnapshot,
   type ReviewExternalResultSubmission,
+  type ReviewFindingLink,
   type StoredImportEvidence,
 } from "../../src/domain/result";
 import type {
@@ -1082,6 +1083,89 @@ describe("WorkItemController", () => {
     expect(fixture.evidence.size).toBe(1);
   });
 
+  it.each<{
+    name: string;
+    link: ReviewFindingLink;
+    reason: string;
+  }>([
+    {
+      name: "an unknown acceptance criterion",
+      link: {
+        type: "acceptance_criteria",
+        criterion: "A criterion that is not in the pinned goal",
+      },
+      reason: "acceptance criterion",
+    },
+    {
+      name: "an unknown non-goal",
+      link: {
+        type: "non_goals",
+        non_goal: "A non-goal that is not in the pinned goal",
+      },
+      reason: "non-goal",
+    },
+    {
+      name: "an unknown deterministic check",
+      link: { type: "deterministic_checks", command: "npm run unknown" },
+      reason: "deterministic check",
+    },
+  ])("rejects a review finding linked to $name", async ({ link, reason }) => {
+    const fixture = await createReviewImportFixture({
+      transformResult: (result) => ({
+        ...result,
+        summary: "Review finding names an unpinned contract target.",
+        verdict: "findings",
+        findings: [
+          {
+            finding_id: "F-unpinned",
+            severity: "P1",
+            title: "Unpinned finding target",
+            evidence: { summary: "The target is not in the review mission." },
+            required_action: "Link the finding to an exact pinned target.",
+            link,
+          },
+        ],
+      }),
+    });
+    const before = await fixture.repository.read(
+      fixture.workItem.goal.work_item_id,
+    );
+    let commandRuns = 0;
+    const runner: VerificationRunner = {
+      async run(command) {
+        commandRuns += 1;
+        return passingRunner.run(command);
+      },
+    };
+
+    const imported = await createController(
+      fixture.repository,
+      passingGit,
+      runner,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.manifest).toBeNull();
+    expect(imported.evidence).toMatchObject({ outcome: "rejected" });
+    expect(imported.evidence.reasons.join(" ")).toContain(reason);
+    expect(imported.work_item).toEqual(before);
+    expect(commandRuns).toBe(0);
+    expect(fixture.evidenceWrites.count).toBe(1);
+    expect(
+      (await fixture.repository.read(fixture.workItem.goal.work_item_id))?.state
+        .active_run,
+    ).toBeUndefined();
+    expect(
+      await readdir(
+        join(
+          fixture.repository.workspaceRoot,
+          ".founder",
+          "work-items",
+          fixture.workItem.goal.work_item_id,
+        ),
+      ),
+    ).not.toContain(".controller.lock");
+  });
+
   it("preserves malformed review output as replayable rejected evidence only", async () => {
     const fixture = await createReviewImportFixture({ resultSource: "{invalid" });
     const before = await fixture.repository.read(
@@ -1208,6 +1292,20 @@ describe("WorkItemController", () => {
     expect(imported.work_item).toEqual(before);
     expect(await fixture.repository.read(fixture.workItem.goal.work_item_id))
       .toEqual(before);
+    expect(
+      (await fixture.repository.read(fixture.workItem.goal.work_item_id))?.state
+        .active_run,
+    ).toBeUndefined();
+    expect(
+      await readdir(
+        join(
+          fixture.repository.workspaceRoot,
+          ".founder",
+          "work-items",
+          fixture.workItem.goal.work_item_id,
+        ),
+      ),
+    ).not.toContain(".controller.lock");
   });
 
   it.each([
