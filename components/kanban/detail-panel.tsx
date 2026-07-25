@@ -18,7 +18,9 @@ import {
 import type {
   MissionCompilation,
   PortfolioImportResult,
+  PortfolioReviewImportResult,
   PortfolioRetryResult,
+  ReviewMissionCompilation,
 } from "@/src/application/portfolio";
 import {
   INBOX_SOURCE_ID,
@@ -28,6 +30,7 @@ import {
 import type {
   CommandEvidenceRecord,
   ImportEvidenceOutcome,
+  ReviewFinding,
   StoredImportEvidence,
 } from "@/src/domain/result";
 import {
@@ -42,6 +45,7 @@ import {
   detailPanelModeForItem,
   missionHandoffModeForItem,
   nextActionForPhase,
+  reviewHandoffForItem,
   type BoardColumnId,
 } from "@/src/presentation/board";
 
@@ -73,6 +77,21 @@ interface MissionImportState {
   result: PortfolioImportResult["evidence"];
 }
 
+interface ReviewMissionCompilationState {
+  itemKey: string;
+  result: ReviewMissionCompilation;
+}
+
+interface ReviewMissionImportState {
+  itemKey: string;
+  result: PortfolioReviewImportResult;
+}
+
+interface ReviewAttestationState {
+  itemKey: string;
+  checked: boolean;
+}
+
 interface RunEvidenceState {
   itemKey: string;
   result: StoredImportEvidence[];
@@ -91,7 +110,7 @@ interface RunEvidenceSectionProps {
   loading: boolean;
   error: string | null;
   expandedRunIds: Set<string>;
-  onToggle: (importRunId: string) => void;
+  onToggle: (phase: "execute" | "review", importRunId: string) => void;
 }
 
 const capturedAtFormatter = new Intl.DateTimeFormat(undefined, {
@@ -199,6 +218,31 @@ function outcomeClassName(outcome: ImportEvidenceOutcome): string {
   return outcome === "applied" ? "text-success" : "text-destructive";
 }
 
+function findingSeverityClassName(severity: ReviewFinding["severity"]): string {
+  if (severity === "P0" || severity === "P1") {
+    return "text-destructive";
+  }
+  if (severity === "P2") {
+    return "text-[var(--chart-3)]";
+  }
+  return "text-muted-foreground";
+}
+
+function findingLinkLabel(link: ReviewFinding["link"]): string {
+  switch (link.type) {
+    case "acceptance_criteria":
+      return `Acceptance criterion · ${link.criterion}`;
+    case "non_goals":
+      return `Non-goal · ${link.non_goal}`;
+    case "defect":
+      return `Defect · ${link.evidence_summary}`;
+    case "security":
+      return `Security · ${link.evidence_summary}`;
+    case "deterministic_checks":
+      return `Deterministic check · ${link.command}`;
+  }
+}
+
 function commandStatusClassName(status: CommandEvidenceRecord["status"]): string {
   if (status === "passed") {
     return "text-success";
@@ -272,17 +316,25 @@ function RunEvidenceSection({
       {evidence.length > 0 ? (
         <div className="mt-3 space-y-2">
           {evidence.map((entry, index) => {
-            const { evidence: run, verification } = entry;
-            const expanded = expandedRunIds.has(run.import_run_id);
-            const detailsId = `${fieldId}-run-${run.import_run_id}`;
+            const { evidence: run, verification, submission } = entry;
+            const evidenceKey = `${run.phase}:${run.import_run_id}`;
+            const expanded = expandedRunIds.has(evidenceKey);
+            const detailsId = `${fieldId}-run-${run.phase}-${run.import_run_id}`;
             const shortRunId = run.import_run_id.slice(0, 12);
+            const reviewSubmission =
+              submission && "review_mission_content_sha256" in submission
+                ? submission
+                : null;
 
             return (
-              <article key={run.import_run_id} className="border bg-background">
+              <article key={evidenceKey} className="border bg-background">
                 <div className="p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+                          {run.phase === "execute" ? "Execute" : "Review"}
+                        </span>
                         <span
                           className={`text-xs font-medium ${outcomeClassName(run.outcome)}`}
                         >
@@ -300,7 +352,7 @@ function RunEvidenceSection({
                       >
                         {run.result_commit === null
                           ? "No result commit"
-                          : `Result commit · ${run.result_commit.slice(0, 12)}`}
+                          : `${run.phase === "review" ? "Subject" : "Result"} commit · ${run.result_commit.slice(0, 12)}`}
                       </p>
                     </div>
                     <button
@@ -308,7 +360,7 @@ function RunEvidenceSection({
                       aria-expanded={expanded}
                       aria-controls={detailsId}
                       aria-label={`${expanded ? "Collapse" : "Expand"} ${outcomeLabel(run.outcome).toLowerCase()} run ${shortRunId}`}
-                      onClick={() => onToggle(run.import_run_id)}
+                      onClick={() => onToggle(run.phase, run.import_run_id)}
                       className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border bg-secondary px-2.5 text-[11px] font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                     >
                       {expanded ? "Hide details" : "View details"}
@@ -355,7 +407,7 @@ function RunEvidenceSection({
                         <ul className="mt-2 space-y-1.5 text-xs leading-5">
                           {run.reasons.map((reason, reasonIndex) => (
                             <li
-                              key={`${run.import_run_id}-reason-${reasonIndex}`}
+                              key={`${evidenceKey}:reason:${reasonIndex}`}
                               className="border-l-2 border-destructive pl-2.5"
                             >
                               {reason}
@@ -365,21 +417,96 @@ function RunEvidenceSection({
                       </div>
                     ) : null}
 
-                    <div>
-                      <h4 className="text-[11px] font-medium text-muted-foreground">
-                        Commands
-                      </h4>
-                      {verification.length === 0 ? (
-                        <p className="mt-2 text-xs text-muted-foreground">
-                          No verification commands recorded.
+                    {run.phase === "review" ? (
+                      <div>
+                        <h4 className="text-[11px] font-medium text-muted-foreground">
+                          Review result
+                        </h4>
+                        {reviewSubmission === null ? (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            Structured review output is unavailable for this rejected import.
+                          </p>
+                        ) : (
+                          <div className="mt-2 space-y-3">
+                            <div className="border-l-2 border-border bg-muted/40 px-3 py-2.5">
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="text-xs font-medium">Verdict</span>
+                                <span
+                                  className={`text-xs font-medium ${
+                                    reviewSubmission.verdict === "clean"
+                                      ? "text-success"
+                                      : "text-destructive"
+                                  }`}
+                                >
+                                  {reviewSubmission.verdict === "clean"
+                                    ? "Clean"
+                                    : `${reviewSubmission.findings.length} finding${reviewSubmission.findings.length === 1 ? "" : "s"}`}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                                {reviewSubmission.summary}
+                              </p>
+                            </div>
+                            {reviewSubmission.findings.map((finding) => (
+                              <article
+                                key={`${evidenceKey}:${finding.finding_id}`}
+                                className="border-l-2 border-border px-3 py-2.5"
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <p className="text-xs font-medium">
+                                      {finding.title}
+                                    </p>
+                                    <p className="mt-1 text-[11px] text-muted-foreground">
+                                      {findingLinkLabel(finding.link)}
+                                    </p>
+                                  </div>
+                                  <span
+                                    className={`shrink-0 text-[11px] font-semibold ${findingSeverityClassName(finding.severity)}`}
+                                  >
+                                    {finding.severity}
+                                  </span>
+                                </div>
+                                <p className="mt-2 text-xs leading-5">
+                                  {finding.evidence.summary}
+                                </p>
+                                {finding.evidence.path ? (
+                                  <p className="mt-1 break-all text-[11px] text-muted-foreground">
+                                    {finding.evidence.path}
+                                  </p>
+                                ) : null}
+                                <div className="mt-2 border-t pt-2">
+                                  <p className="text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+                                    Required action
+                                  </p>
+                                  <p className="mt-1 text-xs leading-5">
+                                    {finding.required_action}
+                                  </p>
+                                </div>
+                              </article>
+                            ))}
+                          </div>
+                        )}
+                        <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
+                          No commands were rerun during review import.
                         </p>
-                      ) : (
-                        <div className="mt-2 space-y-3">
-                          {verification.map((command, commandIndex) => (
-                            <div
-                              key={`${run.import_run_id}-${commandIndex}`}
-                              className="border-l-2 border-border bg-muted/40 px-3 py-2.5"
-                            >
+                      </div>
+                    ) : (
+                      <div>
+                        <h4 className="text-[11px] font-medium text-muted-foreground">
+                          Commands
+                        </h4>
+                        {verification.length === 0 ? (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            No verification commands recorded.
+                          </p>
+                        ) : (
+                          <div className="mt-2 space-y-3">
+                            {verification.map((command, commandIndex) => (
+                              <div
+                                key={`${evidenceKey}:command:${commandIndex}`}
+                                className="border-l-2 border-border bg-muted/40 px-3 py-2.5"
+                              >
                               <div className="flex items-center justify-between gap-3 text-xs">
                                 <span className="font-medium">{command.name}</span>
                                 <span className={commandStatusClassName(command.status)}>
@@ -415,11 +542,12 @@ function RunEvidenceSection({
                                   </pre>
                                 </div>
                               </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </article>
@@ -469,10 +597,18 @@ export function DetailPanel({
   const [compilingMission, setCompilingMission] = useState(false);
   const [importingResult, setImportingResult] = useState(false);
   const [startingRepair, setStartingRepair] = useState(false);
+  const [compilingReviewMission, setCompilingReviewMission] = useState(false);
+  const [importingReviewResult, setImportingReviewResult] = useState(false);
   const [missionCompilationState, setMissionCompilationState] =
     useState<MissionCompilationState | null>(null);
   const [missionImportState, setMissionImportState] =
     useState<MissionImportState | null>(null);
+  const [reviewMissionCompilationState, setReviewMissionCompilationState] =
+    useState<ReviewMissionCompilationState | null>(null);
+  const [reviewMissionImportState, setReviewMissionImportState] =
+    useState<ReviewMissionImportState | null>(null);
+  const [reviewAttestationState, setReviewAttestationState] =
+    useState<ReviewAttestationState | null>(null);
   const [copiedMissionKey, setCopiedMissionKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [runEvidenceState, setRunEvidenceState] =
@@ -512,6 +648,15 @@ export function DetailPanel({
     allowedScopeValues.length > 0 &&
     reviewReadyValues.length > 0;
   const missionItemKey = [
+    "execute",
+    item.source_id,
+    goal.work_item_id,
+    goalContract?.goal_version,
+    state.input_revision,
+    state.attempt,
+  ].join(":");
+  const reviewMissionItemKey = [
+    "review",
     item.source_id,
     goal.work_item_id,
     goalContract?.goal_version,
@@ -535,6 +680,29 @@ export function DetailPanel({
     mode === "governed" && runEvidenceState?.itemKey === runEvidenceItemKey
       ? runEvidenceState.result
       : [];
+  const reviewHandoff = reviewHandoffForItem(item, runEvidence);
+  const reviewEligible = reviewHandoff.mode === "active";
+  const reviewAttested =
+    reviewAttestationState?.itemKey === reviewMissionItemKey &&
+    reviewAttestationState.checked;
+  const reviewBusy = compilingReviewMission || importingReviewResult;
+  const reviewMissionCompilation =
+    reviewMissionCompilationState?.itemKey === reviewMissionItemKey
+      ? reviewMissionCompilationState.result
+      : null;
+  const reviewMissionImport =
+    reviewMissionImportState?.itemKey === reviewMissionItemKey
+      ? reviewMissionImportState.result
+      : null;
+  const appliedExecuteSubject = runEvidence.find(
+    (stored) =>
+      stored.evidence.phase === "execute" &&
+      stored.evidence.outcome === "applied" &&
+      stored.evidence.identity.work_item_id === goal.work_item_id &&
+      stored.evidence.identity.goal_version === state.goal_version &&
+      stored.evidence.identity.input_revision === state.input_revision &&
+      stored.evidence.identity.attempt === state.attempt,
+  );
   const runEvidenceLoading =
     mode === "governed" &&
     (runEvidenceState?.itemKey !== runEvidenceItemKey ||
@@ -580,16 +748,17 @@ export function DetailPanel({
   }, [runEvidenceItemKey]);
 
   const handleToggleRunEvidence = useCallback(
-    (importRunId: string) => {
+    (phase: "execute" | "review", importRunId: string) => {
       setExpandedRunEvidenceState((current) => {
+        const evidenceKey = `${phase}:${importRunId}`;
         const runIds =
           current?.itemKey === runEvidenceItemKey
             ? new Set(current.runIds)
             : new Set<string>();
-        if (runIds.has(importRunId)) {
-          runIds.delete(importRunId);
+        if (runIds.has(evidenceKey)) {
+          runIds.delete(evidenceKey);
         } else {
-          runIds.add(importRunId);
+          runIds.add(evidenceKey);
         }
         return { itemKey: runEvidenceItemKey, runIds };
       });
@@ -815,6 +984,93 @@ export function DetailPanel({
     }
   }
 
+  async function handleCompileReviewMission() {
+    if (!reviewAttested) {
+      return;
+    }
+    setCompilingReviewMission(true);
+    setError(null);
+    setCopiedMissionKey(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/review`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ independence_attested: true }),
+        },
+      );
+      const body = (await response.json()) as
+        | ReviewMissionCompilation
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The review mission could not be compiled."
+            : "The review mission could not be compiled.",
+        );
+        return;
+      }
+
+      setReviewMissionCompilationState({
+        itemKey: reviewMissionItemKey,
+        result: body as ReviewMissionCompilation,
+      });
+    } catch {
+      setError(
+        "The review mission could not be compiled. Check the local server and try again.",
+      );
+    } finally {
+      setCompilingReviewMission(false);
+    }
+  }
+
+  async function handleImportReviewResult() {
+    setImportingReviewResult(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/review/import`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | PortfolioReviewImportResult
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The review result could not be imported."
+            : "The review result could not be imported.",
+        );
+        return;
+      }
+
+      const imported = body as PortfolioReviewImportResult;
+      setReviewMissionImportState({
+        itemKey: reviewMissionItemKey,
+        result: imported,
+      });
+      markRunEvidenceLoading();
+      await loadRunEvidence();
+      onUpdated(
+        imported,
+        imported.evidence.outcome === "applied"
+          ? imported.result?.verdict === "findings"
+            ? "Review findings imported; workflow state is unchanged."
+            : "Clean review imported; workflow state is unchanged."
+          : "Review output was rejected; workflow state is unchanged.",
+      );
+    } catch {
+      setError(
+        "The review result could not be imported. Check the local server and try again.",
+      );
+    } finally {
+      setImportingReviewResult(false);
+    }
+  }
+
   async function handleStartRepair() {
     setStartingRepair(true);
     setError(null);
@@ -851,16 +1107,15 @@ export function DetailPanel({
     }
   }
 
-  async function handleCopyLaunchInstruction() {
-    if (missionCompilation === null) {
-      return;
-    }
-
+  async function handleCopyLaunchInstruction(
+    compilation: MissionCompilation | ReviewMissionCompilation,
+    itemKey: string,
+  ) {
     try {
       await navigator.clipboard.writeText(
-        `Open the workspace in your chosen agent and follow ${missionCompilation.task_path}.`,
+        `Open the workspace in your chosen agent and follow ${compilation.task_path}.`,
       );
-      setCopiedMissionKey(missionItemKey);
+      setCopiedMissionKey(itemKey);
     } catch {
       setError("The launch instruction could not be copied.");
     }
@@ -1241,7 +1496,12 @@ export function DetailPanel({
                           <div className="mt-4 flex items-center gap-3">
                             <button
                               type="button"
-                              onClick={() => void handleCopyLaunchInstruction()}
+                              onClick={() =>
+                                void handleCopyLaunchInstruction(
+                                  missionCompilation,
+                                  missionItemKey,
+                                )
+                              }
                               className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                             >
                               Copy launch instruction
@@ -1252,6 +1512,177 @@ export function DetailPanel({
                               aria-live="polite"
                             >
                               {copiedMissionKey === missionItemKey ? "Copied" : ""}
+                            </span>
+                          </div>
+                        </div>
+                      ) : null}
+                    </section>
+                  ) : null}
+
+                  {reviewEligible && appliedExecuteSubject ? (
+                    <section
+                      aria-labelledby={`${fieldId}-review-handoff`}
+                      className="border-y py-4"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h3
+                            id={`${fieldId}-review-handoff`}
+                            className="text-xs font-medium"
+                          >
+                            Review handoff
+                          </h3>
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            Assess the pinned execute result without editing files or rerunning checks.
+                          </p>
+                        </div>
+                        <span className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+                          Read only
+                        </span>
+                      </div>
+
+                      <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-y py-3 text-[11px]">
+                        <div>
+                          <dt className="text-muted-foreground">Subject commit</dt>
+                          <dd
+                            className="mt-0.5 truncate"
+                            title={appliedExecuteSubject.evidence.result_commit ?? undefined}
+                          >
+                            {appliedExecuteSubject.evidence.result_commit?.slice(0, 12) ??
+                              "Unavailable"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted-foreground">Execute mission</dt>
+                          <dd
+                            className="mt-0.5 truncate"
+                            title={appliedExecuteSubject.evidence.mission_content_sha256}
+                          >
+                            {appliedExecuteSubject.evidence.mission_content_sha256.slice(
+                              0,
+                              12,
+                            )}
+                          </dd>
+                        </div>
+                        <div className="col-span-2">
+                          <dt className="text-muted-foreground">Immutable mission</dt>
+                          <dd className="mt-0.5 break-all leading-5">
+                            {`.founder/missions/${goal.work_item_id}/execute-${appliedExecuteSubject.evidence.identity.goal_version}-${appliedExecuteSubject.evidence.identity.input_revision}-${appliedExecuteSubject.evidence.identity.attempt}/mission.json`}
+                          </dd>
+                        </div>
+                        <div className="col-span-2">
+                          <dt className="text-muted-foreground">Immutable evidence</dt>
+                          <dd className="mt-0.5 break-all leading-5">
+                            {appliedExecuteSubject.summary.evidence_path}
+                          </dd>
+                        </div>
+                      </dl>
+
+                      <label className="mt-3 flex cursor-pointer items-start gap-2.5 text-xs leading-5">
+                        <input
+                          type="checkbox"
+                          checked={reviewAttested}
+                          onChange={(event) =>
+                            setReviewAttestationState({
+                              itemKey: reviewMissionItemKey,
+                              checked: event.target.checked,
+                            })
+                          }
+                          className="mt-0.5 size-4 accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                        />
+                        <span>
+                          I attest that this reviewer is independent from the execute writer.
+                        </span>
+                      </label>
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          disabled={reviewBusy || !reviewAttested}
+                          onClick={() => void handleCompileReviewMission()}
+                          className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {compilingReviewMission
+                            ? "Compiling…"
+                            : "Compile review mission"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={reviewBusy}
+                          onClick={() => void handleImportReviewResult()}
+                          className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {importingReviewResult
+                            ? "Importing…"
+                            : "Import review findings"}
+                        </button>
+                      </div>
+
+                      {reviewMissionImport ? (
+                        <div
+                          className={`mt-4 border-l-2 px-3 py-3 text-xs ${
+                            reviewMissionImport.evidence.outcome === "applied"
+                              ? "border-success bg-success/10"
+                              : "border-destructive bg-destructive/10"
+                          }`}
+                          role="status"
+                        >
+                          <p className="font-medium">
+                            {reviewMissionImport.evidence.outcome === "applied"
+                              ? reviewMissionImport.result?.verdict === "findings"
+                                ? `${reviewMissionImport.result.findings.length} review finding${reviewMissionImport.result.findings.length === 1 ? "" : "s"} imported`
+                                : "Clean review imported"
+                              : "Review import rejected"}
+                          </p>
+                          <p className="mt-1 leading-5 text-muted-foreground">
+                            Workflow state remains Review · Active.
+                          </p>
+                        </div>
+                      ) : null}
+
+                      {reviewMissionCompilation ? (
+                        <div className="mt-4 border-l-2 border-border bg-background px-3 py-3">
+                          <dl className="space-y-3 text-xs">
+                            <div>
+                              <dt className="text-muted-foreground">TASK.md</dt>
+                              <dd className="mt-1 break-all leading-5">
+                                {reviewMissionCompilation.task_path}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">Mission JSON</dt>
+                              <dd className="mt-1 break-all leading-5">
+                                {reviewMissionCompilation.mission_path}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">Package hash</dt>
+                              <dd className="mt-1 break-all text-[11px] leading-5">
+                                {reviewMissionCompilation.mission.content_sha256}
+                              </dd>
+                            </div>
+                          </dl>
+                          <div className="mt-4 flex items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void handleCopyLaunchInstruction(
+                                  reviewMissionCompilation,
+                                  reviewMissionItemKey,
+                                )
+                              }
+                              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                            >
+                              Copy review instruction
+                            </button>
+                            <span
+                              className="text-[11px] text-muted-foreground"
+                              role="status"
+                              aria-live="polite"
+                            >
+                              {copiedMissionKey === reviewMissionItemKey
+                                ? "Copied"
+                                : ""}
                             </span>
                           </div>
                         </div>
