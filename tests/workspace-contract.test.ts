@@ -1020,6 +1020,44 @@ describe("ProductWorkspace", () => {
     expect(
       (await readdir(join(root, ".founder", "missions", firstId))).sort(),
     ).toEqual(["execute-1-1-0", "review-1-1-0"]);
+
+    const reviewMissionSource = await readFile(first.mission_path, "utf8");
+    const reviewTaskSource = await readFile(first.task_path, "utf8");
+    await expect(
+      workspace.writeReviewMissionPackage(
+        reviewIdentity,
+        subject.review_subject,
+        (paths) =>
+          compileReviewMission({
+            work_item: reviewItem,
+            controller_run: {
+              ...reviewRun,
+              run_id: secondRunId,
+              idempotency_key: `${firstId}:review:1:1:0:divergent`,
+            },
+            review_subject: subject.review_subject,
+            paths,
+            independence_attested: true,
+          }),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    expect(await readFile(first.mission_path, "utf8")).toBe(
+      reviewMissionSource,
+    );
+    expect(await readFile(first.task_path, "utf8")).toBe(reviewTaskSource);
+
+    await writeFile(
+      join(
+        root,
+        subject.review_subject.execute_evidence_path,
+        "submission.json",
+      ),
+      `${submissionSource} `,
+      "utf8",
+    );
+    await expect(
+      workspace.readAppliedExecuteReviewSubject(missionIdentity()),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
   });
 
   it("fails closed when applied execute evidence is absent or duplicated", async () => {
@@ -1185,11 +1223,13 @@ describe("ProductWorkspace", () => {
       reasons: [],
     };
 
-    const summary = await workspace.writeImportEvidence({
+    const input = {
       submission_source: submissionSource,
       evidence,
       verification: [],
-    });
+    };
+    const summary = await workspace.writeImportEvidence(input);
+    expect(await workspace.writeImportEvidence(input)).toEqual(summary);
     expect(summary.phase).toBe("review");
     expect(await workspace.readImportEvidence(identity, evidence.import_run_id))
       .toMatchObject({ evidence, verification: [] });
