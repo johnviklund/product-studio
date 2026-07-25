@@ -1287,6 +1287,25 @@ describe("PortfolioService", () => {
     );
     await service.importResult(sourceId, created.goal.work_item_id);
 
+    const unrelatedRoot = await createWorkspace("Unrelated Review Source");
+    const unrelated = await service.register({ workspace_path: unrelatedRoot });
+    await expect(
+      service.compileReviewMission(
+        unrelated.workspace.workspace_id,
+        created.goal.work_item_id,
+        { independence_attested: true },
+      ),
+    ).rejects.toBeInstanceOf(PortfolioWorkItemNotFoundError);
+    await expect(
+      service.importReviewResult(
+        unrelated.workspace.workspace_id,
+        created.goal.work_item_id,
+      ),
+    ).rejects.toBeInstanceOf(PortfolioWorkItemNotFoundError);
+    await expect(
+      readdir(join(unrelatedRoot, ".founder", "missions")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
     await expect(
       service.compileReviewMission(
         sourceId,
@@ -1305,6 +1324,12 @@ describe("PortfolioService", () => {
       { independence_attested: true },
     );
     expect(second).toEqual(first);
+    expect(await readFile(second.mission_path, "utf8")).toBe(
+      await readFile(first.mission_path, "utf8"),
+    );
+    expect(await readFile(second.task_path, "utf8")).toBe(
+      await readFile(first.task_path, "utf8"),
+    );
     expect(first.mission).toMatchObject({
       identity: { phase: "review" },
       independence_attested: true,
