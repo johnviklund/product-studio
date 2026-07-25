@@ -138,6 +138,13 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Traceability:** PRD §8.6, FR-010.
 - **Dependencies:** 2.2–2.5.
 - **Completion signal:** An independent reviewer returns criteria-linked findings for the exact result under review without modifying the implementation or authorizing completion.
+- **Status:** Delivered — commits `202fbd2`–`2acb835` (phase-qualified v3 mission/result contracts;
+  immutable applied-execute review subject sourcing; strict discriminated v2 review-result schema
+  with typed findings; lease-guarded, no-transition review import with HEAD/clean-tree binding;
+  source-qualified review eligibility/compile/import; review-handoff board projection and
+  attested DetailPanel UI; phase-discriminated run-evidence history). Deterministic verification
+  is green: lint, typecheck, 244 tests, and production build. Phase 4 review passed clean — ship
+  as-is, one wontfix P3; see `WORKLOG.md`.
 
 ### 3.2 Bounded patch loop and attention inbox
 

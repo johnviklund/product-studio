@@ -17,6 +17,20 @@ delivery phases.
 - **Boundary:** This is an alternate view over Product Studio's existing workflow state and
   evidence, not a replacement for the Kanban or a second workflow.
 
+### Enforce writer/reviewer model independence for review missions
+
+- **Status:** Revisit once execution stops being fully manual/BYOA (e.g. a managed runner or
+  mission launcher captures model identity automatically).
+- **Idea:** ROADMAP 3.1 (Independent review mission and finding contract) trusts the founder to
+  use a genuinely different model for review than for execution (FR-010's "different eligible
+  model or vendor from the writer"), with no system check. Once model identity can be captured
+  reliably rather than self-reported, add a required model-identity field to the writer's
+  external-result submission and the review-mission compile request, and fail-closed block
+  compiling the review mission if the reviewer's declared model exactly matches the writer's.
+  Same vendor is fine; same model is not.
+- **Boundary:** Independence enforcement only — not a general model-routing or evaluation system
+  (that's ROADMAP Milestone 6).
+
 ## Small UI Changes
 
 - **Replace the free-text tags box with a token/chip picker (capture panel + editor).**

@@ -5,6 +5,29 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-25 · Independent review mission and finding contract (roadmap 3.1) · Copilot/Codex mixed
+- Added a phase-qualified v3 mission/result contract (`MissionPhase = "execute" | "review"`),
+  advancing mission/result-contract to v3 and submission/evidence to v2 in lockstep; phase-prefixed
+  `.founder/` paths so execute and review artifacts for one tuple never collide.
+- Built an immutable applied-execute review-subject reader (fail-closed on 0/>1 matches, binds
+  mission hash/git base/accepted commit/command evidence) and a strict discriminated review-result
+  schema with typed findings (acceptance_criteria/non_goals/defect/security/deterministic_checks)
+  verified against the exact pinned goal and command evidence.
+- Added a lease-guarded, no-transition `importReviewResult`: evidence written before a
+  state-preserving commit, no verification commands run, rejects on moved HEAD or a dirty
+  non-`.founder` worktree, idempotent replay, lease released on every path — leaving
+  `review`/`active` and `workflow-policy.ts` untouched.
+- Wired source-qualified review eligibility/compile/import through the portfolio service, new
+  `mission/review` + `mission/review/import` API routes, a fail-closed board review-handoff
+  projection, and an attested DetailPanel review UI (verdict is display-only; no transition acts
+  on it).
+- Verified: lint, typecheck, 244 tests, and production build pass; Phase 4 review clean (no
+  P0–P2, one wontfix P3, no patch plan required).
+- Commits: 202fbd2 cf73f90 7fa485e 5b1084b e5f5ad0 47a1dc6 f516034 b15b476 740dfdf c80b9e6 a24eccf 1a82d25 e35fc91 2acb835
+- Why: delivers roadmap 3.1's independent review loop — a reviewer can assess the exact accepted
+  execute result and return structured findings without ever modifying the workspace or
+  authorizing completion; 3.2 owns routing on those findings.
+
 ## 2026-07-24 · Clear goal contracts and unified card editing (roadmap 2.5) · Codex GPT-5.6
 - Replaced the flat v1 goal contract with a strict v2 work-item goal and nested version-1 contract
   carrying purpose, acceptance criteria, non-goals, allowed scope, and review readiness. Lightweight
