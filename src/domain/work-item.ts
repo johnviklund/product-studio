@@ -53,6 +53,16 @@ export const CAPTURE_KINDS = ["idea", "todo"] as const;
 
 export const WORK_ITEM_PRIORITIES = ["low", "normal", "high"] as const;
 
+export const WORK_ITEM_ATTENTION_KINDS = [
+  "spec_approval",
+  "plan_approval",
+  "patch_plan_approval",
+  "ambiguous_goal",
+  "cycle_limit",
+  "missing_permission",
+  "review_ready",
+] as const;
+
 export const CONTROLLER_RUN_OUTCOMES = [
   "pending",
   "applied",
@@ -80,6 +90,8 @@ export type WorkItemPhase = (typeof WORK_ITEM_PHASES)[number];
 export type WorkItemStatus = (typeof WORK_ITEM_STATUSES)[number];
 export type CaptureKind = (typeof CAPTURE_KINDS)[number];
 export type WorkItemPriority = (typeof WORK_ITEM_PRIORITIES)[number];
+export type WorkItemAttentionKind =
+  (typeof WORK_ITEM_ATTENTION_KINDS)[number];
 export type ControllerRunOutcome = (typeof CONTROLLER_RUN_OUTCOMES)[number];
 export type ControllerConflictKind =
   (typeof CONTROLLER_CONFLICT_KINDS)[number];
@@ -126,8 +138,35 @@ export interface WorkItemCapture {
   captured_at: string;
 }
 
+export interface GovernedTuple {
+  goal_version: number;
+  input_revision: number;
+  attempt: number;
+  patch_cycle: number;
+}
+
+export interface WorkItemAttentionPins {
+  artifact_paths: [string, ...string[]];
+  evidence_paths: string[];
+  git_commit?: string;
+  mission_content_sha256?: string;
+  result_content_sha256?: string;
+}
+
+interface WorkItemAttentionBase {
+  question: string;
+  recommendation: string;
+  created_at: string;
+  governed_tuple: GovernedTuple;
+  pins: WorkItemAttentionPins;
+}
+
+export type WorkItemAttention = {
+  [TKind in WorkItemAttentionKind]: WorkItemAttentionBase & { kind: TKind };
+}[WorkItemAttentionKind];
+
 export interface WorkItemState {
-  schema_version: 1;
+  schema_version: 2;
   work_item_id: string;
   phase: WorkItemPhase;
   status: WorkItemStatus;
@@ -135,6 +174,8 @@ export interface WorkItemState {
   goal_version?: number;
   input_revision?: number;
   attempt?: number;
+  patch_cycle?: number;
+  attention?: WorkItemAttention;
   active_run?: ActiveRun;
 }
 
@@ -190,7 +231,7 @@ export interface ControllerTransitionInput {
   target_status: WorkItemStatus;
   expected_phase: WorkItemPhase;
   expected_status: WorkItemStatus;
-  expected_schema_version: 1;
+  expected_schema_version: 2;
   expected_goal_version: number;
   expected_input_revision: number;
   attempt: number;
@@ -199,7 +240,7 @@ export interface ControllerTransitionInput {
 export interface ImportExternalResultInput {
   expected_phase: "execute";
   expected_status: "active";
-  expected_schema_version: 1;
+  expected_schema_version: 2;
   expected_goal_version: number;
   expected_input_revision: number;
   attempt: number;
@@ -208,7 +249,7 @@ export interface ImportExternalResultInput {
 export interface ImportReviewResultInput {
   expected_phase: "review";
   expected_status: "active";
-  expected_schema_version: 1;
+  expected_schema_version: 2;
   expected_goal_version: number;
   expected_input_revision: number;
   attempt: number;
@@ -217,7 +258,7 @@ export interface ImportReviewResultInput {
 export interface RetryExecuteAttemptInput {
   expected_phase: "execute";
   expected_status: "blocked";
-  expected_schema_version: 1;
+  expected_schema_version: 2;
   expected_goal_version: number;
   expected_input_revision: number;
   attempt: number;
@@ -464,7 +505,111 @@ export const activeRunSchema: z.ZodType<ActiveRun> = z.strictObject({
   acquired_at: z.iso.datetime(),
 });
 
-export const workItemStateSchema: z.ZodType<WorkItemState> = z
+const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const gitCommitSchema = z.string().regex(/^[0-9a-f]{40}$/);
+const nonEmptyPathListSchema: z.ZodType<[string, ...string[]]> = z
+  .tuple([workspaceRelativePosixPathSchema], workspaceRelativePosixPathSchema)
+  .refine(
+    (paths) => new Set(paths).size === paths.length,
+    "artifact_paths must not contain duplicates",
+  );
+const evidencePathListSchema = z
+  .array(workspaceRelativePosixPathSchema)
+  .refine(
+    (paths) => new Set(paths).size === paths.length,
+    "evidence_paths must not contain duplicates",
+  );
+
+export const governedTupleSchema: z.ZodType<GovernedTuple> = z.strictObject({
+  goal_version: positiveSafeIntegerSchema,
+  input_revision: positiveSafeIntegerSchema,
+  attempt: nonNegativeSafeIntegerSchema,
+  patch_cycle: nonNegativeSafeIntegerSchema,
+});
+
+export const workItemAttentionPinsSchema: z.ZodType<WorkItemAttentionPins> =
+  z.strictObject({
+    artifact_paths: nonEmptyPathListSchema,
+    evidence_paths: evidencePathListSchema,
+    git_commit: gitCommitSchema.optional(),
+    mission_content_sha256: sha256Schema.optional(),
+    result_content_sha256: sha256Schema.optional(),
+  });
+
+const attentionRecordFields = {
+  question: nonEmptyIdentifierSchema,
+  recommendation: nonEmptyIdentifierSchema,
+  created_at: z.iso.datetime(),
+  governed_tuple: governedTupleSchema,
+  pins: workItemAttentionPinsSchema,
+};
+
+export const workItemAttentionSchema: z.ZodType<WorkItemAttention> =
+  z.discriminatedUnion("kind", [
+    z.strictObject({
+      kind: z.literal("spec_approval"),
+      ...attentionRecordFields,
+    }),
+    z.strictObject({
+      kind: z.literal("plan_approval"),
+      ...attentionRecordFields,
+    }),
+    z.strictObject({
+      kind: z.literal("patch_plan_approval"),
+      ...attentionRecordFields,
+    }),
+    z.strictObject({
+      kind: z.literal("ambiguous_goal"),
+      ...attentionRecordFields,
+    }),
+    z.strictObject({
+      kind: z.literal("cycle_limit"),
+      ...attentionRecordFields,
+    }),
+    z.strictObject({
+      kind: z.literal("missing_permission"),
+      ...attentionRecordFields,
+    }),
+    z.strictObject({
+      kind: z.literal("review_ready"),
+      ...attentionRecordFields,
+    }),
+  ]);
+
+interface VersionedStateFields {
+  goal_version?: number;
+  input_revision?: number;
+  attempt?: number;
+}
+
+function validateVersionedStateFields(
+  state: VersionedStateFields,
+  context: z.RefinementCtx,
+): void {
+  const versionedFields = [
+    "goal_version",
+    "input_revision",
+    "attempt",
+  ] as const;
+  const presentFields = versionedFields.filter(
+    (field) => state[field] !== undefined,
+  );
+
+  if (presentFields.length > 0 && presentFields.length < versionedFields.length) {
+    for (const field of versionedFields) {
+      if (state[field] === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: `${field} is required when controller state is present`,
+          path: [field],
+          input: state,
+        });
+      }
+    }
+  }
+}
+
+const legacyWorkItemStateSchema = z
   .strictObject({
     schema_version: z.literal(1),
     work_item_id: workItemIdSchema,
@@ -476,29 +621,99 @@ export const workItemStateSchema: z.ZodType<WorkItemState> = z
     attempt: nonNegativeSafeIntegerSchema.optional(),
     active_run: activeRunSchema.optional(),
   })
-  .superRefine((state, context) => {
-    const versionedFields = [
-      "goal_version",
-      "input_revision",
-      "attempt",
-    ] as const;
-    const presentFields = versionedFields.filter(
-      (field) => state[field] !== undefined,
-    );
+  .superRefine(validateVersionedStateFields);
 
-    if (presentFields.length > 0 && presentFields.length < versionedFields.length) {
-      for (const field of versionedFields) {
-        if (state[field] === undefined) {
+export const workItemStateSchema: z.ZodType<WorkItemState> = z
+  .strictObject({
+    schema_version: z.literal(2),
+    work_item_id: workItemIdSchema,
+    phase: z.enum(WORK_ITEM_PHASES),
+    status: z.enum(WORK_ITEM_STATUSES),
+    updated_at: z.iso.datetime(),
+    goal_version: positiveSafeIntegerSchema.optional(),
+    input_revision: positiveSafeIntegerSchema.optional(),
+    attempt: nonNegativeSafeIntegerSchema.optional(),
+    patch_cycle: nonNegativeSafeIntegerSchema.optional(),
+    attention: workItemAttentionSchema.optional(),
+    active_run: activeRunSchema.optional(),
+  })
+  .superRefine((state, context) => {
+    validateVersionedStateFields(state, context);
+
+    const hasControllerState =
+      state.goal_version !== undefined &&
+      state.input_revision !== undefined &&
+      state.attempt !== undefined;
+
+    if (hasControllerState && state.patch_cycle === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "patch_cycle is required when controller state is present",
+        path: ["patch_cycle"],
+        input: state,
+      });
+    } else if (!hasControllerState && state.patch_cycle !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "patch_cycle requires controller state",
+        path: ["patch_cycle"],
+        input: state,
+      });
+    }
+
+    if (state.attention !== undefined && !hasControllerState) {
+      context.addIssue({
+        code: "custom",
+        message: "attention requires controller state",
+        path: ["attention"],
+        input: state,
+      });
+    }
+
+    if (state.attention !== undefined && state.patch_cycle !== undefined) {
+      const expectedTuple = {
+        goal_version: state.goal_version,
+        input_revision: state.input_revision,
+        attempt: state.attempt,
+        patch_cycle: state.patch_cycle,
+      };
+      for (const field of Object.keys(expectedTuple) as Array<
+        keyof GovernedTuple
+      >) {
+        if (state.attention.governed_tuple[field] !== expectedTuple[field]) {
           context.addIssue({
             code: "custom",
-            message: `${field} is required when controller state is present`,
-            path: [field],
-            input: state,
+            message: `attention governed_tuple ${field} must match state ${field}`,
+            path: ["attention", "governed_tuple", field],
+            input: state.attention.governed_tuple[field],
           });
         }
       }
     }
   });
+
+export function parseWorkItemStateForRead(input: unknown): WorkItemState {
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    "schema_version" in input &&
+    input.schema_version === 2
+  ) {
+    return workItemStateSchema.parse(input);
+  }
+
+  const legacyState = legacyWorkItemStateSchema.parse(input);
+  const hasControllerState =
+    legacyState.goal_version !== undefined &&
+    legacyState.input_revision !== undefined &&
+    legacyState.attempt !== undefined;
+
+  return workItemStateSchema.parse({
+    ...legacyState,
+    schema_version: 2,
+    ...(hasControllerState ? { patch_cycle: 0 } : {}),
+  });
+}
 
 export const workItemSchema: z.ZodType<WorkItem> = z
   .strictObject({
@@ -521,6 +736,8 @@ export const workItemSchema: z.ZodType<WorkItem> = z
       state.goal_version !== undefined ||
       state.input_revision !== undefined ||
       state.attempt !== undefined ||
+      state.patch_cycle !== undefined ||
+      state.attention !== undefined ||
       state.active_run !== undefined;
 
     if (hasContract) {
@@ -614,7 +831,7 @@ export const controllerTransitionInputSchema: z.ZodType<ControllerTransitionInpu
     target_status: z.enum(WORK_ITEM_STATUSES),
     expected_phase: z.enum(WORK_ITEM_PHASES),
     expected_status: z.enum(WORK_ITEM_STATUSES),
-    expected_schema_version: z.literal(1),
+    expected_schema_version: z.literal(2),
     expected_goal_version: positiveSafeIntegerSchema,
     expected_input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
@@ -624,7 +841,7 @@ export const importExternalResultInputSchema: z.ZodType<ImportExternalResultInpu
   z.strictObject({
     expected_phase: z.literal("execute"),
     expected_status: z.literal("active"),
-    expected_schema_version: z.literal(1),
+    expected_schema_version: z.literal(2),
     expected_goal_version: positiveSafeIntegerSchema,
     expected_input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
@@ -634,7 +851,7 @@ export const importReviewResultInputSchema: z.ZodType<ImportReviewResultInput> =
   z.strictObject({
     expected_phase: z.literal("review"),
     expected_status: z.literal("active"),
-    expected_schema_version: z.literal(1),
+    expected_schema_version: z.literal(2),
     expected_goal_version: positiveSafeIntegerSchema,
     expected_input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
@@ -644,7 +861,7 @@ export const retryExecuteAttemptInputSchema: z.ZodType<RetryExecuteAttemptInput>
   z.strictObject({
     expected_phase: z.literal("execute"),
     expected_status: z.literal("blocked"),
-    expected_schema_version: z.literal(1),
+    expected_schema_version: z.literal(2),
     expected_goal_version: positiveSafeIntegerSchema,
     expected_input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,

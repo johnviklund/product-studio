@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ControllerConflictError,
   InvalidWorkspaceError,
+  WORK_ITEM_ATTENTION_KINDS,
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
   controllerRunManifestSchema,
@@ -12,10 +13,12 @@ import {
   saveWorkItemInputSchema,
   importExternalResultInputSchema,
   importReviewResultInputSchema,
+  parseWorkItemStateForRead,
   productManifestSchema,
   retryExecuteAttemptInputSchema,
   updateWorkItemPhaseInputSchema,
   workItemGoalSchema,
+  workItemAttentionSchema,
   workItemSchema,
   workItemStateSchema,
 } from "../../src/domain/work-item";
@@ -31,7 +34,7 @@ const goal = {
 };
 
 const state = {
-  schema_version: 1 as const,
+  schema_version: 2 as const,
   work_item_id: workItemId,
   phase: "idea" as const,
   status: "active" as const,
@@ -233,6 +236,7 @@ describe("durable work-item schemas", () => {
       goal_version: 1,
       input_revision: 1,
       attempt: 0,
+      patch_cycle: 0,
       active_run: {
         run_id: runId,
         idempotency_key: `${workItemId}:spec:1:1:0`,
@@ -243,6 +247,112 @@ describe("durable work-item schemas", () => {
     expect(
       workItemSchema.parse({ goal: contractedGoal, state: contractedState }),
     ).toEqual({ goal: contractedGoal, state: contractedState });
+  });
+
+  it("requires patch_cycle for governed state and forbids it on captures", () => {
+    expect(() =>
+      workItemStateSchema.parse({
+        ...state,
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+      }),
+    ).toThrow("patch_cycle is required when controller state is present");
+    expect(() =>
+      workItemStateSchema.parse({ ...state, patch_cycle: 0 }),
+    ).toThrow("patch_cycle requires controller state");
+  });
+
+  it.each(WORK_ITEM_ATTENTION_KINDS)(
+    "round-trips %s attention with exact governed pins",
+    (kind) => {
+      const attention = {
+        kind,
+        question: "What decision is required?",
+        recommendation: "Open the pinned evidence and decide.",
+        created_at: "2026-07-25T15:00:00.000Z",
+        governed_tuple: {
+          goal_version: 1,
+          input_revision: 1,
+          attempt: 0,
+          patch_cycle: 0,
+        },
+        pins: {
+          artifact_paths: [
+            `.founder/work-items/${workItemId}/goal.yaml`,
+          ] as [string, ...string[]],
+          evidence_paths: [
+            `.founder/run-evidence/${workItemId}/execute-1-1-0/result/evidence.json`,
+          ],
+          git_commit: "a".repeat(40),
+          mission_content_sha256: "b".repeat(64),
+          result_content_sha256: "c".repeat(64),
+        },
+      };
+
+      expect(workItemAttentionSchema.parse(attention)).toEqual(attention);
+      expect(
+        workItemStateSchema.parse({
+          ...state,
+          goal_version: 1,
+          input_revision: 1,
+          attempt: 0,
+          patch_cycle: 0,
+          attention,
+        }),
+      ).toMatchObject({ attention: { kind } });
+    },
+  );
+
+  it("rejects agent-reported cost and model fields in attention", () => {
+    const attention = {
+      kind: "review_ready",
+      question: "What human decision should happen next?",
+      recommendation: "Open the pinned review evidence.",
+      created_at: "2026-07-25T15:00:00.000Z",
+      governed_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      pins: {
+        artifact_paths: [`.founder/work-items/${workItemId}/goal.yaml`],
+        evidence_paths: [],
+      },
+    };
+
+    expect(() =>
+      workItemAttentionSchema.parse({ ...attention, model: "agent-reported" }),
+    ).toThrow();
+    expect(() =>
+      workItemAttentionSchema.parse({
+        ...attention,
+        pins: { ...attention.pins, cost_usd: 1 },
+      }),
+    ).toThrow();
+  });
+
+  it("upgrades v1 state on read without accepting v1 as the active contract", () => {
+    const legacyGovernedState = {
+      ...state,
+      schema_version: 1,
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+    };
+    const legacyCaptureState = { ...state, schema_version: 1 };
+
+    expect(parseWorkItemStateForRead(legacyGovernedState)).toEqual({
+      ...legacyGovernedState,
+      schema_version: 2,
+      patch_cycle: 0,
+    });
+    expect(parseWorkItemStateForRead(legacyCaptureState)).toEqual({
+      ...legacyCaptureState,
+      schema_version: 2,
+    });
+    expect(() => workItemStateSchema.parse(legacyGovernedState)).toThrow();
   });
 
   it.each(["../src/domain", "/src/domain", "src\\domain"])(
@@ -387,12 +497,12 @@ describe("durable work-item schemas", () => {
         target_status: "active",
         expected_phase: "spec",
         expected_status: "active",
-        expected_schema_version: 1,
+        expected_schema_version: 2,
         expected_goal_version: 1,
         expected_input_revision: 1,
         attempt: 0,
       }),
-    ).toMatchObject({ target_phase: "plan", expected_schema_version: 1 });
+    ).toMatchObject({ target_phase: "plan", expected_schema_version: 2 });
 
     expect(
       controllerRunManifestSchema.parse({
@@ -411,7 +521,7 @@ describe("durable work-item schemas", () => {
 
     const executeExpectation = {
       expected_phase: "execute",
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: 1,
       expected_input_revision: 1,
       attempt: 0,
@@ -438,7 +548,7 @@ describe("durable work-item schemas", () => {
       importReviewResultInputSchema.parse({
         expected_phase: "review",
         expected_status: "active",
-        expected_schema_version: 1,
+        expected_schema_version: 2,
         expected_goal_version: 1,
         expected_input_revision: 1,
         attempt: 0,
@@ -448,7 +558,7 @@ describe("durable work-item schemas", () => {
       importReviewResultInputSchema.parse({
         expected_phase: "execute",
         expected_status: "active",
-        expected_schema_version: 1,
+        expected_schema_version: 2,
         expected_goal_version: 1,
         expected_input_revision: 1,
         attempt: 0,

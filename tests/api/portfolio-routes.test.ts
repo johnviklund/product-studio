@@ -169,7 +169,7 @@ async function createMissionReadyWorkspace(): Promise<{
         target_status: "active",
         expected_phase: current.state.phase,
         expected_status: current.state.status,
-        expected_schema_version: 1,
+        expected_schema_version: 2,
         expected_goal_version: current.state.goal_version!,
         expected_input_revision: current.state.input_revision!,
         attempt: current.state.attempt!,

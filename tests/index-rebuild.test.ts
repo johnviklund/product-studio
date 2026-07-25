@@ -38,7 +38,7 @@ function workItem(workItemId: string, title: string): WorkItem {
       type: "Explore",
     },
     state: {
-      schema_version: 1,
+      schema_version: 2,
       work_item_id: workItemId,
       phase: "idea",
       status: "active",
@@ -110,7 +110,7 @@ describe("SQLitePortfolioIndex", () => {
         notes: "Preserve this context in the disposable projection.",
       },
       state: {
-        schema_version: 1,
+        schema_version: 2,
         work_item_id: "wi_550e8400-e29b-41d4-a716-446655440000",
         phase: "idea",
         status: "active",
@@ -149,7 +149,7 @@ describe("SQLitePortfolioIndex", () => {
         },
       },
       state: {
-        schema_version: 1,
+        schema_version: 2,
         work_item_id: "wi_ffffffff-ffff-4fff-afff-ffffffffffff",
         phase: "plan",
         status: "active",
@@ -157,6 +157,7 @@ describe("SQLitePortfolioIndex", () => {
         goal_version: 2,
         input_revision: 3,
         attempt: 1,
+        patch_cycle: 0,
         active_run: {
           run_id: "550e8400-e29b-41d4-a716-446655440000",
           idempotency_key:

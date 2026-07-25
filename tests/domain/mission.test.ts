@@ -36,7 +36,7 @@ const workItem: WorkItem = {
     },
   },
   state: {
-    schema_version: 1,
+    schema_version: 2,
     work_item_id: workItemId,
     phase: "execute",
     status: "active",
@@ -44,6 +44,7 @@ const workItem: WorkItem = {
     goal_version: 2,
     input_revision: 3,
     attempt: 1,
+    patch_cycle: 0,
   },
 };
 

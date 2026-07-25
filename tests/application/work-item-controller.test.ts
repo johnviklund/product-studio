@@ -174,7 +174,7 @@ async function governToExecute(
       target_status: "active",
       expected_phase: mutation.work_item.state.phase,
       expected_status: mutation.work_item.state.status,
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: mutation.work_item.state.goal_version!,
       expected_input_revision: mutation.work_item.state.input_revision!,
       attempt: mutation.work_item.state.attempt!,
@@ -194,7 +194,7 @@ async function createImportFixture(options?: {
   input: {
     expected_phase: "execute";
     expected_status: "active";
-    expected_schema_version: 1;
+    expected_schema_version: 2;
     expected_goal_version: number;
     expected_input_revision: number;
     attempt: number;
@@ -270,7 +270,7 @@ async function createImportFixture(options?: {
     input: {
       expected_phase: "execute",
       expected_status: "active",
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: identity.goal_version,
       expected_input_revision: identity.input_revision,
       attempt: identity.attempt,
@@ -292,7 +292,7 @@ async function createReviewImportFixture(options?: {
   input: {
     expected_phase: "review";
     expected_status: "active";
-    expected_schema_version: 1;
+    expected_schema_version: 2;
     expected_goal_version: number;
     expected_input_revision: number;
     attempt: number;
@@ -310,7 +310,7 @@ async function createReviewImportFixture(options?: {
       target_status: "active",
       expected_phase: "execute",
       expected_status: "active",
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: execute.workItem.state.goal_version!,
       expected_input_revision: execute.workItem.state.input_revision!,
       attempt: execute.workItem.state.attempt!,
@@ -467,7 +467,7 @@ async function createReviewImportFixture(options?: {
     input: {
       expected_phase: "review",
       expected_status: "active",
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: identity.goal_version,
       expected_input_revision: identity.input_revision,
       attempt: identity.attempt,
@@ -591,7 +591,7 @@ describe("WorkItemController", () => {
         target_status: "active",
         expected_phase: mutation.work_item.state.phase,
         expected_status: mutation.work_item.state.status,
-        expected_schema_version: 1,
+        expected_schema_version: 2,
         expected_goal_version: mutation.work_item.state.goal_version!,
         expected_input_revision: mutation.work_item.state.input_revision!,
         attempt: mutation.work_item.state.attempt!,
@@ -628,7 +628,7 @@ describe("WorkItemController", () => {
       target_status: "active",
       expected_phase: afterRejectedUpdate!.state.phase,
       expected_status: afterRejectedUpdate!.state.status,
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: afterRejectedUpdate!.state.goal_version!,
       expected_input_revision: afterRejectedUpdate!.state.input_revision!,
       attempt: afterRejectedUpdate!.state.attempt!,
@@ -646,7 +646,7 @@ describe("WorkItemController", () => {
       target_status: "active" as const,
       expected_phase: "idea" as const,
       expected_status: "active" as const,
-      expected_schema_version: 1 as const,
+      expected_schema_version: 2 as const,
       expected_goal_version: 1,
       expected_input_revision: 1,
       attempt: 0,
@@ -691,7 +691,7 @@ describe("WorkItemController", () => {
         target_status: "active",
         expected_phase: "idea",
         expected_status: "active",
-        expected_schema_version: 1,
+        expected_schema_version: 2,
         expected_goal_version: 1,
         expected_input_revision: 1,
         attempt: 0,
@@ -709,7 +709,7 @@ describe("WorkItemController", () => {
           target_status: "active" as const,
           expected_phase: "plan" as const,
           expected_status: "active" as const,
-          expected_schema_version: 1 as const,
+          expected_schema_version: 2 as const,
           expected_goal_version: 1,
           expected_input_revision: 1,
           attempt: 0,
@@ -722,7 +722,7 @@ describe("WorkItemController", () => {
           target_status: "active" as const,
           expected_phase: "idea" as const,
           expected_status: "active" as const,
-          expected_schema_version: 1 as const,
+          expected_schema_version: 2 as const,
           expected_goal_version: 1,
           expected_input_revision: 1,
           attempt: 0,
@@ -735,7 +735,7 @@ describe("WorkItemController", () => {
           target_status: "active" as const,
           expected_phase: "idea" as const,
           expected_status: "active" as const,
-          expected_schema_version: 1 as const,
+          expected_schema_version: 2 as const,
           expected_goal_version: 1,
           expected_input_revision: 1,
           attempt: 1,
@@ -835,7 +835,7 @@ describe("WorkItemController", () => {
         {
           expected_phase: "execute",
           expected_status: "blocked",
-          expected_schema_version: 1,
+          expected_schema_version: 2,
           expected_goal_version: input.expected_goal_version,
           expected_input_revision: input.expected_input_revision,
           attempt: 0,
@@ -850,7 +850,7 @@ describe("WorkItemController", () => {
         await controller.retryExecuteAttempt(workItem.goal.work_item_id, {
           expected_phase: "execute",
           expected_status: "blocked",
-          expected_schema_version: 1,
+          expected_schema_version: 2,
           expected_goal_version: input.expected_goal_version,
           expected_input_revision: input.expected_input_revision,
           attempt: 0,
@@ -1348,7 +1348,7 @@ describe("WorkItemController", () => {
         {
           expected_phase: "execute",
           expected_status: "blocked",
-          expected_schema_version: 1,
+          expected_schema_version: 2,
           expected_goal_version: input.expected_goal_version,
           expected_input_revision: input.expected_input_revision,
           attempt: input.attempt,

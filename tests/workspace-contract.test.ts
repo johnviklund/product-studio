@@ -193,7 +193,7 @@ async function writeMissionReadyWorkItem(
     },
   };
   const state = {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     work_item_id: workItemId,
     phase,
     status: "active" as const,
@@ -201,6 +201,7 @@ async function writeMissionReadyWorkItem(
     goal_version: 1,
     input_revision: 1,
     attempt: 0,
+    patch_cycle: 0,
   };
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, "goal.yaml"), stringify(goal), "utf8");

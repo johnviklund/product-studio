@@ -627,7 +627,7 @@ export class PortfolioService {
     const imported = await controller.importExternalResult(workItemId, {
       expected_phase: "execute",
       expected_status: "active",
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: identity.goal_version,
       expected_input_revision: identity.input_revision,
       attempt: identity.attempt,
@@ -666,7 +666,7 @@ export class PortfolioService {
     ).importReviewResult(workItemId, {
       expected_phase: "review",
       expected_status: "active",
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: identity.goal_version,
       expected_input_revision: identity.input_revision,
       attempt: identity.attempt,
@@ -704,7 +704,7 @@ export class PortfolioService {
     const retried = await controller.retryExecuteAttempt(workItemId, {
       expected_phase: "execute",
       expected_status: "blocked",
-      expected_schema_version: 1,
+      expected_schema_version: 2,
       expected_goal_version: identity.goal_version,
       expected_input_revision: identity.input_revision,
       attempt: identity.attempt,
