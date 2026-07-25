@@ -53,6 +53,20 @@ export type BoardColumnId = BoardColumn["id"];
 export type DetailPanelMode = "capture" | "governed";
 export type MissionHandoffMode = "active" | "repair" | "hidden";
 
+export type ReviewHandoffProjection =
+  | {
+      mode: "active";
+      requires_independence_attestation: true;
+      can_compile: true;
+      can_import: true;
+    }
+  | {
+      mode: "hidden";
+      requires_independence_attestation: false;
+      can_compile: false;
+      can_import: false;
+    };
+
 export interface BoardTransitionAction {
   target_column_id: BoardColumnId;
   target_phase: WorkItemPhase;
@@ -234,6 +248,70 @@ export function missionHandoffModeForItem(item: {
     return "repair";
   }
   return "hidden";
+}
+
+export function reviewHandoffForItem(
+  item: {
+    source_id: string;
+    work_item: {
+      goal: {
+        work_item_id: string;
+        goal_contract?: { goal_version: number };
+      };
+      state: {
+        phase: WorkItemPhase;
+        status: WorkItemStatus;
+        goal_version?: number;
+        input_revision?: number;
+        attempt?: number;
+      };
+    };
+  },
+  evidence: readonly {
+    evidence: {
+      phase: "execute" | "review";
+      outcome: "rejected" | "failed" | "applied";
+      identity: {
+        work_item_id: string;
+        goal_version: number;
+        input_revision: number;
+        attempt: number;
+      };
+    };
+  }[],
+): ReviewHandoffProjection {
+  const { goal, state } = item.work_item;
+  const eligible =
+    item.source_id !== INBOX_SOURCE_ID &&
+    goal.goal_contract !== undefined &&
+    state.phase === "review" &&
+    state.status === "active" &&
+    state.goal_version !== undefined &&
+    state.input_revision !== undefined &&
+    state.attempt !== undefined &&
+    evidence.some(
+      (stored) =>
+        stored.evidence.phase === "execute" &&
+        stored.evidence.outcome === "applied" &&
+        stored.evidence.identity.work_item_id === goal.work_item_id &&
+        stored.evidence.identity.goal_version === state.goal_version &&
+        stored.evidence.identity.input_revision === state.input_revision &&
+        stored.evidence.identity.attempt === state.attempt,
+    );
+
+  return eligible
+    ? {
+        mode: "active",
+        requires_independence_attestation: true,
+        can_compile: true,
+        can_import: true,
+      }
+    : {
+        mode: "hidden",
+        requires_independence_attestation: false,
+        can_compile: false,
+        can_import: false,
+      };
 }
 
 export function boardTransitionActionsForPhase(phase: WorkItemPhase): {

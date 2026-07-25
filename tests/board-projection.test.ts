@@ -12,6 +12,7 @@ import {
   nextActionForPhase,
   parseBoardItemIdentityKey,
   parseBoardView,
+  reviewHandoffForItem,
   revealBoardItem,
   resolveBoardDrop,
   targetPhaseForColumn,
@@ -160,6 +161,80 @@ describe("board projection", () => {
         },
       }),
     ).toBe("hidden");
+  });
+
+  it("shows review handoff affordances only for the current applied execute subject", () => {
+    const item = {
+      source_id: "ws_product",
+      work_item: {
+        goal: {
+          work_item_id: workItemId,
+          goal_contract: { goal_version: 3 },
+        },
+        state: {
+          phase: "review" as const,
+          status: "active" as const,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+        },
+      },
+    };
+    const appliedExecute = {
+      evidence: {
+        phase: "execute" as const,
+        outcome: "applied" as const,
+        identity: {
+          work_item_id: workItemId,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+        },
+      },
+    };
+
+    expect(reviewHandoffForItem(item, [appliedExecute])).toEqual({
+      mode: "active",
+      requires_independence_attestation: true,
+      can_compile: true,
+      can_import: true,
+    });
+    expect(
+      reviewHandoffForItem(item, [
+        {
+          evidence: {
+            ...appliedExecute.evidence,
+            outcome: "rejected",
+          },
+        },
+      ]),
+    ).toMatchObject({ mode: "hidden", can_compile: false, can_import: false });
+    expect(
+      reviewHandoffForItem(item, [
+        {
+          evidence: {
+            ...appliedExecute.evidence,
+            identity: { ...appliedExecute.evidence.identity, attempt: 0 },
+          },
+        },
+      ]),
+    ).toMatchObject({ mode: "hidden" });
+    expect(
+      reviewHandoffForItem(
+        {
+          ...item,
+          work_item: {
+            ...item.work_item,
+            state: { ...item.work_item.state, phase: "execute" },
+          },
+        },
+        [appliedExecute],
+      ),
+    ).toMatchObject({ mode: "hidden" });
+    expect(
+      reviewHandoffForItem({ ...item, source_id: "inbox" }, [appliedExecute]),
+    ).toMatchObject({ mode: "hidden" });
+    expect(missionHandoffModeForItem(item)).toBe("hidden");
   });
 
   it("derives only valid forward and backward board transition actions", () => {
