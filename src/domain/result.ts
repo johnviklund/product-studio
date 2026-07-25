@@ -6,6 +6,7 @@ import {
   type ExecuteMissionPackage,
   type MissionIdentity,
   type MissionPackage,
+  type ReviewSubject,
 } from "./mission";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
@@ -170,6 +171,13 @@ export interface ImportEvidenceWriteInput {
 export interface StoredImportEvidence {
   evidence: ImportEvidenceEnvelope;
   summary: ImportEvidenceSummary;
+  verification: CommandEvidenceRecord[];
+}
+
+export interface AppliedExecuteReviewSubject {
+  review_subject: ReviewSubject;
+  submission_source: string;
+  evidence: ExecuteImportEvidenceEnvelope;
   verification: CommandEvidenceRecord[];
 }
 

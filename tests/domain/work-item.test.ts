@@ -11,6 +11,7 @@ import {
   createWorkItemInputSchema,
   saveWorkItemInputSchema,
   importExternalResultInputSchema,
+  importReviewResultInputSchema,
   productManifestSchema,
   retryExecuteAttemptInputSchema,
   updateWorkItemPhaseInputSchema,
@@ -431,6 +432,26 @@ describe("durable work-item schemas", () => {
       importExternalResultInputSchema.parse({
         ...executeExpectation,
         expected_status: "blocked",
+      }),
+    ).toThrow();
+    expect(
+      importReviewResultInputSchema.parse({
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 1,
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+        attempt: 0,
+      }),
+    ).toMatchObject({ expected_phase: "review", expected_status: "active" });
+    expect(() =>
+      importReviewResultInputSchema.parse({
+        expected_phase: "execute",
+        expected_status: "active",
+        expected_schema_version: 1,
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+        attempt: 0,
       }),
     ).toThrow();
   });

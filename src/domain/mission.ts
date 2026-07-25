@@ -205,14 +205,18 @@ export interface MissionPaths {
   git_base_commit: string;
 }
 
-export interface MissionArtifactWriteResult {
-  mission: MissionPackage;
+export interface MissionArtifactWriteResult<
+  TMission extends MissionPackage = MissionPackage,
+> {
+  mission: TMission;
   workspace_path: string;
   task_path: string;
   mission_path: string;
 }
 
-export type MissionPackageBuilder = (paths: MissionPaths) => MissionPackage;
+export type MissionPackageBuilder<
+  TMission extends MissionPackage = MissionPackage,
+> = (paths: MissionPaths) => TMission;
 
 export const missionIdentitySchema: z.ZodType<MissionIdentity> = z.strictObject({
   phase: z.enum(MISSION_PHASES),

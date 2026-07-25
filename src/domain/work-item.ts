@@ -4,9 +4,11 @@ import type {
   MissionArtifactWriteResult,
   MissionIdentity,
   MissionPackageBuilder,
+  ReviewMissionPackage,
 } from "./mission";
 import { portfolioSourceIdSchema } from "./portfolio-source";
 import type {
+  AppliedExecuteReviewSubject,
   ImportEvidenceSummary,
   ImportEvidenceWriteInput,
   MissionResultSnapshot,
@@ -203,6 +205,15 @@ export interface ImportExternalResultInput {
   attempt: number;
 }
 
+export interface ImportReviewResultInput {
+  expected_phase: "review";
+  expected_status: "active";
+  expected_schema_version: 1;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
+}
+
 export interface RetryExecuteAttemptInput {
   expected_phase: "execute";
   expected_status: "blocked";
@@ -279,7 +290,7 @@ export interface WorkItemRepository {
     runId: string,
   ): Promise<ControllerRunManifest | null>;
   findAppliedExecuteManifest(
-    identity: MissionIdentity,
+    identity: MissionIdentity<"execute">,
   ): Promise<ControllerRunManifest | null>;
   writeMissionPackage(
     identity: MissionIdentity,
@@ -293,6 +304,7 @@ export interface WorkItemRepository {
   writeImportEvidence(
     input: ImportEvidenceWriteInput,
   ): Promise<ImportEvidenceSummary>;
+  listImportEvidence(workItemId: string): Promise<StoredImportEvidence[]>;
   gitVerificationAdapter(): GitVerificationAdapter;
   verificationRunner(): VerificationRunner;
   commitControllerMutation(
@@ -300,6 +312,16 @@ export interface WorkItemRepository {
     input: ControllerMutationInput,
   ): Promise<ControllerMutationResult>;
   releaseControllerLease(lease: ControllerLease): Promise<void>;
+}
+
+export interface ReviewWorkItemRepository extends WorkItemRepository {
+  readAppliedExecuteReviewSubject(
+    identity: MissionIdentity<"execute">,
+  ): Promise<AppliedExecuteReviewSubject>;
+  writeReviewMissionPackage(
+    identity: MissionIdentity<"review">,
+    buildPackage: MissionPackageBuilder<ReviewMissionPackage>,
+  ): Promise<MissionArtifactWriteResult<ReviewMissionPackage>>;
 }
 
 export type ControllerWorkItemRepository = WorkItemRepository;
@@ -600,6 +622,16 @@ export const controllerTransitionInputSchema: z.ZodType<ControllerTransitionInpu
 export const importExternalResultInputSchema: z.ZodType<ImportExternalResultInput> =
   z.strictObject({
     expected_phase: z.literal("execute"),
+    expected_status: z.literal("active"),
+    expected_schema_version: z.literal(1),
+    expected_goal_version: positiveSafeIntegerSchema,
+    expected_input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+  });
+
+export const importReviewResultInputSchema: z.ZodType<ImportReviewResultInput> =
+  z.strictObject({
+    expected_phase: z.literal("review"),
     expected_status: z.literal("active"),
     expected_schema_version: z.literal(1),
     expected_goal_version: positiveSafeIntegerSchema,
