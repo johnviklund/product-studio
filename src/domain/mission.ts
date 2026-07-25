@@ -9,8 +9,8 @@ import type {
 } from "./work-item";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
-const MISSION_SCHEMA_VERSION = 3 as const;
-const RESULT_CONTRACT_SCHEMA_VERSION = 3 as const;
+const MISSION_SCHEMA_VERSION = 4 as const;
+const RESULT_CONTRACT_SCHEMA_VERSION = 4 as const;
 const RESULT_SCHEMA_VERSION = 2 as const;
 const EXECUTE_RESULT_REQUIRED_FIELDS = [
   "result_schema_version",
@@ -33,8 +33,30 @@ const REVIEW_RESULT_REQUIRED_FIELDS = [
   "verdict",
   "findings",
 ] as const;
+const PATCH_RESULT_REQUIRED_FIELDS = [
+  "result_schema_version",
+  "patch_mission_content_sha256",
+  "identity",
+  "commit",
+  "summary",
+  "changed_files",
+  "verification",
+] as const;
+const PATCH_REVIEW_RESULT_REQUIRED_FIELDS = [
+  "result_schema_version",
+  "review_mission_content_sha256",
+  "identity",
+  "patch_mission_content_sha256",
+  "patch_result_content_sha256",
+  "git_base_commit",
+  "accepted_result_commit",
+  "summary",
+  "verdict",
+  "findings",
+  "resolutions",
+] as const;
 
-export const MISSION_PHASES = ["execute", "review"] as const;
+export const MISSION_PHASES = ["execute", "review", "patch"] as const;
 export type MissionPhase = (typeof MISSION_PHASES)[number];
 
 const missionWorkItemTypes = Object.keys({
@@ -85,15 +107,19 @@ const workItemIdSchema = z
     "work_item_id must use the wi_<uuid> format",
   );
 
-export interface MissionIdentity<
-  TPhase extends MissionPhase = MissionPhase,
-> {
+interface MissionIdentityBase<TPhase extends MissionPhase> {
   phase: TPhase;
   work_item_id: string;
   goal_version: number;
   input_revision: number;
   attempt: number;
 }
+
+export type MissionIdentity<
+  TPhase extends MissionPhase = MissionPhase,
+> = TPhase extends "patch"
+  ? MissionIdentityBase<TPhase> & { patch_cycle: number }
+  : MissionIdentityBase<TPhase>;
 
 interface MissionControllerRun<TPhase extends MissionPhase> {
   run_id: string;
@@ -120,14 +146,14 @@ interface MissionSourceRevision {
 interface MissionResultContract<
   TRequiredFields extends readonly string[],
 > {
-  schema_version: 3;
+  schema_version: 4;
   output_path: string;
   result_schema_version: 2;
   required_fields: TRequiredFields;
 }
 
 interface MissionPackageBase<TPhase extends MissionPhase> {
-  mission_schema_version: 3;
+  mission_schema_version: 4;
   identity: MissionIdentity<TPhase>;
   controller_run: MissionControllerRun<TPhase>;
   goal: MissionGoal;
@@ -140,6 +166,25 @@ export interface ExecuteMissionPackage extends MissionPackageBase<"execute"> {
   result_contract: MissionResultContract<
     typeof EXECUTE_RESULT_REQUIRED_FIELDS
   >;
+}
+
+export type PatchFindingLink =
+  | { type: "acceptance_criteria"; criterion: string }
+  | { type: "non_goals"; non_goal: string }
+  | { type: "defect"; evidence_summary: string }
+  | { type: "security"; evidence_summary: string }
+  | { type: "deterministic_checks"; command: string };
+
+export interface PatchSubjectFinding {
+  finding_id: string;
+  severity: "P0" | "P1" | "P2" | "P3";
+  title: string;
+  evidence: {
+    path?: string;
+    summary: string;
+  };
+  required_action: string;
+  link: PatchFindingLink;
 }
 
 export interface ReviewCommandEvidenceRecord {
@@ -156,26 +201,81 @@ export interface ReviewCommandEvidenceRecord {
   output_truncated: boolean;
 }
 
-export interface ReviewSubject {
-  execute_mission_content_sha256: string;
-  execute_result_content_sha256: string;
+interface ReviewSubjectBase {
   git_base_commit: string;
   accepted_result_commit: string;
   changed_files: string[];
-  execute_mission_path: string;
-  execute_evidence_path: string;
   command_evidence: ReviewCommandEvidenceRecord[];
 }
 
-export interface ReviewMissionPackage extends MissionPackageBase<"review"> {
-  review_subject: ReviewSubject;
+export interface ExecuteReviewSubject extends ReviewSubjectBase {
+  source: "execute";
+  execute_mission_content_sha256: string;
+  execute_result_content_sha256: string;
+  execute_mission_path: string;
+  execute_evidence_path: string;
+}
+
+export interface PatchReviewSubject extends ReviewSubjectBase {
+  source: "patch";
+  patch_cycle: number;
+  patch_mission_content_sha256: string;
+  patch_result_content_sha256: string;
+  patch_mission_path: string;
+  patch_evidence_path: string;
+  resolved_from: {
+    review_mission_content_sha256: string;
+    review_result_content_sha256: string;
+    finding_ids: [string, ...string[]];
+  };
+}
+
+export type ReviewSubject = ExecuteReviewSubject | PatchReviewSubject;
+
+export interface PatchSubject {
+  review_mission_content_sha256: string;
+  review_result_content_sha256: string;
+  review_mission_path: string;
+  review_result_path: string;
+  review_evidence_path: string;
+  reviewed_commit: string;
+  findings: [PatchSubjectFinding, ...PatchSubjectFinding[]];
+  prior_review_subject: ReviewSubject;
+}
+
+export interface ExecuteReviewMissionPackage
+  extends MissionPackageBase<"review"> {
+  review_subject: ExecuteReviewSubject;
   independence_attested: true;
   result_contract: MissionResultContract<
     typeof REVIEW_RESULT_REQUIRED_FIELDS
   >;
 }
 
-export type MissionPackage = ExecuteMissionPackage | ReviewMissionPackage;
+export interface PatchReviewMissionPackage
+  extends MissionPackageBase<"review"> {
+  review_subject: PatchReviewSubject;
+  independence_attested: true;
+  result_contract: MissionResultContract<
+    typeof PATCH_REVIEW_RESULT_REQUIRED_FIELDS
+  >;
+}
+
+export type ReviewMissionPackage =
+  | ExecuteReviewMissionPackage
+  | PatchReviewMissionPackage;
+
+export interface PatchMissionPackage extends MissionPackageBase<"patch"> {
+  patch_subject: PatchSubject;
+  result_contract: MissionResultContract<
+    typeof PATCH_RESULT_REQUIRED_FIELDS
+  >;
+}
+
+export type MissionPackage =
+  | ExecuteMissionPackage
+  | ReviewMissionPackage
+  | PatchMissionPackage;
 
 export interface ReviewMissionControllerRun {
   schema_version: 1;
@@ -199,6 +299,27 @@ export interface ReviewMissionCompileInput {
   independence_attested: true;
 }
 
+export interface PatchMissionControllerRun {
+  schema_version: 1;
+  run_id: string;
+  work_item_id: string;
+  idempotency_key: string;
+  phase: "patch";
+  goal_version: number;
+  input_revision: number;
+  attempt: number;
+  started_at: string;
+  completed_at: string;
+  outcome: "applied";
+}
+
+export interface PatchMissionCompileInput {
+  work_item: WorkItem;
+  controller_run: PatchMissionControllerRun;
+  patch_subject: PatchSubject;
+  paths: MissionPaths;
+}
+
 export interface MissionPaths {
   task_path: string;
   output_path: string;
@@ -218,9 +339,16 @@ type MissionPathBoundPackage = Pick<
 function validateMissionPackagePaths(
   mission: MissionPathBoundPackage,
   context: z.RefinementCtx,
+  reviewPatchCycle?: number,
 ): void {
   const identity = mission.identity;
-  const directory = `.founder/missions/${identity.work_item_id}/${identity.phase}-${identity.goal_version}-${identity.input_revision}-${identity.attempt}`;
+  const patchCycleSuffix =
+    identity.phase === "patch"
+      ? `-${identity.patch_cycle}`
+      : reviewPatchCycle === undefined
+        ? ""
+        : `-patch-${reviewPatchCycle}`;
+  const directory = `.founder/missions/${identity.work_item_id}/${identity.phase}-${identity.goal_version}-${identity.input_revision}-${identity.attempt}${patchCycleSuffix}`;
   const expectedTaskPath = `${directory}/TASK.md`;
   const expectedOutputPath = `${directory}/result.json`;
 
@@ -255,14 +383,6 @@ export type MissionPackageBuilder<
   TMission extends MissionPackage = MissionPackage,
 > = (paths: MissionPaths) => TMission;
 
-export const missionIdentitySchema: z.ZodType<MissionIdentity> = z.strictObject({
-  phase: z.enum(MISSION_PHASES),
-  work_item_id: workItemIdSchema,
-  goal_version: positiveSafeIntegerSchema,
-  input_revision: positiveSafeIntegerSchema,
-  attempt: nonNegativeSafeIntegerSchema,
-});
-
 const executeMissionIdentitySchema: z.ZodType<MissionIdentity<"execute">> =
   z.strictObject({
     phase: z.literal("execute"),
@@ -280,6 +400,22 @@ const reviewMissionIdentitySchema: z.ZodType<MissionIdentity<"review">> =
     input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
   });
+
+const patchMissionIdentitySchema: z.ZodType<MissionIdentity<"patch">> =
+  z.strictObject({
+    phase: z.literal("patch"),
+    work_item_id: workItemIdSchema,
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+    patch_cycle: positiveSafeIntegerSchema,
+  });
+
+export const missionIdentitySchema: z.ZodType<MissionIdentity> = z.union([
+  executeMissionIdentitySchema,
+  reviewMissionIdentitySchema,
+  patchMissionIdentitySchema,
+]);
 
 const missionGoalSchema: z.ZodType<MissionGoal> = z.strictObject({
   title: nonEmptyTrimmedStringSchema,
@@ -311,51 +447,196 @@ const reviewCommandEvidenceRecordSchema: z.ZodType<ReviewCommandEvidenceRecord> 
     output_truncated: z.boolean(),
   });
 
-export const reviewSubjectSchema: z.ZodType<ReviewSubject> = z
+const reviewSubjectCommonShape = {
+  git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
+  accepted_result_commit: z.string().regex(/^[0-9a-f]{40}$/),
+  changed_files: z.array(workspaceRelativePosixPathSchema),
+  command_evidence: z.array(reviewCommandEvidenceRecordSchema).min(1),
+};
+
+function validateReviewSubjectEvidence(
+  subject: ReviewSubjectBase,
+  context: z.RefinementCtx,
+): void {
+  if (new Set(subject.changed_files).size !== subject.changed_files.length) {
+    context.addIssue({
+      code: "custom",
+      message: "changed_files must not contain duplicates",
+      path: ["changed_files"],
+      input: subject.changed_files,
+    });
+  }
+  const sortedChangedFiles = [...subject.changed_files].sort();
+  if (
+    sortedChangedFiles.some(
+      (changedFile, index) => changedFile !== subject.changed_files[index],
+    )
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "changed_files must use canonical sort order",
+      path: ["changed_files"],
+      input: subject.changed_files,
+    });
+  }
+  if (
+    new Set(
+      subject.command_evidence.map((record) =>
+        record.name.toLocaleLowerCase(),
+      ),
+    ).size !== subject.command_evidence.length
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "command evidence names must not contain duplicates",
+      path: ["command_evidence"],
+      input: subject.command_evidence,
+    });
+  }
+}
+
+export const executeReviewSubjectSchema: z.ZodType<ExecuteReviewSubject> = z
   .strictObject({
+    ...reviewSubjectCommonShape,
+    source: z.literal("execute"),
     execute_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     execute_result_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
-    accepted_result_commit: z.string().regex(/^[0-9a-f]{40}$/),
-    changed_files: z.array(workspaceRelativePosixPathSchema),
     execute_mission_path: workspaceRelativePosixPathSchema,
     execute_evidence_path: workspaceRelativePosixPathSchema,
-    command_evidence: z.array(reviewCommandEvidenceRecordSchema).min(1),
   })
-  .superRefine((subject, context) => {
-    if (new Set(subject.changed_files).size !== subject.changed_files.length) {
+  .superRefine(validateReviewSubjectEvidence);
+
+const nonEmptyFindingIdListSchema: z.ZodType<[string, ...string[]]> = z
+  .tuple([nonEmptyTrimmedStringSchema], nonEmptyTrimmedStringSchema)
+  .superRefine((findingIds, context) => {
+    if (new Set(findingIds).size !== findingIds.length) {
       context.addIssue({
         code: "custom",
-        message: "changed_files must not contain duplicates",
-        path: ["changed_files"],
-        input: subject.changed_files,
+        message: "finding_ids must not contain duplicates",
+        input: findingIds,
       });
     }
-    const sortedChangedFiles = [...subject.changed_files].sort();
+    const sortedFindingIds = [...findingIds].sort();
     if (
-      sortedChangedFiles.some(
-        (changedFile, index) => changedFile !== subject.changed_files[index],
+      sortedFindingIds.some(
+        (findingId, index) => findingId !== findingIds[index],
       )
     ) {
       context.addIssue({
         code: "custom",
-        message: "changed_files must use canonical sort order",
-        path: ["changed_files"],
-        input: subject.changed_files,
+        message: "finding_ids must use canonical sort order",
+        input: findingIds,
       });
     }
+  });
+
+const patchReviewSubjectSchema: z.ZodType<PatchReviewSubject> = z
+  .strictObject({
+    ...reviewSubjectCommonShape,
+    source: z.literal("patch"),
+    patch_cycle: positiveSafeIntegerSchema,
+    patch_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    patch_result_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    patch_mission_path: workspaceRelativePosixPathSchema,
+    patch_evidence_path: workspaceRelativePosixPathSchema,
+    resolved_from: z.strictObject({
+      review_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      review_result_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      finding_ids: nonEmptyFindingIdListSchema,
+    }),
+  })
+  .superRefine(validateReviewSubjectEvidence);
+
+export const reviewSubjectSchema: z.ZodType<ReviewSubject> = z.union([
+  executeReviewSubjectSchema,
+  patchReviewSubjectSchema,
+]);
+
+const patchFindingLinkSchema: z.ZodType<PatchFindingLink> =
+  z.discriminatedUnion("type", [
+    z.strictObject({
+      type: z.literal("acceptance_criteria"),
+      criterion: nonEmptyTrimmedStringSchema,
+    }),
+    z.strictObject({
+      type: z.literal("non_goals"),
+      non_goal: nonEmptyTrimmedStringSchema,
+    }),
+    z.strictObject({
+      type: z.literal("defect"),
+      evidence_summary: nonEmptyTrimmedStringSchema,
+    }),
+    z.strictObject({
+      type: z.literal("security"),
+      evidence_summary: nonEmptyTrimmedStringSchema,
+    }),
+    z.strictObject({
+      type: z.literal("deterministic_checks"),
+      command: nonEmptyTrimmedStringSchema,
+    }),
+  ]);
+
+const patchSubjectFindingSchema: z.ZodType<PatchSubjectFinding> =
+  z.strictObject({
+    finding_id: nonEmptyTrimmedStringSchema,
+    severity: z.enum(["P0", "P1", "P2", "P3"]),
+    title: nonEmptyTrimmedStringSchema,
+    evidence: z.strictObject({
+      path: workspaceRelativePosixPathSchema.optional(),
+      summary: nonEmptyTrimmedStringSchema,
+    }),
+    required_action: nonEmptyTrimmedStringSchema,
+    link: patchFindingLinkSchema,
+  });
+
+const patchSubjectFindingListSchema: z.ZodType<
+  [PatchSubjectFinding, ...PatchSubjectFinding[]]
+> = z
+  .tuple([patchSubjectFindingSchema], patchSubjectFindingSchema)
+  .superRefine((findings, context) => {
+    const findingIds = findings.map((finding) => finding.finding_id);
+    if (new Set(findingIds).size !== findingIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "patch findings must have unique finding_id values",
+        input: findings,
+      });
+    }
+    const sortedFindingIds = [...findingIds].sort();
     if (
-      new Set(
-        subject.command_evidence.map((record) =>
-          record.name.toLocaleLowerCase(),
-        ),
-      ).size !== subject.command_evidence.length
+      sortedFindingIds.some(
+        (findingId, index) => findingId !== findingIds[index],
+      )
     ) {
       context.addIssue({
         code: "custom",
-        message: "command evidence names must not contain duplicates",
-        path: ["command_evidence"],
-        input: subject.command_evidence,
+        message: "patch findings must use canonical finding_id order",
+        input: findings,
+      });
+    }
+  });
+
+export const patchSubjectSchema: z.ZodType<PatchSubject> = z
+  .strictObject({
+    review_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    review_result_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    review_mission_path: workspaceRelativePosixPathSchema,
+    review_result_path: workspaceRelativePosixPathSchema,
+    review_evidence_path: workspaceRelativePosixPathSchema,
+    reviewed_commit: z.string().regex(/^[0-9a-f]{40}$/),
+    findings: patchSubjectFindingListSchema,
+    prior_review_subject: reviewSubjectSchema,
+  })
+  .superRefine((subject, context) => {
+    if (
+      subject.reviewed_commit !==
+      subject.prior_review_subject.accepted_result_commit
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "reviewed_commit must match the prior review subject commit",
+        path: ["reviewed_commit"],
+        input: subject.reviewed_commit,
       });
     }
   });
@@ -393,6 +674,40 @@ const reviewResultContractSchema = z.strictObject({
   ]),
 });
 
+const patchResultContractSchema = z.strictObject({
+  schema_version: z.literal(RESULT_CONTRACT_SCHEMA_VERSION),
+  output_path: workspaceRelativePosixPathSchema,
+  result_schema_version: z.literal(RESULT_SCHEMA_VERSION),
+  required_fields: z.tuple([
+    z.literal(PATCH_RESULT_REQUIRED_FIELDS[0]),
+    z.literal(PATCH_RESULT_REQUIRED_FIELDS[1]),
+    z.literal(PATCH_RESULT_REQUIRED_FIELDS[2]),
+    z.literal(PATCH_RESULT_REQUIRED_FIELDS[3]),
+    z.literal(PATCH_RESULT_REQUIRED_FIELDS[4]),
+    z.literal(PATCH_RESULT_REQUIRED_FIELDS[5]),
+    z.literal(PATCH_RESULT_REQUIRED_FIELDS[6]),
+  ]),
+});
+
+const patchReviewResultContractSchema = z.strictObject({
+  schema_version: z.literal(RESULT_CONTRACT_SCHEMA_VERSION),
+  output_path: workspaceRelativePosixPathSchema,
+  result_schema_version: z.literal(RESULT_SCHEMA_VERSION),
+  required_fields: z.tuple([
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[0]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[1]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[2]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[3]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[4]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[5]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[6]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[7]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[8]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[9]),
+    z.literal(PATCH_REVIEW_RESULT_REQUIRED_FIELDS[10]),
+  ]),
+});
+
 const missionPackageCommonShape = {
   mission_schema_version: z.literal(MISSION_SCHEMA_VERSION),
   goal: missionGoalSchema,
@@ -417,7 +732,7 @@ const executeMissionPackageSchema: z.ZodType<ExecuteMissionPackage> =
     })
     .superRefine(validateMissionPackagePaths);
 
-const reviewMissionPackageSchema: z.ZodType<ReviewMissionPackage> =
+const executeReviewMissionPackageSchema: z.ZodType<ExecuteReviewMissionPackage> =
   z
     .strictObject({
       ...missionPackageCommonShape,
@@ -429,7 +744,7 @@ const reviewMissionPackageSchema: z.ZodType<ReviewMissionPackage> =
         started_at: z.iso.datetime(),
         completed_at: z.iso.datetime(),
       }),
-      review_subject: reviewSubjectSchema,
+      review_subject: executeReviewSubjectSchema,
       independence_attested: z.literal(true),
       result_contract: reviewResultContractSchema,
     })
@@ -448,8 +763,77 @@ const reviewMissionPackageSchema: z.ZodType<ReviewMissionPackage> =
       }
     });
 
+const patchReviewMissionPackageSchema: z.ZodType<PatchReviewMissionPackage> =
+  z
+    .strictObject({
+      ...missionPackageCommonShape,
+      identity: reviewMissionIdentitySchema,
+      controller_run: z.strictObject({
+        run_id: z.uuid(),
+        idempotency_key: nonEmptyTrimmedStringSchema,
+        phase: z.literal("review"),
+        started_at: z.iso.datetime(),
+        completed_at: z.iso.datetime(),
+      }),
+      review_subject: patchReviewSubjectSchema,
+      independence_attested: z.literal(true),
+      result_contract: patchReviewResultContractSchema,
+    })
+    .superRefine((mission, context) => {
+      validateMissionPackagePaths(
+        mission,
+        context,
+        mission.review_subject.patch_cycle,
+      );
+      if (
+        mission.source_revision.git_base_commit !==
+        mission.review_subject.git_base_commit
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "source revision must match the review subject Git base",
+          path: ["source_revision", "git_base_commit"],
+          input: mission.source_revision.git_base_commit,
+        });
+      }
+    });
+
+const patchMissionPackageSchema: z.ZodType<PatchMissionPackage> = z
+  .strictObject({
+    ...missionPackageCommonShape,
+    identity: patchMissionIdentitySchema,
+    controller_run: z.strictObject({
+      run_id: z.uuid(),
+      idempotency_key: nonEmptyTrimmedStringSchema,
+      phase: z.literal("patch"),
+      started_at: z.iso.datetime(),
+      completed_at: z.iso.datetime(),
+    }),
+    patch_subject: patchSubjectSchema,
+    result_contract: patchResultContractSchema,
+  })
+  .superRefine((mission, context) => {
+    validateMissionPackagePaths(mission, context);
+    if (
+      mission.source_revision.git_base_commit !==
+      mission.patch_subject.reviewed_commit
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "source revision must match the reviewed patch base commit",
+        path: ["source_revision", "git_base_commit"],
+        input: mission.source_revision.git_base_commit,
+      });
+    }
+  });
+
 export const missionPackageSchema: z.ZodType<MissionPackage> = z
-  .union([executeMissionPackageSchema, reviewMissionPackageSchema])
+  .union([
+    executeMissionPackageSchema,
+    executeReviewMissionPackageSchema,
+    patchReviewMissionPackageSchema,
+    patchMissionPackageSchema,
+  ])
   .superRefine((mission, context) => {
     if (mission.content_sha256 !== hashMissionContent(mission)) {
       context.addIssue({
@@ -480,7 +864,7 @@ const compilableWorkItemGoalSchema = z.object({
 const compilableExecuteWorkItemSchema = z.object({
   goal: compilableWorkItemGoalSchema,
   state: z.object({
-    schema_version: z.literal(1),
+    schema_version: z.literal(2),
     work_item_id: workItemIdSchema,
     phase: z.literal("execute"),
     status: z.literal("active"),
@@ -488,13 +872,14 @@ const compilableExecuteWorkItemSchema = z.object({
     goal_version: positiveSafeIntegerSchema,
     input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
+    patch_cycle: nonNegativeSafeIntegerSchema,
   }),
 });
 
 const compilableReviewWorkItemSchema = z.object({
   goal: compilableWorkItemGoalSchema,
   state: z.object({
-    schema_version: z.literal(1),
+    schema_version: z.literal(2),
     work_item_id: workItemIdSchema,
     phase: z.literal("review"),
     status: z.literal("active"),
@@ -502,6 +887,22 @@ const compilableReviewWorkItemSchema = z.object({
     goal_version: positiveSafeIntegerSchema,
     input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
+    patch_cycle: nonNegativeSafeIntegerSchema,
+  }),
+});
+
+const compilablePatchWorkItemSchema = z.object({
+  goal: compilableWorkItemGoalSchema,
+  state: z.object({
+    schema_version: z.literal(2),
+    work_item_id: workItemIdSchema,
+    phase: z.literal("patch"),
+    status: z.literal("active"),
+    updated_at: z.iso.datetime(),
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+    patch_cycle: positiveSafeIntegerSchema,
   }),
 });
 
@@ -526,6 +927,21 @@ const reviewMissionControllerRunSchema: z.ZodType<ReviewMissionControllerRun> =
     work_item_id: workItemIdSchema,
     idempotency_key: nonEmptyTrimmedStringSchema,
     phase: z.literal("review"),
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+    started_at: z.iso.datetime(),
+    completed_at: z.iso.datetime(),
+    outcome: z.literal("applied"),
+  });
+
+const patchMissionControllerRunSchema: z.ZodType<PatchMissionControllerRun> =
+  z.strictObject({
+    schema_version: z.literal(1),
+    run_id: z.uuid(),
+    work_item_id: workItemIdSchema,
+    idempotency_key: nonEmptyTrimmedStringSchema,
+    phase: z.literal("patch"),
     goal_version: positiveSafeIntegerSchema,
     input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
@@ -666,32 +1082,165 @@ const reviewMissionCompileInputSchema = z
     }
   });
 
+const patchMissionCompileInputSchema = z
+  .strictObject({
+    work_item: compilablePatchWorkItemSchema,
+    controller_run: patchMissionControllerRunSchema,
+    patch_subject: patchSubjectSchema,
+    paths: missionPathsSchema,
+  })
+  .superRefine(
+    (
+      {
+        work_item: workItem,
+        controller_run: run,
+        patch_subject: subject,
+        paths,
+      },
+      context,
+    ) => {
+      const expected = {
+        work_item_id: workItem.goal.work_item_id,
+        goal_version: workItem.goal.goal_contract.goal_version,
+        input_revision: workItem.state.input_revision,
+        attempt: workItem.state.attempt,
+      };
+
+      if (workItem.state.work_item_id !== expected.work_item_id) {
+        context.addIssue({
+          code: "custom",
+          message: "goal and state work_item_id values must match",
+          path: ["work_item", "state", "work_item_id"],
+          input: workItem.state.work_item_id,
+        });
+      }
+      if (workItem.state.goal_version !== expected.goal_version) {
+        context.addIssue({
+          code: "custom",
+          message: "goal and state goal_version values must match",
+          path: ["work_item", "state", "goal_version"],
+          input: workItem.state.goal_version,
+        });
+      }
+      for (const [field, value] of Object.entries(expected)) {
+        if (run[field as keyof typeof expected] !== value) {
+          context.addIssue({
+            code: "custom",
+            message: `patch controller run ${field} must match the governed work item`,
+            path: ["controller_run", field],
+            input: run[field as keyof typeof expected],
+          });
+        }
+      }
+      if (paths.git_base_commit !== subject.reviewed_commit) {
+        context.addIssue({
+          code: "custom",
+          message: "mission paths Git base must match the reviewed commit",
+          path: ["paths", "git_base_commit"],
+          input: paths.git_base_commit,
+        });
+      }
+    },
+  );
+
 type MissionPackageWithoutHash =
   | Omit<ExecuteMissionPackage, "content_sha256">
-  | Omit<ReviewMissionPackage, "content_sha256">;
+  | Omit<ExecuteReviewMissionPackage, "content_sha256">
+  | Omit<PatchReviewMissionPackage, "content_sha256">
+  | Omit<PatchMissionPackage, "content_sha256">;
+
+function canonicalCommandEvidence(
+  records: ReviewCommandEvidenceRecord[],
+): ReviewCommandEvidenceRecord[] {
+  return records.map((record) => ({
+    name: record.name,
+    argv: record.argv,
+    started_at: record.started_at,
+    completed_at: record.completed_at,
+    duration_ms: record.duration_ms,
+    status: record.status,
+    exit_code: record.exit_code,
+    signal: record.signal,
+    stdout: record.stdout,
+    stderr: record.stderr,
+    output_truncated: record.output_truncated,
+  }));
+}
 
 function canonicalReviewSubject(subject: ReviewSubject): ReviewSubject {
-  return {
-    execute_mission_content_sha256: subject.execute_mission_content_sha256,
-    execute_result_content_sha256: subject.execute_result_content_sha256,
+  const common = {
+    source: subject.source,
     git_base_commit: subject.git_base_commit,
     accepted_result_commit: subject.accepted_result_commit,
     changed_files: subject.changed_files,
-    execute_mission_path: subject.execute_mission_path,
-    execute_evidence_path: subject.execute_evidence_path,
-    command_evidence: subject.command_evidence.map((record) => ({
-      name: record.name,
-      argv: record.argv,
-      started_at: record.started_at,
-      completed_at: record.completed_at,
-      duration_ms: record.duration_ms,
-      status: record.status,
-      exit_code: record.exit_code,
-      signal: record.signal,
-      stdout: record.stdout,
-      stderr: record.stderr,
-      output_truncated: record.output_truncated,
-    })),
+    command_evidence: canonicalCommandEvidence(subject.command_evidence),
+  };
+
+  if (subject.source === "execute") {
+    return {
+      ...common,
+      source: "execute",
+      execute_mission_content_sha256: subject.execute_mission_content_sha256,
+      execute_result_content_sha256: subject.execute_result_content_sha256,
+      execute_mission_path: subject.execute_mission_path,
+      execute_evidence_path: subject.execute_evidence_path,
+    };
+  }
+
+  return {
+    ...common,
+    source: "patch",
+    patch_cycle: subject.patch_cycle,
+    patch_mission_content_sha256: subject.patch_mission_content_sha256,
+    patch_result_content_sha256: subject.patch_result_content_sha256,
+    patch_mission_path: subject.patch_mission_path,
+    patch_evidence_path: subject.patch_evidence_path,
+    resolved_from: {
+      review_mission_content_sha256:
+        subject.resolved_from.review_mission_content_sha256,
+      review_result_content_sha256:
+        subject.resolved_from.review_result_content_sha256,
+      finding_ids: subject.resolved_from.finding_ids,
+    },
+  };
+}
+
+function canonicalPatchFindingLink(link: PatchFindingLink): PatchFindingLink {
+  switch (link.type) {
+    case "acceptance_criteria":
+      return { type: link.type, criterion: link.criterion };
+    case "non_goals":
+      return { type: link.type, non_goal: link.non_goal };
+    case "defect":
+    case "security":
+      return { type: link.type, evidence_summary: link.evidence_summary };
+    case "deterministic_checks":
+      return { type: link.type, command: link.command };
+  }
+}
+
+function canonicalPatchSubject(subject: PatchSubject): PatchSubject {
+  return {
+    review_mission_content_sha256: subject.review_mission_content_sha256,
+    review_result_content_sha256: subject.review_result_content_sha256,
+    review_mission_path: subject.review_mission_path,
+    review_result_path: subject.review_result_path,
+    review_evidence_path: subject.review_evidence_path,
+    reviewed_commit: subject.reviewed_commit,
+    findings: subject.findings.map((finding) => ({
+      finding_id: finding.finding_id,
+      severity: finding.severity,
+      title: finding.title,
+      evidence: {
+        ...(finding.evidence.path === undefined
+          ? {}
+          : { path: finding.evidence.path }),
+        summary: finding.evidence.summary,
+      },
+      required_action: finding.required_action,
+      link: canonicalPatchFindingLink(finding.link),
+    })) as [PatchSubjectFinding, ...PatchSubjectFinding[]],
+    prior_review_subject: canonicalReviewSubject(subject.prior_review_subject),
   };
 }
 
@@ -706,6 +1255,9 @@ function missionContent(
       goal_version: mission.identity.goal_version,
       input_revision: mission.identity.input_revision,
       attempt: mission.identity.attempt,
+      ...(mission.identity.phase === "patch"
+        ? { patch_cycle: mission.identity.patch_cycle }
+        : {}),
     },
     controller_run: {
       run_id: mission.controller_run.run_id,
@@ -734,6 +1286,15 @@ function missionContent(
     result_schema_version: mission.result_contract.result_schema_version,
     required_fields: mission.result_contract.required_fields,
   };
+
+  if ("patch_subject" in mission) {
+    return {
+      ...common,
+      patch_subject: canonicalPatchSubject(mission.patch_subject),
+      result_contract: resultContract,
+      task_path: mission.task_path,
+    };
+  }
 
   if ("review_subject" in mission) {
     return {
@@ -850,10 +1411,16 @@ export function compileMission(
 }
 
 export function compileReviewMission(
+  input: ReviewMissionCompileInput & { review_subject: ExecuteReviewSubject },
+): ExecuteReviewMissionPackage;
+export function compileReviewMission(
+  input: ReviewMissionCompileInput & { review_subject: PatchReviewSubject },
+): PatchReviewMissionPackage;
+export function compileReviewMission(
   input: ReviewMissionCompileInput,
 ): ReviewMissionPackage {
   const validated = reviewMissionCompileInputSchema.parse(input);
-  const content: Omit<ReviewMissionPackage, "content_sha256"> = {
+  const common = {
     mission_schema_version: MISSION_SCHEMA_VERSION,
     identity: {
       phase: "review",
@@ -875,16 +1442,80 @@ export function compileReviewMission(
     },
     review_subject: validated.review_subject,
     independence_attested: validated.independence_attested,
+    task_path: validated.paths.task_path,
+  } as const;
+
+  if (validated.review_subject.source === "execute") {
+    const content: Omit<ExecuteReviewMissionPackage, "content_sha256"> = {
+      ...common,
+      review_subject: validated.review_subject,
+      result_contract: {
+        schema_version: RESULT_CONTRACT_SCHEMA_VERSION,
+        output_path: validated.paths.output_path,
+        result_schema_version: RESULT_SCHEMA_VERSION,
+        required_fields: [...REVIEW_RESULT_REQUIRED_FIELDS],
+      },
+    };
+
+    return executeReviewMissionPackageSchema.parse({
+      ...content,
+      content_sha256: hashMissionContent(content),
+    });
+  }
+
+  const content: Omit<PatchReviewMissionPackage, "content_sha256"> = {
+    ...common,
+    review_subject: validated.review_subject,
     result_contract: {
       schema_version: RESULT_CONTRACT_SCHEMA_VERSION,
       output_path: validated.paths.output_path,
       result_schema_version: RESULT_SCHEMA_VERSION,
-      required_fields: [...REVIEW_RESULT_REQUIRED_FIELDS],
+      required_fields: [...PATCH_REVIEW_RESULT_REQUIRED_FIELDS],
+    },
+  };
+
+  return patchReviewMissionPackageSchema.parse({
+    ...content,
+    content_sha256: hashMissionContent(content),
+  });
+}
+
+export function compilePatchMission(
+  input: PatchMissionCompileInput,
+): PatchMissionPackage {
+  const validated = patchMissionCompileInputSchema.parse(input);
+  const content: Omit<PatchMissionPackage, "content_sha256"> = {
+    mission_schema_version: MISSION_SCHEMA_VERSION,
+    identity: {
+      phase: "patch",
+      work_item_id: validated.work_item.goal.work_item_id,
+      goal_version: validated.work_item.goal.goal_contract.goal_version,
+      input_revision: validated.work_item.state.input_revision,
+      attempt: validated.work_item.state.attempt,
+      patch_cycle: validated.work_item.state.patch_cycle,
+    },
+    controller_run: {
+      run_id: validated.controller_run.run_id,
+      idempotency_key: validated.controller_run.idempotency_key,
+      phase: validated.controller_run.phase,
+      started_at: validated.controller_run.started_at,
+      completed_at: validated.controller_run.completed_at,
+    },
+    goal: missionGoal(validated.work_item),
+    source_revision: {
+      git_base_commit: validated.paths.git_base_commit,
+    },
+    patch_subject: validated.patch_subject,
+    result_contract: {
+      schema_version: RESULT_CONTRACT_SCHEMA_VERSION,
+      output_path: validated.paths.output_path,
+      result_schema_version: RESULT_SCHEMA_VERSION,
+      required_fields: [...PATCH_RESULT_REQUIRED_FIELDS],
     },
     task_path: validated.paths.task_path,
   };
 
-  return reviewMissionPackageSchema.parse({
+  return patchMissionPackageSchema.parse({
     ...content,
     content_sha256: hashMissionContent(content),
   });
@@ -969,6 +1600,43 @@ function renderExecuteTaskMd(mission: ExecuteMissionPackage): string {
 
 function renderReviewTaskMd(mission: ReviewMissionPackage): string {
   const subject = mission.review_subject;
+  const subjectLines =
+    subject.source === "execute"
+      ? [
+          `Execute mission hash: \`${subject.execute_mission_content_sha256}\``,
+          `Execute result hash: \`${subject.execute_result_content_sha256}\``,
+          `Immutable mission: \`${subject.execute_mission_path}\``,
+          `Immutable evidence: \`${subject.execute_evidence_path}\``,
+        ]
+      : [
+          `Patch mission hash: \`${subject.patch_mission_content_sha256}\``,
+          `Patch result hash: \`${subject.patch_result_content_sha256}\``,
+          `Immutable patch mission: \`${subject.patch_mission_path}\``,
+          `Immutable patch evidence: \`${subject.patch_evidence_path}\``,
+          `Resolved-from review mission hash: \`${subject.resolved_from.review_mission_content_sha256}\``,
+          `Resolved-from review result hash: \`${subject.resolved_from.review_result_content_sha256}\``,
+        ];
+  const bindingLines =
+    subject.source === "execute"
+      ? [
+          `  \"execute_mission_content_sha256\": \"${subject.execute_mission_content_sha256}\",`,
+          `  \"execute_result_content_sha256\": \"${subject.execute_result_content_sha256}\",`,
+        ]
+      : [
+          `  \"patch_mission_content_sha256\": \"${subject.patch_mission_content_sha256}\",`,
+          `  \"patch_result_content_sha256\": \"${subject.patch_result_content_sha256}\",`,
+        ];
+  const resolutionLines =
+    subject.source === "patch"
+      ? [
+          "  \"resolutions\": [",
+          ...subject.resolved_from.finding_ids.map(
+            (findingId, index) =>
+              `    { \"finding_id\": \"${findingId}\", \"status\": \"resolved | unresolved\" }${index === subject.resolved_from.finding_ids.length - 1 ? "" : ","}`,
+          ),
+          "  ]",
+        ]
+      : [];
   return [
     ...renderMissionHeader(mission),
     "## Review assignment",
@@ -978,10 +1646,7 @@ function renderReviewTaskMd(mission: ReviewMissionPackage): string {
     "",
     `Pinned subject commit: \`${subject.accepted_result_commit}\``,
     `Git base: \`${subject.git_base_commit}\``,
-    `Execute mission hash: \`${subject.execute_mission_content_sha256}\``,
-    `Execute result hash: \`${subject.execute_result_content_sha256}\``,
-    `Immutable mission: \`${subject.execute_mission_path}\``,
-    `Immutable evidence: \`${subject.execute_evidence_path}\``,
+    ...subjectLines,
     "",
     "Changed files:",
     renderList(subject.changed_files),
@@ -1010,8 +1675,7 @@ function renderReviewTaskMd(mission: ReviewMissionPackage): string {
     `    \"input_revision\": ${mission.identity.input_revision},`,
     `    \"attempt\": ${mission.identity.attempt}`,
     "  },",
-    `  \"execute_mission_content_sha256\": \"${subject.execute_mission_content_sha256}\",`,
-    `  \"execute_result_content_sha256\": \"${subject.execute_result_content_sha256}\",`,
+    ...bindingLines,
     `  \"git_base_commit\": \"${subject.git_base_commit}\",`,
     `  \"accepted_result_commit\": \"${subject.accepted_result_commit}\",`,
     "  \"summary\": \"<concise review summary>\",",
@@ -1028,7 +1692,8 @@ function renderReviewTaskMd(mission: ReviewMissionPackage): string {
     '        "evidence_summary": "<concrete defect evidence>"',
     "      }",
     "    }",
-    "  ]",
+    `  ]${resolutionLines.length === 0 ? "" : ","}`,
+    ...resolutionLines,
     "}",
     "```",
     "",
@@ -1037,8 +1702,69 @@ function renderReviewTaskMd(mission: ReviewMissionPackage): string {
   ].join("\n");
 }
 
+function renderPatchTaskMd(mission: PatchMissionPackage): string {
+  const subject = mission.patch_subject;
+  const findings = subject.findings.flatMap((finding) => [
+    `- ${finding.finding_id} (${finding.severity}): ${finding.title}`,
+    `  Required action: ${finding.required_action}`,
+  ]);
+
+  return [
+    ...renderMissionHeader(mission),
+    "## Patch assignment",
+    "",
+    "Apply one bounded repair that addresses every finding listed below.",
+    "Modify only files within the existing allowed scope.",
+    "Do not advance controller state or declare any finding resolved.",
+    "",
+    `Reviewed commit: \`${subject.reviewed_commit}\``,
+    `Review mission hash: \`${subject.review_mission_content_sha256}\``,
+    `Review result hash: \`${subject.review_result_content_sha256}\``,
+    `Immutable review mission: \`${subject.review_mission_path}\``,
+    `Immutable review result: \`${subject.review_result_path}\``,
+    `Immutable review evidence: \`${subject.review_evidence_path}\``,
+    "",
+    "Blocking findings:",
+    ...findings,
+    "",
+    "## Patch result contract",
+    "",
+    `Write the structured patch result to \`${mission.result_contract.output_path}\`.`,
+    "Commit the code changes before returning the result.",
+    "Use this complete JSON shape:",
+    "",
+    "```json",
+    "{",
+    `  \"result_schema_version\": ${mission.result_contract.result_schema_version},`,
+    `  \"patch_mission_content_sha256\": \"${mission.content_sha256}\",`,
+    "  \"identity\": {",
+    "    \"phase\": \"patch\",",
+    `    \"work_item_id\": \"${mission.identity.work_item_id}\",`,
+    `    \"goal_version\": ${mission.identity.goal_version},`,
+    `    \"input_revision\": ${mission.identity.input_revision},`,
+    `    \"attempt\": ${mission.identity.attempt},`,
+    `    \"patch_cycle\": ${mission.identity.patch_cycle}`,
+    "  },",
+    "  \"commit\": \"<full 40-character Git commit SHA>\",",
+    "  \"summary\": \"<concise repair summary>\",",
+    "  \"changed_files\": [\"<workspace-relative POSIX path>\"],",
+    "  \"verification\": [",
+    "    { \"name\": \"<check name>\", \"status\": \"passed\", \"detail\": \"<optional detail>\" }",
+    "  ]",
+    "}",
+    "```",
+    "",
+    "Reported verification is context only. The controller validates the commit and runs the authoritative checks.",
+    "Return the patch result for validation; do not advance controller state or self-declare findings resolved.",
+    "",
+  ].join("\n");
+}
+
 export function renderTaskMd(mission: MissionPackage): string {
   const validatedMission = missionPackageSchema.parse(mission);
+  if ("patch_subject" in validatedMission) {
+    return renderPatchTaskMd(validatedMission);
+  }
   return "review_subject" in validatedMission
     ? renderReviewTaskMd(validatedMission)
     : renderExecuteTaskMd(validatedMission);

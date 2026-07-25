@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { ReviewSubject } from "../domain/mission";
+import type { ExecuteReviewSubject } from "../domain/mission";
 import {
   commandEvidenceRecordSchema,
   createImportRunId,
@@ -880,7 +880,7 @@ export class WorkItemController {
   private async assessReviewResult(
     snapshot: MissionResultSnapshot,
     identity: ReviewExternalResultSubmission["identity"],
-    currentSubject: ReviewSubject,
+    currentSubject: ExecuteReviewSubject,
   ): Promise<ReviewResultAssessment> {
     const mission = snapshot.mission;
     if (!("review_subject" in mission)) {
@@ -901,6 +901,15 @@ export class WorkItemController {
       JSON.stringify(mission.review_subject) !== JSON.stringify(currentSubject)
     ) {
       reasons.push("Review mission subject is stale or does not match applied execute evidence.");
+    }
+    if (mission.review_subject.source !== "execute") {
+      return {
+        outcome: "rejected",
+        reasons: [
+          ...reasons,
+          "Patch-subject review assessment is not available before the patch controller slice.",
+        ],
+      };
     }
 
     let parsedJson: unknown;

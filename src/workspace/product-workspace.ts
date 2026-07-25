@@ -47,6 +47,7 @@ import {
   type VerificationCommand,
 } from "../domain/work-item";
 import {
+  executeReviewSubjectSchema,
   missionIdentitySchema,
   missionPackageSchema,
   renderTaskMd,
@@ -1210,7 +1211,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
-    const reviewSubject = reviewSubjectSchema.parse({
+    const reviewSubject = executeReviewSubjectSchema.parse({
+      source: "execute",
       execute_mission_content_sha256: evidence.mission_content_sha256,
       execute_result_content_sha256: evidence.result_content_sha256,
       git_base_commit: evidence.git_base_commit,

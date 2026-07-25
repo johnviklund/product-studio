@@ -2,14 +2,20 @@ import { describe, expect, it } from "vitest";
 
 import {
   compileMission,
+  compilePatchMission,
   compileReviewMission,
   hashMissionContent,
   missionPackageSchema,
+  patchSubjectSchema,
   renderTaskMd,
+  reviewSubjectSchema,
   serializeMissionPackage,
+  type ExecuteReviewSubject,
   type MissionPaths,
+  type PatchMissionControllerRun,
+  type PatchReviewSubject,
+  type PatchSubject,
   type ReviewMissionControllerRun,
-  type ReviewSubject,
 } from "../../src/domain/mission";
 import type {
   ControllerRunManifest,
@@ -91,7 +97,8 @@ const reviewControllerRun: ReviewMissionControllerRun = {
   outcome: "applied",
 };
 
-const reviewSubject: ReviewSubject = {
+const reviewSubject: ExecuteReviewSubject = {
+  source: "execute",
   execute_mission_content_sha256: "a".repeat(64),
   execute_result_content_sha256: "b".repeat(64),
   git_base_commit: paths.git_base_commit,
@@ -122,6 +129,89 @@ const reviewPaths: MissionPaths = {
   git_base_commit: paths.git_base_commit,
 };
 
+const patchWorkItem: WorkItem = {
+  ...reviewWorkItem,
+  state: {
+    ...reviewWorkItem.state,
+    phase: "patch",
+    patch_cycle: 1,
+    updated_at: "2026-07-22T12:00:03.000Z",
+  },
+};
+
+const patchControllerRun: PatchMissionControllerRun = {
+  schema_version: 1,
+  run_id: "77777777-7777-4777-8777-777777777777",
+  work_item_id: workItemId,
+  idempotency_key: `${workItemId}:patch:2:3:1:1`,
+  phase: "patch",
+  goal_version: 2,
+  input_revision: 3,
+  attempt: 1,
+  started_at: "2026-07-22T12:00:02.000Z",
+  completed_at: "2026-07-22T12:00:03.000Z",
+  outcome: "applied",
+};
+
+const patchSubject: PatchSubject = {
+  review_mission_content_sha256: "d".repeat(64),
+  review_result_content_sha256: "e".repeat(64),
+  review_mission_path: `.founder/missions/${workItemId}/review-2-3-1/mission.json`,
+  review_result_path: `.founder/missions/${workItemId}/review-2-3-1/result.json`,
+  review_evidence_path: `.founder/run-evidence/${workItemId}/review-2-3-1/${"f".repeat(64)}`,
+  reviewed_commit: reviewSubject.accepted_result_commit,
+  findings: [
+    {
+      finding_id: "F-001",
+      severity: "P1",
+      title: "Preserve the active contract",
+      evidence: {
+        path: "src/domain/mission.ts",
+        summary: "The patch must retain strict schema validation.",
+      },
+      required_action: "Keep the patch package phase-discriminated.",
+      link: {
+        type: "acceptance_criteria",
+        criterion: "The package is deterministic",
+      },
+    },
+    {
+      finding_id: "F-002",
+      severity: "P2",
+      title: "Keep the task bounded",
+      evidence: { summary: "The patch task must cover only listed findings." },
+      required_action: "Render every assigned finding in TASK.md.",
+      link: { type: "defect", evidence_summary: "Missing patch boundary." },
+    },
+  ],
+  prior_review_subject: reviewSubject,
+};
+
+const patchPaths: MissionPaths = {
+  task_path: `.founder/missions/${workItemId}/patch-2-3-1-1/TASK.md`,
+  output_path: `.founder/missions/${workItemId}/patch-2-3-1-1/result.json`,
+  git_base_commit: patchSubject.reviewed_commit,
+};
+
+const patchReviewSubject: PatchReviewSubject = {
+  source: "patch",
+  patch_cycle: 1,
+  patch_mission_content_sha256: "1".repeat(64),
+  patch_result_content_sha256: "2".repeat(64),
+  git_base_commit: patchSubject.reviewed_commit,
+  accepted_result_commit: "3".repeat(40),
+  changed_files: ["src/domain/mission.ts"],
+  patch_mission_path: `.founder/missions/${workItemId}/patch-2-3-1-1/mission.json`,
+  patch_evidence_path: `.founder/run-evidence/${workItemId}/patch-2-3-1-1/${"4".repeat(64)}`,
+  command_evidence: reviewSubject.command_evidence,
+  resolved_from: {
+    review_mission_content_sha256:
+      patchSubject.review_mission_content_sha256,
+    review_result_content_sha256: patchSubject.review_result_content_sha256,
+    finding_ids: ["F-001", "F-002"],
+  },
+};
+
 describe("mission domain", () => {
   it("compiles stable canonical package and Markdown bytes", () => {
     const first = compileMission(workItem, executeManifest, paths);
@@ -131,13 +221,13 @@ describe("mission domain", () => {
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(renderTaskMd(second)).toBe(renderTaskMd(first));
     expect(first.content_sha256).toBe(
-      "fe1a2c269f789fe1e3d9a2dea439d590478bdd31b7fb7fa8248ea07267e41943",
+      "cfd32dc901956d7371b8e3afb950b4f8ce17e7f7c3eae28386f8984d5c4c61b1",
     );
-    expect(first.mission_schema_version).toBe(3);
+    expect(first.mission_schema_version).toBe(4);
     expect(first.identity.phase).toBe("execute");
     expect(first.source_revision.git_base_commit).toBe(paths.git_base_commit);
     expect(first.result_contract).toEqual({
-      schema_version: 3,
+      schema_version: 4,
       output_path: paths.output_path,
       result_schema_version: 2,
       required_fields: [
@@ -334,14 +424,14 @@ describe("mission domain", () => {
     expect(second).toEqual(first);
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(first.content_sha256).toBe(
-      "96748a68fbe1d0a89abb8f10ca89f5aac43fe5268e7c2c0a1cb56281ac45cf53",
+      "f9f72c73e54e455ec3af6009f57026235b7b5bae7251570ab388fc278f133230",
     );
     expect(first.content_sha256).not.toBe(execute.content_sha256);
     expect(first.identity.phase).toBe("review");
     expect(first.controller_run.phase).toBe("review");
     expect(first.independence_attested).toBe(true);
     expect(first.review_subject).toEqual(reviewSubject);
-    expect(first.result_contract.schema_version).toBe(3);
+    expect(first.result_contract.schema_version).toBe(4);
   });
 
   it("binds the review package hash to the immutable review subject", () => {
@@ -367,6 +457,129 @@ describe("mission domain", () => {
       "f".repeat(40),
     );
     expect(changedSubject.independence_attested).toBe(true);
+  });
+
+  it("round-trips execute and patch review subjects without hybrid shapes", () => {
+    expect(reviewSubjectSchema.parse(reviewSubject)).toEqual(reviewSubject);
+    expect(reviewSubjectSchema.parse(patchReviewSubject)).toEqual(
+      patchReviewSubject,
+    );
+    expect(() =>
+      reviewSubjectSchema.parse({
+        ...reviewSubject,
+        source: "patch",
+        patch_mission_content_sha256: "1".repeat(64),
+      }),
+    ).toThrow();
+  });
+
+  it("compiles a patch-subject re-review into its own cycle-qualified path", () => {
+    const mission = compileReviewMission({
+      work_item: {
+        ...reviewWorkItem,
+        state: {
+          ...reviewWorkItem.state,
+          patch_cycle: 1,
+        },
+      },
+      controller_run: reviewControllerRun,
+      review_subject: patchReviewSubject,
+      paths: {
+        task_path: `.founder/missions/${workItemId}/review-2-3-1-patch-1/TASK.md`,
+        output_path: `.founder/missions/${workItemId}/review-2-3-1-patch-1/result.json`,
+        git_base_commit: patchReviewSubject.git_base_commit,
+      },
+      independence_attested: true,
+    });
+
+    expect(mission.review_subject).toEqual(patchReviewSubject);
+    expect(mission.task_path).toContain("review-2-3-1-patch-1");
+    expect(mission.result_contract.required_fields).toContain("resolutions");
+  });
+
+  it("compiles a canonical phase-qualified patch package", () => {
+    const input = {
+      work_item: patchWorkItem,
+      controller_run: patchControllerRun,
+      patch_subject: patchSubject,
+      paths: patchPaths,
+    };
+    const first = compilePatchMission(input);
+    const second = compilePatchMission(input);
+    const reordered = {
+      content_sha256: first.content_sha256,
+      task_path: first.task_path,
+      result_contract: first.result_contract,
+      patch_subject: {
+        prior_review_subject: first.patch_subject.prior_review_subject,
+        findings: first.patch_subject.findings,
+        reviewed_commit: first.patch_subject.reviewed_commit,
+        review_evidence_path: first.patch_subject.review_evidence_path,
+        review_result_path: first.patch_subject.review_result_path,
+        review_mission_path: first.patch_subject.review_mission_path,
+        review_result_content_sha256:
+          first.patch_subject.review_result_content_sha256,
+        review_mission_content_sha256:
+          first.patch_subject.review_mission_content_sha256,
+      },
+      source_revision: first.source_revision,
+      goal: first.goal,
+      controller_run: first.controller_run,
+      identity: first.identity,
+      mission_schema_version: first.mission_schema_version,
+    };
+
+    expect(second).toEqual(first);
+    expect(first.identity).toMatchObject({ phase: "patch", patch_cycle: 1 });
+    expect(first.task_path).toBe(patchPaths.task_path);
+    expect(hashMissionContent(reordered)).toBe(first.content_sha256);
+    expect(missionPackageSchema.parse(reordered)).toEqual(first);
+    expect(renderTaskMd(first)).toContain(
+      "Apply one bounded repair that addresses every finding listed below.",
+    );
+    expect(renderTaskMd(first)).toContain("F-001");
+    expect(renderTaskMd(first)).toContain("F-002");
+    expect(renderTaskMd(first)).toContain(
+      "do not advance controller state or self-declare findings resolved",
+    );
+  });
+
+  it("rejects reordered findings and execute-overloaded patch packages", () => {
+    expect(() =>
+      patchSubjectSchema.parse({
+        ...patchSubject,
+        findings: [...patchSubject.findings].reverse(),
+      }),
+    ).toThrow("patch findings must use canonical finding_id order");
+
+    const patch = compilePatchMission({
+      work_item: patchWorkItem,
+      controller_run: patchControllerRun,
+      patch_subject: patchSubject,
+      paths: patchPaths,
+    });
+    expect(() =>
+      missionPackageSchema.parse({
+        ...patch,
+        identity: {
+          ...patch.identity,
+          phase: "execute",
+        },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      compilePatchMission({
+        work_item: patchWorkItem,
+        controller_run: patchControllerRun,
+        patch_subject: patchSubject,
+        paths: {
+          ...patchPaths,
+          task_path: `.founder/missions/${workItemId}/patch-2-3-1/TASK.md`,
+          output_path: `.founder/missions/${workItemId}/patch-2-3-1/result.json`,
+        },
+      }),
+    ).toThrow("task_path must match the phase-qualified mission identity");
   });
 
   it("rejects legacy tuple-only mission paths", () => {

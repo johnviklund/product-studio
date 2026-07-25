@@ -1342,6 +1342,9 @@ describe("PortfolioService", () => {
     expect(await readFile(first.task_path, "utf8")).toContain(
       "Do not modify workspace files or execute verification commands.",
     );
+    if (first.mission.review_subject.source !== "execute") {
+      throw new Error("Initial review mission must bind execute evidence.");
+    }
 
     await writeFile(
       join(dirname(first.task_path), "result.json"),

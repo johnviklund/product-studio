@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import {
+  type ExecuteReviewSubject,
   type ExecuteMissionPackage,
   type MissionIdentity,
   type MissionPackage,
-  type ReviewSubject,
 } from "./mission";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
@@ -177,7 +177,7 @@ export interface StoredImportEvidence {
 }
 
 export interface AppliedExecuteReviewSubject {
-  review_subject: ReviewSubject;
+  review_subject: ExecuteReviewSubject;
   submission_source: string;
   evidence: ExecuteImportEvidenceEnvelope;
   verification: CommandEvidenceRecord[];

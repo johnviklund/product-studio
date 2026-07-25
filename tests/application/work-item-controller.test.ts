@@ -12,8 +12,8 @@ import {
 import {
   compileMission,
   compileReviewMission,
+  type ExecuteReviewSubject,
   type MissionIdentity,
-  type ReviewSubject,
 } from "../../src/domain/mission";
 import {
   importEvidenceSummarySchema,
@@ -285,7 +285,9 @@ async function createReviewImportFixture(options?: {
   transformResult?: (
     result: ReviewExternalResultSubmission,
   ) => ReviewExternalResultSubmission;
-  transformCurrentSubject?: (subject: ReviewSubject) => ReviewSubject;
+  transformCurrentSubject?: (
+    subject: ExecuteReviewSubject,
+  ) => ExecuteReviewSubject;
 }): Promise<{
   repository: ImportTestRepository;
   workItem: WorkItem;
@@ -352,7 +354,8 @@ async function createReviewImportFixture(options?: {
       output_truncated: false,
     },
   ];
-  const subject: ReviewSubject = {
+  const subject: ExecuteReviewSubject = {
+    source: "execute",
     execute_mission_content_sha256: "1".repeat(64),
     execute_result_content_sha256: "2".repeat(64),
     git_base_commit: "0".repeat(40),
@@ -1322,7 +1325,7 @@ describe("WorkItemController", () => {
     {
       name: "a stale execute subject",
       options: {
-        transformCurrentSubject: (subject: ReviewSubject) => ({
+        transformCurrentSubject: (subject: ExecuteReviewSubject) => ({
           ...subject,
           accepted_result_commit: "b".repeat(40),
         }),
