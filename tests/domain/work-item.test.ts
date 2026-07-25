@@ -6,12 +6,14 @@ import {
   WORK_ITEM_ATTENTION_KINDS,
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
+  acceptPatchPlanInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   createCaptureInputSchema,
   createWorkItemInputSchema,
   saveWorkItemInputSchema,
   importExternalResultInputSchema,
+  importPatchResultInputSchema,
   importReviewResultInputSchema,
   parseWorkItemStateForRead,
   productManifestSchema,
@@ -552,8 +554,13 @@ describe("durable work-item schemas", () => {
         expected_goal_version: 1,
         expected_input_revision: 1,
         attempt: 0,
+        expected_patch_cycle: 0,
       }),
-    ).toMatchObject({ expected_phase: "review", expected_status: "active" });
+    ).toMatchObject({
+      expected_phase: "review",
+      expected_status: "active",
+      expected_patch_cycle: 0,
+    });
     expect(() =>
       importReviewResultInputSchema.parse({
         expected_phase: "execute",
@@ -562,6 +569,40 @@ describe("durable work-item schemas", () => {
         expected_goal_version: 1,
         expected_input_revision: 1,
         attempt: 0,
+        expected_patch_cycle: 0,
+      }),
+    ).toThrow();
+    expect(
+      acceptPatchPlanInputSchema.parse({
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+        attempt: 0,
+        expected_patch_cycle: 0,
+      }),
+    ).toMatchObject({ expected_patch_cycle: 0 });
+    expect(
+      importPatchResultInputSchema.parse({
+        expected_phase: "patch",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+        attempt: 0,
+        expected_patch_cycle: 1,
+      }),
+    ).toMatchObject({ expected_phase: "patch", expected_patch_cycle: 1 });
+    expect(() =>
+      importPatchResultInputSchema.parse({
+        expected_phase: "patch",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: 1,
+        expected_input_revision: 1,
+        attempt: 0,
+        expected_patch_cycle: 0,
       }),
     ).toThrow();
   });

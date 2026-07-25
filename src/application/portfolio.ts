@@ -670,6 +670,7 @@ export class PortfolioService {
       expected_goal_version: identity.goal_version,
       expected_input_revision: identity.input_revision,
       attempt: identity.attempt,
+      expected_patch_cycle: workItem.state.patch_cycle!,
     });
     await this.rebuild();
     return {

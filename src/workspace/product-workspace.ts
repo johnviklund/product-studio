@@ -524,7 +524,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         ...goalFields,
       },
       state: {
-        schema_version: 1,
+        schema_version: 2,
         work_item_id: workItemId,
         phase: "idea",
         status: "active",

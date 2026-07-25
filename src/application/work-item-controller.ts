@@ -1,19 +1,25 @@
 import { createHash } from "node:crypto";
 
-import type { ExecuteReviewSubject } from "../domain/mission";
+import {
+  reviewSubjectSchema,
+  type MissionIdentity,
+  type PatchReviewSubject,
+  type ReviewSubject,
+} from "../domain/mission";
 import {
   commandEvidenceRecordSchema,
   createImportRunId,
   executeExternalResultSubmissionSchema,
-  executeReviewExternalResultSubmissionSchema,
   hashResultContent,
   importEvidenceEnvelopeSchema,
+  patchExternalResultSubmissionSchema,
+  reviewExternalResultSubmissionForSubjectSchema,
   type CommandEvidenceRecord,
   type ExecuteExternalResultSubmission,
-  type ExecuteReviewExternalResultSubmission,
   type ImportEvidenceOutcome,
   type ImportEvidenceSummary,
   type MissionResultSnapshot,
+  type PatchExternalResultSubmission,
   type ReviewExternalResultSubmission,
   type StoredImportEvidence,
 } from "../domain/result";
@@ -23,26 +29,31 @@ import type {
 } from "../domain/verification";
 import {
   ControllerConflictError,
+  acceptPatchPlanInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   importExternalResultInputSchema,
+  importPatchResultInputSchema,
   importReviewResultInputSchema,
   retryExecuteAttemptInputSchema,
   saveWorkItemInputSchema,
   workItemIdSchema,
   workItemSchema,
   type ActiveRun,
+  type AcceptPatchPlanInput,
   type ControllerLease,
   type ControllerMutationResult,
   type ControllerRunManifest,
   type ControllerTransitionInput,
   type ControllerWorkItemRepository,
   type ImportExternalResultInput,
+  type ImportPatchResultInput,
   type ImportReviewResultInput,
   type ProductManifest,
   type RetryExecuteAttemptInput,
   type SaveWorkItemInput,
   type WorkItem,
+  type WorkItemAttention,
   type WorkItemPhase,
   type WorkItemStatus,
 } from "../domain/work-item";
@@ -68,6 +79,13 @@ export interface ImportReviewResultResult {
   result?: ReviewExternalResultSubmission;
 }
 
+export interface ImportPatchResultResult {
+  work_item: WorkItem;
+  manifest: ControllerRunManifest | null;
+  evidence: ImportEvidenceSummary;
+  result?: PatchExternalResultSubmission;
+}
+
 interface ExternalResultAssessment {
   outcome: ImportEvidenceOutcome;
   reasons: string[];
@@ -78,7 +96,14 @@ interface ExternalResultAssessment {
 interface ReviewResultAssessment {
   outcome: "rejected" | "applied";
   reasons: string[];
-  result?: ExecuteReviewExternalResultSubmission;
+  result?: ReviewExternalResultSubmission;
+}
+
+interface PatchResultAssessment {
+  outcome: "rejected" | "applied";
+  reasons: string[];
+  result?: PatchExternalResultSubmission;
+  verification: CommandEvidenceRecord[];
 }
 
 export function deriveControllerIdempotencyKey(
@@ -119,6 +144,12 @@ function nextTimestamp(currentTimestamp: string, clock: Clock): string {
   return new Date(
     Math.max(clock().getTime(), Date.parse(currentTimestamp) + 1),
   ).toISOString();
+}
+
+function withoutAttention(state: WorkItem["state"]): WorkItem["state"] {
+  const nextState = { ...state };
+  delete nextState.attention;
+  return nextState;
 }
 
 function manifestMatches(
@@ -332,6 +363,7 @@ export class WorkItemController {
           goal_version: nextGoalVersion,
           input_revision: nextInputRevision,
           attempt: 0,
+          patch_cycle: 0,
           updated_at: nextTimestamp(
             lease.work_item.state.updated_at,
             this.clock,
@@ -658,6 +690,7 @@ export class WorkItemController {
         identity.input_revision,
         identity.attempt,
       ),
+      `patch-cycle-${validatedInput.expected_patch_cycle}`,
       "import",
       resultContentSha256,
     ].join(":");
@@ -709,14 +742,16 @@ export class WorkItemController {
         lease.work_item,
         validatedInput,
       );
-      const executeSubject = await repository.readAppliedExecuteReviewSubject({
-        ...identity,
-        phase: "execute",
-      });
+      const currentSubject = await this.currentReviewSubject(
+        repository,
+        identity,
+        snapshot.mission.review_subject,
+        validatedInput.expected_patch_cycle,
+      );
       const assessment = await this.assessReviewResult(
         snapshot,
         identity,
-        executeSubject.review_subject,
+        currentSubject,
       );
       const completedAt = nextTimestamp(activeRun.acquired_at, this.clock);
       const evidence = importEvidenceEnvelopeSchema.parse({
@@ -763,10 +798,419 @@ export class WorkItemController {
         },
         activeRun.acquired_at,
       );
-      const mutation = await repository.commitControllerMutation(lease, {
+      const nextItem = workItemSchema.parse({
         goal: lease.work_item.goal,
-        state: lease.work_item.state,
+        state: {
+          ...lease.work_item.state,
+          attention: this.reviewAttention(
+            lease.work_item,
+            snapshot,
+            evidenceSummary,
+            resultContentSha256,
+            assessment.result!,
+            completedAt,
+          ),
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const mutation = await repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
         manifest: pendingManifest,
+      });
+      return {
+        ...mutation,
+        evidence: evidenceSummary,
+        result: assessment.result,
+      };
+    } finally {
+      await repository.releaseControllerLease(lease);
+    }
+  }
+
+  async acceptPatchPlan(
+    workItemId: string,
+    input: AcceptPatchPlanInput,
+  ): Promise<ControllerMutationResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = acceptPatchPlanInputSchema.parse(input);
+    if (validatedInput.expected_patch_cycle >= 3) {
+      throw this.conflict(
+        "invalid_transition",
+        validatedId,
+        "A fourth patch cycle is not permitted.",
+      );
+    }
+    const nextPatchCycle = this.incrementVersion(
+      validatedInput.expected_patch_cycle,
+      validatedId,
+      "patch_cycle",
+    );
+    const identity: MissionIdentity<"review"> = {
+      phase: "review",
+      work_item_id: validatedId,
+      goal_version: validatedInput.expected_goal_version,
+      input_revision: validatedInput.expected_input_revision,
+      attempt: validatedInput.attempt,
+    };
+    const snapshot = await this.repository.readMissionResult(identity);
+    if (!("review_subject" in snapshot.mission)) {
+      throw this.conflict(
+        "mission_not_ready",
+        validatedId,
+        "Patch-plan approval requires an immutable review mission.",
+      );
+    }
+    const resultContentSha256 = hashResultContent(snapshot.result_source);
+    const importRunId = createImportRunId(
+      snapshot.mission.content_sha256,
+      resultContentSha256,
+    );
+    const idempotencyKey = [
+      deriveControllerIdempotencyKey(
+        validatedId,
+        "patch",
+        identity.goal_version,
+        identity.input_revision,
+        identity.attempt,
+      ),
+      `cycle-${nextPatchCycle}`,
+      "accept-plan",
+      resultContentSha256,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "accept_patch_plan", input: validatedInput }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const manifestIdentity = {
+        work_item_id: validatedId,
+        run_id: runId,
+        idempotency_key: idempotencyKey,
+        phase: "patch" as const,
+        goal_version: identity.goal_version,
+        input_revision: identity.input_revision,
+        attempt: identity.attempt,
+      };
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (existing !== null) {
+        return this.reconcileStoredAcceptPatchPlan(
+          lease,
+          existing,
+          manifestIdentity,
+          nextPatchCycle,
+        );
+      }
+
+      this.validateReviewExpectation(
+        validatedId,
+        lease.work_item,
+        validatedInput,
+      );
+      const attention = lease.work_item.state.attention;
+      if (
+        attention?.kind !== "patch_plan_approval" ||
+        attention.pins.mission_content_sha256 !==
+          snapshot.mission.content_sha256 ||
+        attention.pins.result_content_sha256 !== resultContentSha256 ||
+        attention.pins.git_commit !==
+          snapshot.mission.review_subject.accepted_result_commit ||
+        JSON.stringify(attention.pins.artifact_paths) !==
+          JSON.stringify([snapshot.mission_path, snapshot.result_path]) ||
+        attention.pins.evidence_paths.length !== 1
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "Patch-plan approval does not match the current pinned review decision.",
+        );
+      }
+      const currentSubject = await this.currentReviewSubject(
+        this.repository,
+        identity,
+        snapshot.mission.review_subject,
+        validatedInput.expected_patch_cycle,
+      );
+      const assessment = await this.assessReviewResult(
+        snapshot,
+        identity,
+        currentSubject,
+      );
+      if (
+        assessment.outcome !== "applied" ||
+        assessment.result?.verdict !== "findings"
+      ) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          "Patch-plan approval requires a valid applied review with findings.",
+        );
+      }
+      const stored = await this.repository.readImportEvidence(
+        identity,
+        importRunId,
+      );
+      const reviewImportManifest =
+        stored === null
+          ? null
+          : await this.repository.readControllerRunManifest(
+              validatedId,
+              stored.evidence.controller_run_id,
+            );
+      if (
+        stored === null ||
+        stored.evidence.phase !== "review" ||
+        stored.evidence.outcome !== "applied" ||
+        JSON.stringify(stored.evidence.identity) !== JSON.stringify(identity) ||
+        stored.evidence.mission_content_sha256 !==
+          snapshot.mission.content_sha256 ||
+        stored.evidence.result_content_sha256 !== resultContentSha256 ||
+        stored.evidence.git_base_commit !==
+          snapshot.mission.review_subject.git_base_commit ||
+        stored.evidence.result_commit !==
+          snapshot.mission.review_subject.accepted_result_commit ||
+        stored.summary.phase !== "review" ||
+        stored.summary.import_run_id !== importRunId ||
+        stored.summary.outcome !== "applied" ||
+        stored.summary.evidence_path !== attention.pins.evidence_paths[0] ||
+        reviewImportManifest === null ||
+        reviewImportManifest.phase !== "review" ||
+        reviewImportManifest.outcome !== "applied" ||
+        reviewImportManifest.goal_version !== identity.goal_version ||
+        reviewImportManifest.input_revision !== identity.input_revision ||
+        reviewImportManifest.attempt !== identity.attempt
+      ) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          "Patch-plan approval requires matching applied review evidence.",
+        );
+      }
+      const transition = validateWorkItemTransition(
+        lease.work_item.state.phase,
+        "patch",
+        lease.work_item.state.status,
+        "active",
+      );
+      if (!transition.ok) {
+        throw this.conflict(
+          "invalid_transition",
+          validatedId,
+          transition.reason,
+        );
+      }
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...withoutAttention(lease.work_item.state),
+          phase: "patch",
+          status: "active",
+          patch_cycle: nextPatchCycle,
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      return await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest: this.pendingManifest(
+          manifestIdentity,
+          activeRun.acquired_at,
+        ),
+      });
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
+  }
+
+  async importPatchResult(
+    workItemId: string,
+    input: ImportPatchResultInput,
+  ): Promise<ImportPatchResultResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = importPatchResultInputSchema.parse(input);
+    const repository = this.repository;
+    const identity: MissionIdentity<"patch"> = {
+      phase: "patch",
+      work_item_id: validatedId,
+      goal_version: validatedInput.expected_goal_version,
+      input_revision: validatedInput.expected_input_revision,
+      attempt: validatedInput.attempt,
+      patch_cycle: validatedInput.expected_patch_cycle,
+    };
+    const snapshot = await repository.readMissionResult(identity);
+    if (!("patch_subject" in snapshot.mission)) {
+      throw this.conflict(
+        "mission_not_ready",
+        validatedId,
+        "Patch result import requires an immutable patch mission.",
+      );
+    }
+    const resultContentSha256 = hashResultContent(snapshot.result_source);
+    const importRunId = createImportRunId(
+      snapshot.mission.content_sha256,
+      resultContentSha256,
+    );
+    const idempotencyKey = [
+      deriveControllerIdempotencyKey(
+        validatedId,
+        "patch",
+        identity.goal_version,
+        identity.input_revision,
+        identity.attempt,
+      ),
+      `cycle-${identity.patch_cycle}`,
+      "import",
+      resultContentSha256,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "import_patch_result", importRunId }),
+    );
+    const storedEvidence = await repository.readImportEvidence(
+      identity,
+      importRunId,
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await repository.acquireControllerLease(validatedId, activeRun);
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const existingManifest = await repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (storedEvidence !== null) {
+        return await this.reconcileStoredPatchImport(
+          repository,
+          lease,
+          existingManifest,
+          storedEvidence,
+          validatedInput,
+          activeRun,
+          idempotencyKey,
+          snapshot,
+        );
+      }
+      if (existingManifest !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Patch import run ${runId} has a controller manifest but no immutable evidence.`,
+        );
+      }
+      this.validatePatchExpectation(
+        validatedId,
+        lease.work_item,
+        validatedInput,
+      );
+      const manifest = await repository.readManifest();
+      const assessment = await this.assessPatchResult(
+        snapshot,
+        identity,
+        manifest,
+      );
+      const completedAt = nextTimestamp(activeRun.acquired_at, this.clock);
+      const evidence = importEvidenceEnvelopeSchema.parse({
+        schema_version: 2,
+        phase: "patch",
+        import_run_id: importRunId,
+        result_content_sha256: resultContentSha256,
+        mission_content_sha256: snapshot.mission.content_sha256,
+        identity,
+        git_base_commit: snapshot.mission.source_revision.git_base_commit,
+        result_commit:
+          assessment.result?.commit ??
+          snapshot.mission.source_revision.git_base_commit,
+        controller_run_id: runId,
+        started_at: activeRun.acquired_at,
+        completed_at: completedAt,
+        outcome: assessment.outcome,
+        reasons: assessment.reasons,
+      });
+      const evidenceSummary = await repository.writeImportEvidence({
+        submission_source: snapshot.result_source,
+        evidence,
+        verification: assessment.verification,
+      });
+      if (assessment.outcome === "rejected") {
+        return {
+          work_item: lease.work_item,
+          manifest: null,
+          evidence: evidenceSummary,
+          ...(assessment.result === undefined
+            ? {}
+            : { result: assessment.result }),
+        };
+      }
+      const transition = validateWorkItemTransition(
+        lease.work_item.state.phase,
+        "review",
+        lease.work_item.state.status,
+        "active",
+      );
+      if (!transition.ok) {
+        throw this.conflict(
+          "invalid_transition",
+          validatedId,
+          transition.reason,
+        );
+      }
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...withoutAttention(lease.work_item.state),
+          phase: "review",
+          status: "active",
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const manifestIdentity = {
+        work_item_id: validatedId,
+        run_id: runId,
+        idempotency_key: idempotencyKey,
+        phase: "review" as const,
+        goal_version: identity.goal_version,
+        input_revision: identity.input_revision,
+        attempt: identity.attempt,
+      };
+      const mutation = await repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest: this.pendingManifest(
+          manifestIdentity,
+          activeRun.acquired_at,
+        ),
       });
       return {
         ...mutation,
@@ -878,10 +1322,250 @@ export class WorkItemController {
     }
   }
 
+  private reviewAttention(
+    workItem: WorkItem,
+    snapshot: MissionResultSnapshot,
+    evidence: ImportEvidenceSummary,
+    resultContentSha256: string,
+    result: ReviewExternalResultSubmission,
+    createdAt: string,
+  ): WorkItemAttention {
+    const patchCycle = workItem.state.patch_cycle;
+    if (
+      workItem.state.goal_version === undefined ||
+      workItem.state.input_revision === undefined ||
+      workItem.state.attempt === undefined ||
+      patchCycle === undefined
+    ) {
+      throw this.conflict(
+        "contract_required",
+        workItem.goal.work_item_id,
+        "Review attention requires a complete governed tuple.",
+      );
+    }
+    const common = {
+      created_at: createdAt,
+      governed_tuple: {
+        goal_version: workItem.state.goal_version,
+        input_revision: workItem.state.input_revision,
+        attempt: workItem.state.attempt,
+        patch_cycle: patchCycle,
+      },
+      pins: {
+        artifact_paths: [
+          snapshot.mission_path,
+          snapshot.result_path,
+        ] as [string, ...string[]],
+        evidence_paths: [evidence.evidence_path],
+        git_commit: result.accepted_result_commit,
+        mission_content_sha256: snapshot.mission.content_sha256,
+        result_content_sha256: resultContentSha256,
+      },
+    };
+
+    if (result.verdict === "clean") {
+      return {
+        kind: "review_ready",
+        question:
+          "The pinned result passed deterministic checks and independent review. What human decision should happen next?",
+        recommendation:
+          "Open the exact review evidence; completion remains governed by the authorized human or policy gate.",
+        ...common,
+      };
+    }
+
+    const unresolvedIds =
+      "resolutions" in result
+        ? result.resolutions
+            .filter((resolution) => resolution.status === "unresolved")
+            .map((resolution) => resolution.finding_id)
+        : [];
+    if (unresolvedIds.length > 0) {
+      return {
+        kind: "unresolved_finding",
+        question: `Assigned ${unresolvedIds.length === 1 ? "finding" : "findings"} ${unresolvedIds.join(", ")} remain unresolved after patch cycle ${patchCycle}. What human decision should happen next?`,
+        recommendation:
+          "Open the pinned re-review evidence and decide whether to change the goal or scope, pause the item, or handle the residual risk through a later authorized gate.",
+        ...common,
+      };
+    }
+
+    if (patchCycle >= 3) {
+      return {
+        kind: "cycle_limit",
+        question:
+          "The three permitted patch cycles are exhausted. What governed human decision should happen next?",
+        recommendation:
+          "Open the pinned evidence and change the goal or scope, pause or cancel the item, or handle residual risk through a later authorized gate.",
+        ...common,
+      };
+    }
+
+    return {
+      kind: "patch_plan_approval",
+      question: "Approve one patch that addresses these exact findings?",
+      recommendation:
+        "Approve the bounded patch plan, or open the work item to change its governed goal or scope.",
+      ...common,
+    };
+  }
+
+  private async readAppliedPatchReviewSubject(
+    repository: ControllerWorkItemRepository,
+    reviewIdentity: MissionIdentity<"review">,
+    patchCycle: number,
+  ): Promise<PatchReviewSubject> {
+    const workItemId = reviewIdentity.work_item_id;
+    const patchIdentity: MissionIdentity<"patch"> = {
+      ...reviewIdentity,
+      phase: "patch",
+      patch_cycle: patchCycle,
+    };
+    const snapshot = await repository.readMissionResult(patchIdentity);
+    if (!("patch_subject" in snapshot.mission)) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Applied patch evidence is not backed by a patch mission.",
+      );
+    }
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(snapshot.result_source);
+    } catch {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Applied patch result is not valid JSON.",
+      );
+    }
+    const parsedResult = patchExternalResultSubmissionSchema.safeParse(parsedJson);
+    if (!parsedResult.success) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Applied patch result no longer satisfies the patch result contract.",
+      );
+    }
+    const result = parsedResult.data;
+    const resultContentSha256 = hashResultContent(snapshot.result_source);
+    const importRunId = createImportRunId(
+      snapshot.mission.content_sha256,
+      resultContentSha256,
+    );
+    const stored = await repository.readImportEvidence(
+      patchIdentity,
+      importRunId,
+    );
+    const controllerRun =
+      stored === null
+        ? null
+        : await repository.readControllerRunManifest(
+            workItemId,
+            stored.evidence.controller_run_id,
+          );
+    const requiredCommands = (await repository.readManifest()).verification
+      .required_commands;
+    if (
+      JSON.stringify(snapshot.mission.identity) !==
+        JSON.stringify(patchIdentity) ||
+      snapshot.mission.result_contract.output_path !== snapshot.result_path ||
+      result.patch_mission_content_sha256 !== snapshot.mission.content_sha256 ||
+      JSON.stringify(result.identity) !== JSON.stringify(patchIdentity) ||
+      stored === null ||
+      stored.evidence.phase !== "patch" ||
+      stored.evidence.outcome !== "applied" ||
+      JSON.stringify(stored.evidence.identity) !==
+        JSON.stringify(patchIdentity) ||
+      stored.evidence.mission_content_sha256 !==
+        snapshot.mission.content_sha256 ||
+      stored.evidence.result_content_sha256 !== resultContentSha256 ||
+      stored.evidence.result_commit !== result.commit ||
+      stored.evidence.git_base_commit !==
+        snapshot.mission.source_revision.git_base_commit ||
+      stored.summary.phase !== "patch" ||
+      stored.summary.import_run_id !== importRunId ||
+      stored.summary.outcome !== "applied" ||
+      controllerRun === null ||
+      controllerRun.phase !== "review" ||
+      controllerRun.outcome !== "applied" ||
+      controllerRun.goal_version !== patchIdentity.goal_version ||
+      controllerRun.input_revision !== patchIdentity.input_revision ||
+      controllerRun.attempt !== patchIdentity.attempt ||
+      stored.verification.length !== requiredCommands.length ||
+      stored.verification.some(
+        (record, index) =>
+          record.name !== requiredCommands[index]?.name ||
+          JSON.stringify(record.argv) !==
+            JSON.stringify(requiredCommands[index]?.argv) ||
+          record.status !== "passed" ||
+          record.started_at === null ||
+          record.completed_at === null ||
+          record.exit_code !== 0 ||
+          record.signal !== null,
+      )
+    ) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Applied patch result, evidence, and governed identity do not match.",
+      );
+    }
+
+    const subject = reviewSubjectSchema.parse({
+      source: "patch",
+      patch_cycle: patchCycle,
+      patch_mission_content_sha256: snapshot.mission.content_sha256,
+      patch_result_content_sha256: resultContentSha256,
+      patch_mission_path: snapshot.mission_path,
+      patch_evidence_path: stored.summary.evidence_path,
+      git_base_commit: snapshot.mission.source_revision.git_base_commit,
+      accepted_result_commit: result.commit,
+      changed_files: [...result.changed_files].sort(),
+      command_evidence: stored.verification,
+      resolved_from: {
+        review_mission_content_sha256:
+          snapshot.mission.patch_subject.review_mission_content_sha256,
+        review_result_content_sha256:
+          snapshot.mission.patch_subject.review_result_content_sha256,
+        finding_ids: snapshot.mission.patch_subject.findings.map(
+          (finding) => finding.finding_id,
+        ),
+      },
+    });
+    if (subject.source !== "patch") {
+      throw new Error("Patch subject parser returned an execute subject.");
+    }
+    return subject;
+  }
+
+  private async currentReviewSubject(
+    repository: ControllerWorkItemRepository,
+    identity: MissionIdentity<"review">,
+    missionSubject: ReviewSubject,
+    patchCycle: number,
+  ): Promise<ReviewSubject> {
+    const currentSubject =
+      missionSubject.source === "execute"
+        ? (
+            await repository.readAppliedExecuteReviewSubject({
+              ...identity,
+              phase: "execute",
+            })
+          ).review_subject
+        : await this.readAppliedPatchReviewSubject(
+            repository,
+            identity,
+            patchCycle,
+          );
+    return reviewSubjectSchema.parse(currentSubject);
+  }
+
   private async assessReviewResult(
     snapshot: MissionResultSnapshot,
     identity: ReviewExternalResultSubmission["identity"],
-    currentSubject: ExecuteReviewSubject,
+    currentSubject: ReviewSubject,
+    validateWorkspace = true,
   ): Promise<ReviewResultAssessment> {
     const mission = snapshot.mission;
     if (!("review_subject" in mission)) {
@@ -903,16 +1587,6 @@ export class WorkItemController {
     ) {
       reasons.push("Review mission subject is stale or does not match applied execute evidence.");
     }
-    if (mission.review_subject.source !== "execute") {
-      return {
-        outcome: "rejected",
-        reasons: [
-          ...reasons,
-          "Patch-subject review assessment is not available before the patch controller slice.",
-        ],
-      };
-    }
-
     let parsedJson: unknown;
     try {
       parsedJson = JSON.parse(snapshot.result_source);
@@ -923,7 +1597,9 @@ export class WorkItemController {
       };
     }
     const parsedResult =
-      executeReviewExternalResultSubmissionSchema.safeParse(parsedJson);
+      reviewExternalResultSubmissionForSubjectSchema(
+        mission.review_subject,
+      ).safeParse(parsedJson);
     if (!parsedResult.success) {
       return {
         outcome: "rejected",
@@ -943,19 +1619,6 @@ export class WorkItemController {
     }
     if (JSON.stringify(result.identity) !== JSON.stringify(identity)) {
       reasons.push("Review result identity does not match the requested governed tuple.");
-    }
-    const subjectBindings = {
-      execute_mission_content_sha256:
-        mission.review_subject.execute_mission_content_sha256,
-      execute_result_content_sha256:
-        mission.review_subject.execute_result_content_sha256,
-      git_base_commit: mission.review_subject.git_base_commit,
-      accepted_result_commit: mission.review_subject.accepted_result_commit,
-    };
-    for (const [field, expected] of Object.entries(subjectBindings)) {
-      if (result[field as keyof typeof subjectBindings] !== expected) {
-        reasons.push(`Review result ${field} does not match the immutable subject.`);
-      }
     }
     const deterministicChecks = new Set(
       mission.review_subject.command_evidence.map((record) =>
@@ -992,14 +1655,16 @@ export class WorkItemController {
           break;
       }
     }
-    if (
-      (await this.git.readHeadCommit()) !==
-      currentSubject.accepted_result_commit
-    ) {
-      reasons.push("Workspace HEAD no longer equals the accepted execute commit.");
-    }
-    if (!(await this.git.isWorktreeCleanExcludingFounder())) {
-      reasons.push("Workspace has uncommitted changes outside .founder/.");
+    if (validateWorkspace) {
+      if (
+        (await this.git.readHeadCommit()) !==
+        currentSubject.accepted_result_commit
+      ) {
+        reasons.push("Workspace HEAD no longer equals the accepted subject commit.");
+      }
+      if (!(await this.git.isWorktreeCleanExcludingFounder())) {
+        reasons.push("Workspace has uncommitted changes outside .founder/.");
+      }
     }
 
     return reasons.length === 0
@@ -1059,7 +1724,105 @@ export class WorkItemController {
       return { outcome: "rejected", reasons, result, verification: [] };
     }
 
-    const verification: CommandEvidenceRecord[] = [];
+    const verification = await this.runAuthoritativeVerification(manifest);
+    reasons.push(...verification.reasons);
+
+    return reasons.length === 0
+      ? {
+          outcome: "applied",
+          reasons: [],
+          result,
+          verification: verification.records,
+        }
+      : {
+          outcome: "failed",
+          reasons,
+          result,
+          verification: verification.records,
+        };
+  }
+
+  private async assessPatchResult(
+    snapshot: MissionResultSnapshot,
+    identity: MissionIdentity<"patch">,
+    manifest: ProductManifest,
+  ): Promise<PatchResultAssessment> {
+    const reasons: string[] = [];
+    if (!("patch_subject" in snapshot.mission)) {
+      return {
+        outcome: "rejected",
+        reasons: ["Mission snapshot is not a patch mission."],
+        verification: [],
+      };
+    }
+    if (JSON.stringify(snapshot.mission.identity) !== JSON.stringify(identity)) {
+      reasons.push("Patch mission identity does not match the requested governed tuple.");
+    }
+    if (snapshot.mission.result_contract.output_path !== snapshot.result_path) {
+      reasons.push("Patch result path does not match the immutable snapshot path.");
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(snapshot.result_source);
+    } catch {
+      return {
+        outcome: "rejected",
+        reasons: [...reasons, "result.json is not valid JSON."],
+        verification: [],
+      };
+    }
+    const parsedResult = patchExternalResultSubmissionSchema.safeParse(parsedJson);
+    if (!parsedResult.success) {
+      return {
+        outcome: "rejected",
+        reasons: [
+          ...reasons,
+          ...parsedResult.error.issues.map(
+            (issue) =>
+              `result.json ${issue.path.map(String).join(".") || "value"}: ${issue.message}`,
+          ),
+        ],
+        verification: [],
+      };
+    }
+    const result = parsedResult.data;
+    if (
+      result.patch_mission_content_sha256 !== snapshot.mission.content_sha256
+    ) {
+      reasons.push("Patch result mission hash does not match the immutable mission.");
+    }
+    if (JSON.stringify(result.identity) !== JSON.stringify(identity)) {
+      reasons.push("Patch result identity does not match the governed tuple.");
+    }
+    if (reasons.length === 0) {
+      reasons.push(...(await this.validateGitProof(snapshot, result)));
+    }
+    if (reasons.length > 0) {
+      return { outcome: "rejected", reasons, result, verification: [] };
+    }
+
+    const verification = await this.runAuthoritativeVerification(manifest);
+    return verification.reasons.length === 0
+      ? {
+          outcome: "applied",
+          reasons: [],
+          result,
+          verification: verification.records,
+        }
+      : {
+          outcome: "rejected",
+          reasons: verification.reasons,
+          result,
+          verification: verification.records,
+        };
+  }
+
+  private async runAuthoritativeVerification(
+    manifest: ProductManifest,
+  ): Promise<{ reasons: string[]; records: CommandEvidenceRecord[] }> {
+    const reasons: string[] = [];
+    const records: CommandEvidenceRecord[] = [];
     for (
       let index = 0;
       index < manifest.verification.required_commands.length;
@@ -1095,7 +1858,7 @@ export class WorkItemController {
           output_truncated: false,
         });
       }
-      verification.push(record);
+      records.push(record);
       if (record.status !== "passed") {
         reasons.push(
           `Required verification command ${command.name} ended with ${record.status}.`,
@@ -1105,7 +1868,7 @@ export class WorkItemController {
           remaining < manifest.verification.required_commands.length;
           remaining += 1
         ) {
-          verification.push(
+          records.push(
             this.notRunEvidence(
               manifest.verification.required_commands[remaining],
             ),
@@ -1115,14 +1878,12 @@ export class WorkItemController {
       }
     }
 
-    return reasons.length === 0
-      ? { outcome: "applied", reasons: [], result, verification }
-      : { outcome: "failed", reasons, result, verification };
+    return { reasons, records };
   }
 
   private async validateGitProof(
     snapshot: MissionResultSnapshot,
-    result: ExecuteExternalResultSubmission,
+    result: ExecuteExternalResultSubmission | PatchExternalResultSubmission,
   ): Promise<string[]> {
     const resolvedCommit = await this.git.resolveCommit(result.commit);
     if (resolvedCommit === null || resolvedCommit !== result.commit) {
@@ -1170,6 +1931,214 @@ export class WorkItemController {
       return ["Result changed_files do not exactly match the Git diff."];
     }
     return [];
+  }
+
+  private reconcileStoredAcceptPatchPlan(
+    lease: ControllerLease,
+    existingManifest: ControllerRunManifest,
+    manifestIdentity: {
+      work_item_id: string;
+      run_id: string;
+      idempotency_key: string;
+      phase: "patch";
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+    },
+    nextPatchCycle: number,
+  ): ControllerMutationResult {
+    if (
+      manifestMatches(existingManifest, manifestIdentity) &&
+      lease.work_item.state.phase === "patch" &&
+      lease.work_item.state.status === "active" &&
+      lease.work_item.state.goal_version === manifestIdentity.goal_version &&
+      lease.work_item.state.input_revision ===
+        manifestIdentity.input_revision &&
+      lease.work_item.state.attempt === manifestIdentity.attempt &&
+      lease.work_item.state.patch_cycle === nextPatchCycle &&
+      lease.work_item.state.attention === undefined
+    ) {
+      return { work_item: lease.work_item, manifest: existingManifest };
+    }
+    throw this.conflict(
+      "idempotency_conflict",
+      manifestIdentity.work_item_id,
+      `Patch-plan run ${manifestIdentity.run_id} already has a non-matching durable result.`,
+    );
+  }
+
+  private async reconcileStoredPatchImport(
+    repository: ControllerWorkItemRepository,
+    lease: ControllerLease,
+    existingManifest: ControllerRunManifest | null,
+    stored: StoredImportEvidence,
+    input: ImportPatchResultInput,
+    activeRun: ActiveRun,
+    idempotencyKey: string,
+    snapshot: MissionResultSnapshot,
+  ): Promise<ImportPatchResultResult> {
+    const workItemId = lease.work_item.goal.work_item_id;
+    const identity: MissionIdentity<"patch"> = {
+      phase: "patch",
+      work_item_id: workItemId,
+      goal_version: input.expected_goal_version,
+      input_revision: input.expected_input_revision,
+      attempt: input.attempt,
+      patch_cycle: input.expected_patch_cycle,
+    };
+    if (!("patch_subject" in snapshot.mission)) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Stored patch evidence is not backed by a patch mission snapshot.",
+      );
+    }
+    const resultContentSha256 = hashResultContent(snapshot.result_source);
+    const importRunId = createImportRunId(
+      snapshot.mission.content_sha256,
+      resultContentSha256,
+    );
+    const parsed = patchExternalResultSubmissionSchema.safeParse(
+      (() => {
+        try {
+          return JSON.parse(snapshot.result_source) as unknown;
+        } catch {
+          return null;
+        }
+      })(),
+    );
+    const result = parsed.success ? parsed.data : undefined;
+    if (
+      stored.evidence.phase !== "patch" ||
+      stored.evidence.controller_run_id !== activeRun.run_id ||
+      stored.evidence.import_run_id !== importRunId ||
+      JSON.stringify(stored.evidence.identity) !== JSON.stringify(identity) ||
+      stored.evidence.mission_content_sha256 !==
+        snapshot.mission.content_sha256 ||
+      stored.evidence.result_content_sha256 !== resultContentSha256 ||
+      stored.evidence.git_base_commit !==
+        snapshot.mission.source_revision.git_base_commit ||
+      stored.summary.import_run_id !== stored.evidence.import_run_id ||
+      stored.summary.phase !== "patch" ||
+      stored.summary.outcome !== stored.evidence.outcome ||
+      JSON.stringify(stored.summary.reasons) !==
+        JSON.stringify(stored.evidence.reasons)
+    ) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Stored patch import evidence does not match its controller run or summary.",
+      );
+    }
+
+    if (stored.evidence.outcome === "rejected") {
+      this.validatePatchExpectation(workItemId, lease.work_item, input);
+      if (existingManifest !== null) {
+        throw this.conflict(
+          "idempotency_conflict",
+          workItemId,
+          `Rejected patch run ${activeRun.run_id} must not have a controller manifest.`,
+        );
+      }
+      return {
+        work_item: lease.work_item,
+        manifest: null,
+        evidence: stored.summary,
+        ...(result === undefined ? {} : { result }),
+      };
+    }
+
+    if (
+      result === undefined ||
+      result.patch_mission_content_sha256 !== snapshot.mission.content_sha256 ||
+      JSON.stringify(result.identity) !== JSON.stringify(identity) ||
+      stored.evidence.result_commit !== result.commit ||
+      stored.verification.length === 0
+    ) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Applied patch evidence no longer validates for recovery.",
+      );
+    }
+    const requiredCommands = (await repository.readManifest()).verification
+      .required_commands;
+    if (
+      stored.verification.length !== requiredCommands.length ||
+      stored.verification.some(
+        (record, index) =>
+          record.name !== requiredCommands[index]?.name ||
+          JSON.stringify(record.argv) !==
+            JSON.stringify(requiredCommands[index]?.argv) ||
+          record.status !== "passed" ||
+          record.started_at === null ||
+          record.completed_at === null ||
+          record.exit_code !== 0 ||
+          record.signal !== null,
+      )
+    ) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Applied patch evidence does not match the required command set.",
+      );
+    }
+    const manifestIdentity = {
+      work_item_id: workItemId,
+      run_id: activeRun.run_id,
+      idempotency_key: idempotencyKey,
+      phase: "review" as const,
+      goal_version: input.expected_goal_version,
+      input_revision: input.expected_input_revision,
+      attempt: input.attempt,
+    };
+    const isTargetState =
+      lease.work_item.state.phase === "review" &&
+      lease.work_item.state.status === "active" &&
+      lease.work_item.state.goal_version === input.expected_goal_version &&
+      lease.work_item.state.input_revision === input.expected_input_revision &&
+      lease.work_item.state.attempt === input.attempt &&
+      lease.work_item.state.patch_cycle === input.expected_patch_cycle &&
+      lease.work_item.state.attention === undefined;
+    if (existingManifest !== null) {
+      if (manifestMatches(existingManifest, manifestIdentity) && isTargetState) {
+        return {
+          work_item: lease.work_item,
+          manifest: existingManifest,
+          evidence: stored.summary,
+          result,
+        };
+      }
+      throw this.conflict(
+        "idempotency_conflict",
+        workItemId,
+        `Patch run ${activeRun.run_id} already has a non-matching durable result.`,
+      );
+    }
+    if (!isTargetState) {
+      this.validatePatchExpectation(workItemId, lease.work_item, input);
+    }
+    const nextItem = workItemSchema.parse({
+      goal: lease.work_item.goal,
+      state: {
+        ...withoutAttention(lease.work_item.state),
+        phase: "review",
+        status: "active",
+        updated_at: isTargetState
+          ? lease.work_item.state.updated_at
+          : nextTimestamp(lease.work_item.state.updated_at, this.clock),
+      },
+    });
+    const mutation = await repository.commitControllerMutation(lease, {
+      goal: nextItem.goal,
+      state: nextItem.state,
+      manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
+    });
+    return {
+      ...mutation,
+      evidence: stored.summary,
+      result,
+    };
   }
 
   private async reconcileStoredReviewImport(
@@ -1224,11 +2193,11 @@ export class WorkItemController {
     }
     this.validateReviewExpectation(workItemId, lease.work_item, input);
 
-    let result: ExecuteReviewExternalResultSubmission | undefined;
+    let result: ReviewExternalResultSubmission | undefined;
     try {
-      const parsed = executeReviewExternalResultSubmissionSchema.safeParse(
-        JSON.parse(snapshot.result_source),
-      );
+      const parsed = reviewExternalResultSubmissionForSubjectSchema(
+        snapshot.mission.review_subject,
+      ).safeParse(JSON.parse(snapshot.result_source));
       result = parsed.success ? parsed.data : undefined;
     } catch {
       result = undefined;
@@ -1259,30 +2228,17 @@ export class WorkItemController {
       input_revision: input.expected_input_revision,
       attempt: input.attempt,
     };
-    if (existingManifest !== null) {
-      if (manifestMatches(existingManifest, manifestIdentity)) {
-        return {
-          work_item: lease.work_item,
-          manifest: existingManifest,
-          evidence: stored.summary,
-          ...(result === undefined ? {} : { result }),
-        };
-      }
-      throw this.conflict(
-        "idempotency_conflict",
-        workItemId,
-        `Review run ${activeRun.run_id} already has a non-matching durable result.`,
-      );
-    }
-
-    const executeSubject = await repository.readAppliedExecuteReviewSubject({
-      ...identity,
-      phase: "execute",
-    });
+    const currentSubject = await this.currentReviewSubject(
+      repository,
+      identity,
+      snapshot.mission.review_subject,
+      input.expected_patch_cycle,
+    );
     const assessment = await this.assessReviewResult(
       snapshot,
       identity,
-      executeSubject.review_subject,
+      currentSubject,
+      false,
     );
     if (assessment.outcome !== "applied") {
       throw this.conflict(
@@ -1292,9 +2248,48 @@ export class WorkItemController {
       );
     }
 
-    const mutation = await repository.commitControllerMutation(lease, {
+    const attention = this.reviewAttention(
+      lease.work_item,
+      snapshot,
+      stored.summary,
+      stored.evidence.result_content_sha256,
+      assessment.result!,
+      stored.evidence.completed_at,
+    );
+    if (existingManifest !== null) {
+      if (
+        manifestMatches(existingManifest, manifestIdentity) &&
+        JSON.stringify(lease.work_item.state.attention) ===
+          JSON.stringify(attention)
+      ) {
+        return {
+          work_item: lease.work_item,
+          manifest: existingManifest,
+          evidence: stored.summary,
+          result: assessment.result,
+        };
+      }
+      throw this.conflict(
+        "idempotency_conflict",
+        workItemId,
+        `Review run ${activeRun.run_id} already has a non-matching durable result.`,
+      );
+    }
+
+    const nextItem = workItemSchema.parse({
       goal: lease.work_item.goal,
-      state: lease.work_item.state,
+      state: {
+        ...lease.work_item.state,
+        attention,
+        updated_at: nextTimestamp(
+          lease.work_item.state.updated_at,
+          this.clock,
+        ),
+      },
+    });
+    const mutation = await repository.commitControllerMutation(lease, {
+      goal: nextItem.goal,
+      state: nextItem.state,
       manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
     });
     return {
@@ -1451,7 +2446,7 @@ export class WorkItemController {
   private validateReviewExpectation(
     workItemId: string,
     current: WorkItem,
-    input: ImportReviewResultInput,
+    input: ImportReviewResultInput | AcceptPatchPlanInput,
   ): void {
     if (current.goal.goal_contract === undefined) {
       throw this.conflict(
@@ -1478,6 +2473,42 @@ export class WorkItemController {
         "attempt_conflict",
         workItemId,
         `Expected attempt ${input.attempt} but found ${current.state.attempt}.`,
+      );
+    }
+    if (current.state.patch_cycle !== input.expected_patch_cycle) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        `Expected patch cycle ${input.expected_patch_cycle} but found ${current.state.patch_cycle}.`,
+      );
+    }
+  }
+
+  private validatePatchExpectation(
+    workItemId: string,
+    current: WorkItem,
+    input: ImportPatchResultInput,
+  ): void {
+    if (current.goal.goal_contract === undefined) {
+      throw this.conflict(
+        "contract_required",
+        workItemId,
+        "Patch result import requires an active goal contract.",
+      );
+    }
+    if (
+      current.state.phase !== input.expected_phase ||
+      current.state.status !== input.expected_status ||
+      current.state.schema_version !== input.expected_schema_version ||
+      current.state.goal_version !== input.expected_goal_version ||
+      current.state.input_revision !== input.expected_input_revision ||
+      current.state.attempt !== input.attempt ||
+      current.state.patch_cycle !== input.expected_patch_cycle
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Patch result expectations do not match durable state.",
       );
     }
   }

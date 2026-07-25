@@ -11,17 +11,23 @@ import {
 } from "../../src/application/work-item-controller";
 import {
   compileMission,
+  compilePatchMission,
   compileReviewMission,
   type ExecuteReviewSubject,
   type MissionIdentity,
+  type PatchReviewSubject,
+  type PatchSubject,
 } from "../../src/domain/mission";
 import {
+  hashResultContent,
   importEvidenceSummarySchema,
   serializeExternalResult,
   type AppliedExecuteReviewSubject,
   type ExecuteExternalResultSubmission,
   type ImportEvidenceWriteInput,
   type MissionResultSnapshot,
+  type PatchExternalResultSubmission,
+  type PatchReviewExternalResultSubmission,
   type ReviewExternalResultSubmission,
   type ReviewFindingLink,
   type StoredImportEvidence,
@@ -32,6 +38,7 @@ import type {
 } from "../../src/domain/verification";
 import {
   ControllerConflictError,
+  workItemSchema,
   type ControllerRunManifest,
   type VerificationCommand,
   type WorkItem,
@@ -282,6 +289,7 @@ async function createImportFixture(options?: {
 
 async function createReviewImportFixture(options?: {
   resultSource?: string;
+  patchCycle?: number;
   transformResult?: (
     result: ReviewExternalResultSubmission,
   ) => ReviewExternalResultSubmission;
@@ -298,9 +306,11 @@ async function createReviewImportFixture(options?: {
     expected_goal_version: number;
     expected_input_revision: number;
     attempt: number;
+    expected_patch_cycle: number;
   };
   evidence: Map<string, StoredImportEvidence>;
   evidenceWrites: { count: number };
+  snapshot: MissionResultSnapshot;
 }> {
   const { repository: workspace } = await createWorkspace();
   const execute = await governToExecute(workspace);
@@ -318,7 +328,49 @@ async function createReviewImportFixture(options?: {
       attempt: execute.workItem.state.attempt!,
     },
   );
-  const workItem = transitioned.work_item;
+  let workItem = transitioned.work_item;
+  if (options?.patchCycle !== undefined) {
+    const activeRun = {
+      run_id: `90000000-0000-4000-8000-00000000000${options.patchCycle}`,
+      idempotency_key: `test-fixture-patch-cycle-${options.patchCycle}`,
+      acquired_at: "2026-07-21T21:00:00.000Z",
+    };
+    const lease = await workspace.acquireControllerLease(
+      workItem.goal.work_item_id,
+      activeRun,
+    );
+    if (lease === null) {
+      throw new Error("Patch-cycle fixture requires a durable work item.");
+    }
+    const nextItem = workItemSchema.parse({
+      goal: workItem.goal,
+      state: {
+        ...workItem.state,
+        patch_cycle: options.patchCycle,
+      },
+    });
+    try {
+      const mutation = await workspace.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest: {
+          schema_version: 1,
+          run_id: activeRun.run_id,
+          work_item_id: nextItem.goal.work_item_id,
+          idempotency_key: activeRun.idempotency_key,
+          phase: "review",
+          goal_version: nextItem.state.goal_version!,
+          input_revision: nextItem.state.input_revision!,
+          attempt: nextItem.state.attempt!,
+          started_at: activeRun.acquired_at,
+          outcome: "pending",
+        },
+      });
+      workItem = mutation.work_item;
+    } finally {
+      await workspace.releaseControllerLease(lease);
+    }
+  }
   const identity = {
     phase: "review" as const,
     work_item_id: workItem.goal.work_item_id,
@@ -448,11 +500,16 @@ async function createReviewImportFixture(options?: {
     },
     async writeImportEvidence(input: ImportEvidenceWriteInput) {
       evidenceWrites.count += 1;
+      const evidenceIdentity = input.evidence.identity;
+      const patchCycleSuffix =
+        input.evidence.phase === "patch"
+          ? `-${input.evidence.identity.patch_cycle}`
+          : "";
       const summary = importEvidenceSummarySchema.parse({
         phase: input.evidence.phase,
         import_run_id: input.evidence.import_run_id,
         outcome: input.evidence.outcome,
-        evidence_path: `.founder/run-evidence/${identity.work_item_id}/review-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/${input.evidence.import_run_id}`,
+        evidence_path: `.founder/run-evidence/${evidenceIdentity.work_item_id}/${input.evidence.phase}-${evidenceIdentity.goal_version}-${evidenceIdentity.input_revision}-${evidenceIdentity.attempt}${patchCycleSuffix}/${input.evidence.import_run_id}`,
         reasons: input.evidence.reasons,
       });
       evidence.set(input.evidence.import_run_id, {
@@ -474,9 +531,321 @@ async function createReviewImportFixture(options?: {
       expected_goal_version: identity.goal_version,
       expected_input_revision: identity.input_revision,
       attempt: identity.attempt,
+      expected_patch_cycle: workItem.state.patch_cycle!,
     },
     evidence,
     evidenceWrites,
+    snapshot,
+  };
+}
+
+async function createPatchImportFixture(options?: {
+  severity?: "P0" | "P1" | "P2" | "P3";
+  transformPatchResult?: (
+    result: PatchExternalResultSubmission,
+  ) => PatchExternalResultSubmission;
+}): Promise<{
+  repository: ImportTestRepository;
+  workItem: WorkItem;
+  input: {
+    expected_phase: "patch";
+    expected_status: "active";
+    expected_schema_version: 2;
+    expected_goal_version: number;
+    expected_input_revision: number;
+    attempt: number;
+    expected_patch_cycle: number;
+  };
+  evidence: Map<string, StoredImportEvidence>;
+  evidenceWrites: { count: number };
+  patchSnapshot: MissionResultSnapshot;
+  reviewSnapshot: MissionResultSnapshot;
+}> {
+  const reviewFixture = await createReviewImportFixture({
+    transformResult: (result) => ({
+      ...result,
+      summary: "Review found one bounded correction.",
+      verdict: "findings",
+      findings: [
+        {
+          finding_id: "F-1",
+          severity: options?.severity ?? "P1",
+          title: "Preserve immutable evidence",
+          evidence: {
+            path: "src/application/work-item-controller.ts",
+            summary: "The patch must preserve evidence before mutation.",
+          },
+          required_action: "Keep patch import recovery deterministic.",
+          link: {
+            type: "acceptance_criteria",
+            criterion: "Reject stale transitions",
+          },
+        },
+      ],
+    }),
+  });
+  const controller = createController(reviewFixture.repository);
+  const importedReview = await controller.importReviewResult(
+    reviewFixture.workItem.goal.work_item_id,
+    reviewFixture.input,
+  );
+  const accepted = await controller.acceptPatchPlan(
+    reviewFixture.workItem.goal.work_item_id,
+    {
+      expected_phase: "review",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: importedReview.work_item.state.goal_version!,
+      expected_input_revision: importedReview.work_item.state.input_revision!,
+      attempt: importedReview.work_item.state.attempt!,
+      expected_patch_cycle: importedReview.work_item.state.patch_cycle!,
+    },
+  );
+  const reviewResult = JSON.parse(
+    reviewFixture.snapshot.result_source,
+  ) as ReviewExternalResultSubmission;
+  if (
+    reviewResult.verdict !== "findings" ||
+    reviewResult.findings.length === 0 ||
+    !("review_subject" in reviewFixture.snapshot.mission)
+  ) {
+    throw new Error("Patch fixture requires an applied review with findings.");
+  }
+  const reviewEvidence = [...reviewFixture.evidence.values()].find(
+    (stored) =>
+      stored.evidence.phase === "review" &&
+      stored.evidence.outcome === "applied",
+  );
+  if (reviewEvidence === undefined) {
+    throw new Error("Patch fixture requires applied review evidence.");
+  }
+  const patchSubject: PatchSubject = {
+    review_mission_content_sha256:
+      reviewFixture.snapshot.mission.content_sha256,
+    review_result_content_sha256: hashResultContent(
+      reviewFixture.snapshot.result_source,
+    ),
+    review_mission_path: reviewFixture.snapshot.mission_path,
+    review_result_path: reviewFixture.snapshot.result_path,
+    review_evidence_path: reviewEvidence.summary.evidence_path,
+    reviewed_commit: reviewResult.accepted_result_commit,
+    findings: reviewResult.findings as PatchSubject["findings"],
+    prior_review_subject: reviewFixture.snapshot.mission.review_subject,
+  };
+  const patchIdentity = {
+    phase: "patch" as const,
+    work_item_id: accepted.work_item.goal.work_item_id,
+    goal_version: accepted.work_item.state.goal_version!,
+    input_revision: accepted.work_item.state.input_revision!,
+    attempt: accepted.work_item.state.attempt!,
+    patch_cycle: accepted.work_item.state.patch_cycle!,
+  };
+  const patchPaths = {
+    task_path: `.founder/missions/${patchIdentity.work_item_id}/patch-${patchIdentity.goal_version}-${patchIdentity.input_revision}-${patchIdentity.attempt}-${patchIdentity.patch_cycle}/TASK.md`,
+    output_path: `.founder/missions/${patchIdentity.work_item_id}/patch-${patchIdentity.goal_version}-${patchIdentity.input_revision}-${patchIdentity.attempt}-${patchIdentity.patch_cycle}/result.json`,
+    git_base_commit: patchSubject.reviewed_commit,
+  };
+  const patchMission = compilePatchMission({
+    work_item: accepted.work_item,
+    controller_run: {
+      schema_version: 1,
+      run_id: "88888888-8888-4888-8888-888888888888",
+      work_item_id: patchIdentity.work_item_id,
+      idempotency_key: `${patchIdentity.work_item_id}:patch:${patchIdentity.patch_cycle}:mission`,
+      phase: "patch",
+      goal_version: patchIdentity.goal_version,
+      input_revision: patchIdentity.input_revision,
+      attempt: patchIdentity.attempt,
+      started_at: "2026-07-21T21:00:01.000Z",
+      completed_at: "2026-07-21T21:00:02.000Z",
+      outcome: "applied",
+    },
+    patch_subject: patchSubject,
+    paths: patchPaths,
+  });
+  const defaultPatchResult: PatchExternalResultSubmission = {
+    result_schema_version: 2,
+    patch_mission_content_sha256: patchMission.content_sha256,
+    identity: patchIdentity,
+    commit: testCommit,
+    summary: "Applied the bounded correction.",
+    changed_files: ["src/domain/result.ts"],
+    verification: [{ name: "Tests", status: "passed" }],
+  };
+  const patchSnapshot: MissionResultSnapshot = {
+    mission: patchMission,
+    mission_path: patchPaths.task_path.replace(/TASK\.md$/, "mission.json"),
+    result_path: patchPaths.output_path,
+    result_source: serializeExternalResult(
+      options?.transformPatchResult?.(defaultPatchResult) ?? defaultPatchResult,
+    ),
+  };
+  Object.assign(reviewFixture.repository, {
+    async readMissionResult(identity: MissionIdentity) {
+      return identity.phase === "patch"
+        ? patchSnapshot
+        : reviewFixture.snapshot;
+    },
+  });
+
+  return {
+    repository: reviewFixture.repository,
+    workItem: accepted.work_item,
+    input: {
+      expected_phase: "patch",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: patchIdentity.goal_version,
+      expected_input_revision: patchIdentity.input_revision,
+      attempt: patchIdentity.attempt,
+      expected_patch_cycle: patchIdentity.patch_cycle,
+    },
+    evidence: reviewFixture.evidence,
+    evidenceWrites: reviewFixture.evidenceWrites,
+    patchSnapshot,
+    reviewSnapshot: reviewFixture.snapshot,
+  };
+}
+
+async function createPatchReviewImportFixture(options: {
+  verdict: "clean" | "findings";
+  findings: PatchReviewExternalResultSubmission["findings"];
+  resolutions: PatchReviewExternalResultSubmission["resolutions"];
+}): Promise<{
+  repository: ImportTestRepository;
+  workItem: WorkItem;
+  input: {
+    expected_phase: "review";
+    expected_status: "active";
+    expected_schema_version: 2;
+    expected_goal_version: number;
+    expected_input_revision: number;
+    attempt: number;
+    expected_patch_cycle: number;
+  };
+}> {
+  const patchFixture = await createPatchImportFixture();
+  const importedPatch = await createController(
+    patchFixture.repository,
+  ).importPatchResult(
+    patchFixture.workItem.goal.work_item_id,
+    patchFixture.input,
+  );
+  const patchEvidence = [...patchFixture.evidence.values()].find(
+    (stored) =>
+      stored.evidence.phase === "patch" &&
+      stored.evidence.outcome === "applied",
+  );
+  const patchResult = JSON.parse(
+    patchFixture.patchSnapshot.result_source,
+  ) as PatchExternalResultSubmission;
+  if (
+    patchEvidence === undefined ||
+    !("patch_subject" in patchFixture.patchSnapshot.mission)
+  ) {
+    throw new Error("Re-review fixture requires applied patch evidence.");
+  }
+  const patchMission = patchFixture.patchSnapshot.mission;
+  const reviewSubject: PatchReviewSubject = {
+    source: "patch",
+    patch_cycle: patchResult.identity.patch_cycle,
+    patch_mission_content_sha256: patchMission.content_sha256,
+    patch_result_content_sha256: hashResultContent(
+      patchFixture.patchSnapshot.result_source,
+    ),
+    patch_mission_path: patchFixture.patchSnapshot.mission_path,
+    patch_evidence_path: patchEvidence.summary.evidence_path,
+    git_base_commit: patchMission.source_revision.git_base_commit,
+    accepted_result_commit: patchResult.commit,
+    changed_files: [...patchResult.changed_files].sort(),
+    command_evidence: patchEvidence.verification.map((record) => ({
+      ...record,
+      status: "passed" as const,
+      started_at: record.started_at!,
+      completed_at: record.completed_at!,
+      exit_code: 0 as const,
+      signal: null,
+    })),
+    resolved_from: {
+      review_mission_content_sha256:
+        patchMission.patch_subject.review_mission_content_sha256,
+      review_result_content_sha256:
+        patchMission.patch_subject.review_result_content_sha256,
+      finding_ids: patchMission.patch_subject.findings.map(
+        (finding) => finding.finding_id,
+      ) as [string, ...string[]],
+    },
+  };
+  const reviewIdentity = {
+    phase: "review" as const,
+    work_item_id: importedPatch.work_item.goal.work_item_id,
+    goal_version: importedPatch.work_item.state.goal_version!,
+    input_revision: importedPatch.work_item.state.input_revision!,
+    attempt: importedPatch.work_item.state.attempt!,
+  };
+  const reviewPaths = {
+    task_path: `.founder/missions/${reviewIdentity.work_item_id}/review-${reviewIdentity.goal_version}-${reviewIdentity.input_revision}-${reviewIdentity.attempt}-patch-${reviewSubject.patch_cycle}/TASK.md`,
+    output_path: `.founder/missions/${reviewIdentity.work_item_id}/review-${reviewIdentity.goal_version}-${reviewIdentity.input_revision}-${reviewIdentity.attempt}-patch-${reviewSubject.patch_cycle}/result.json`,
+    git_base_commit: reviewSubject.git_base_commit,
+  };
+  const reviewMission = compileReviewMission({
+    work_item: importedPatch.work_item,
+    controller_run: {
+      schema_version: 1,
+      run_id: "99999999-9999-4999-8999-999999999999",
+      work_item_id: reviewIdentity.work_item_id,
+      idempotency_key: `${reviewIdentity.work_item_id}:review:${reviewSubject.patch_cycle}:mission`,
+      phase: "review",
+      goal_version: reviewIdentity.goal_version,
+      input_revision: reviewIdentity.input_revision,
+      attempt: reviewIdentity.attempt,
+      started_at: "2026-07-21T21:00:03.000Z",
+      completed_at: "2026-07-21T21:00:04.000Z",
+      outcome: "applied",
+    },
+    review_subject: reviewSubject,
+    paths: reviewPaths,
+    independence_attested: true,
+  });
+  const reviewResult: PatchReviewExternalResultSubmission = {
+    result_schema_version: 2,
+    review_mission_content_sha256: reviewMission.content_sha256,
+    identity: reviewIdentity,
+    patch_mission_content_sha256: reviewSubject.patch_mission_content_sha256,
+    patch_result_content_sha256: reviewSubject.patch_result_content_sha256,
+    git_base_commit: reviewSubject.git_base_commit,
+    accepted_result_commit: reviewSubject.accepted_result_commit,
+    summary: "Re-review recorded exact assigned-finding resolutions.",
+    verdict: options.verdict,
+    findings: options.findings,
+    resolutions: options.resolutions,
+  };
+  const reviewSnapshot: MissionResultSnapshot = {
+    mission: reviewMission,
+    mission_path: reviewPaths.task_path.replace(/TASK\.md$/, "mission.json"),
+    result_path: reviewPaths.output_path,
+    result_source: serializeExternalResult(reviewResult),
+  };
+  Object.assign(patchFixture.repository, {
+    async readMissionResult(identity: MissionIdentity) {
+      return identity.phase === "patch"
+        ? patchFixture.patchSnapshot
+        : reviewSnapshot;
+    },
+  });
+
+  return {
+    repository: patchFixture.repository,
+    workItem: importedPatch.work_item,
+    input: {
+      expected_phase: "review",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: reviewIdentity.goal_version,
+      expected_input_revision: reviewIdentity.input_revision,
+      attempt: reviewIdentity.attempt,
+      expected_patch_cycle: reviewSubject.patch_cycle,
+    },
   };
 }
 
@@ -492,6 +861,25 @@ const firstContract = {
   allowed_scope: ["src/domain", "src/application"],
   review_ready: ["Deterministic checks pass"],
 };
+
+function reviewFinding(
+  findingId: string,
+): PatchReviewExternalResultSubmission["findings"][number] {
+  return {
+    finding_id: findingId,
+    severity: "P1",
+    title: `Blocking finding ${findingId}`,
+    evidence: {
+      path: "src/application/work-item-controller.ts",
+      summary: `Finding ${findingId} remains observable.`,
+    },
+    required_action: `Resolve ${findingId} without widening scope.`,
+    link: {
+      type: "defect",
+      evidence_summary: `Deterministic evidence for ${findingId}.`,
+    },
+  };
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -1020,7 +1408,7 @@ describe("WorkItemController", () => {
     expect(commandRuns).toBe(0);
   });
 
-  it("imports review findings once without commands or a work-item transition", async () => {
+  it("routes review findings to one durable patch-plan decision", async () => {
     const fixture = await createReviewImportFixture({
       transformResult: (result) => ({
         ...result,
@@ -1044,9 +1432,6 @@ describe("WorkItemController", () => {
         ],
       }),
     });
-    const before = await fixture.repository.read(
-      fixture.workItem.goal.work_item_id,
-    );
     let commandRuns = 0;
     const runner: VerificationRunner = {
       async run(command) {
@@ -1064,9 +1449,17 @@ describe("WorkItemController", () => {
       fixture.workItem.goal.work_item_id,
       fixture.input,
     );
-    expect(imported.work_item).toEqual(before);
+    expect(imported.work_item.state).toMatchObject({
+      phase: "review",
+      status: "active",
+      patch_cycle: 0,
+      attention: {
+        kind: "patch_plan_approval",
+        governed_tuple: { patch_cycle: 0 },
+      },
+    });
     expect(await fixture.repository.read(fixture.workItem.goal.work_item_id))
-      .toEqual(before);
+      .toEqual(imported.work_item);
     expect(imported).toMatchObject({
       manifest: { phase: "review", outcome: "applied" },
       evidence: { phase: "review", outcome: "applied" },
@@ -1084,6 +1477,304 @@ describe("WorkItemController", () => {
     expect(commandRuns).toBe(0);
     expect(fixture.evidenceWrites.count).toBe(1);
     expect(fixture.evidence.size).toBe(1);
+  });
+
+  it.each(["P0", "P1", "P2", "P3"] as const)(
+    "gives first %s findings one bounded patch opportunity",
+    async (severity) => {
+      const fixture = await createPatchImportFixture({ severity });
+
+      expect(fixture.workItem.state).toMatchObject({
+        phase: "patch",
+        status: "active",
+        patch_cycle: 1,
+      });
+      expect(fixture.workItem.state.attention).toBeUndefined();
+    },
+  );
+
+  it("replays patch-plan acceptance idempotently", async () => {
+    const fixture = await createPatchImportFixture();
+    const replay = await createController(fixture.repository).acceptPatchPlan(
+      fixture.workItem.goal.work_item_id,
+      {
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: fixture.workItem.state.goal_version!,
+        expected_input_revision: fixture.workItem.state.input_revision!,
+        attempt: fixture.workItem.state.attempt!,
+        expected_patch_cycle: 0,
+      },
+    );
+
+    expect(replay.work_item).toEqual(fixture.workItem);
+    expect(replay.manifest).toMatchObject({ phase: "patch", outcome: "applied" });
+  });
+
+  it("rejects patch-plan approval when the pinned review result changes", async () => {
+    const fixture = await createReviewImportFixture({
+      transformResult: (result) => ({
+        ...result,
+        summary: "Review found one bounded issue.",
+        verdict: "findings",
+        findings: [reviewFinding("F-stale")],
+      }),
+    });
+    const controller = createController(fixture.repository);
+    const imported = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    const changedResult = JSON.parse(
+      fixture.snapshot.result_source,
+    ) as ReviewExternalResultSubmission;
+    Object.assign(fixture.repository, {
+      async readMissionResult() {
+        return {
+          ...fixture.snapshot,
+          result_source: serializeExternalResult({
+            ...changedResult,
+            summary: "Review bytes changed after the decision was pinned.",
+          }),
+        };
+      },
+    });
+
+    await expect(
+      controller.acceptPatchPlan(fixture.workItem.goal.work_item_id, {
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: imported.work_item.state.goal_version!,
+        expected_input_revision: imported.work_item.state.input_revision!,
+        attempt: imported.work_item.state.attempt!,
+        expected_patch_cycle: 0,
+      }),
+    ).rejects.toThrow("current pinned review decision");
+    expect(
+      (await fixture.repository.read(fixture.workItem.goal.work_item_id))?.state,
+    ).toEqual(imported.work_item.state);
+  });
+
+  it.each([1, 2] as const)(
+    "allows patch cycle %s to advance once more",
+    async (patchCycle) => {
+      const fixture = await createReviewImportFixture({
+        patchCycle,
+        transformResult: (result) => ({
+          ...result,
+          summary: "Review found a new bounded issue.",
+          verdict: "findings",
+          findings: [reviewFinding(`F-${patchCycle + 1}`)],
+        }),
+      });
+      const controller = createController(fixture.repository);
+      const imported = await controller.importReviewResult(
+        fixture.workItem.goal.work_item_id,
+        fixture.input,
+      );
+      const accepted = await controller.acceptPatchPlan(
+        fixture.workItem.goal.work_item_id,
+        {
+          expected_phase: "review",
+          expected_status: "active",
+          expected_schema_version: 2,
+          expected_goal_version: imported.work_item.state.goal_version!,
+          expected_input_revision: imported.work_item.state.input_revision!,
+          attempt: imported.work_item.state.attempt!,
+          expected_patch_cycle: patchCycle,
+        },
+      );
+
+      expect(accepted.work_item.state.patch_cycle).toBe(patchCycle + 1);
+      expect(accepted.work_item.state.phase).toBe("patch");
+    },
+  );
+
+  it("fails closed before a fourth patch cycle", async () => {
+    const fixture = await createReviewImportFixture({
+      patchCycle: 3,
+      transformResult: (result) => ({
+        ...result,
+        summary: "Review found another bounded issue.",
+        verdict: "findings",
+        findings: [reviewFinding("F-4")],
+      }),
+    });
+    const controller = createController(fixture.repository);
+    const imported = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+
+    expect(imported.work_item.state.attention?.kind).toBe("cycle_limit");
+    await expect(
+      controller.acceptPatchPlan(fixture.workItem.goal.work_item_id, {
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: imported.work_item.state.goal_version!,
+        expected_input_revision: imported.work_item.state.input_revision!,
+        attempt: imported.work_item.state.attempt!,
+        expected_patch_cycle: 3,
+      }),
+    ).rejects.toThrow("fourth patch cycle");
+  });
+
+  it("routes a clean review to review-ready without completing the item", async () => {
+    const fixture = await createReviewImportFixture();
+    const imported = await createController(
+      fixture.repository,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.work_item.state).toMatchObject({
+      phase: "review",
+      status: "active",
+      attention: { kind: "review_ready" },
+    });
+  });
+
+  it("imports and replays one green patch without consuming another cycle", async () => {
+    const fixture = await createPatchImportFixture();
+    let commandRuns = 0;
+    const runner: VerificationRunner = {
+      async run(command) {
+        commandRuns += 1;
+        return passingRunner.run(command);
+      },
+    };
+    const controller = createController(
+      fixture.repository,
+      passingGit,
+      runner,
+    );
+
+    const imported = await controller.importPatchResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(imported.work_item.state).toMatchObject({
+      phase: "review",
+      status: "active",
+      patch_cycle: 1,
+    });
+    expect(imported.evidence).toMatchObject({ phase: "patch", outcome: "applied" });
+    expect(commandRuns).toBe(2);
+
+    const replay = await controller.importPatchResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(replay).toEqual(imported);
+    expect(commandRuns).toBe(2);
+    expect(fixture.evidenceWrites.count).toBe(2);
+  });
+
+  it("keeps a red patch import active in the same cycle", async () => {
+    const fixture = await createPatchImportFixture();
+    const failingRunner: VerificationRunner = {
+      async run(command) {
+        return {
+          ...(await passingRunner.run(command)),
+          status: "failed",
+          exit_code: 1,
+        };
+      },
+    };
+    const imported = await createController(
+      fixture.repository,
+      passingGit,
+      failingRunner,
+    ).importPatchResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.manifest).toBeNull();
+    expect(imported.evidence.outcome).toBe("rejected");
+    expect(imported.work_item.state).toMatchObject({
+      phase: "patch",
+      status: "active",
+      patch_cycle: 1,
+    });
+  });
+
+  it("recovers patch state from evidence written before a failed mutation", async () => {
+    const fixture = await createPatchImportFixture();
+    const commit = fixture.repository.commitControllerMutation.bind(
+      fixture.repository,
+    );
+    Object.assign(fixture.repository, {
+      async commitControllerMutation() {
+        throw new Error("simulated patch commit failure");
+      },
+    });
+
+    await expect(
+      createController(fixture.repository).importPatchResult(
+        fixture.workItem.goal.work_item_id,
+        fixture.input,
+      ),
+    ).rejects.toThrow("simulated patch commit failure");
+    expect(fixture.evidenceWrites.count).toBe(2);
+
+    Object.assign(fixture.repository, { commitControllerMutation: commit });
+    const recovered = await createController(
+      fixture.repository,
+    ).importPatchResult(fixture.workItem.goal.work_item_id, fixture.input);
+    expect(recovered.work_item.state).toMatchObject({
+      phase: "review",
+      patch_cycle: 1,
+    });
+    expect(fixture.evidenceWrites.count).toBe(2);
+  });
+
+  it("escalates an assigned finding that remains unresolved", async () => {
+    const fixture = await createPatchReviewImportFixture({
+      verdict: "findings",
+      findings: [reviewFinding("F-1")],
+      resolutions: [{ finding_id: "F-1", status: "unresolved" }],
+    });
+    const imported = await createController(
+      fixture.repository,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.work_item.state.attention).toMatchObject({
+      kind: "unresolved_finding",
+      governed_tuple: { patch_cycle: 1 },
+    });
+  });
+
+  it("offers a fresh bounded patch when assigned findings resolve but a new one appears", async () => {
+    const fixture = await createPatchReviewImportFixture({
+      verdict: "findings",
+      findings: [reviewFinding("F-2")],
+      resolutions: [{ finding_id: "F-1", status: "resolved" }],
+    });
+    const imported = await createController(
+      fixture.repository,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.work_item.state.attention).toMatchObject({
+      kind: "patch_plan_approval",
+      governed_tuple: { patch_cycle: 1 },
+    });
+  });
+
+  it("routes a clean patch re-review to review-ready", async () => {
+    const fixture = await createPatchReviewImportFixture({
+      verdict: "clean",
+      findings: [],
+      resolutions: [{ finding_id: "F-1", status: "resolved" }],
+    });
+    const imported = await createController(
+      fixture.repository,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.work_item.state).toMatchObject({
+      phase: "review",
+      status: "active",
+      patch_cycle: 1,
+      attention: { kind: "review_ready" },
+    });
   });
 
   it.each<{
@@ -1253,9 +1944,11 @@ describe("WorkItemController", () => {
     ).toBeUndefined();
 
     Object.assign(fixture.repository, { commitControllerMutation: commit });
-    const recovered = await createController(
-      fixture.repository,
-    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+    const recovered = await createController(fixture.repository, {
+      ...passingGit,
+      readHeadCommit: async () => "b".repeat(40),
+      isWorktreeCleanExcludingFounder: async () => false,
+    }).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
     expect(recovered).toMatchObject({
       manifest: { phase: "review", outcome: "applied" },
       evidence: { phase: "review", outcome: "applied" },

@@ -58,6 +58,7 @@ export const WORK_ITEM_ATTENTION_KINDS = [
   "spec_approval",
   "plan_approval",
   "patch_plan_approval",
+  "unresolved_finding",
   "ambiguous_goal",
   "cycle_limit",
   "missing_permission",
@@ -254,6 +255,27 @@ export interface ImportReviewResultInput {
   expected_goal_version: number;
   expected_input_revision: number;
   attempt: number;
+  expected_patch_cycle: number;
+}
+
+export interface AcceptPatchPlanInput {
+  expected_phase: "review";
+  expected_status: "active";
+  expected_schema_version: 2;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
+  expected_patch_cycle: number;
+}
+
+export interface ImportPatchResultInput {
+  expected_phase: "patch";
+  expected_status: "active";
+  expected_schema_version: 2;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
+  expected_patch_cycle: number;
 }
 
 export interface RetryExecuteAttemptInput {
@@ -560,6 +582,10 @@ export const workItemAttentionSchema: z.ZodType<WorkItemAttention> =
       ...attentionRecordFields,
     }),
     z.strictObject({
+      kind: z.literal("unresolved_finding"),
+      ...attentionRecordFields,
+    }),
+    z.strictObject({
       kind: z.literal("ambiguous_goal"),
       ...attentionRecordFields,
     }),
@@ -856,6 +882,29 @@ export const importReviewResultInputSchema: z.ZodType<ImportReviewResultInput> =
     expected_goal_version: positiveSafeIntegerSchema,
     expected_input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
+    expected_patch_cycle: nonNegativeSafeIntegerSchema,
+  });
+
+export const acceptPatchPlanInputSchema: z.ZodType<AcceptPatchPlanInput> =
+  z.strictObject({
+    expected_phase: z.literal("review"),
+    expected_status: z.literal("active"),
+    expected_schema_version: z.literal(2),
+    expected_goal_version: positiveSafeIntegerSchema,
+    expected_input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+    expected_patch_cycle: nonNegativeSafeIntegerSchema,
+  });
+
+export const importPatchResultInputSchema: z.ZodType<ImportPatchResultInput> =
+  z.strictObject({
+    expected_phase: z.literal("patch"),
+    expected_status: z.literal("active"),
+    expected_schema_version: z.literal(2),
+    expected_goal_version: positiveSafeIntegerSchema,
+    expected_input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+    expected_patch_cycle: positiveSafeIntegerSchema,
   });
 
 export const retryExecuteAttemptInputSchema: z.ZodType<RetryExecuteAttemptInput> =
