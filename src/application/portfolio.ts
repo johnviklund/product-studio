@@ -35,13 +35,16 @@ import {
 } from "../domain/portfolio";
 import {
   compileMission as compileMissionPackage,
+  compileReviewMission as compileReviewMissionPackage,
   type MissionArtifactWriteResult,
   type MissionIdentity,
+  type ReviewMissionPackage,
 } from "../domain/mission";
 import {
   createImportRunId,
   hashResultContent,
   type ImportEvidenceSummary,
+  type ReviewExternalResultSubmission,
   type StoredImportEvidence,
 } from "../domain/result";
 import {
@@ -216,9 +219,16 @@ export interface RegisterWorkspaceResult {
 }
 
 export type MissionCompilation = MissionArtifactWriteResult;
+export type ReviewMissionCompilation =
+  MissionArtifactWriteResult<ReviewMissionPackage>;
 
 export interface PortfolioImportResult extends PortfolioWorkItem {
   evidence: ImportEvidenceSummary;
+}
+
+export interface PortfolioReviewImportResult extends PortfolioWorkItem {
+  evidence: ImportEvidenceSummary;
+  result?: ReviewExternalResultSubmission;
 }
 
 export interface PortfolioRetryResult extends PortfolioWorkItem {
@@ -228,6 +238,10 @@ export interface PortfolioRetryResult extends PortfolioWorkItem {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+const compileReviewMissionInputSchema = z.strictObject({
+  independence_attested: z.literal(true),
+});
 
 function validationReason(error: z.ZodError): string {
   return error.issues
@@ -487,6 +501,75 @@ export class PortfolioService {
     );
   }
 
+  async compileReviewMission(
+    sourceId: string,
+    workItemId: string,
+    input: { independence_attested: true },
+  ): Promise<ReviewMissionCompilation> {
+    const validatedInput = compileReviewMissionInputSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedReviewIdentity(source, workItem);
+    if (
+      workItem.state.phase !== "review" ||
+      workItem.state.status !== "active"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Review mission compilation requires an assigned, governed item in active review.",
+      );
+    }
+
+    const applied = await source.workspace.readAppliedExecuteReviewSubject({
+      ...identity,
+      phase: "execute",
+    });
+    const controllerRun = await source.workspace.readControllerRunManifest(
+      workItemId,
+      applied.evidence.controller_run_id,
+    );
+    if (
+      controllerRun === null ||
+      controllerRun.phase !== "review" ||
+      controllerRun.outcome !== "applied" ||
+      controllerRun.completed_at === undefined
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Applied execute evidence is missing its review transition controller run.",
+      );
+    }
+    const reviewRun = {
+      schema_version: controllerRun.schema_version,
+      run_id: controllerRun.run_id,
+      work_item_id: controllerRun.work_item_id,
+      idempotency_key: controllerRun.idempotency_key,
+      phase: "review" as const,
+      goal_version: controllerRun.goal_version,
+      input_revision: controllerRun.input_revision,
+      attempt: controllerRun.attempt,
+      started_at: controllerRun.started_at,
+      completed_at: controllerRun.completed_at,
+      outcome: "applied" as const,
+    };
+
+    return source.workspace.writeReviewMissionPackage(
+      identity,
+      applied.review_subject,
+      (paths) =>
+        compileReviewMissionPackage({
+          work_item: workItem,
+          controller_run: reviewRun,
+          review_subject: applied.review_subject,
+          paths,
+          independence_attested: validatedInput.independence_attested,
+        }),
+    );
+  }
+
   async listImportEvidence(
     sourceId: string,
     workItemId: string,
@@ -555,6 +638,46 @@ export class PortfolioService {
       project: source.project,
       work_item: imported.work_item,
       evidence: imported.evidence,
+    };
+  }
+
+  async importReviewResult(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PortfolioReviewImportResult> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedReviewIdentity(source, workItem);
+    if (
+      workItem.state.phase !== "review" ||
+      workItem.state.status !== "active"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Review result import requires an assigned, governed item in active review.",
+      );
+    }
+
+    const imported = await this.workItemController(
+      source.workspace,
+    ).importReviewResult(workItemId, {
+      expected_phase: "review",
+      expected_status: "active",
+      expected_schema_version: 1,
+      expected_goal_version: identity.goal_version,
+      expected_input_revision: identity.input_revision,
+      attempt: identity.attempt,
+    });
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: imported.work_item,
+      evidence: imported.evidence,
+      ...(imported.result === undefined ? {} : { result: imported.result }),
     };
   }
 
@@ -958,7 +1081,7 @@ export class PortfolioService {
   private governedExecuteIdentity(
     source: ResolvedSource,
     workItem: WorkItem,
-  ): MissionIdentity {
+  ): MissionIdentity<"execute"> {
     if (
       source.source_id === INBOX_SOURCE_ID ||
       workItem.goal.goal_contract === undefined ||
@@ -973,6 +1096,31 @@ export class PortfolioService {
     }
     return {
       phase: "execute",
+      work_item_id: workItem.goal.work_item_id,
+      goal_version: workItem.state.goal_version,
+      input_revision: workItem.state.input_revision,
+      attempt: workItem.state.attempt,
+    };
+  }
+
+  private governedReviewIdentity(
+    source: ResolvedSource,
+    workItem: WorkItem,
+  ): MissionIdentity<"review"> {
+    if (
+      source.source_id === INBOX_SOURCE_ID ||
+      workItem.goal.goal_contract === undefined ||
+      workItem.state.goal_version === undefined ||
+      workItem.state.input_revision === undefined ||
+      workItem.state.attempt === undefined
+    ) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Review operations require an assigned, governed item.",
+      );
+    }
+    return {
+      phase: "review",
       work_item_id: workItem.goal.work_item_id,
       goal_version: workItem.state.goal_version,
       input_revision: workItem.state.input_revision,

@@ -15,6 +15,8 @@ import { stringify } from "yaml";
 import { PortfolioService } from "../../src/application/portfolio";
 import { WorkItemController } from "../../src/application/work-item-controller";
 import {
+  createImportRunId,
+  hashResultContent,
   serializeExternalResult,
   type StoredImportEvidence,
 } from "../../src/domain/result";
@@ -1251,6 +1253,212 @@ describe("PortfolioService", () => {
     index.close();
   });
 
+  it("compiles and imports an attested review without verdict-driven routing", async () => {
+    const root = await createWorkspace("Review Mission Workspace");
+    const repository = new ProductWorkspace(root);
+    const created = await repository.create({
+      title: "Review an accepted execute result",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, [
+      "spec",
+      "plan",
+      "execute",
+    ]);
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const executeMission = await service.compileMission(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    await writeFile(
+      join(dirname(executeMission.task_path), "result.json"),
+      serializeExternalResult({
+        result_schema_version: 2,
+        mission_content_sha256: executeMission.mission.content_sha256,
+        identity: { ...executeMission.mission.identity, phase: "execute" },
+        commit: "a".repeat(40),
+        summary: "Implemented the review mission boundary.",
+        changed_files: ["src/application/portfolio.ts"],
+        verification: [{ name: "Tests", status: "passed" }],
+      }),
+      "utf8",
+    );
+    await service.importResult(sourceId, created.goal.work_item_id);
+
+    await expect(
+      service.compileReviewMission(
+        sourceId,
+        created.goal.work_item_id,
+        { independence_attested: false } as never,
+      ),
+    ).rejects.toMatchObject({ name: "ZodError" });
+    const first = await service.compileReviewMission(
+      sourceId,
+      created.goal.work_item_id,
+      { independence_attested: true },
+    );
+    const second = await service.compileReviewMission(
+      sourceId,
+      created.goal.work_item_id,
+      { independence_attested: true },
+    );
+    expect(second).toEqual(first);
+    expect(first.mission).toMatchObject({
+      identity: { phase: "review" },
+      independence_attested: true,
+      review_subject: {
+        accepted_result_commit: "a".repeat(40),
+        changed_files: ["src/application/portfolio.ts"],
+      },
+    });
+    expect(first.task_path).toContain("/review-1-1-0/TASK.md");
+    expect(await readFile(first.task_path, "utf8")).toContain(
+      "Do not modify workspace files or execute verification commands.",
+    );
+
+    await writeFile(
+      join(dirname(first.task_path), "result.json"),
+      serializeExternalResult({
+        result_schema_version: 2,
+        review_mission_content_sha256: first.mission.content_sha256,
+        identity: first.mission.identity,
+        execute_mission_content_sha256:
+          first.mission.review_subject.execute_mission_content_sha256,
+        execute_result_content_sha256:
+          first.mission.review_subject.execute_result_content_sha256,
+        git_base_commit: first.mission.review_subject.git_base_commit,
+        accepted_result_commit:
+          first.mission.review_subject.accepted_result_commit,
+        summary: "Found one required correction.",
+        verdict: "findings",
+        findings: [
+          {
+            finding_id: "F-portfolio-1",
+            severity: "P1",
+            title: "Keep review imports state-neutral",
+            evidence: {
+              path: "src/application/portfolio.ts",
+              summary: "The verdict must not route the work item.",
+            },
+            required_action: "Preserve review/active after import.",
+            link: {
+              type: "non_goals",
+              non_goal: "Do not mutate unrelated workspace state.",
+            },
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const stateBefore = await repository.read(created.goal.work_item_id);
+    const imported = await service.importReviewResult(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(imported).toMatchObject({
+      source_id: sourceId,
+      work_item: { state: { phase: "review", status: "active", attempt: 0 } },
+      evidence: { phase: "review", outcome: "applied" },
+      result: {
+        verdict: "findings",
+        findings: [{ finding_id: "F-portfolio-1" }],
+      },
+    });
+    expect(imported.work_item).toEqual(stateBefore);
+    expect(await repository.read(created.goal.work_item_id)).toEqual(
+      stateBefore,
+    );
+    await expect(
+      service.importReviewResult(sourceId, created.goal.work_item_id),
+    ).resolves.toEqual(imported);
+    expect(
+      (await service.listImportEvidence(sourceId, created.goal.work_item_id))
+        .map((stored) => stored.evidence.phase)
+        .sort(),
+    ).toEqual(["execute", "review"]);
+    index.close();
+  });
+
+  it("rejects review compilation when a newer execute import makes the subject ambiguous", async () => {
+    const root = await createWorkspace("Stale Review Subject");
+    const repository = new ProductWorkspace(root);
+    const created = await repository.create({
+      title: "Reject a stale review subject",
+      type: "Fix",
+    });
+    await governWorkItemThrough(repository, created, [
+      "spec",
+      "plan",
+      "execute",
+    ]);
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const mission = await service.compileMission(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    await writeFile(
+      join(dirname(mission.task_path), "result.json"),
+      serializeExternalResult({
+        result_schema_version: 2,
+        mission_content_sha256: mission.mission.content_sha256,
+        identity: { ...mission.mission.identity, phase: "execute" },
+        commit: "a".repeat(40),
+        summary: "First accepted execute result.",
+        changed_files: ["src/application/portfolio.ts"],
+        verification: [{ name: "Tests", status: "passed" }],
+      }),
+      "utf8",
+    );
+    await service.importResult(sourceId, created.goal.work_item_id);
+    const firstEvidence = (
+      await repository.listImportEvidence(created.goal.work_item_id)
+    ).find(
+      (stored) =>
+        stored.evidence.phase === "execute" &&
+        stored.evidence.outcome === "applied",
+    );
+    if (firstEvidence === undefined || firstEvidence.evidence.phase !== "execute") {
+      throw new Error("Expected applied execute evidence");
+    }
+    const secondSubmission = serializeExternalResult({
+      ...JSON.parse(
+        await readFile(
+          join(root, firstEvidence.summary.evidence_path, "submission.json"),
+          "utf8",
+        ),
+      ),
+      summary: "Newer accepted execute result.",
+    });
+    const secondResultHash = hashResultContent(secondSubmission);
+    await repository.writeImportEvidence({
+      submission_source: secondSubmission,
+      evidence: {
+        ...firstEvidence.evidence,
+        import_run_id: createImportRunId(
+          firstEvidence.evidence.mission_content_sha256,
+          secondResultHash,
+        ),
+        result_content_sha256: secondResultHash,
+        completed_at: "2026-07-22T12:00:02.000Z",
+      },
+      verification: firstEvidence.verification,
+    });
+
+    await expect(
+      service.compileReviewMission(sourceId, created.goal.work_item_id, {
+        independence_attested: true,
+      }),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      workItemId: created.goal.work_item_id,
+    });
+    index.close();
+  });
+
   it("recovers a green import evidence bundle through a fresh workspace and index rebuild", async () => {
     const root = await createWorkspace("Import Recovery Workspace");
     const cacheRoot = await createRoot("product-studio-import-cache-");
@@ -1378,7 +1586,20 @@ describe("PortfolioService", () => {
         ),
       ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
       await expect(
+        service.compileReviewMission(
+          registration.workspace.workspace_id,
+          workItemId,
+          { independence_attested: true },
+        ),
+      ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
+      await expect(
         service.importResult(registration.workspace.workspace_id, workItemId),
+      ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
+      await expect(
+        service.importReviewResult(
+          registration.workspace.workspace_id,
+          workItemId,
+        ),
       ).rejects.toMatchObject({ kind: "mission_not_ready", workItemId });
       await expect(
         service.retryExecuteAttempt(
@@ -1409,7 +1630,23 @@ describe("PortfolioService", () => {
       workItemId: inboxItem.goal.work_item_id,
     });
     await expect(
+      service.compileReviewMission(
+        INBOX_SOURCE_ID,
+        inboxItem.goal.work_item_id,
+        { independence_attested: true },
+      ),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      workItemId: inboxItem.goal.work_item_id,
+    });
+    await expect(
       service.importResult(INBOX_SOURCE_ID, inboxItem.goal.work_item_id),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      workItemId: inboxItem.goal.work_item_id,
+    });
+    await expect(
+      service.importReviewResult(INBOX_SOURCE_ID, inboxItem.goal.work_item_id),
     ).rejects.toMatchObject({
       kind: "mission_not_ready",
       workItemId: inboxItem.goal.work_item_id,
