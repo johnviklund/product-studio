@@ -270,7 +270,7 @@ export function reviewHandoffForItem(
   },
   evidence: readonly {
     evidence: {
-      phase: "execute" | "review";
+      phase: "execute" | "review" | "patch";
       outcome: "rejected" | "failed" | "applied";
       identity: {
         work_item_id: string;

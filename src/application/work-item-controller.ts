@@ -5,11 +5,12 @@ import {
   commandEvidenceRecordSchema,
   createImportRunId,
   executeExternalResultSubmissionSchema,
+  executeReviewExternalResultSubmissionSchema,
   hashResultContent,
   importEvidenceEnvelopeSchema,
-  reviewExternalResultSubmissionSchema,
   type CommandEvidenceRecord,
   type ExecuteExternalResultSubmission,
+  type ExecuteReviewExternalResultSubmission,
   type ImportEvidenceOutcome,
   type ImportEvidenceSummary,
   type MissionResultSnapshot,
@@ -77,7 +78,7 @@ interface ExternalResultAssessment {
 interface ReviewResultAssessment {
   outcome: "rejected" | "applied";
   reasons: string[];
-  result?: ReviewExternalResultSubmission;
+  result?: ExecuteReviewExternalResultSubmission;
 }
 
 export function deriveControllerIdempotencyKey(
@@ -921,7 +922,8 @@ export class WorkItemController {
         reasons: [...reasons, "result.json is not valid JSON."],
       };
     }
-    const parsedResult = reviewExternalResultSubmissionSchema.safeParse(parsedJson);
+    const parsedResult =
+      executeReviewExternalResultSubmissionSchema.safeParse(parsedJson);
     if (!parsedResult.success) {
       return {
         outcome: "rejected",
@@ -1222,9 +1224,9 @@ export class WorkItemController {
     }
     this.validateReviewExpectation(workItemId, lease.work_item, input);
 
-    let result: ReviewExternalResultSubmission | undefined;
+    let result: ExecuteReviewExternalResultSubmission | undefined;
     try {
-      const parsed = reviewExternalResultSubmissionSchema.safeParse(
+      const parsed = executeReviewExternalResultSubmissionSchema.safeParse(
         JSON.parse(snapshot.result_source),
       );
       result = parsed.success ? parsed.data : undefined;

@@ -110,7 +110,10 @@ interface RunEvidenceSectionProps {
   loading: boolean;
   error: string | null;
   expandedRunIds: Set<string>;
-  onToggle: (phase: "execute" | "review", importRunId: string) => void;
+  onToggle: (
+    phase: "execute" | "review" | "patch",
+    importRunId: string,
+  ) => void;
 }
 
 const capturedAtFormatter = new Intl.DateTimeFormat(undefined, {
@@ -333,7 +336,11 @@ function RunEvidenceSection({
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
-                          {run.phase === "execute" ? "Execute" : "Review"}
+                          {run.phase === "execute"
+                            ? "Execute"
+                            : run.phase === "review"
+                              ? "Review"
+                              : "Patch"}
                         </span>
                         <span
                           className={`text-xs font-medium ${outcomeClassName(run.outcome)}`}
@@ -748,7 +755,7 @@ export function DetailPanel({
   }, [runEvidenceItemKey]);
 
   const handleToggleRunEvidence = useCallback(
-    (phase: "execute" | "review", importRunId: string) => {
+    (phase: "execute" | "review" | "patch", importRunId: string) => {
       setExpandedRunEvidenceState((current) => {
         const evidenceKey = `${phase}:${importRunId}`;
         const runIds =

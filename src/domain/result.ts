@@ -7,6 +7,7 @@ import {
   type ExecuteMissionPackage,
   type MissionIdentity,
   type MissionPackage,
+  type ReviewSubject,
 } from "./mission";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
@@ -64,6 +65,16 @@ export interface ExecuteExternalResultSubmission {
   verification: ReportedVerification[];
 }
 
+export interface PatchExternalResultSubmission {
+  result_schema_version: 2;
+  patch_mission_content_sha256: string;
+  identity: MissionIdentity<"patch">;
+  commit: string;
+  summary: string;
+  changed_files: string[];
+  verification: ReportedVerification[];
+}
+
 export type ReviewFindingLink =
   | { type: "acceptance_criteria"; criterion: string }
   | { type: "non_goals"; non_goal: string }
@@ -83,12 +94,10 @@ export interface ReviewFinding {
   link: ReviewFindingLink;
 }
 
-export interface ReviewExternalResultSubmission {
+interface ReviewExternalResultSubmissionBase {
   result_schema_version: 2;
   review_mission_content_sha256: string;
   identity: MissionIdentity<"review">;
-  execute_mission_content_sha256: string;
-  execute_result_content_sha256: string;
   git_base_commit: string;
   accepted_result_commit: string;
   summary: string;
@@ -96,8 +105,38 @@ export interface ReviewExternalResultSubmission {
   findings: ReviewFinding[];
 }
 
+export interface ExecuteReviewExternalResultSubmission
+  extends ReviewExternalResultSubmissionBase {
+  execute_mission_content_sha256: string;
+  execute_result_content_sha256: string;
+}
+
+export const REVIEW_FINDING_RESOLUTION_STATUSES = [
+  "resolved",
+  "unresolved",
+] as const;
+export type ReviewFindingResolutionStatus =
+  (typeof REVIEW_FINDING_RESOLUTION_STATUSES)[number];
+
+export interface ReviewFindingResolution {
+  finding_id: string;
+  status: ReviewFindingResolutionStatus;
+}
+
+export interface PatchReviewExternalResultSubmission
+  extends ReviewExternalResultSubmissionBase {
+  patch_mission_content_sha256: string;
+  patch_result_content_sha256: string;
+  resolutions: [ReviewFindingResolution, ...ReviewFindingResolution[]];
+}
+
+export type ReviewExternalResultSubmission =
+  | ExecuteReviewExternalResultSubmission
+  | PatchReviewExternalResultSubmission;
+
 export type ExternalResultSubmission =
   | ExecuteExternalResultSubmission
+  | PatchExternalResultSubmission
   | ReviewExternalResultSubmission;
 
 export interface CommandEvidenceRecord {
@@ -140,9 +179,16 @@ export interface ReviewImportEvidenceEnvelope
   result_commit: string;
 }
 
+export interface PatchImportEvidenceEnvelope
+  extends ImportEvidenceEnvelopeBase<"patch"> {
+  outcome: "rejected" | "applied";
+  result_commit: string;
+}
+
 export type ImportEvidenceEnvelope =
   | ExecuteImportEvidenceEnvelope
-  | ReviewImportEvidenceEnvelope;
+  | ReviewImportEvidenceEnvelope
+  | PatchImportEvidenceEnvelope;
 
 export interface ImportEvidenceSummary {
   phase: MissionIdentity["phase"];
@@ -219,6 +265,16 @@ const reviewMissionIdentitySchema: z.ZodType<MissionIdentity<"review">> =
     attempt: nonNegativeSafeIntegerSchema,
   });
 
+const patchMissionIdentitySchema: z.ZodType<MissionIdentity<"patch">> =
+  z.strictObject({
+    phase: z.literal("patch"),
+    work_item_id: workItemIdSchema,
+    goal_version: z.number().int().positive().safe(),
+    input_revision: z.number().int().positive().safe(),
+    attempt: nonNegativeSafeIntegerSchema,
+    patch_cycle: z.number().int().positive().safe(),
+  });
+
 export const reportedVerificationSchema: z.ZodType<ReportedVerification> =
   z.strictObject({
     name: nonEmptyTrimmedStringSchema,
@@ -231,6 +287,29 @@ export const executeExternalResultSubmissionSchema: z.ZodType<ExecuteExternalRes
     result_schema_version: z.literal(2),
     mission_content_sha256: sha256Schema,
     identity: executeMissionIdentitySchema,
+    commit: gitCommitSchema,
+    summary: nonEmptyTrimmedStringSchema,
+    changed_files: z
+      .array(workspaceRelativePosixPathSchema)
+      .refine(
+        (paths) => new Set(paths).size === paths.length,
+        "changed_files must not contain duplicates",
+      ),
+    verification: z
+      .array(reportedVerificationSchema)
+      .refine(
+        (records) =>
+          new Set(records.map((record) => record.name.toLocaleLowerCase()))
+            .size === records.length,
+        "verification names must not contain case-insensitive duplicates",
+      ),
+  });
+
+export const patchExternalResultSubmissionSchema: z.ZodType<PatchExternalResultSubmission> =
+  z.strictObject({
+    result_schema_version: z.literal(2),
+    patch_mission_content_sha256: sha256Schema,
+    identity: patchMissionIdentitySchema,
     commit: gitCommitSchema,
     summary: nonEmptyTrimmedStringSchema,
     changed_files: z
@@ -285,53 +364,215 @@ export const reviewFindingSchema: z.ZodType<ReviewFinding> = z.strictObject({
   link: reviewFindingLinkSchema,
 });
 
-export const reviewExternalResultSubmissionSchema: z.ZodType<ReviewExternalResultSubmission> =
+const reviewExternalResultCommonShape = {
+  result_schema_version: z.literal(2),
+  review_mission_content_sha256: sha256Schema,
+  identity: reviewMissionIdentitySchema,
+  git_base_commit: gitCommitSchema,
+  accepted_result_commit: gitCommitSchema,
+  summary: nonEmptyTrimmedStringSchema,
+  verdict: z.enum(REVIEW_VERDICTS),
+  findings: z.array(reviewFindingSchema),
+};
+
+function validateReviewResultInvariants(
+  result: ReviewExternalResultSubmissionBase,
+  context: z.RefinementCtx,
+): void {
+  if (
+    new Set(result.findings.map((finding) => finding.finding_id)).size !==
+    result.findings.length
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "finding_id values must be unique",
+      path: ["findings"],
+      input: result.findings,
+    });
+  }
+  if (result.verdict === "clean" && result.findings.length !== 0) {
+    context.addIssue({
+      code: "custom",
+      message: "clean review results must not contain findings",
+      path: ["findings"],
+      input: result.findings,
+    });
+  }
+  if (result.verdict === "findings" && result.findings.length === 0) {
+    context.addIssue({
+      code: "custom",
+      message: "findings review results require at least one finding",
+      path: ["findings"],
+      input: result.findings,
+    });
+  }
+}
+
+export const executeReviewExternalResultSubmissionSchema: z.ZodType<ExecuteReviewExternalResultSubmission> =
   z
     .strictObject({
-      result_schema_version: z.literal(2),
-      review_mission_content_sha256: sha256Schema,
-      identity: reviewMissionIdentitySchema,
+      ...reviewExternalResultCommonShape,
       execute_mission_content_sha256: sha256Schema,
       execute_result_content_sha256: sha256Schema,
-      git_base_commit: gitCommitSchema,
-      accepted_result_commit: gitCommitSchema,
-      summary: nonEmptyTrimmedStringSchema,
-      verdict: z.enum(REVIEW_VERDICTS),
-      findings: z.array(reviewFindingSchema),
+    })
+    .superRefine(validateReviewResultInvariants);
+
+const reviewFindingResolutionSchema: z.ZodType<ReviewFindingResolution> =
+  z.strictObject({
+    finding_id: nonEmptyTrimmedStringSchema,
+    status: z.enum(REVIEW_FINDING_RESOLUTION_STATUSES),
+  });
+
+const reviewFindingResolutionListSchema: z.ZodType<
+  [ReviewFindingResolution, ...ReviewFindingResolution[]]
+> = z
+  .tuple([reviewFindingResolutionSchema], reviewFindingResolutionSchema)
+  .superRefine((resolutions, context) => {
+    const findingIds = resolutions.map((resolution) => resolution.finding_id);
+    if (new Set(findingIds).size !== findingIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "resolution finding_id values must be unique",
+        input: resolutions,
+      });
+    }
+    const sortedFindingIds = [...findingIds].sort();
+    if (
+      sortedFindingIds.some(
+        (findingId, index) => findingId !== findingIds[index],
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "resolutions must use canonical finding_id order",
+        input: resolutions,
+      });
+    }
+  });
+
+export const patchReviewExternalResultSubmissionSchema: z.ZodType<PatchReviewExternalResultSubmission> =
+  z
+    .strictObject({
+      ...reviewExternalResultCommonShape,
+      patch_mission_content_sha256: sha256Schema,
+      patch_result_content_sha256: sha256Schema,
+      resolutions: reviewFindingResolutionListSchema,
     })
     .superRefine((result, context) => {
+      validateReviewResultInvariants(result, context);
+      const currentFindingIds = new Set(
+        result.findings.map((finding) => finding.finding_id),
+      );
+      for (const [index, resolution] of result.resolutions.entries()) {
+        if (
+          resolution.status === "unresolved" &&
+          !currentFindingIds.has(resolution.finding_id)
+        ) {
+          context.addIssue({
+            code: "custom",
+            message:
+              "unresolved resolution requires a matching current finding",
+            path: ["resolutions", index, "finding_id"],
+            input: resolution.finding_id,
+          });
+        }
+      }
+    });
+
+export const reviewExternalResultSubmissionSchema: z.ZodType<ReviewExternalResultSubmission> =
+  z.union([
+    executeReviewExternalResultSubmissionSchema,
+    patchReviewExternalResultSubmissionSchema,
+  ]);
+
+export function reviewExternalResultSubmissionForSubjectSchema(
+  subject: ReviewSubject,
+): z.ZodType<ReviewExternalResultSubmission> {
+  return reviewExternalResultSubmissionSchema.superRefine(
+    (result, context) => {
+      if (subject.source === "execute") {
+        if (!("execute_mission_content_sha256" in result)) {
+          context.addIssue({
+            code: "custom",
+            message: "execute review subjects require an execute-bound result",
+            input: result,
+          });
+          return;
+        }
+        const bindings = {
+          execute_mission_content_sha256:
+            subject.execute_mission_content_sha256,
+          execute_result_content_sha256:
+            subject.execute_result_content_sha256,
+          git_base_commit: subject.git_base_commit,
+          accepted_result_commit: subject.accepted_result_commit,
+        };
+        for (const [field, expected] of Object.entries(bindings)) {
+          if (result[field as keyof typeof bindings] !== expected) {
+            context.addIssue({
+              code: "custom",
+              message: `${field} must match the execute review subject`,
+              path: [field],
+              input: result[field as keyof typeof bindings],
+            });
+          }
+        }
+        return;
+      }
+
+      if (!("resolutions" in result)) {
+        context.addIssue({
+          code: "custom",
+          message: "patch review subjects require a patch-bound result",
+          input: result,
+        });
+        return;
+      }
+
+      const bindings = {
+        patch_mission_content_sha256:
+          subject.patch_mission_content_sha256,
+        patch_result_content_sha256: subject.patch_result_content_sha256,
+        git_base_commit: subject.git_base_commit,
+        accepted_result_commit: subject.accepted_result_commit,
+      };
+      for (const [field, expected] of Object.entries(bindings)) {
+        if (result[field as keyof typeof bindings] !== expected) {
+          context.addIssue({
+            code: "custom",
+            message: `${field} must match the patch review subject`,
+            path: [field],
+            input: result[field as keyof typeof bindings],
+          });
+        }
+      }
+
+      const expectedFindingIds = subject.resolved_from.finding_ids;
+      const resolutionFindingIds = result.resolutions.map(
+        (resolution) => resolution.finding_id,
+      );
       if (
-        new Set(result.findings.map((finding) => finding.finding_id)).size !==
-        result.findings.length
+        expectedFindingIds.length !== resolutionFindingIds.length ||
+        expectedFindingIds.some(
+          (findingId, index) => findingId !== resolutionFindingIds[index],
+        )
       ) {
         context.addIssue({
           code: "custom",
-          message: "finding_id values must be unique",
-          path: ["findings"],
-          input: result.findings,
+          message:
+            "resolutions must cover every patch-subject finding_id exactly once in canonical order",
+          path: ["resolutions"],
+          input: result.resolutions,
         });
       }
-      if (result.verdict === "clean" && result.findings.length !== 0) {
-        context.addIssue({
-          code: "custom",
-          message: "clean review results must not contain findings",
-          path: ["findings"],
-          input: result.findings,
-        });
-      }
-      if (result.verdict === "findings" && result.findings.length === 0) {
-        context.addIssue({
-          code: "custom",
-          message: "findings review results require at least one finding",
-          path: ["findings"],
-          input: result.findings,
-        });
-      }
-    });
+    },
+  );
+}
 
 export const externalResultSubmissionSchema: z.ZodType<ExternalResultSubmission> =
   z.union([
     executeExternalResultSubmissionSchema,
+    patchExternalResultSubmissionSchema,
     reviewExternalResultSubmissionSchema,
   ]);
 
@@ -414,11 +655,20 @@ const reviewImportEvidenceEnvelopeSchema = z.strictObject({
   result_commit: gitCommitSchema,
 });
 
+const patchImportEvidenceEnvelopeSchema = z.strictObject({
+  ...importEvidenceEnvelopeBaseShape,
+  phase: z.literal("patch"),
+  identity: patchMissionIdentitySchema,
+  outcome: z.enum(["rejected", "applied"]),
+  result_commit: gitCommitSchema,
+});
+
 export const importEvidenceEnvelopeSchema: z.ZodType<ImportEvidenceEnvelope> =
   z
     .discriminatedUnion("phase", [
       executeImportEvidenceEnvelopeSchema,
       reviewImportEvidenceEnvelopeSchema,
+      patchImportEvidenceEnvelopeSchema,
     ])
     .superRefine((evidence, context) => {
       if (evidence.outcome !== "applied" && evidence.reasons.length === 0) {
@@ -453,7 +703,7 @@ export const importEvidenceEnvelopeSchema: z.ZodType<ImportEvidenceEnvelope> =
 
 export const importEvidenceSummarySchema: z.ZodType<ImportEvidenceSummary> =
   z.strictObject({
-    phase: z.enum(["execute", "review"]),
+    phase: z.enum(["execute", "review", "patch"]),
     import_run_id: sha256Schema,
     outcome: z.enum(IMPORT_EVIDENCE_OUTCOMES),
     evidence_path: workspaceRelativePosixPathSchema,
@@ -467,6 +717,9 @@ function canonicalIdentity(identity: MissionIdentity) {
     goal_version: identity.goal_version,
     input_revision: identity.input_revision,
     attempt: identity.attempt,
+    ...(identity.phase === "patch"
+      ? { patch_cycle: identity.patch_cycle }
+      : {}),
   };
 }
 
@@ -482,6 +735,22 @@ function canonicalFindingLink(link: ReviewFindingLink) {
     case "deterministic_checks":
       return { type: link.type, command: link.command };
   }
+}
+
+function canonicalFindings(findings: ReviewFinding[]) {
+  return findings.map((finding) => ({
+    finding_id: finding.finding_id,
+    severity: finding.severity,
+    title: finding.title,
+    evidence: {
+      ...(finding.evidence.path === undefined
+        ? {}
+        : { path: finding.evidence.path }),
+      summary: finding.evidence.summary,
+    },
+    required_action: finding.required_action,
+    link: canonicalFindingLink(finding.link),
+  }));
 }
 
 function canonicalResultContent(result: ExternalResultSubmission) {
@@ -501,28 +770,53 @@ function canonicalResultContent(result: ExternalResultSubmission) {
     };
   }
 
-  return {
+  if ("commit" in result) {
+    return {
+      result_schema_version: result.result_schema_version,
+      patch_mission_content_sha256: result.patch_mission_content_sha256,
+      identity: canonicalIdentity(result.identity),
+      commit: result.commit,
+      summary: result.summary,
+      changed_files: result.changed_files,
+      verification: result.verification.map((record) => ({
+        name: record.name,
+        status: record.status,
+        ...(record.detail === undefined ? {} : { detail: record.detail }),
+      })),
+    };
+  }
+
+  const common = {
     result_schema_version: result.result_schema_version,
     review_mission_content_sha256: result.review_mission_content_sha256,
     identity: canonicalIdentity(result.identity),
-    execute_mission_content_sha256: result.execute_mission_content_sha256,
-    execute_result_content_sha256: result.execute_result_content_sha256,
+  };
+
+  if ("execute_mission_content_sha256" in result) {
+    return {
+      ...common,
+      execute_mission_content_sha256: result.execute_mission_content_sha256,
+      execute_result_content_sha256: result.execute_result_content_sha256,
+      git_base_commit: result.git_base_commit,
+      accepted_result_commit: result.accepted_result_commit,
+      summary: result.summary,
+      verdict: result.verdict,
+      findings: canonicalFindings(result.findings),
+    };
+  }
+
+  return {
+    ...common,
+    patch_mission_content_sha256: result.patch_mission_content_sha256,
+    patch_result_content_sha256: result.patch_result_content_sha256,
     git_base_commit: result.git_base_commit,
     accepted_result_commit: result.accepted_result_commit,
     summary: result.summary,
     verdict: result.verdict,
-    findings: result.findings.map((finding) => ({
-      finding_id: finding.finding_id,
-      severity: finding.severity,
-      title: finding.title,
-      evidence: {
-        ...(finding.evidence.path === undefined
-          ? {}
-          : { path: finding.evidence.path }),
-        summary: finding.evidence.summary,
-      },
-      required_action: finding.required_action,
-      link: canonicalFindingLink(finding.link),
+    findings: canonicalFindings(result.findings),
+    resolutions: result.resolutions.map((resolution) => ({
+      finding_id: resolution.finding_id,
+      status: resolution.status,
     })),
   };
 }

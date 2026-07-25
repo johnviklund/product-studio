@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { PatchReviewSubject } from "../../src/domain/mission";
 import {
   commandEvidenceRecordSchema,
   createImportRunId,
@@ -7,11 +8,17 @@ import {
   hashExternalResult,
   hashResultContent,
   importEvidenceEnvelopeSchema,
+  importEvidenceSummarySchema,
+  patchExternalResultSubmissionSchema,
+  patchReviewExternalResultSubmissionSchema,
   reviewExternalResultSubmissionSchema,
+  reviewExternalResultSubmissionForSubjectSchema,
   reviewFindingLinkSchema,
   serializeExternalResult,
   type ExecuteExternalResultSubmission,
-  type ReviewExternalResultSubmission,
+  type ExecuteReviewExternalResultSubmission,
+  type PatchExternalResultSubmission,
+  type PatchReviewExternalResultSubmission,
   type ReviewFindingLink,
 } from "../../src/domain/result";
 
@@ -33,7 +40,7 @@ const executeSubmission: ExecuteExternalResultSubmission = {
   verification: [{ name: "Tests", status: "passed" }],
 };
 
-const reviewSubmission: ReviewExternalResultSubmission = {
+const reviewSubmission: ExecuteReviewExternalResultSubmission = {
   result_schema_version: 2,
   review_mission_content_sha256: "c".repeat(64),
   identity: {
@@ -64,6 +71,73 @@ const reviewSubmission: ReviewExternalResultSubmission = {
         criterion: "Strict review outputs reject changed files.",
       },
     },
+  ],
+};
+
+const patchSubmission: PatchExternalResultSubmission = {
+  result_schema_version: 2,
+  patch_mission_content_sha256: "1".repeat(64),
+  identity: {
+    phase: "patch",
+    work_item_id: workItemId,
+    goal_version: 2,
+    input_revision: 3,
+    attempt: 1,
+    patch_cycle: 1,
+  },
+  commit: "2".repeat(40),
+  summary: "Applied the bounded repair.",
+  changed_files: ["src/domain/result.ts", "tests/domain/result.test.ts"],
+  verification: [{ name: "Tests", status: "passed" }],
+};
+
+const patchReviewSubject: PatchReviewSubject = {
+  source: "patch",
+  patch_cycle: 1,
+  patch_mission_content_sha256: patchSubmission.patch_mission_content_sha256,
+  patch_result_content_sha256: "3".repeat(64),
+  patch_mission_path: `.founder/missions/${workItemId}/patch-2-3-1-1/mission.json`,
+  patch_evidence_path: `.founder/run-evidence/${workItemId}/patch-2-3-1-1/${"4".repeat(64)}`,
+  git_base_commit: "5".repeat(40),
+  accepted_result_commit: patchSubmission.commit,
+  changed_files: patchSubmission.changed_files,
+  command_evidence: [
+    {
+      name: "Tests",
+      argv: ["npm", "test"],
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:01.000Z",
+      duration_ms: 1000,
+      status: "passed",
+      exit_code: 0,
+      signal: null,
+      stdout: "green",
+      stderr: "",
+      output_truncated: false,
+    },
+  ],
+  resolved_from: {
+    review_mission_content_sha256: "6".repeat(64),
+    review_result_content_sha256: "7".repeat(64),
+    finding_ids: ["finding-1", "finding-2"],
+  },
+};
+
+const patchReviewSubmission: PatchReviewExternalResultSubmission = {
+  result_schema_version: 2,
+  review_mission_content_sha256: "8".repeat(64),
+  identity: reviewSubmission.identity,
+  patch_mission_content_sha256:
+    patchReviewSubject.patch_mission_content_sha256,
+  patch_result_content_sha256: patchReviewSubject.patch_result_content_sha256,
+  git_base_commit: patchReviewSubject.git_base_commit,
+  accepted_result_commit: patchReviewSubject.accepted_result_commit,
+  summary: "Both assigned findings are resolved.",
+  verdict: "clean",
+  findings: [],
+  resolutions: [
+    { finding_id: "finding-1", status: "resolved" },
+    { finding_id: "finding-2", status: "resolved" },
   ],
 };
 
@@ -126,6 +200,57 @@ describe("external result domain", () => {
     expect(() => externalResultSubmissionSchema.parse(value)).toThrow();
   });
 
+  it("round-trips and stably hashes a strict patch result", () => {
+    const serialized = serializeExternalResult(patchSubmission);
+    const reordered: PatchExternalResultSubmission = {
+      verification: patchSubmission.verification,
+      changed_files: patchSubmission.changed_files,
+      summary: patchSubmission.summary,
+      commit: patchSubmission.commit,
+      identity: patchSubmission.identity,
+      patch_mission_content_sha256:
+        patchSubmission.patch_mission_content_sha256,
+      result_schema_version: patchSubmission.result_schema_version,
+    };
+
+    expect(
+      patchExternalResultSubmissionSchema.parse(JSON.parse(serialized)),
+    ).toEqual(patchSubmission);
+    expect(externalResultSubmissionSchema.parse(JSON.parse(serialized))).toEqual(
+      patchSubmission,
+    );
+    expect(hashExternalResult(reordered)).toBe(
+      hashExternalResult(patchSubmission),
+    );
+    expect(serializeExternalResult(patchSubmission)).toContain(
+      '"patch_cycle": 1',
+    );
+    const resultHash = hashResultContent(serialized);
+    expect(
+      createImportRunId(
+        patchSubmission.patch_mission_content_sha256,
+        resultHash,
+      ),
+    ).toBe(
+      createImportRunId(
+        patchSubmission.patch_mission_content_sha256,
+        resultHash,
+      ),
+    );
+  });
+
+  it.each([
+    { name: "budget", extra: { budget: 100 } },
+    { name: "model", extra: { model: "provider-model" } },
+  ])("rejects agent-reported $name metadata on patch results", ({ extra }) => {
+    expect(() =>
+      patchExternalResultSubmissionSchema.parse({
+        ...patchSubmission,
+        ...extra,
+      }),
+    ).toThrow();
+  });
+
   it("strictly round-trips and hashes canonical review result content", () => {
     const serialized = serializeExternalResult(reviewSubmission);
 
@@ -152,7 +277,7 @@ describe("external result domain", () => {
   });
 
   it("binds canonical review hashes to the exact immutable subject", () => {
-    const reordered: ReviewExternalResultSubmission = {
+    const reordered: ExecuteReviewExternalResultSubmission = {
       findings: reviewSubmission.findings,
       verdict: reviewSubmission.verdict,
       summary: reviewSubmission.summary,
@@ -168,7 +293,7 @@ describe("external result domain", () => {
       result_schema_version: reviewSubmission.result_schema_version,
     };
     const originalHash = hashExternalResult(reviewSubmission);
-    const reboundSubjects: ReviewExternalResultSubmission[] = [
+    const reboundSubjects: ExecuteReviewExternalResultSubmission[] = [
       {
         ...reviewSubmission,
         execute_mission_content_sha256: "1".repeat(64),
@@ -185,6 +310,97 @@ describe("external result domain", () => {
     for (const rebound of reboundSubjects) {
       expect(hashExternalResult(rebound)).not.toBe(originalHash);
     }
+  });
+
+  it("round-trips and stably hashes a patch-subject review result", () => {
+    const serialized = serializeExternalResult(patchReviewSubmission);
+    const reordered: PatchReviewExternalResultSubmission = {
+      resolutions: patchReviewSubmission.resolutions,
+      findings: patchReviewSubmission.findings,
+      verdict: patchReviewSubmission.verdict,
+      summary: patchReviewSubmission.summary,
+      accepted_result_commit: patchReviewSubmission.accepted_result_commit,
+      git_base_commit: patchReviewSubmission.git_base_commit,
+      patch_result_content_sha256:
+        patchReviewSubmission.patch_result_content_sha256,
+      patch_mission_content_sha256:
+        patchReviewSubmission.patch_mission_content_sha256,
+      identity: patchReviewSubmission.identity,
+      review_mission_content_sha256:
+        patchReviewSubmission.review_mission_content_sha256,
+      result_schema_version: patchReviewSubmission.result_schema_version,
+    };
+
+    expect(
+      patchReviewExternalResultSubmissionSchema.parse(JSON.parse(serialized)),
+    ).toEqual(patchReviewSubmission);
+    expect(
+      reviewExternalResultSubmissionForSubjectSchema(
+        patchReviewSubject,
+      ).parse(JSON.parse(serialized)),
+    ).toEqual(patchReviewSubmission);
+    expect(hashExternalResult(reordered)).toBe(
+      hashExternalResult(patchReviewSubmission),
+    );
+    expect(() =>
+      reviewExternalResultSubmissionForSubjectSchema(
+        patchReviewSubject,
+      ).parse({
+        ...patchReviewSubmission,
+        patch_result_content_sha256: "9".repeat(64),
+      }),
+    ).toThrow("must match the patch review subject");
+  });
+
+  it.each([
+    {
+      name: "unknown IDs",
+      resolutions: [
+        { finding_id: "finding-1", status: "resolved" },
+        { finding_id: "finding-3", status: "resolved" },
+      ],
+    },
+    {
+      name: "missing IDs",
+      resolutions: [{ finding_id: "finding-1", status: "resolved" }],
+    },
+    {
+      name: "duplicate IDs",
+      resolutions: [
+        { finding_id: "finding-1", status: "resolved" },
+        { finding_id: "finding-1", status: "resolved" },
+      ],
+    },
+    {
+      name: "reordered IDs",
+      resolutions: [
+        { finding_id: "finding-2", status: "resolved" },
+        { finding_id: "finding-1", status: "resolved" },
+      ],
+    },
+  ])("rejects patch-review resolution coverage with $name", ({ resolutions }) => {
+    expect(() =>
+      reviewExternalResultSubmissionForSubjectSchema(
+        patchReviewSubject,
+      ).parse({
+        ...patchReviewSubmission,
+        resolutions,
+      }),
+    ).toThrow();
+  });
+
+  it("requires every unresolved assigned finding to remain structured", () => {
+    expect(() =>
+      reviewExternalResultSubmissionForSubjectSchema(
+        patchReviewSubject,
+      ).parse({
+        ...patchReviewSubmission,
+        resolutions: [
+          { finding_id: "finding-1", status: "unresolved" },
+          { finding_id: "finding-2", status: "resolved" },
+        ],
+      }),
+    ).toThrow("unresolved resolution requires a matching current finding");
   });
 
   it.each([
@@ -384,5 +600,27 @@ describe("external result domain", () => {
         reasons: [],
       }),
     ).toMatchObject({ phase: "review", outcome: "applied" });
+
+    const patchEvidence = {
+      ...executeEvidence,
+      phase: "patch",
+      identity: patchSubmission.identity,
+      mission_content_sha256: patchSubmission.patch_mission_content_sha256,
+      result_commit: patchSubmission.commit,
+      outcome: "applied",
+      reasons: [],
+    } as const;
+    expect(importEvidenceEnvelopeSchema.parse(patchEvidence)).toEqual(
+      patchEvidence,
+    );
+    expect(
+      importEvidenceSummarySchema.parse({
+        phase: "patch",
+        import_run_id: patchEvidence.import_run_id,
+        outcome: patchEvidence.outcome,
+        evidence_path: `.founder/run-evidence/${workItemId}/patch-2-3-1-1/${patchEvidence.import_run_id}/evidence.json`,
+        reasons: [],
+      }),
+    ).toMatchObject({ phase: "patch", outcome: "applied" });
   });
 });
