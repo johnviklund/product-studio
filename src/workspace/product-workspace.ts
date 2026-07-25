@@ -24,6 +24,7 @@ import {
   controllerRunManifestSchema,
   createCaptureInputSchema,
   createWorkItemInputSchema,
+  parseWorkItemStateForRead,
   productManifestSchema,
   verificationCommandSchema,
   workItemGoalSchema,
@@ -50,14 +51,21 @@ import {
   executeReviewSubjectSchema,
   missionIdentitySchema,
   missionPackageSchema,
+  patchSubjectSchema,
+  readableMissionPackageSchema,
+  renderReadableTaskMd,
   renderTaskMd,
   reviewSubjectSchema,
+  serializeReadableMissionPackage,
   serializeMissionPackage,
   type MissionArtifactWriteResult,
   type MissionIdentity,
   type MissionPackage,
   type MissionPackageBuilder,
   type MissionPaths,
+  type PatchMissionPackage,
+  type PatchSubject,
+  type ReadableMissionPackage,
   type ReviewMissionPackage,
   type ReviewSubject,
 } from "../domain/mission";
@@ -71,12 +79,15 @@ import {
   importEvidenceSummarySchema,
   importRunIdSchema,
   type AppliedExecuteReviewSubject,
+  type AppliedPatchReviewSubject,
   type CommandEvidenceRecord,
   type ExecuteImportEvidenceEnvelope,
   type ImportEvidenceSummary,
   type ImportEvidenceWriteInput,
   type MissionResultSnapshot,
+  type PatchImportEvidenceEnvelope,
   type StoredImportEvidence,
+  patchExternalResultSubmissionSchema,
 } from "../domain/result";
 import type {
   GitVerificationAdapter,
@@ -1230,6 +1241,198 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     };
   }
 
+  async readAppliedPatchReviewSubject(
+    identity: MissionIdentity<"patch">,
+  ): Promise<AppliedPatchReviewSubject> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    if (validatedIdentity.phase !== "patch") {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "Patch review subjects require patch identity.",
+      );
+    }
+
+    const matches = (await this.listImportEvidence(validatedIdentity.work_item_id))
+      .filter(
+        (stored) =>
+          stored.evidence.phase === "patch" &&
+          stored.evidence.outcome === "applied" &&
+          JSON.stringify(stored.evidence.identity) ===
+            JSON.stringify(validatedIdentity),
+      );
+    if (matches.length !== 1) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        matches.length === 0
+          ? "No applied patch import matches the governed tuple."
+          : "More than one applied patch import matches the governed tuple.",
+      );
+    }
+
+    const stored = matches[0];
+    if (stored.evidence.phase !== "patch") {
+      throw this.invalid(
+        stored.summary.evidence_path,
+        "applied patch subject has a non-patch evidence envelope",
+      );
+    }
+    const evidence: PatchImportEvidenceEnvelope = stored.evidence;
+    const controllerRun = await this.readControllerRunManifest(
+      validatedIdentity.work_item_id,
+      evidence.controller_run_id,
+    );
+    if (
+      controllerRun === null ||
+      controllerRun.phase !== "review" ||
+      controllerRun.outcome !== "applied" ||
+      controllerRun.goal_version !== validatedIdentity.goal_version ||
+      controllerRun.input_revision !== validatedIdentity.input_revision ||
+      controllerRun.attempt !== validatedIdentity.attempt
+    ) {
+      throw this.invalid(
+        stored.summary.evidence_path,
+        "applied patch evidence does not match its review transition controller run",
+      );
+    }
+    const evidenceDirectory = this.evidenceDirectories(
+      validatedIdentity,
+      evidence.import_run_id,
+    ).target;
+    const submissionPath = join(evidenceDirectory, SUBMISSION_JSON_FILE);
+    const submissionSource = await this.readRequiredFile(submissionPath);
+    const submission = this.parseJson(
+      submissionSource,
+      submissionPath,
+      patchExternalResultSubmissionSchema,
+    );
+    const missionSnapshot = await this.readMissionPackageSnapshot(
+      validatedIdentity,
+    );
+    if (!("patch_subject" in missionSnapshot.mission)) {
+      throw this.invalid(
+        missionSnapshot.missionPath,
+        "patch evidence must bind to a patch mission",
+      );
+    }
+    if (
+      missionSnapshot.mission.content_sha256 !==
+        evidence.mission_content_sha256 ||
+      missionSnapshot.mission.source_revision.git_base_commit !==
+        evidence.git_base_commit ||
+      submission.patch_mission_content_sha256 !==
+        evidence.mission_content_sha256 ||
+      JSON.stringify(submission.identity) !==
+        JSON.stringify(validatedIdentity) ||
+      submission.commit !== evidence.result_commit
+    ) {
+      throw this.invalid(
+        evidenceDirectory,
+        "applied patch evidence is not bound to its immutable mission and submission",
+      );
+    }
+    const requiredCommands = (await this.readManifest()).verification
+      .required_commands;
+    if (
+      stored.verification.length !== requiredCommands.length ||
+      stored.verification.some(
+        (record, index) =>
+          record.name !== requiredCommands[index]?.name ||
+          JSON.stringify(record.argv) !==
+            JSON.stringify(requiredCommands[index]?.argv),
+      )
+    ) {
+      throw this.invalid(
+        evidenceDirectory,
+        "applied patch evidence does not match the required command set",
+      );
+    }
+
+    const reviewSubject = reviewSubjectSchema.parse({
+      source: "patch",
+      patch_cycle: validatedIdentity.patch_cycle,
+      patch_mission_content_sha256: evidence.mission_content_sha256,
+      patch_result_content_sha256: evidence.result_content_sha256,
+      patch_mission_path: missionSnapshot.relativeMissionPath,
+      patch_evidence_path: stored.summary.evidence_path,
+      git_base_commit: evidence.git_base_commit,
+      accepted_result_commit: evidence.result_commit,
+      changed_files: [...submission.changed_files].sort(),
+      command_evidence: stored.verification,
+      resolved_from: {
+        review_mission_content_sha256:
+          missionSnapshot.mission.patch_subject
+            .review_mission_content_sha256,
+        review_result_content_sha256:
+          missionSnapshot.mission.patch_subject.review_result_content_sha256,
+        finding_ids: missionSnapshot.mission.patch_subject.findings.map(
+          (finding) => finding.finding_id,
+        ),
+      },
+    });
+    if (reviewSubject.source !== "patch") {
+      throw new Error("Patch subject parser returned an execute subject.");
+    }
+    return {
+      review_subject: reviewSubject,
+      submission_source: submissionSource,
+      evidence,
+      verification: stored.verification,
+    };
+  }
+
+  async writePatchMissionPackage(
+    identity: MissionIdentity<"patch">,
+    patchSubject: PatchSubject,
+    buildPackage: MissionPackageBuilder<PatchMissionPackage>,
+  ): Promise<MissionArtifactWriteResult<PatchMissionPackage>> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    if (validatedIdentity.phase !== "patch") {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "Patch mission writes require patch identity.",
+      );
+    }
+    await this.readManifest();
+    const current = await this.readValidated(validatedIdentity.work_item_id);
+    if (
+      current === null ||
+      current.state.phase !== "patch" ||
+      current.state.status !== "active" ||
+      current.goal.goal_contract?.goal_version !==
+        validatedIdentity.goal_version ||
+      current.state.goal_version !== validatedIdentity.goal_version ||
+      current.state.input_revision !== validatedIdentity.input_revision ||
+      current.state.attempt !== validatedIdentity.attempt ||
+      current.state.patch_cycle !== validatedIdentity.patch_cycle
+    ) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The durable work item no longer matches the active patch tuple.",
+      );
+    }
+
+    const validatedSubject = patchSubjectSchema.parse(patchSubject);
+    const paths = this.missionPaths(
+      validatedIdentity,
+      validatedSubject.reviewed_commit,
+    );
+    const mission = missionPackageSchema.parse(buildPackage(paths));
+    if (
+      !("patch_subject" in mission) ||
+      JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
+      JSON.stringify(mission.patch_subject) !==
+        JSON.stringify(validatedSubject) ||
+      mission.task_path !== paths.task_path ||
+      mission.result_contract.output_path !== paths.output_path
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "compiled patch mission must match the workspace-derived identity, subject, and paths",
+      );
+    }
+    return this.publishMissionSnapshot(validatedIdentity, mission);
+  }
+
   async writeReviewMissionPackage(
     identity: MissionIdentity<"review">,
     reviewSubject: ReviewSubject,
@@ -1260,24 +1463,45 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
-    const freshSubject = await this.readAppliedExecuteReviewSubject({
-      ...validatedIdentity,
-      phase: "execute",
-    });
     const validatedSubject = reviewSubjectSchema.parse(reviewSubject);
+    if (
+      current.state.patch_cycle !==
+      (validatedSubject.source === "patch"
+        ? validatedSubject.patch_cycle
+        : 0)
+    ) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The review subject does not match the active patch cycle.",
+      );
+    }
+    const freshSubject =
+      validatedSubject.source === "execute"
+        ? await this.readAppliedExecuteReviewSubject({
+            ...validatedIdentity,
+            phase: "execute",
+          })
+        : await this.readAppliedPatchReviewSubject({
+            ...validatedIdentity,
+            phase: "patch",
+            patch_cycle: validatedSubject.patch_cycle,
+          });
     if (
       JSON.stringify(validatedSubject) !==
       JSON.stringify(freshSubject.review_subject)
     ) {
       throw this.missionNotReady(
         validatedIdentity.work_item_id,
-        "Review subject does not match the current applied execute evidence.",
+        "Review subject does not match the current applied result evidence.",
       );
     }
 
     const paths = this.missionPaths(
       validatedIdentity,
       validatedSubject.git_base_commit,
+      validatedSubject.source === "patch"
+        ? validatedSubject.patch_cycle
+        : undefined,
     );
     const mission = missionPackageSchema.parse(buildPackage(paths));
     if (
@@ -1298,9 +1522,13 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
   async readMissionResult(
     identity: MissionIdentity,
+    reviewPatchCycle?: number,
   ): Promise<MissionResultSnapshot> {
     const validatedIdentity = missionIdentitySchema.parse(identity);
-    const snapshot = await this.readMissionPackageSnapshot(validatedIdentity);
+    const snapshot = await this.readMissionPackageSnapshot(
+      validatedIdentity,
+      reviewPatchCycle,
+    );
     const resultPath = join(snapshot.missionDirectory, RESULT_JSON_FILE);
 
     return {
@@ -1370,22 +1598,35 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         );
       }
 
-      const identityMatch = /^(execute|review)-(\d+)-(\d+)-(\d+)$/.exec(
+      const standardIdentityMatch =
+        /^(execute|review)-(\d+)-(\d+)-(\d+)$/.exec(identityEntry.name);
+      const patchIdentityMatch = /^patch-(\d+)-(\d+)-(\d+)-(\d+)$/.exec(
         identityEntry.name,
       );
-      if (identityMatch === null) {
+      if (standardIdentityMatch === null && patchIdentityMatch === null) {
         throw this.invalid(
           identityDirectory,
-          "evidence identity directory must use the <phase>-<goal_version>-<input_revision>-<attempt> format",
+          "evidence identity directory must use <phase>-<goal_version>-<input_revision>-<attempt> with a required patch-cycle suffix for patch evidence",
         );
       }
-      const identityResult = missionIdentitySchema.safeParse({
-        phase: identityMatch[1],
-        work_item_id: validatedWorkItemId,
-        goal_version: Number(identityMatch[2]),
-        input_revision: Number(identityMatch[3]),
-        attempt: Number(identityMatch[4]),
-      });
+      const identityResult = missionIdentitySchema.safeParse(
+        patchIdentityMatch === null
+          ? {
+              phase: standardIdentityMatch![1],
+              work_item_id: validatedWorkItemId,
+              goal_version: Number(standardIdentityMatch![2]),
+              input_revision: Number(standardIdentityMatch![3]),
+              attempt: Number(standardIdentityMatch![4]),
+            }
+          : {
+              phase: "patch",
+              work_item_id: validatedWorkItemId,
+              goal_version: Number(patchIdentityMatch[1]),
+              input_revision: Number(patchIdentityMatch[2]),
+              attempt: Number(patchIdentityMatch[3]),
+              patch_cycle: Number(patchIdentityMatch[4]),
+            },
+      );
       if (!identityResult.success) {
         throw this.invalid(
           identityDirectory,
@@ -1952,9 +2193,15 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       missionsDirectory,
       identity.work_item_id,
     );
+    const reviewPatchCycle =
+      mission.identity.phase === "review" &&
+      "review_subject" in mission &&
+      mission.review_subject.source === "patch"
+        ? mission.review_subject.patch_cycle
+        : undefined;
     const missionDirectory = join(
       workItemMissionsDirectory,
-      this.missionDirectoryName(identity),
+      this.missionDirectoryName(identity, reviewPatchCycle),
     );
 
     await this.ensureDirectory(missionsDirectory);
@@ -1971,7 +2218,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
     const stagingDirectory = join(
       workItemMissionsDirectory,
-      `.${this.missionDirectoryName(identity)}.${randomUUID()}.mission.tmp`,
+      `.${this.missionDirectoryName(identity, reviewPatchCycle)}.${randomUUID()}.mission.tmp`,
     );
     await mkdir(stagingDirectory);
     try {
@@ -2011,8 +2258,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return this.missionWriteResult(mission, missionDirectory);
   }
 
-  private async readMissionPackageSnapshot(identity: MissionIdentity): Promise<{
-    mission: MissionPackage;
+  private async readMissionPackageSnapshot(
+    identity: MissionIdentity,
+    reviewPatchCycle?: number,
+  ): Promise<{
+    mission: ReadableMissionPackage;
     missionDirectory: string;
     missionPath: string;
     relativeDirectory: string;
@@ -2023,7 +2273,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       FOUNDER_DIRECTORY,
       MISSIONS_DIRECTORY,
       identity.work_item_id,
-      this.missionDirectoryName(identity),
+      this.missionDirectoryName(identity, reviewPatchCycle),
     );
     const missionsDirectory = join(this.founderDirectory, MISSIONS_DIRECTORY);
     const workItemMissionsDirectory = join(
@@ -2032,7 +2282,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     );
     const missionDirectory = join(
       workItemMissionsDirectory,
-      this.missionDirectoryName(identity),
+      this.missionDirectoryName(identity, reviewPatchCycle),
     );
     await this.assertDirectory(missionsDirectory);
     await this.assertDirectory(workItemMissionsDirectory);
@@ -2043,11 +2293,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const mission = this.parseJson(
       missionSource,
       missionPath,
-      missionPackageSchema,
+      readableMissionPackageSchema,
     );
     const expectedPaths = this.missionPaths(
       identity,
       mission.source_revision.git_base_commit,
+      reviewPatchCycle,
     );
     if (
       JSON.stringify(mission.identity) !== JSON.stringify(identity) ||
@@ -2062,8 +2313,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     await this.assertMissionSnapshot(
       missionDirectory,
       mission,
-      serializeMissionPackage(mission),
-      renderTaskMd(mission),
+      serializeReadableMissionPackage(mission),
+      renderReadableTaskMd(mission),
     );
     return {
       mission,
@@ -2080,12 +2331,13 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   private missionPaths(
     identity: MissionIdentity,
     gitBaseCommit: string,
+    reviewPatchCycle?: number,
   ): MissionPaths {
     const relativeDirectory = posix.join(
       FOUNDER_DIRECTORY,
       MISSIONS_DIRECTORY,
       identity.work_item_id,
-      this.missionDirectoryName(identity),
+      this.missionDirectoryName(identity, reviewPatchCycle),
     );
     return {
       task_path: posix.join(relativeDirectory, TASK_MD_FILE),
@@ -2105,13 +2357,23 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
   }
 
-  private missionDirectoryName(identity: MissionIdentity): string {
-    return [
+  private missionDirectoryName(
+    identity: MissionIdentity,
+    reviewPatchCycle?: number,
+  ): string {
+    const base = [
       identity.phase,
       identity.goal_version,
       identity.input_revision,
       identity.attempt,
     ].join("-");
+    if (identity.phase === "patch") {
+      return `${base}-${identity.patch_cycle}`;
+    }
+    if (identity.phase === "review" && reviewPatchCycle !== undefined) {
+      return `${base}-patch-${reviewPatchCycle}`;
+    }
+    return base;
   }
 
   private missionWriteResult<TMission extends MissionPackage>(
@@ -2128,7 +2390,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
   private async assertMissionSnapshot(
     missionDirectory: string,
-    mission: MissionPackage,
+    mission: ReadableMissionPackage,
     missionSource: string,
     taskSource: string,
   ): Promise<void> {
@@ -2146,7 +2408,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const existingMission = this.parseJson(
       existingMissionSource,
       missionPath,
-      missionPackageSchema,
+      readableMissionPackageSchema,
     );
     if (
       JSON.stringify(existingMission) !== JSON.stringify(mission) ||
@@ -2601,7 +2863,20 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const goalSource = await this.readRequiredFile(goalPath);
     const stateSource = await this.readRequiredFile(statePath);
     const goal = this.parseYaml(goalSource, goalPath, workItemGoalSchema);
-    const state = this.parseJson(stateSource, statePath, workItemStateSchema);
+    let state: WorkItemState;
+    try {
+      state = parseWorkItemStateForRead(
+        this.parseJsonValue(stateSource, statePath),
+      );
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw this.invalid(
+          statePath,
+          validationReason({ error }),
+        );
+      }
+      throw error;
+    }
     const itemResult = workItemSchema.safeParse({ goal, state });
 
     if (!itemResult.success) {
@@ -2849,6 +3124,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   private parseJson<T>(source: string, filePath: string, schema: ZodType<T>): T {
+    return this.parseValue(this.parseJsonValue(source, filePath), filePath, schema);
+  }
+
+  private parseJsonValue(source: string, filePath: string): unknown {
     let value: unknown;
     try {
       value = JSON.parse(source);
@@ -2856,7 +3135,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       throw this.invalid(filePath, `invalid JSON: ${errorMessage(error)}`);
     }
 
-    return this.parseValue(value, filePath, schema);
+    return value;
   }
 
   private parseValue<T>(value: unknown, filePath: string, schema: ZodType<T>): T {

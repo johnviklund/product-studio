@@ -607,6 +607,7 @@ async function createPatchImportFixture(options?: {
   if (
     reviewResult.verdict !== "findings" ||
     reviewResult.findings.length === 0 ||
+    reviewFixture.snapshot.mission.mission_schema_version !== 4 ||
     !("review_subject" in reviewFixture.snapshot.mission)
   ) {
     throw new Error("Patch fixture requires an applied review with findings.");
@@ -741,6 +742,7 @@ async function createPatchReviewImportFixture(options: {
   ) as PatchExternalResultSubmission;
   if (
     patchEvidence === undefined ||
+    patchEvidence.evidence.phase !== "patch" ||
     !("patch_subject" in patchFixture.patchSnapshot.mission)
   ) {
     throw new Error("Re-review fixture requires applied patch evidence.");
@@ -831,6 +833,14 @@ async function createPatchReviewImportFixture(options: {
       return identity.phase === "patch"
         ? patchFixture.patchSnapshot
         : reviewSnapshot;
+    },
+    async readAppliedPatchReviewSubject() {
+      return {
+        review_subject: reviewSubject,
+        submission_source: patchFixture.patchSnapshot.result_source,
+        evidence: patchEvidence.evidence,
+        verification: patchEvidence.verification,
+      };
     },
   });
 

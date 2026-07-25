@@ -92,6 +92,8 @@ type WorkspaceGateway = Pick<
   | "readControllerRunManifest"
   | "findAppliedExecuteManifest"
   | "readAppliedExecuteReviewSubject"
+  | "readAppliedPatchReviewSubject"
+  | "writePatchMissionPackage"
   | "writeReviewMissionPackage"
   | "writeMissionPackage"
   | "readMissionResult"

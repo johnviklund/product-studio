@@ -7,6 +7,8 @@ import {
   type ExecuteMissionPackage,
   type MissionIdentity,
   type MissionPackage,
+  type PatchReviewSubject,
+  type ReadableMissionPackage,
   type ReviewSubject,
 } from "./mission";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
@@ -199,10 +201,14 @@ export interface ImportEvidenceSummary {
 }
 
 export interface MissionResultSnapshot {
-  mission: MissionPackage;
+  mission: ReadableMissionPackage;
   mission_path: string;
   result_path: string;
   result_source: string;
+}
+
+export interface ActiveMissionResultSnapshot extends MissionResultSnapshot {
+  mission: MissionPackage;
 }
 
 export interface ExecuteMissionResultSnapshot extends MissionResultSnapshot {
@@ -226,6 +232,13 @@ export interface AppliedExecuteReviewSubject {
   review_subject: ExecuteReviewSubject;
   submission_source: string;
   evidence: ExecuteImportEvidenceEnvelope;
+  verification: CommandEvidenceRecord[];
+}
+
+export interface AppliedPatchReviewSubject {
+  review_subject: PatchReviewSubject;
+  submission_source: string;
+  evidence: PatchImportEvidenceEnvelope;
   verification: CommandEvidenceRecord[];
 }
 

@@ -15,10 +15,17 @@ import { parse, stringify } from "yaml";
 
 import {
   compileMission,
+  compilePatchMission,
   compileReviewMission,
+  hashHistoricalMissionContentV3,
+  renderReadableTaskMd,
   renderTaskMd,
+  serializeReadableMissionPackage,
   serializeMissionPackage,
+  type HistoricalExecuteMissionPackageV3,
+  type HistoricalReviewMissionPackageV3,
   type MissionIdentity,
+  type PatchSubject,
   type ReviewMissionControllerRun,
 } from "../src/domain/mission";
 import {
@@ -174,7 +181,8 @@ async function writeContractedWorkItem(
 async function writeMissionReadyWorkItem(
   root: string,
   workItemId: string,
-  phase: "execute" | "review" = "execute",
+  phase: "execute" | "review" | "patch" = "execute",
+  patchCycle = phase === "patch" ? 1 : 0,
 ): Promise<WorkItem> {
   const directory = join(root, ".founder", "work-items", workItemId);
   const goal = {
@@ -201,7 +209,7 @@ async function writeMissionReadyWorkItem(
     goal_version: 1,
     input_revision: 1,
     attempt: 0,
-    patch_cycle: 0,
+    patch_cycle: patchCycle,
   };
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, "goal.yaml"), stringify(goal), "utf8");
@@ -345,6 +353,7 @@ function controllerMutation(
       goal_version: goalVersion,
       input_revision: inputRevision,
       attempt: 0,
+      patch_cycle: 0,
     },
     manifest: {
       schema_version: 1,
@@ -432,6 +441,28 @@ describe("ProductWorkspace", () => {
     expect(created.goal.capture?.captured_at).toMatch(/Z$/);
     expect(created.state).toMatchObject({ phase: "idea", status: "active" });
     expect(await workspace.read(created.goal.work_item_id)).toEqual(created);
+  });
+
+  it("upgrades a v1 governed state on read without rewriting its durable bytes", async () => {
+    const root = await createWorkspace();
+    await writeContractedWorkItem(root, firstId);
+    const workspace = new ProductWorkspace(root);
+    const statePath = join(
+      root,
+      ".founder",
+      "work-items",
+      firstId,
+      "state.json",
+    );
+    const originalStateSource = await readFile(statePath, "utf8");
+
+    const item = await workspace.read(firstId);
+
+    expect(item?.state).toMatchObject({
+      schema_version: 2,
+      patch_cycle: 0,
+    });
+    expect(await readFile(statePath, "utf8")).toBe(originalStateSource);
   });
 
   it("orders newest items first and uses work_item_id as the tie-breaker", async () => {
@@ -887,6 +918,192 @@ describe("ProductWorkspace", () => {
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
   });
 
+  it("reads historical v3 execute/review artifacts without rewriting their bytes", async () => {
+    const root = await createWorkspace();
+    const executeItem = await writeMissionReadyWorkItem(root, firstId);
+    const workspace = missionWorkspace(root);
+    const commandEvidence = [
+      {
+        name: "Tests",
+        argv: ["npm", "test"] as [string, ...string[]],
+        started_at: "2026-07-20T12:00:00.000Z",
+        completed_at: "2026-07-20T12:00:01.000Z",
+        duration_ms: 1_000,
+        status: "passed" as const,
+        exit_code: 0 as const,
+        signal: null,
+        stdout: "green",
+        stderr: "",
+        output_truncated: false,
+      },
+    ];
+    const historicalExecuteDraft: HistoricalExecuteMissionPackageV3 = {
+      mission_schema_version: 3,
+      identity: missionIdentity(),
+      controller_run: {
+        run_id: firstRunId,
+        idempotency_key: `${firstId}:execute:1:1:0:historical`,
+        phase: "execute",
+        started_at: "2026-07-20T12:00:00.000Z",
+        completed_at: "2026-07-20T12:00:01.000Z",
+      },
+      goal: {
+        title: executeItem.goal.title,
+        type: executeItem.goal.type,
+        purpose: executeItem.goal.goal_contract!.purpose,
+        acceptance_criteria:
+          executeItem.goal.goal_contract!.acceptance_criteria,
+        non_goals: executeItem.goal.goal_contract!.non_goals,
+        allowed_scope: executeItem.goal.goal_contract!.allowed_scope,
+        review_ready: executeItem.goal.goal_contract!.review_ready,
+      },
+      source_revision: { git_base_commit: "a".repeat(40) },
+      result_contract: {
+        schema_version: 3,
+        output_path: `.founder/missions/${firstId}/execute-1-1-0/result.json`,
+        result_schema_version: 2,
+        required_fields: [
+          "result_schema_version",
+          "mission_content_sha256",
+          "identity",
+          "commit",
+          "summary",
+          "changed_files",
+          "verification",
+        ],
+      },
+      task_path: `.founder/missions/${firstId}/execute-1-1-0/TASK.md`,
+      content_sha256: "0".repeat(64),
+    };
+    const historicalExecute = {
+      ...historicalExecuteDraft,
+      content_sha256: hashHistoricalMissionContentV3(
+        historicalExecuteDraft,
+      ),
+    };
+    const historicalReviewDraft: HistoricalReviewMissionPackageV3 = {
+      mission_schema_version: 3,
+      identity: { ...missionIdentity(), phase: "review" },
+      controller_run: {
+        run_id: secondRunId,
+        idempotency_key: `${firstId}:review:1:1:0:historical`,
+        phase: "review",
+        started_at: "2026-07-20T12:00:01.000Z",
+        completed_at: "2026-07-20T12:00:02.000Z",
+      },
+      goal: historicalExecute.goal,
+      source_revision: historicalExecute.source_revision,
+      review_subject: {
+        execute_mission_content_sha256:
+          historicalExecute.content_sha256,
+        execute_result_content_sha256: "7".repeat(64),
+        git_base_commit: "a".repeat(40),
+        accepted_result_commit: "a".repeat(40),
+        changed_files: ["src/domain/result.ts"],
+        execute_mission_path: `.founder/missions/${firstId}/execute-1-1-0/mission.json`,
+        execute_evidence_path: `.founder/run-evidence/${firstId}/execute-1-1-0/${"8".repeat(64)}`,
+        command_evidence: commandEvidence,
+      },
+      independence_attested: true,
+      result_contract: {
+        schema_version: 3,
+        output_path: `.founder/missions/${firstId}/review-1-1-0/result.json`,
+        result_schema_version: 2,
+        required_fields: [
+          "result_schema_version",
+          "review_mission_content_sha256",
+          "identity",
+          "execute_mission_content_sha256",
+          "execute_result_content_sha256",
+          "git_base_commit",
+          "accepted_result_commit",
+          "summary",
+          "verdict",
+          "findings",
+        ],
+      },
+      task_path: `.founder/missions/${firstId}/review-1-1-0/TASK.md`,
+      content_sha256: "0".repeat(64),
+    };
+    const historicalReview = {
+      ...historicalReviewDraft,
+      content_sha256: hashHistoricalMissionContentV3(
+        historicalReviewDraft,
+      ),
+    };
+    const historicalSources = new Map<string, string>();
+    for (const mission of [historicalExecute, historicalReview]) {
+      const directory = join(root, dirname(mission.task_path));
+      await mkdir(directory, { recursive: true });
+      const missionSource = serializeReadableMissionPackage(mission);
+      const taskSource = renderReadableTaskMd(mission);
+      await writeFile(join(directory, "mission.json"), missionSource);
+      await writeFile(join(directory, "TASK.md"), taskSource);
+      await writeFile(join(directory, "result.json"), "{}\n");
+      historicalSources.set(join(directory, "mission.json"), missionSource);
+      historicalSources.set(join(directory, "TASK.md"), taskSource);
+    }
+
+    const evidenceSubmission = '{"historical":true}\n';
+    const evidenceResultHash = hashResultContent(evidenceSubmission);
+    const evidenceSummary = await workspace.writeImportEvidence({
+      submission_source: evidenceSubmission,
+      evidence: {
+        schema_version: 2,
+        phase: "execute",
+        import_run_id: createImportRunId(
+          historicalExecute.content_sha256,
+          evidenceResultHash,
+        ),
+        result_content_sha256: evidenceResultHash,
+        mission_content_sha256: historicalExecute.content_sha256,
+        identity: missionIdentity(),
+        git_base_commit: "a".repeat(40),
+        result_commit: null,
+        controller_run_id: thirdRunId,
+        started_at: "2026-07-20T12:00:01.000Z",
+        completed_at: "2026-07-20T12:00:02.000Z",
+        outcome: "rejected",
+        reasons: ["Historical rejection remains inspectable."],
+      },
+      verification: [],
+    });
+    const evidenceDirectory = join(root, evidenceSummary.evidence_path);
+    for (const name of [
+      "submission.json",
+      "import.json",
+      "verification.json",
+    ]) {
+      const path = join(evidenceDirectory, name);
+      historicalSources.set(path, await readFile(path, "utf8"));
+    }
+
+    expect(
+      (await workspace.readMissionResult(missionIdentity())).mission
+        .mission_schema_version,
+    ).toBe(3);
+    expect(
+      (
+        await workspace.readMissionResult({
+          ...missionIdentity(),
+          phase: "review",
+        })
+      ).mission.mission_schema_version,
+    ).toBe(3);
+    expect(await workspace.listImportEvidence(firstId)).toHaveLength(1);
+    await expect(
+      workspace.writeMissionPackage(
+        missionIdentity(),
+        (paths) =>
+          compileMission(executeItem, appliedExecuteManifest(), paths),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    for (const [path, source] of historicalSources) {
+      expect(await readFile(path, "utf8")).toBe(source);
+    }
+  });
+
   it("builds one immutable execute subject and writes a phase-distinct review mission", async () => {
     const root = await createWorkspace();
     const executeItem = await writeMissionReadyWorkItem(root, firstId);
@@ -1135,6 +1352,206 @@ describe("ProductWorkspace", () => {
     await expect(
       workspace.readAppliedExecuteReviewSubject(missionIdentity()),
     ).rejects.toMatchObject({ kind: "mission_not_ready" });
+  });
+
+  it("publishes cycle-qualified patch artifacts and derives one applied patch review subject", async () => {
+    const root = await createWorkspace();
+    const patchItem = await writeMissionReadyWorkItem(
+      root,
+      firstId,
+      "patch",
+      1,
+    );
+    const workspace = missionWorkspace(root);
+    const commandEvidence = [
+      {
+        name: "Tests",
+        argv: ["npm", "test"] as [string, ...string[]],
+        started_at: "2026-07-22T12:00:00.000Z",
+        completed_at: "2026-07-22T12:00:01.000Z",
+        duration_ms: 1_000,
+        status: "passed" as const,
+        exit_code: 0 as const,
+        signal: null,
+        stdout: "green",
+        stderr: "",
+        output_truncated: false,
+      },
+    ];
+    const priorReviewSubject = {
+      source: "execute" as const,
+      execute_mission_content_sha256: "1".repeat(64),
+      execute_result_content_sha256: "2".repeat(64),
+      git_base_commit: "a".repeat(40),
+      accepted_result_commit: "a".repeat(40),
+      changed_files: ["src/domain/result.ts"],
+      execute_mission_path: `.founder/missions/${firstId}/execute-1-1-0/mission.json`,
+      execute_evidence_path: `.founder/run-evidence/${firstId}/execute-1-1-0/${"3".repeat(64)}`,
+      command_evidence: commandEvidence,
+    };
+    const patchSubject: PatchSubject = {
+      review_mission_content_sha256: "4".repeat(64),
+      review_result_content_sha256: "5".repeat(64),
+      review_mission_path: `.founder/missions/${firstId}/review-1-1-0/mission.json`,
+      review_result_path: `.founder/missions/${firstId}/review-1-1-0/result.json`,
+      review_evidence_path: `.founder/run-evidence/${firstId}/review-1-1-0/${"6".repeat(64)}`,
+      reviewed_commit: "a".repeat(40),
+      findings: [
+        {
+          finding_id: "F-1",
+          severity: "P1",
+          title: "Preserve immutable evidence",
+          evidence: { summary: "The patch requires durable proof." },
+          required_action: "Keep evidence immutable before state mutation.",
+          link: {
+            type: "defect",
+            evidence_summary: "The controller owns durable mutation.",
+          },
+        },
+      ],
+      prior_review_subject: priorReviewSubject,
+    };
+    const patchIdentity = {
+      phase: "patch" as const,
+      work_item_id: firstId,
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      patch_cycle: 1,
+    };
+    const patchArtifact = await workspace.writePatchMissionPackage(
+      patchIdentity,
+      patchSubject,
+      (paths) =>
+        compilePatchMission({
+          work_item: patchItem,
+          controller_run: {
+            schema_version: 1,
+            run_id: secondRunId,
+            work_item_id: firstId,
+            idempotency_key: `${firstId}:patch:1:1:0:1:mission`,
+            phase: "patch",
+            goal_version: 1,
+            input_revision: 1,
+            attempt: 0,
+            started_at: "2026-07-22T12:00:00.000Z",
+            completed_at: "2026-07-22T12:00:01.000Z",
+            outcome: "applied",
+          },
+          patch_subject: patchSubject,
+          paths,
+        }),
+    );
+    expect(patchArtifact.mission_path).toContain("patch-1-1-0-1");
+
+    const submissionSource = serializeExternalResult({
+      result_schema_version: 2,
+      patch_mission_content_sha256: patchArtifact.mission.content_sha256,
+      identity: patchIdentity,
+      commit: "a".repeat(40),
+      summary: "Applied the bounded patch.",
+      changed_files: ["src/domain/result.ts"],
+      verification: [{ name: "Tests", status: "passed" }],
+    });
+    await writeFile(
+      join(root, patchArtifact.mission.result_contract.output_path),
+      submissionSource,
+    );
+    const resultContentSha256 = hashResultContent(submissionSource);
+    const importRunId = createImportRunId(
+      patchArtifact.mission.content_sha256,
+      resultContentSha256,
+    );
+    const evidence = {
+      schema_version: 2 as const,
+      phase: "patch" as const,
+      import_run_id: importRunId,
+      result_content_sha256: resultContentSha256,
+      mission_content_sha256: patchArtifact.mission.content_sha256,
+      identity: patchIdentity,
+      git_base_commit: "a".repeat(40),
+      result_commit: "a".repeat(40),
+      controller_run_id: thirdRunId,
+      started_at: "2026-07-22T12:00:01.000Z",
+      completed_at: "2026-07-22T12:00:02.000Z",
+      outcome: "applied" as const,
+      reasons: [],
+    };
+    const evidenceSummary = await workspace.writeImportEvidence({
+      submission_source: submissionSource,
+      evidence,
+      verification: commandEvidence,
+    });
+    expect(evidenceSummary.evidence_path).toContain("patch-1-1-0-1");
+    await writeRunManifest(root, {
+      schema_version: 1,
+      run_id: thirdRunId,
+      work_item_id: firstId,
+      idempotency_key: `${firstId}:patch:1:1:0:1:import`,
+      phase: "review",
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      started_at: evidence.started_at,
+      completed_at: evidence.completed_at,
+      outcome: "applied",
+    });
+    await writeMissionReadyWorkItem(root, firstId, "review", 1);
+
+    const appliedSubject = await workspace.readAppliedPatchReviewSubject(
+      patchIdentity,
+    );
+    expect(appliedSubject.review_subject).toMatchObject({
+      source: "patch",
+      patch_cycle: 1,
+      patch_mission_path: `.founder/missions/${firstId}/patch-1-1-0-1/mission.json`,
+      patch_evidence_path: evidenceSummary.evidence_path,
+      resolved_from: { finding_ids: ["F-1"] },
+    });
+    expect(appliedSubject.submission_source).toBe(submissionSource);
+
+    const reviewItem = await workspace.read(firstId);
+    if (reviewItem === null) {
+      throw new Error("Expected patch review work item");
+    }
+    const reviewIdentity = { ...missionIdentity(), phase: "review" as const };
+    const reviewArtifact = await workspace.writeReviewMissionPackage(
+      reviewIdentity,
+      appliedSubject.review_subject,
+      (paths) =>
+        compileReviewMission({
+          work_item: reviewItem,
+          controller_run: {
+            schema_version: 1,
+            run_id: firstRunId,
+            work_item_id: firstId,
+            idempotency_key: `${firstId}:review:1:1:0:patch:1`,
+            phase: "review",
+            goal_version: 1,
+            input_revision: 1,
+            attempt: 0,
+            started_at: "2026-07-22T12:00:02.000Z",
+            completed_at: "2026-07-22T12:00:03.000Z",
+            outcome: "applied",
+          },
+          review_subject: appliedSubject.review_subject,
+          paths,
+          independence_attested: true,
+        }),
+    );
+    expect(reviewArtifact.mission_path).toContain("review-1-1-0-patch-1");
+    await writeFile(
+      join(root, reviewArtifact.mission.result_contract.output_path),
+      "{}\n",
+    );
+    expect((await workspace.readMissionResult(reviewIdentity, 1)).mission).toEqual(
+      reviewArtifact.mission,
+    );
+    expect(
+      (await workspace.listImportEvidence(firstId)).map(
+        (stored) => stored.evidence.identity,
+      ),
+    ).toContainEqual(patchIdentity);
   });
 
   it("rejects an applied execute subject whose evidence names a different command", async () => {

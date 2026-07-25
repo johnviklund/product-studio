@@ -4,11 +4,14 @@ import type {
   MissionArtifactWriteResult,
   MissionIdentity,
   MissionPackageBuilder,
+  PatchMissionPackage,
+  PatchSubject,
   ReviewMissionPackage,
 } from "./mission";
 import { portfolioSourceIdSchema } from "./portfolio-source";
 import type {
   AppliedExecuteReviewSubject,
+  AppliedPatchReviewSubject,
   ImportEvidenceSummary,
   ImportEvidenceWriteInput,
   MissionResultSnapshot,
@@ -360,7 +363,10 @@ export interface WorkItemRepository {
     identity: MissionIdentity,
     buildPackage: MissionPackageBuilder,
   ): Promise<MissionArtifactWriteResult>;
-  readMissionResult(identity: MissionIdentity): Promise<MissionResultSnapshot>;
+  readMissionResult(
+    identity: MissionIdentity,
+    reviewPatchCycle?: number,
+  ): Promise<MissionResultSnapshot>;
   readImportEvidence(
     identity: MissionIdentity,
     importRunId: string,
@@ -382,6 +388,14 @@ export interface ReviewWorkItemRepository extends WorkItemRepository {
   readAppliedExecuteReviewSubject(
     identity: MissionIdentity<"execute">,
   ): Promise<AppliedExecuteReviewSubject>;
+  readAppliedPatchReviewSubject(
+    identity: MissionIdentity<"patch">,
+  ): Promise<AppliedPatchReviewSubject>;
+  writePatchMissionPackage(
+    identity: MissionIdentity<"patch">,
+    patchSubject: PatchSubject,
+    buildPackage: MissionPackageBuilder<PatchMissionPackage>,
+  ): Promise<MissionArtifactWriteResult<PatchMissionPackage>>;
   writeReviewMissionPackage(
     identity: MissionIdentity<"review">,
     reviewSubject: ReviewMissionPackage["review_subject"],

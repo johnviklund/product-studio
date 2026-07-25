@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import {
   reviewSubjectSchema,
   type MissionIdentity,
-  type PatchReviewSubject,
   type ReviewSubject,
 } from "../domain/mission";
 import {
@@ -15,6 +14,7 @@ import {
   patchExternalResultSubmissionSchema,
   reviewExternalResultSubmissionForSubjectSchema,
   type CommandEvidenceRecord,
+  type ActiveMissionResultSnapshot,
   type ExecuteExternalResultSubmission,
   type ImportEvidenceOutcome,
   type ImportEvidenceSummary,
@@ -510,6 +510,7 @@ export class WorkItemController {
       attempt: validatedInput.attempt,
     };
     const snapshot = await repository.readMissionResult(identity);
+    this.requireActiveMissionSnapshot(snapshot, validatedId);
     const resultContentSha256 = hashResultContent(snapshot.result_source);
     const importRunId = createImportRunId(
       snapshot.mission.content_sha256,
@@ -669,7 +670,13 @@ export class WorkItemController {
       input_revision: validatedInput.expected_input_revision,
       attempt: validatedInput.attempt,
     };
-    const snapshot = await repository.readMissionResult(identity);
+    const snapshot = await repository.readMissionResult(
+      identity,
+      validatedInput.expected_patch_cycle === 0
+        ? undefined
+        : validatedInput.expected_patch_cycle,
+    );
+    this.requireActiveMissionSnapshot(snapshot, validatedId);
     if (!("review_subject" in snapshot.mission)) {
       throw this.conflict(
         "mission_not_ready",
@@ -856,7 +863,13 @@ export class WorkItemController {
       input_revision: validatedInput.expected_input_revision,
       attempt: validatedInput.attempt,
     };
-    const snapshot = await this.repository.readMissionResult(identity);
+    const snapshot = await this.repository.readMissionResult(
+      identity,
+      validatedInput.expected_patch_cycle === 0
+        ? undefined
+        : validatedInput.expected_patch_cycle,
+    );
+    this.requireActiveMissionSnapshot(snapshot, validatedId);
     if (!("review_subject" in snapshot.mission)) {
       throw this.conflict(
         "mission_not_ready",
@@ -1060,6 +1073,7 @@ export class WorkItemController {
       patch_cycle: validatedInput.expected_patch_cycle,
     };
     const snapshot = await repository.readMissionResult(identity);
+    this.requireActiveMissionSnapshot(snapshot, validatedId);
     if (!("patch_subject" in snapshot.mission)) {
       throw this.conflict(
         "mission_not_ready",
@@ -1324,7 +1338,7 @@ export class WorkItemController {
 
   private reviewAttention(
     workItem: WorkItem,
-    snapshot: MissionResultSnapshot,
+    snapshot: ActiveMissionResultSnapshot,
     evidence: ImportEvidenceSummary,
     resultContentSha256: string,
     result: ReviewExternalResultSubmission,
@@ -1410,135 +1424,6 @@ export class WorkItemController {
     };
   }
 
-  private async readAppliedPatchReviewSubject(
-    repository: ControllerWorkItemRepository,
-    reviewIdentity: MissionIdentity<"review">,
-    patchCycle: number,
-  ): Promise<PatchReviewSubject> {
-    const workItemId = reviewIdentity.work_item_id;
-    const patchIdentity: MissionIdentity<"patch"> = {
-      ...reviewIdentity,
-      phase: "patch",
-      patch_cycle: patchCycle,
-    };
-    const snapshot = await repository.readMissionResult(patchIdentity);
-    if (!("patch_subject" in snapshot.mission)) {
-      throw this.conflict(
-        "repair_required",
-        workItemId,
-        "Applied patch evidence is not backed by a patch mission.",
-      );
-    }
-    let parsedJson: unknown;
-    try {
-      parsedJson = JSON.parse(snapshot.result_source);
-    } catch {
-      throw this.conflict(
-        "repair_required",
-        workItemId,
-        "Applied patch result is not valid JSON.",
-      );
-    }
-    const parsedResult = patchExternalResultSubmissionSchema.safeParse(parsedJson);
-    if (!parsedResult.success) {
-      throw this.conflict(
-        "repair_required",
-        workItemId,
-        "Applied patch result no longer satisfies the patch result contract.",
-      );
-    }
-    const result = parsedResult.data;
-    const resultContentSha256 = hashResultContent(snapshot.result_source);
-    const importRunId = createImportRunId(
-      snapshot.mission.content_sha256,
-      resultContentSha256,
-    );
-    const stored = await repository.readImportEvidence(
-      patchIdentity,
-      importRunId,
-    );
-    const controllerRun =
-      stored === null
-        ? null
-        : await repository.readControllerRunManifest(
-            workItemId,
-            stored.evidence.controller_run_id,
-          );
-    const requiredCommands = (await repository.readManifest()).verification
-      .required_commands;
-    if (
-      JSON.stringify(snapshot.mission.identity) !==
-        JSON.stringify(patchIdentity) ||
-      snapshot.mission.result_contract.output_path !== snapshot.result_path ||
-      result.patch_mission_content_sha256 !== snapshot.mission.content_sha256 ||
-      JSON.stringify(result.identity) !== JSON.stringify(patchIdentity) ||
-      stored === null ||
-      stored.evidence.phase !== "patch" ||
-      stored.evidence.outcome !== "applied" ||
-      JSON.stringify(stored.evidence.identity) !==
-        JSON.stringify(patchIdentity) ||
-      stored.evidence.mission_content_sha256 !==
-        snapshot.mission.content_sha256 ||
-      stored.evidence.result_content_sha256 !== resultContentSha256 ||
-      stored.evidence.result_commit !== result.commit ||
-      stored.evidence.git_base_commit !==
-        snapshot.mission.source_revision.git_base_commit ||
-      stored.summary.phase !== "patch" ||
-      stored.summary.import_run_id !== importRunId ||
-      stored.summary.outcome !== "applied" ||
-      controllerRun === null ||
-      controllerRun.phase !== "review" ||
-      controllerRun.outcome !== "applied" ||
-      controllerRun.goal_version !== patchIdentity.goal_version ||
-      controllerRun.input_revision !== patchIdentity.input_revision ||
-      controllerRun.attempt !== patchIdentity.attempt ||
-      stored.verification.length !== requiredCommands.length ||
-      stored.verification.some(
-        (record, index) =>
-          record.name !== requiredCommands[index]?.name ||
-          JSON.stringify(record.argv) !==
-            JSON.stringify(requiredCommands[index]?.argv) ||
-          record.status !== "passed" ||
-          record.started_at === null ||
-          record.completed_at === null ||
-          record.exit_code !== 0 ||
-          record.signal !== null,
-      )
-    ) {
-      throw this.conflict(
-        "repair_required",
-        workItemId,
-        "Applied patch result, evidence, and governed identity do not match.",
-      );
-    }
-
-    const subject = reviewSubjectSchema.parse({
-      source: "patch",
-      patch_cycle: patchCycle,
-      patch_mission_content_sha256: snapshot.mission.content_sha256,
-      patch_result_content_sha256: resultContentSha256,
-      patch_mission_path: snapshot.mission_path,
-      patch_evidence_path: stored.summary.evidence_path,
-      git_base_commit: snapshot.mission.source_revision.git_base_commit,
-      accepted_result_commit: result.commit,
-      changed_files: [...result.changed_files].sort(),
-      command_evidence: stored.verification,
-      resolved_from: {
-        review_mission_content_sha256:
-          snapshot.mission.patch_subject.review_mission_content_sha256,
-        review_result_content_sha256:
-          snapshot.mission.patch_subject.review_result_content_sha256,
-        finding_ids: snapshot.mission.patch_subject.findings.map(
-          (finding) => finding.finding_id,
-        ),
-      },
-    });
-    if (subject.source !== "patch") {
-      throw new Error("Patch subject parser returned an execute subject.");
-    }
-    return subject;
-  }
-
   private async currentReviewSubject(
     repository: ControllerWorkItemRepository,
     identity: MissionIdentity<"review">,
@@ -1553,16 +1438,18 @@ export class WorkItemController {
               phase: "execute",
             })
           ).review_subject
-        : await this.readAppliedPatchReviewSubject(
-            repository,
-            identity,
-            patchCycle,
-          );
+        : (
+            await repository.readAppliedPatchReviewSubject({
+              ...identity,
+              phase: "patch",
+              patch_cycle: patchCycle,
+            })
+          ).review_subject;
     return reviewSubjectSchema.parse(currentSubject);
   }
 
   private async assessReviewResult(
-    snapshot: MissionResultSnapshot,
+    snapshot: ActiveMissionResultSnapshot,
     identity: ReviewExternalResultSubmission["identity"],
     currentSubject: ReviewSubject,
     validateWorkspace = true,
@@ -1673,7 +1560,7 @@ export class WorkItemController {
   }
 
   private async assessExternalResult(
-    snapshot: MissionResultSnapshot,
+    snapshot: ActiveMissionResultSnapshot,
     identity: ExecuteExternalResultSubmission["identity"],
     manifest: ProductManifest,
   ): Promise<ExternalResultAssessment> {
@@ -1743,7 +1630,7 @@ export class WorkItemController {
   }
 
   private async assessPatchResult(
-    snapshot: MissionResultSnapshot,
+    snapshot: ActiveMissionResultSnapshot,
     identity: MissionIdentity<"patch">,
     manifest: ProductManifest,
   ): Promise<PatchResultAssessment> {
@@ -1882,7 +1769,7 @@ export class WorkItemController {
   }
 
   private async validateGitProof(
-    snapshot: MissionResultSnapshot,
+    snapshot: ActiveMissionResultSnapshot,
     result: ExecuteExternalResultSubmission | PatchExternalResultSubmission,
   ): Promise<string[]> {
     const resolvedCommit = await this.git.resolveCommit(result.commit);
@@ -1975,7 +1862,7 @@ export class WorkItemController {
     input: ImportPatchResultInput,
     activeRun: ActiveRun,
     idempotencyKey: string,
-    snapshot: MissionResultSnapshot,
+    snapshot: ActiveMissionResultSnapshot,
   ): Promise<ImportPatchResultResult> {
     const workItemId = lease.work_item.goal.work_item_id;
     const identity: MissionIdentity<"patch"> = {
@@ -2149,7 +2036,7 @@ export class WorkItemController {
     input: ImportReviewResultInput,
     activeRun: ActiveRun,
     idempotencyKey: string,
-    snapshot: MissionResultSnapshot,
+    snapshot: ActiveMissionResultSnapshot,
   ): Promise<ImportReviewResultResult> {
     const workItemId = lease.work_item.goal.work_item_id;
     const identity = {
@@ -2509,6 +2396,19 @@ export class WorkItemController {
         "stale_expectation",
         workItemId,
         "Patch result expectations do not match durable state.",
+      );
+    }
+  }
+
+  private requireActiveMissionSnapshot(
+    snapshot: MissionResultSnapshot,
+    workItemId: string,
+  ): asserts snapshot is ActiveMissionResultSnapshot {
+    if (snapshot.mission.mission_schema_version !== 4) {
+      throw this.conflict(
+        "mission_not_ready",
+        workItemId,
+        "Historical mission packages are read-only and cannot drive an active controller operation.",
       );
     }
   }

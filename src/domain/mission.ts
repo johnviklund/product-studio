@@ -277,6 +277,56 @@ export type MissionPackage =
   | ReviewMissionPackage
   | PatchMissionPackage;
 
+export interface HistoricalExecuteReviewSubjectV3 extends ReviewSubjectBase {
+  execute_mission_content_sha256: string;
+  execute_result_content_sha256: string;
+  execute_mission_path: string;
+  execute_evidence_path: string;
+}
+
+interface HistoricalMissionResultContractV3<
+  TRequiredFields extends readonly string[],
+> {
+  schema_version: 3;
+  output_path: string;
+  result_schema_version: 2;
+  required_fields: TRequiredFields;
+}
+
+interface HistoricalMissionPackageBaseV3<TPhase extends "execute" | "review"> {
+  mission_schema_version: 3;
+  identity: MissionIdentity<TPhase>;
+  controller_run: MissionControllerRun<TPhase>;
+  goal: MissionGoal;
+  source_revision: MissionSourceRevision;
+  task_path: string;
+  content_sha256: string;
+}
+
+export interface HistoricalExecuteMissionPackageV3
+  extends HistoricalMissionPackageBaseV3<"execute"> {
+  result_contract: HistoricalMissionResultContractV3<
+    typeof EXECUTE_RESULT_REQUIRED_FIELDS
+  >;
+}
+
+export interface HistoricalReviewMissionPackageV3
+  extends HistoricalMissionPackageBaseV3<"review"> {
+  review_subject: HistoricalExecuteReviewSubjectV3;
+  independence_attested: true;
+  result_contract: HistoricalMissionResultContractV3<
+    typeof REVIEW_RESULT_REQUIRED_FIELDS
+  >;
+}
+
+export type HistoricalMissionPackageV3 =
+  | HistoricalExecuteMissionPackageV3
+  | HistoricalReviewMissionPackageV3;
+
+export type ReadableMissionPackage =
+  | MissionPackage
+  | HistoricalMissionPackageV3;
+
 export interface ReviewMissionControllerRun {
   schema_version: 1;
   run_id: string;
@@ -845,6 +895,129 @@ export const missionPackageSchema: z.ZodType<MissionPackage> = z
     }
   });
 
+const historicalExecuteReviewSubjectV3Schema: z.ZodType<
+  HistoricalExecuteReviewSubjectV3
+> = z
+  .strictObject({
+    ...reviewSubjectCommonShape,
+    execute_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    execute_result_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    execute_mission_path: workspaceRelativePosixPathSchema,
+    execute_evidence_path: workspaceRelativePosixPathSchema,
+  })
+  .superRefine(validateReviewSubjectEvidence);
+
+const historicalExecuteResultContractV3Schema = z.strictObject({
+  schema_version: z.literal(3),
+  output_path: workspaceRelativePosixPathSchema,
+  result_schema_version: z.literal(RESULT_SCHEMA_VERSION),
+  required_fields: z.tuple([
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[0]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[1]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[2]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[3]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[4]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[5]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[6]),
+  ]),
+});
+
+const historicalReviewResultContractV3Schema = z.strictObject({
+  schema_version: z.literal(3),
+  output_path: workspaceRelativePosixPathSchema,
+  result_schema_version: z.literal(RESULT_SCHEMA_VERSION),
+  required_fields: z.tuple([
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[0]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[1]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[2]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[3]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[4]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[5]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[6]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[7]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[8]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[9]),
+  ]),
+});
+
+const historicalMissionPackageCommonShapeV3 = {
+  mission_schema_version: z.literal(3),
+  goal: missionGoalSchema,
+  source_revision: missionSourceRevisionSchema,
+  task_path: workspaceRelativePosixPathSchema,
+  content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+};
+
+const historicalExecuteMissionPackageV3Schema: z.ZodType<
+  HistoricalExecuteMissionPackageV3
+> = z
+  .strictObject({
+    ...historicalMissionPackageCommonShapeV3,
+    identity: executeMissionIdentitySchema,
+    controller_run: z.strictObject({
+      run_id: z.uuid(),
+      idempotency_key: nonEmptyTrimmedStringSchema,
+      phase: z.literal("execute"),
+      started_at: z.iso.datetime(),
+      completed_at: z.iso.datetime(),
+    }),
+    result_contract: historicalExecuteResultContractV3Schema,
+  })
+  .superRefine(validateMissionPackagePaths);
+
+const historicalReviewMissionPackageV3Schema: z.ZodType<
+  HistoricalReviewMissionPackageV3
+> = z
+  .strictObject({
+    ...historicalMissionPackageCommonShapeV3,
+    identity: reviewMissionIdentitySchema,
+    controller_run: z.strictObject({
+      run_id: z.uuid(),
+      idempotency_key: nonEmptyTrimmedStringSchema,
+      phase: z.literal("review"),
+      started_at: z.iso.datetime(),
+      completed_at: z.iso.datetime(),
+    }),
+    review_subject: historicalExecuteReviewSubjectV3Schema,
+    independence_attested: z.literal(true),
+    result_contract: historicalReviewResultContractV3Schema,
+  })
+  .superRefine((mission, context) => {
+    validateMissionPackagePaths(mission, context);
+    if (
+      mission.source_revision.git_base_commit !==
+      mission.review_subject.git_base_commit
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "source revision must match the review subject Git base",
+        path: ["source_revision", "git_base_commit"],
+        input: mission.source_revision.git_base_commit,
+      });
+    }
+  });
+
+export const historicalMissionPackageV3Schema: z.ZodType<
+  HistoricalMissionPackageV3
+> = z
+  .union([
+    historicalExecuteMissionPackageV3Schema,
+    historicalReviewMissionPackageV3Schema,
+  ])
+  .superRefine((mission, context) => {
+    if (mission.content_sha256 !== hashHistoricalMissionContentV3(mission)) {
+      context.addIssue({
+        code: "custom",
+        message: "content_sha256 must match the canonical historical mission content",
+        path: ["content_sha256"],
+        input: mission.content_sha256,
+      });
+    }
+  });
+
+export const readableMissionPackageSchema: z.ZodType<ReadableMissionPackage> =
+  z.union([missionPackageSchema, historicalMissionPackageV3Schema]);
+
 const compilableWorkItemGoalSchema = z.object({
   schema_version: z.literal(2),
   work_item_id: workItemIdSchema,
@@ -1244,6 +1417,95 @@ function canonicalPatchSubject(subject: PatchSubject): PatchSubject {
   };
 }
 
+function historicalMissionContentV3(mission: HistoricalMissionPackageV3) {
+  const common = {
+    mission_schema_version: mission.mission_schema_version,
+    identity: {
+      phase: mission.identity.phase,
+      work_item_id: mission.identity.work_item_id,
+      goal_version: mission.identity.goal_version,
+      input_revision: mission.identity.input_revision,
+      attempt: mission.identity.attempt,
+    },
+    controller_run: {
+      run_id: mission.controller_run.run_id,
+      idempotency_key: mission.controller_run.idempotency_key,
+      phase: mission.controller_run.phase,
+      started_at: mission.controller_run.started_at,
+      completed_at: mission.controller_run.completed_at,
+    },
+    goal: {
+      title: mission.goal.title,
+      ...(mission.goal.type === undefined
+        ? {}
+        : { type: mission.goal.type }),
+      purpose: mission.goal.purpose,
+      acceptance_criteria: mission.goal.acceptance_criteria,
+      non_goals: mission.goal.non_goals,
+      allowed_scope: mission.goal.allowed_scope,
+      review_ready: mission.goal.review_ready,
+    },
+    source_revision: {
+      git_base_commit: mission.source_revision.git_base_commit,
+    },
+  };
+  const resultContract = {
+    schema_version: mission.result_contract.schema_version,
+    output_path: mission.result_contract.output_path,
+    result_schema_version: mission.result_contract.result_schema_version,
+    required_fields: mission.result_contract.required_fields,
+  };
+
+  if ("review_subject" in mission) {
+    const subject = mission.review_subject;
+    return {
+      ...common,
+      review_subject: {
+        execute_mission_content_sha256:
+          subject.execute_mission_content_sha256,
+        execute_result_content_sha256:
+          subject.execute_result_content_sha256,
+        git_base_commit: subject.git_base_commit,
+        accepted_result_commit: subject.accepted_result_commit,
+        changed_files: subject.changed_files,
+        execute_mission_path: subject.execute_mission_path,
+        execute_evidence_path: subject.execute_evidence_path,
+        command_evidence: canonicalCommandEvidence(subject.command_evidence),
+      },
+      independence_attested: mission.independence_attested,
+      result_contract: resultContract,
+      task_path: mission.task_path,
+    };
+  }
+
+  return {
+    ...common,
+    result_contract: resultContract,
+    task_path: mission.task_path,
+  };
+}
+
+export function hashHistoricalMissionContentV3(
+  mission: HistoricalMissionPackageV3,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(historicalMissionContentV3(mission)))
+    .digest("hex");
+}
+
+function serializeHistoricalMissionPackageV3(
+  mission: HistoricalMissionPackageV3,
+): string {
+  return `${JSON.stringify(
+    {
+      ...historicalMissionContentV3(mission),
+      content_sha256: mission.content_sha256,
+    },
+    null,
+    2,
+  )}\n`;
+}
+
 function missionContent(
   mission: MissionPackageWithoutHash | MissionPackage,
 ) {
@@ -1337,6 +1599,15 @@ export function serializeMissionPackage(mission: MissionPackage): string {
     null,
     2,
   )}\n`;
+}
+
+export function serializeReadableMissionPackage(
+  mission: ReadableMissionPackage,
+): string {
+  const validatedMission = readableMissionPackageSchema.parse(mission);
+  return validatedMission.mission_schema_version === MISSION_SCHEMA_VERSION
+    ? serializeMissionPackage(validatedMission)
+    : serializeHistoricalMissionPackageV3(validatedMission);
 }
 
 function missionGoal(workItem: {
@@ -1768,4 +2039,25 @@ export function renderTaskMd(mission: MissionPackage): string {
   return "review_subject" in validatedMission
     ? renderReviewTaskMd(validatedMission)
     : renderExecuteTaskMd(validatedMission);
+}
+
+export function renderReadableTaskMd(
+  mission: ReadableMissionPackage,
+): string {
+  const validatedMission = readableMissionPackageSchema.parse(mission);
+  if (validatedMission.mission_schema_version === MISSION_SCHEMA_VERSION) {
+    return renderTaskMd(validatedMission);
+  }
+  if ("review_subject" in validatedMission) {
+    return renderReviewTaskMd({
+      ...validatedMission,
+      review_subject: {
+        source: "execute",
+        ...validatedMission.review_subject,
+      },
+    } as unknown as ExecuteReviewMissionPackage);
+  }
+  return renderExecuteTaskMd(
+    validatedMission as unknown as ExecuteMissionPackage,
+  );
 }
