@@ -210,10 +210,12 @@ async function writeMissionReadyWorkItem(
 
 function missionIdentity(
   workItemId = firstId,
-  overrides: Partial<Omit<MissionIdentity, "work_item_id">> = {},
-): MissionIdentity {
+  overrides: Partial<
+    Omit<MissionIdentity<"execute">, "phase" | "work_item_id">
+  > = {},
+): MissionIdentity<"execute"> {
   return {
-    phase: overrides.phase ?? "execute",
+    phase: "execute",
     work_item_id: workItemId,
     goal_version: overrides.goal_version ?? 1,
     input_revision: overrides.input_revision ?? 1,
@@ -223,14 +225,15 @@ function missionIdentity(
 
 async function writeRejectedEvidence(
   workspace: ProductWorkspace,
-  identity: MissionIdentity,
+  identity: MissionIdentity<"execute">,
   submissionSource: string,
   completedAt: string,
 ): Promise<ImportEvidenceEnvelope> {
   const missionContentSha256 = "b".repeat(64);
   const resultContentSha256 = hashResultContent(submissionSource);
   const evidence: ImportEvidenceEnvelope = {
-    schema_version: 1,
+    schema_version: 2,
+    phase: identity.phase,
     import_run_id: createImportRunId(
       missionContentSha256,
       resultContentSha256,
@@ -778,10 +781,10 @@ describe("ProductWorkspace", () => {
     expect(second).toEqual(first);
     expect(first.workspace_path).toBe(root);
     expect(first.mission.task_path).toBe(
-      `.founder/missions/${firstId}/1-1-0/TASK.md`,
+      `.founder/missions/${firstId}/execute-1-1-0/TASK.md`,
     );
     expect(first.mission.result_contract.output_path).toBe(
-      `.founder/missions/${firstId}/1-1-0/result.json`,
+      `.founder/missions/${firstId}/execute-1-1-0/result.json`,
     );
     expect(missionSource).toBe(serializeMissionPackage(first.mission));
     expect(taskSource).toBe(renderTaskMd(first.mission));
@@ -789,11 +792,11 @@ describe("ProductWorkspace", () => {
     expect(await readFile(second.task_path, "utf8")).toBe(taskSource);
     expect(
       await readdir(join(root, ".founder", "missions", firstId)),
-    ).toEqual(["1-1-0"]);
+    ).toEqual(["execute-1-1-0"]);
     expect(
       (
         await readdir(
-          join(root, ".founder", "missions", firstId, "1-1-0"),
+          join(root, ".founder", "missions", firstId, "execute-1-1-0"),
         )
       ).sort(),
     ).toEqual(["TASK.md", "mission.json"]);
@@ -816,7 +819,7 @@ describe("ProductWorkspace", () => {
     expect(snapshot.mission).toEqual(artifact.mission);
     expect(snapshot.result_source).toBe(submissionSource);
     expect(snapshot.result_path).toBe(
-      `.founder/missions/${firstId}/1-1-0/result.json`,
+      `.founder/missions/${firstId}/execute-1-1-0/result.json`,
     );
 
     const resultContentSha256 = hashResultContent(submissionSource);
@@ -825,7 +828,8 @@ describe("ProductWorkspace", () => {
       resultContentSha256,
     );
     const evidence = {
-      schema_version: 1 as const,
+      schema_version: 2 as const,
+      phase: "execute" as const,
       import_run_id: importRunId,
       result_content_sha256: resultContentSha256,
       mission_content_sha256: artifact.mission.content_sha256,
@@ -923,7 +927,7 @@ describe("ProductWorkspace", () => {
       ".founder",
       "run-evidence",
       firstId,
-      "1-1-0",
+      "execute-1-1-0",
     );
     await mkdir(symlinkTuple, { recursive: true });
     await symlink(outsideRoot, join(symlinkTuple, "c".repeat(64)), "dir");
@@ -953,7 +957,7 @@ describe("ProductWorkspace", () => {
         ".founder",
         "run-evidence",
         firstId,
-        "1-1-0",
+        "execute-1-1-0",
         "bad-run-id",
       ),
       { recursive: true },
@@ -975,7 +979,7 @@ describe("ProductWorkspace", () => {
       ".founder",
       "run-evidence",
       firstId,
-      "1-1-0",
+      "execute-1-1-0",
       partial.import_run_id,
     );
     await rm(join(partialDirectory, "verification.json"));
@@ -996,7 +1000,7 @@ describe("ProductWorkspace", () => {
       ".founder",
       "run-evidence",
       firstId,
-      "1-1-0",
+      "execute-1-1-0",
       divergent.import_run_id,
     );
     await writeFile(
@@ -1024,7 +1028,7 @@ describe("ProductWorkspace", () => {
       ".founder",
       "missions",
       firstId,
-      "1-1-0",
+      "execute-1-1-0",
     );
     await mkdir(partialDirectory, { recursive: true });
     await writeFile(join(partialDirectory, "mission.json"), "{}\n", "utf8");
@@ -1043,7 +1047,7 @@ describe("ProductWorkspace", () => {
       ".founder",
       "missions",
       firstId,
-      "1-1-0",
+      "execute-1-1-0",
     );
     await mkdir(malformedDirectory, { recursive: true });
     await writeFile(

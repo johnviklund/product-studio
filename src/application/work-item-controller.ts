@@ -3,11 +3,11 @@ import { createHash } from "node:crypto";
 import {
   commandEvidenceRecordSchema,
   createImportRunId,
-  externalResultSubmissionSchema,
+  executeExternalResultSubmissionSchema,
   hashResultContent,
   importEvidenceEnvelopeSchema,
   type CommandEvidenceRecord,
-  type ExternalResultSubmission,
+  type ExecuteExternalResultSubmission,
   type ImportEvidenceOutcome,
   type ImportEvidenceSummary,
   type MissionResultSnapshot,
@@ -58,7 +58,7 @@ export interface ImportExternalResultResult extends ControllerMutationResult {
 interface ExternalResultAssessment {
   outcome: ImportEvidenceOutcome;
   reasons: string[];
-  result?: ExternalResultSubmission;
+  result?: ExecuteExternalResultSubmission;
   verification: CommandEvidenceRecord[];
 }
 
@@ -549,7 +549,8 @@ export class WorkItemController {
 
       const completedAt = nextTimestamp(activeRun.acquired_at, this.clock);
       const evidence = importEvidenceEnvelopeSchema.parse({
-        schema_version: 1,
+        schema_version: 2,
+        phase: "execute",
         import_run_id: importRunId,
         result_content_sha256: resultContentSha256,
         mission_content_sha256: snapshot.mission.content_sha256,
@@ -705,7 +706,7 @@ export class WorkItemController {
 
   private async assessExternalResult(
     snapshot: MissionResultSnapshot,
-    identity: ExternalResultSubmission["identity"],
+    identity: ExecuteExternalResultSubmission["identity"],
     manifest: ProductManifest,
   ): Promise<ExternalResultAssessment> {
     const reasons: string[] = [];
@@ -726,7 +727,8 @@ export class WorkItemController {
         verification: [],
       };
     }
-    const parsedResult = externalResultSubmissionSchema.safeParse(parsedJson);
+    const parsedResult =
+      executeExternalResultSubmissionSchema.safeParse(parsedJson);
     if (!parsedResult.success) {
       return {
         outcome: "rejected",
@@ -817,7 +819,7 @@ export class WorkItemController {
 
   private async validateGitProof(
     snapshot: MissionResultSnapshot,
-    result: ExternalResultSubmission,
+    result: ExecuteExternalResultSubmission,
   ): Promise<string[]> {
     const resolvedCommit = await this.git.resolveCommit(result.commit);
     if (resolvedCommit === null || resolvedCommit !== result.commit) {
@@ -881,12 +883,14 @@ export class WorkItemController {
       stored.evidence.controller_run_id !== activeRun.run_id ||
       JSON.stringify(stored.evidence.identity) !==
         JSON.stringify({
+          phase: "execute",
           work_item_id: workItemId,
           goal_version: input.expected_goal_version,
           input_revision: input.expected_input_revision,
           attempt: input.attempt,
         }) ||
       stored.summary.import_run_id !== stored.evidence.import_run_id ||
+      stored.summary.phase !== stored.evidence.phase ||
       stored.summary.outcome !== stored.evidence.outcome ||
       JSON.stringify(stored.summary.reasons) !==
         JSON.stringify(stored.evidence.reasons)

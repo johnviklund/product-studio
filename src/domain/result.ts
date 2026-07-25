@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import {
-  missionIdentitySchema,
+  type ExecuteMissionPackage,
   type MissionIdentity,
   type MissionPackage,
 } from "./mission";
@@ -29,12 +29,23 @@ export const IMPORT_EVIDENCE_OUTCOMES = [
   "applied",
 ] as const;
 
+export const REVIEW_VERDICTS = ["clean", "findings"] as const;
+export const REVIEW_FINDING_SEVERITIES = [
+  "P0",
+  "P1",
+  "P2",
+  "P3",
+] as const;
+
 export type ReportedVerificationStatus =
   (typeof REPORTED_VERIFICATION_STATUSES)[number];
 export type CommandEvidenceStatus =
   (typeof COMMAND_EVIDENCE_STATUSES)[number];
 export type ImportEvidenceOutcome =
   (typeof IMPORT_EVIDENCE_OUTCOMES)[number];
+export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
+export type ReviewFindingSeverity =
+  (typeof REVIEW_FINDING_SEVERITIES)[number];
 
 export interface ReportedVerification {
   name: string;
@@ -42,15 +53,51 @@ export interface ReportedVerification {
   detail?: string;
 }
 
-export interface ExternalResultSubmission {
-  result_schema_version: 1;
+export interface ExecuteExternalResultSubmission {
+  result_schema_version: 2;
   mission_content_sha256: string;
-  identity: MissionIdentity;
+  identity: MissionIdentity<"execute">;
   commit: string;
   summary: string;
   changed_files: string[];
   verification: ReportedVerification[];
 }
+
+export type ReviewFindingLink =
+  | { type: "acceptance_criteria"; criterion: string }
+  | { type: "non_goals"; non_goal: string }
+  | { type: "defect"; evidence_summary: string }
+  | { type: "security"; evidence_summary: string }
+  | { type: "deterministic_checks"; command: string };
+
+export interface ReviewFinding {
+  finding_id: string;
+  severity: ReviewFindingSeverity;
+  title: string;
+  evidence: {
+    path?: string;
+    summary: string;
+  };
+  required_action: string;
+  link: ReviewFindingLink;
+}
+
+export interface ReviewExternalResultSubmission {
+  result_schema_version: 2;
+  review_mission_content_sha256: string;
+  identity: MissionIdentity<"review">;
+  execute_mission_content_sha256: string;
+  execute_result_content_sha256: string;
+  git_base_commit: string;
+  accepted_result_commit: string;
+  summary: string;
+  verdict: ReviewVerdict;
+  findings: ReviewFinding[];
+}
+
+export type ExternalResultSubmission =
+  | ExecuteExternalResultSubmission
+  | ReviewExternalResultSubmission;
 
 export interface CommandEvidenceRecord {
   name: string;
@@ -66,14 +113,14 @@ export interface CommandEvidenceRecord {
   output_truncated: boolean;
 }
 
-export interface ImportEvidenceEnvelope {
-  schema_version: 1;
+interface ImportEvidenceEnvelopeBase<TPhase extends MissionIdentity["phase"]> {
+  schema_version: 2;
+  phase: TPhase;
   import_run_id: string;
   result_content_sha256: string;
   mission_content_sha256: string;
-  identity: MissionIdentity;
+  identity: MissionIdentity<TPhase>;
   git_base_commit: string;
-  result_commit: string | null;
   controller_run_id: string;
   started_at: string;
   completed_at: string;
@@ -81,7 +128,22 @@ export interface ImportEvidenceEnvelope {
   reasons: string[];
 }
 
+export interface ExecuteImportEvidenceEnvelope
+  extends ImportEvidenceEnvelopeBase<"execute"> {
+  result_commit: string | null;
+}
+
+export interface ReviewImportEvidenceEnvelope
+  extends ImportEvidenceEnvelopeBase<"review"> {
+  result_commit: string;
+}
+
+export type ImportEvidenceEnvelope =
+  | ExecuteImportEvidenceEnvelope
+  | ReviewImportEvidenceEnvelope;
+
 export interface ImportEvidenceSummary {
+  phase: MissionIdentity["phase"];
   import_run_id: string;
   outcome: ImportEvidenceOutcome;
   evidence_path: string;
@@ -93,6 +155,10 @@ export interface MissionResultSnapshot {
   mission_path: string;
   result_path: string;
   result_source: string;
+}
+
+export interface ExecuteMissionResultSnapshot extends MissionResultSnapshot {
+  mission: ExecuteMissionPackage;
 }
 
 export interface ImportEvidenceWriteInput {
@@ -117,8 +183,31 @@ const nonEmptyTrimmedStringSchema = z
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const gitCommitSchema = z.string().regex(/^[0-9a-f]{40}$/);
 const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().safe();
+const workItemIdSchema = z
+  .string()
+  .regex(
+    /^wi_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  );
 
 export const importRunIdSchema = sha256Schema;
+
+const executeMissionIdentitySchema: z.ZodType<MissionIdentity<"execute">> =
+  z.strictObject({
+    phase: z.literal("execute"),
+    work_item_id: workItemIdSchema,
+    goal_version: z.number().int().positive().safe(),
+    input_revision: z.number().int().positive().safe(),
+    attempt: nonNegativeSafeIntegerSchema,
+  });
+
+const reviewMissionIdentitySchema: z.ZodType<MissionIdentity<"review">> =
+  z.strictObject({
+    phase: z.literal("review"),
+    work_item_id: workItemIdSchema,
+    goal_version: z.number().int().positive().safe(),
+    input_revision: z.number().int().positive().safe(),
+    attempt: nonNegativeSafeIntegerSchema,
+  });
 
 export const reportedVerificationSchema: z.ZodType<ReportedVerification> =
   z.strictObject({
@@ -127,11 +216,11 @@ export const reportedVerificationSchema: z.ZodType<ReportedVerification> =
     detail: nonEmptyTrimmedStringSchema.optional(),
   });
 
-export const externalResultSubmissionSchema: z.ZodType<ExternalResultSubmission> =
+export const executeExternalResultSubmissionSchema: z.ZodType<ExecuteExternalResultSubmission> =
   z.strictObject({
-    result_schema_version: z.literal(1),
+    result_schema_version: z.literal(2),
     mission_content_sha256: sha256Schema,
-    identity: missionIdentitySchema,
+    identity: executeMissionIdentitySchema,
     commit: gitCommitSchema,
     summary: nonEmptyTrimmedStringSchema,
     changed_files: z
@@ -149,6 +238,92 @@ export const externalResultSubmissionSchema: z.ZodType<ExternalResultSubmission>
         "verification names must not contain case-insensitive duplicates",
       ),
   });
+
+export const reviewFindingLinkSchema: z.ZodType<ReviewFindingLink> =
+  z.discriminatedUnion("type", [
+    z.strictObject({
+      type: z.literal("acceptance_criteria"),
+      criterion: nonEmptyTrimmedStringSchema,
+    }),
+    z.strictObject({
+      type: z.literal("non_goals"),
+      non_goal: nonEmptyTrimmedStringSchema,
+    }),
+    z.strictObject({
+      type: z.literal("defect"),
+      evidence_summary: nonEmptyTrimmedStringSchema,
+    }),
+    z.strictObject({
+      type: z.literal("security"),
+      evidence_summary: nonEmptyTrimmedStringSchema,
+    }),
+    z.strictObject({
+      type: z.literal("deterministic_checks"),
+      command: nonEmptyTrimmedStringSchema,
+    }),
+  ]);
+
+export const reviewFindingSchema: z.ZodType<ReviewFinding> = z.strictObject({
+  finding_id: nonEmptyTrimmedStringSchema,
+  severity: z.enum(REVIEW_FINDING_SEVERITIES),
+  title: nonEmptyTrimmedStringSchema,
+  evidence: z.strictObject({
+    path: workspaceRelativePosixPathSchema.optional(),
+    summary: nonEmptyTrimmedStringSchema,
+  }),
+  required_action: nonEmptyTrimmedStringSchema,
+  link: reviewFindingLinkSchema,
+});
+
+export const reviewExternalResultSubmissionSchema: z.ZodType<ReviewExternalResultSubmission> =
+  z
+    .strictObject({
+      result_schema_version: z.literal(2),
+      review_mission_content_sha256: sha256Schema,
+      identity: reviewMissionIdentitySchema,
+      execute_mission_content_sha256: sha256Schema,
+      execute_result_content_sha256: sha256Schema,
+      git_base_commit: gitCommitSchema,
+      accepted_result_commit: gitCommitSchema,
+      summary: nonEmptyTrimmedStringSchema,
+      verdict: z.enum(REVIEW_VERDICTS),
+      findings: z.array(reviewFindingSchema),
+    })
+    .superRefine((result, context) => {
+      if (
+        new Set(result.findings.map((finding) => finding.finding_id)).size !==
+        result.findings.length
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "finding_id values must be unique",
+          path: ["findings"],
+          input: result.findings,
+        });
+      }
+      if (result.verdict === "clean" && result.findings.length !== 0) {
+        context.addIssue({
+          code: "custom",
+          message: "clean review results must not contain findings",
+          path: ["findings"],
+          input: result.findings,
+        });
+      }
+      if (result.verdict === "findings" && result.findings.length === 0) {
+        context.addIssue({
+          code: "custom",
+          message: "findings review results require at least one finding",
+          path: ["findings"],
+          input: result.findings,
+        });
+      }
+    });
+
+export const externalResultSubmissionSchema: z.ZodType<ExternalResultSubmission> =
+  z.union([
+    executeExternalResultSubmissionSchema,
+    reviewExternalResultSubmissionSchema,
+  ]);
 
 export const commandEvidenceRecordSchema: z.ZodType<CommandEvidenceRecord> =
   z
@@ -201,22 +376,39 @@ export const commandEvidenceRecordSchema: z.ZodType<CommandEvidenceRecord> =
       }
     });
 
+const importEvidenceEnvelopeBaseShape = {
+  schema_version: z.literal(2),
+  import_run_id: sha256Schema,
+  result_content_sha256: sha256Schema,
+  mission_content_sha256: sha256Schema,
+  git_base_commit: gitCommitSchema,
+  controller_run_id: z.uuid(),
+  started_at: z.iso.datetime(),
+  completed_at: z.iso.datetime(),
+  outcome: z.enum(IMPORT_EVIDENCE_OUTCOMES),
+  reasons: z.array(nonEmptyTrimmedStringSchema),
+};
+
+const executeImportEvidenceEnvelopeSchema = z.strictObject({
+  ...importEvidenceEnvelopeBaseShape,
+  phase: z.literal("execute"),
+  identity: executeMissionIdentitySchema,
+  result_commit: gitCommitSchema.nullable(),
+});
+
+const reviewImportEvidenceEnvelopeSchema = z.strictObject({
+  ...importEvidenceEnvelopeBaseShape,
+  phase: z.literal("review"),
+  identity: reviewMissionIdentitySchema,
+  result_commit: gitCommitSchema,
+});
+
 export const importEvidenceEnvelopeSchema: z.ZodType<ImportEvidenceEnvelope> =
   z
-    .strictObject({
-      schema_version: z.literal(1),
-      import_run_id: sha256Schema,
-      result_content_sha256: sha256Schema,
-      mission_content_sha256: sha256Schema,
-      identity: missionIdentitySchema,
-      git_base_commit: gitCommitSchema,
-      result_commit: gitCommitSchema.nullable(),
-      controller_run_id: z.uuid(),
-      started_at: z.iso.datetime(),
-      completed_at: z.iso.datetime(),
-      outcome: z.enum(IMPORT_EVIDENCE_OUTCOMES),
-      reasons: z.array(nonEmptyTrimmedStringSchema),
-    })
+    .discriminatedUnion("phase", [
+      executeImportEvidenceEnvelopeSchema,
+      reviewImportEvidenceEnvelopeSchema,
+    ])
     .superRefine((evidence, context) => {
       if (evidence.outcome !== "applied" && evidence.reasons.length === 0) {
         context.addIssue({
@@ -234,10 +426,14 @@ export const importEvidenceEnvelopeSchema: z.ZodType<ImportEvidenceEnvelope> =
           input: evidence.reasons,
         });
       }
-      if (evidence.outcome !== "rejected" && evidence.result_commit === null) {
+      if (
+        evidence.phase === "execute" &&
+        evidence.outcome !== "rejected" &&
+        evidence.result_commit === null
+      ) {
         context.addIssue({
           code: "custom",
-          message: "failed or applied evidence requires a result commit",
+          message: "failed or applied execute evidence requires a result commit",
           path: ["result_commit"],
           input: evidence.result_commit,
         });
@@ -246,29 +442,76 @@ export const importEvidenceEnvelopeSchema: z.ZodType<ImportEvidenceEnvelope> =
 
 export const importEvidenceSummarySchema: z.ZodType<ImportEvidenceSummary> =
   z.strictObject({
+    phase: z.enum(["execute", "review"]),
     import_run_id: sha256Schema,
     outcome: z.enum(IMPORT_EVIDENCE_OUTCOMES),
     evidence_path: workspaceRelativePosixPathSchema,
     reasons: z.array(nonEmptyTrimmedStringSchema),
   });
 
+function canonicalIdentity(identity: MissionIdentity) {
+  return {
+    phase: identity.phase,
+    work_item_id: identity.work_item_id,
+    goal_version: identity.goal_version,
+    input_revision: identity.input_revision,
+    attempt: identity.attempt,
+  };
+}
+
+function canonicalFindingLink(link: ReviewFindingLink) {
+  switch (link.type) {
+    case "acceptance_criteria":
+      return { type: link.type, criterion: link.criterion };
+    case "non_goals":
+      return { type: link.type, non_goal: link.non_goal };
+    case "defect":
+    case "security":
+      return { type: link.type, evidence_summary: link.evidence_summary };
+    case "deterministic_checks":
+      return { type: link.type, command: link.command };
+  }
+}
+
 function canonicalResultContent(result: ExternalResultSubmission) {
+  if ("mission_content_sha256" in result) {
+    return {
+      result_schema_version: result.result_schema_version,
+      mission_content_sha256: result.mission_content_sha256,
+      identity: canonicalIdentity(result.identity),
+      commit: result.commit,
+      summary: result.summary,
+      changed_files: result.changed_files,
+      verification: result.verification.map((record) => ({
+        name: record.name,
+        status: record.status,
+        ...(record.detail === undefined ? {} : { detail: record.detail }),
+      })),
+    };
+  }
+
   return {
     result_schema_version: result.result_schema_version,
-    mission_content_sha256: result.mission_content_sha256,
-    identity: {
-      work_item_id: result.identity.work_item_id,
-      goal_version: result.identity.goal_version,
-      input_revision: result.identity.input_revision,
-      attempt: result.identity.attempt,
-    },
-    commit: result.commit,
+    review_mission_content_sha256: result.review_mission_content_sha256,
+    identity: canonicalIdentity(result.identity),
+    execute_mission_content_sha256: result.execute_mission_content_sha256,
+    execute_result_content_sha256: result.execute_result_content_sha256,
+    git_base_commit: result.git_base_commit,
+    accepted_result_commit: result.accepted_result_commit,
     summary: result.summary,
-    changed_files: result.changed_files,
-    verification: result.verification.map((record) => ({
-      name: record.name,
-      status: record.status,
-      ...(record.detail === undefined ? {} : { detail: record.detail }),
+    verdict: result.verdict,
+    findings: result.findings.map((finding) => ({
+      finding_id: finding.finding_id,
+      severity: finding.severity,
+      title: finding.title,
+      evidence: {
+        ...(finding.evidence.path === undefined
+          ? {}
+          : { path: finding.evidence.path }),
+        summary: finding.evidence.summary,
+      },
+      required_action: finding.required_action,
+      link: canonicalFindingLink(finding.link),
     })),
   };
 }

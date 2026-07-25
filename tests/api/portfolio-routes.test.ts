@@ -518,7 +518,7 @@ describe("portfolio API routes", () => {
         ".founder",
         "missions",
         workItemId,
-        "1-1-0",
+        "execute-1-1-0",
         "TASK.md",
       ),
       mission_path: join(
@@ -526,7 +526,7 @@ describe("portfolio API routes", () => {
         ".founder",
         "missions",
         workItemId,
-        "1-1-0",
+        "execute-1-1-0",
         "mission.json",
       ),
       mission: {
@@ -599,7 +599,8 @@ describe("portfolio API routes", () => {
     const history: StoredImportEvidence[] = [
       {
         evidence: {
-          schema_version: 1,
+          schema_version: 2,
+          phase: "execute",
           import_run_id: "f".repeat(64),
           result_content_sha256: "c".repeat(64),
           mission_content_sha256: "d".repeat(64),
@@ -619,6 +620,7 @@ describe("portfolio API routes", () => {
           reasons: ["Rejected imported result."],
         },
         summary: {
+          phase: "execute",
           import_run_id: "f".repeat(64),
           outcome: "rejected",
           evidence_path: `.founder/run-evidence/${workItemId}/1-2-1/${"f".repeat(64)}`,
@@ -679,7 +681,7 @@ describe("portfolio API routes", () => {
       evidence: {
         import_run_id: "a".repeat(64),
         outcome: "applied",
-        evidence_path: `.founder/run-evidence/${workItemId}/1-1-0/${"a".repeat(64)}`,
+        evidence_path: `.founder/run-evidence/${workItemId}/execute-1-1-0/${"a".repeat(64)}`,
         reasons: [],
       },
     };

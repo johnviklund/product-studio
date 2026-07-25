@@ -1268,18 +1268,21 @@ export class ProductWorkspace implements WorkItemRepository {
         );
       }
 
-      const identityMatch = /^(\d+)-(\d+)-(\d+)$/.exec(identityEntry.name);
+      const identityMatch = /^(execute|review)-(\d+)-(\d+)-(\d+)$/.exec(
+        identityEntry.name,
+      );
       if (identityMatch === null) {
         throw this.invalid(
           identityDirectory,
-          "evidence identity directory must use the <goal_version>-<input_revision>-<attempt> format",
+          "evidence identity directory must use the <phase>-<goal_version>-<input_revision>-<attempt> format",
         );
       }
       const identityResult = missionIdentitySchema.safeParse({
+        phase: identityMatch[1],
         work_item_id: validatedWorkItemId,
-        goal_version: Number(identityMatch[1]),
-        input_revision: Number(identityMatch[2]),
-        attempt: Number(identityMatch[3]),
+        goal_version: Number(identityMatch[2]),
+        input_revision: Number(identityMatch[3]),
+        attempt: Number(identityMatch[4]),
       });
       if (!identityResult.success) {
         throw this.invalid(
@@ -1644,6 +1647,7 @@ export class ProductWorkspace implements WorkItemRepository {
     evidence: ImportEvidenceWriteInput["evidence"],
   ): ImportEvidenceSummary {
     return importEvidenceSummarySchema.parse({
+      phase: evidence.phase,
       import_run_id: evidence.import_run_id,
       outcome: evidence.outcome,
       evidence_path: posix.join(
@@ -1843,6 +1847,7 @@ export class ProductWorkspace implements WorkItemRepository {
 
   private missionDirectoryName(identity: MissionIdentity): string {
     return [
+      identity.phase,
       identity.goal_version,
       identity.input_revision,
       identity.attempt,

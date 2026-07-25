@@ -16,7 +16,7 @@ import {
 import {
   importEvidenceSummarySchema,
   serializeExternalResult,
-  type ExternalResultSubmission,
+  type ExecuteExternalResultSubmission,
   type ImportEvidenceWriteInput,
   type MissionResultSnapshot,
   type StoredImportEvidence,
@@ -181,8 +181,8 @@ async function governToExecute(
 async function createImportFixture(options?: {
   resultSource?: string;
   transformResult?: (
-    result: ExternalResultSubmission,
-  ) => ExternalResultSubmission;
+    result: ExecuteExternalResultSubmission,
+  ) => ExecuteExternalResultSubmission;
 }): Promise<{
   repository: ImportTestRepository;
   workItem: WorkItem;
@@ -207,13 +207,13 @@ async function createImportFixture(options?: {
     attempt: workItem.state.attempt!,
   };
   const paths = {
-    task_path: `.founder/missions/${identity.work_item_id}/${identity.goal_version}-${identity.input_revision}-${identity.attempt}/TASK.md`,
-    output_path: `.founder/missions/${identity.work_item_id}/${identity.goal_version}-${identity.input_revision}-${identity.attempt}/result.json`,
+    task_path: `.founder/missions/${identity.work_item_id}/execute-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/TASK.md`,
+    output_path: `.founder/missions/${identity.work_item_id}/execute-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/result.json`,
     git_base_commit: "0".repeat(40),
   };
   const mission = compileMission(workItem, manifest, paths);
-  const defaultResult: ExternalResultSubmission = {
-    result_schema_version: 1,
+  const defaultResult: ExecuteExternalResultSubmission = {
+    result_schema_version: 2,
     mission_content_sha256: mission.content_sha256,
     identity,
     commit: testCommit,
@@ -244,9 +244,10 @@ async function createImportFixture(options?: {
     async writeImportEvidence(input: ImportEvidenceWriteInput) {
       evidenceWrites.count += 1;
       const summary = importEvidenceSummarySchema.parse({
+        phase: input.evidence.phase,
         import_run_id: input.evidence.import_run_id,
         outcome: input.evidence.outcome,
-        evidence_path: `.founder/run-evidence/${identity.work_item_id}/${identity.goal_version}-${identity.input_revision}-${identity.attempt}/${input.evidence.import_run_id}`,
+        evidence_path: `.founder/run-evidence/${identity.work_item_id}/execute-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/${input.evidence.import_run_id}`,
         reasons: input.evidence.reasons,
       });
       evidence.set(input.evidence.import_run_id, {
@@ -733,7 +734,7 @@ describe("WorkItemController", () => {
   it.each([
     {
       name: "a mismatched mission hash",
-      transformResult: (result: ExternalResultSubmission) => ({
+      transformResult: (result: ExecuteExternalResultSubmission) => ({
         ...result,
         mission_content_sha256: "f".repeat(64),
       }),
@@ -742,7 +743,7 @@ describe("WorkItemController", () => {
     },
     {
       name: "a mismatched governed tuple",
-      transformResult: (result: ExternalResultSubmission) => ({
+      transformResult: (result: ExecuteExternalResultSubmission) => ({
         ...result,
         identity: { ...result.identity, attempt: result.identity.attempt + 1 },
       }),
@@ -779,7 +780,7 @@ describe("WorkItemController", () => {
     },
     {
       name: "reported files that differ from Git",
-      transformResult: (result: ExternalResultSubmission) => ({
+      transformResult: (result: ExecuteExternalResultSubmission) => ({
         ...result,
         changed_files: ["src/application/work-item-controller.ts"],
       }),

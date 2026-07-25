@@ -987,7 +987,7 @@ describe("PortfolioService", () => {
         ".founder",
         "missions",
         created.goal.work_item_id,
-        "1-1-0",
+        "execute-1-1-0",
         "TASK.md",
       ),
     );
@@ -997,7 +997,7 @@ describe("PortfolioService", () => {
         ".founder",
         "missions",
         created.goal.work_item_id,
-        "1-1-0",
+        "execute-1-1-0",
         "mission.json",
       ),
     );
@@ -1048,7 +1048,8 @@ describe("PortfolioService", () => {
     const history: StoredImportEvidence[] = [
       {
         evidence: {
-          schema_version: 1,
+          schema_version: 2,
+          phase: "execute",
           import_run_id: "f".repeat(64),
           result_content_sha256: "c".repeat(64),
           mission_content_sha256: "d".repeat(64),
@@ -1068,16 +1069,18 @@ describe("PortfolioService", () => {
           reasons: ["Rejected historical result."],
         },
         summary: {
+          phase: "execute",
           import_run_id: "f".repeat(64),
           outcome: "rejected",
-          evidence_path: `.founder/run-evidence/${workItemId}/2-3-1/${"f".repeat(64)}`,
+          evidence_path: `.founder/run-evidence/${workItemId}/execute-2-3-1/${"f".repeat(64)}`,
           reasons: ["Rejected historical result."],
         },
         verification: [],
       },
       {
         evidence: {
-          schema_version: 1,
+          schema_version: 2,
+          phase: "execute",
           import_run_id: "e".repeat(64),
           result_content_sha256: "b".repeat(64),
           mission_content_sha256: "d".repeat(64),
@@ -1097,9 +1100,10 @@ describe("PortfolioService", () => {
           reasons: ["Rejected original result."],
         },
         summary: {
+          phase: "execute",
           import_run_id: "e".repeat(64),
           outcome: "rejected",
-          evidence_path: `.founder/run-evidence/${workItemId}/1-1-0/${"e".repeat(64)}`,
+          evidence_path: `.founder/run-evidence/${workItemId}/execute-1-1-0/${"e".repeat(64)}`,
           reasons: ["Rejected original result."],
         },
         verification: [],
@@ -1166,9 +1170,9 @@ describe("PortfolioService", () => {
     await writeFile(
       join(dirname(appliedMission.task_path), "result.json"),
       serializeExternalResult({
-        result_schema_version: 1,
+        result_schema_version: 2,
         mission_content_sha256: appliedMission.mission.content_sha256,
-        identity: appliedMission.mission.identity,
+        identity: { ...appliedMission.mission.identity, phase: "execute" },
         commit: "a".repeat(40),
         summary: "Implemented the import path",
         changed_files: ["src/application/portfolio.ts"],
@@ -1269,9 +1273,9 @@ describe("PortfolioService", () => {
       created.goal.work_item_id,
     );
     const submissionSource = serializeExternalResult({
-      result_schema_version: 1,
+      result_schema_version: 2,
       mission_content_sha256: mission.mission.content_sha256,
-      identity: mission.mission.identity,
+      identity: { ...mission.mission.identity, phase: "execute" },
       commit: "a".repeat(40),
       summary: "Persist the import bundle",
       changed_files: ["src/application/portfolio.ts"],
