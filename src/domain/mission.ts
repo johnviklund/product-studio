@@ -9,9 +9,10 @@ import type {
 } from "./work-item";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
-const MISSION_SCHEMA_VERSION = 2 as const;
-const RESULT_CONTRACT_SCHEMA_VERSION = 2 as const;
-const RESULT_REQUIRED_FIELDS = [
+const MISSION_SCHEMA_VERSION = 3 as const;
+const RESULT_CONTRACT_SCHEMA_VERSION = 3 as const;
+const RESULT_SCHEMA_VERSION = 2 as const;
+const EXECUTE_RESULT_REQUIRED_FIELDS = [
   "result_schema_version",
   "mission_content_sha256",
   "identity",
@@ -20,6 +21,21 @@ const RESULT_REQUIRED_FIELDS = [
   "changed_files",
   "verification",
 ] as const;
+const REVIEW_RESULT_REQUIRED_FIELDS = [
+  "result_schema_version",
+  "review_mission_content_sha256",
+  "identity",
+  "execute_mission_content_sha256",
+  "execute_result_content_sha256",
+  "git_base_commit",
+  "accepted_result_commit",
+  "summary",
+  "verdict",
+  "findings",
+] as const;
+
+export const MISSION_PHASES = ["execute", "review"] as const;
+export type MissionPhase = (typeof MISSION_PHASES)[number];
 
 const missionWorkItemTypes = Object.keys({
   Explore: true,
@@ -69,51 +85,118 @@ const workItemIdSchema = z
     "work_item_id must use the wi_<uuid> format",
   );
 
-export interface MissionIdentity {
+export interface MissionIdentity<
+  TPhase extends MissionPhase = MissionPhase,
+> {
+  phase: TPhase;
   work_item_id: string;
   goal_version: number;
   input_revision: number;
   attempt: number;
 }
 
-export interface MissionPackage {
-  mission_schema_version: 2;
-  identity: MissionIdentity;
-  controller_run: {
-    run_id: string;
-    idempotency_key: string;
-    phase: "execute";
-    started_at: string;
-    completed_at: string;
-  };
-  goal: {
-    title: string;
-    type?: WorkItemType;
-    purpose: string;
-    acceptance_criteria: string[];
-    non_goals: string[];
-    allowed_scope: string[];
-    review_ready: string[];
-  };
-  source_revision: {
-    git_base_commit: string;
-  };
-  result_contract: {
-    schema_version: 2;
-    output_path: string;
-    result_schema_version: 1;
-    required_fields: [
-      "result_schema_version",
-      "mission_content_sha256",
-      "identity",
-      "commit",
-      "summary",
-      "changed_files",
-      "verification",
-    ];
-  };
+interface MissionControllerRun<TPhase extends MissionPhase> {
+  run_id: string;
+  idempotency_key: string;
+  phase: TPhase;
+  started_at: string;
+  completed_at: string;
+}
+
+interface MissionGoal {
+  title: string;
+  type?: WorkItemType;
+  purpose: string;
+  acceptance_criteria: string[];
+  non_goals: string[];
+  allowed_scope: string[];
+  review_ready: string[];
+}
+
+interface MissionSourceRevision {
+  git_base_commit: string;
+}
+
+interface MissionResultContract<
+  TRequiredFields extends readonly string[],
+> {
+  schema_version: 3;
+  output_path: string;
+  result_schema_version: 2;
+  required_fields: TRequiredFields;
+}
+
+interface MissionPackageBase<TPhase extends MissionPhase> {
+  mission_schema_version: 3;
+  identity: MissionIdentity<TPhase>;
+  controller_run: MissionControllerRun<TPhase>;
+  goal: MissionGoal;
+  source_revision: MissionSourceRevision;
   task_path: string;
   content_sha256: string;
+}
+
+export interface ExecuteMissionPackage extends MissionPackageBase<"execute"> {
+  result_contract: MissionResultContract<
+    typeof EXECUTE_RESULT_REQUIRED_FIELDS
+  >;
+}
+
+export interface ReviewCommandEvidenceRecord {
+  name: string;
+  argv: [string, ...string[]];
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
+  status: "passed";
+  exit_code: 0;
+  signal: null;
+  stdout: string;
+  stderr: string;
+  output_truncated: boolean;
+}
+
+export interface ReviewSubject {
+  execute_mission_content_sha256: string;
+  execute_result_content_sha256: string;
+  git_base_commit: string;
+  accepted_result_commit: string;
+  changed_files: string[];
+  execute_mission_path: string;
+  execute_evidence_path: string;
+  command_evidence: ReviewCommandEvidenceRecord[];
+}
+
+export interface ReviewMissionPackage extends MissionPackageBase<"review"> {
+  review_subject: ReviewSubject;
+  independence_attested: true;
+  result_contract: MissionResultContract<
+    typeof REVIEW_RESULT_REQUIRED_FIELDS
+  >;
+}
+
+export type MissionPackage = ExecuteMissionPackage | ReviewMissionPackage;
+
+export interface ReviewMissionControllerRun {
+  schema_version: 1;
+  run_id: string;
+  work_item_id: string;
+  idempotency_key: string;
+  phase: "review";
+  goal_version: number;
+  input_revision: number;
+  attempt: number;
+  started_at: string;
+  completed_at: string;
+  outcome: "applied";
+}
+
+export interface ReviewMissionCompileInput {
+  work_item: WorkItem;
+  controller_run: ReviewMissionControllerRun;
+  review_subject: ReviewSubject;
+  paths: MissionPaths;
+  independence_attested: true;
 }
 
 export interface MissionPaths {
@@ -132,54 +215,198 @@ export interface MissionArtifactWriteResult {
 export type MissionPackageBuilder = (paths: MissionPaths) => MissionPackage;
 
 export const missionIdentitySchema: z.ZodType<MissionIdentity> = z.strictObject({
+  phase: z.enum(MISSION_PHASES),
   work_item_id: workItemIdSchema,
   goal_version: positiveSafeIntegerSchema,
   input_revision: positiveSafeIntegerSchema,
   attempt: nonNegativeSafeIntegerSchema,
 });
 
-const missionPackageBaseSchema = z.strictObject({
-  mission_schema_version: z.literal(MISSION_SCHEMA_VERSION),
-  identity: missionIdentitySchema,
-  controller_run: z.strictObject({
-    run_id: z.uuid(),
-    idempotency_key: nonEmptyTrimmedStringSchema,
+const executeMissionIdentitySchema: z.ZodType<MissionIdentity<"execute">> =
+  z.strictObject({
     phase: z.literal("execute"),
-    started_at: z.iso.datetime(),
-    completed_at: z.iso.datetime(),
-  }),
-  goal: z.strictObject({
-    title: nonEmptyTrimmedStringSchema,
-    type: z.enum(missionWorkItemTypes).optional(),
-    purpose: purposeSchema,
-    acceptance_criteria: nonEmptyStringListSchema,
-    non_goals: nonEmptyStringListSchema,
-    allowed_scope: allowedScopeSchema,
-    review_ready: nonEmptyStringListSchema,
-  }),
-  source_revision: z.strictObject({
-    git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
-  }),
-  result_contract: z.strictObject({
-    schema_version: z.literal(RESULT_CONTRACT_SCHEMA_VERSION),
-    output_path: workspaceRelativePosixPathSchema,
-    result_schema_version: z.literal(1),
-    required_fields: z.tuple([
-      z.literal(RESULT_REQUIRED_FIELDS[0]),
-      z.literal(RESULT_REQUIRED_FIELDS[1]),
-      z.literal(RESULT_REQUIRED_FIELDS[2]),
-      z.literal(RESULT_REQUIRED_FIELDS[3]),
-      z.literal(RESULT_REQUIRED_FIELDS[4]),
-      z.literal(RESULT_REQUIRED_FIELDS[5]),
-      z.literal(RESULT_REQUIRED_FIELDS[6]),
-    ]),
-  }),
-  task_path: workspaceRelativePosixPathSchema,
-  content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    work_item_id: workItemIdSchema,
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+  });
+
+const reviewMissionIdentitySchema: z.ZodType<MissionIdentity<"review">> =
+  z.strictObject({
+    phase: z.literal("review"),
+    work_item_id: workItemIdSchema,
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+  });
+
+const missionGoalSchema: z.ZodType<MissionGoal> = z.strictObject({
+  title: nonEmptyTrimmedStringSchema,
+  type: z.enum(missionWorkItemTypes).optional(),
+  purpose: purposeSchema,
+  acceptance_criteria: nonEmptyStringListSchema,
+  non_goals: nonEmptyStringListSchema,
+  allowed_scope: allowedScopeSchema,
+  review_ready: nonEmptyStringListSchema,
 });
 
-export const missionPackageSchema: z.ZodType<MissionPackage> =
-  missionPackageBaseSchema.superRefine((mission, context) => {
+const missionSourceRevisionSchema: z.ZodType<MissionSourceRevision> =
+  z.strictObject({
+    git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
+  });
+
+const reviewCommandEvidenceRecordSchema: z.ZodType<ReviewCommandEvidenceRecord> =
+  z.strictObject({
+    name: nonEmptyTrimmedStringSchema,
+    argv: z.tuple([nonEmptyTrimmedStringSchema], z.string()),
+    started_at: z.iso.datetime(),
+    completed_at: z.iso.datetime(),
+    duration_ms: nonNegativeSafeIntegerSchema,
+    status: z.literal("passed"),
+    exit_code: z.literal(0),
+    signal: z.null(),
+    stdout: z.string(),
+    stderr: z.string(),
+    output_truncated: z.boolean(),
+  });
+
+export const reviewSubjectSchema: z.ZodType<ReviewSubject> = z
+  .strictObject({
+    execute_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    execute_result_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
+    accepted_result_commit: z.string().regex(/^[0-9a-f]{40}$/),
+    changed_files: z.array(workspaceRelativePosixPathSchema),
+    execute_mission_path: workspaceRelativePosixPathSchema,
+    execute_evidence_path: workspaceRelativePosixPathSchema,
+    command_evidence: z.array(reviewCommandEvidenceRecordSchema).min(1),
+  })
+  .superRefine((subject, context) => {
+    if (new Set(subject.changed_files).size !== subject.changed_files.length) {
+      context.addIssue({
+        code: "custom",
+        message: "changed_files must not contain duplicates",
+        path: ["changed_files"],
+        input: subject.changed_files,
+      });
+    }
+    const sortedChangedFiles = [...subject.changed_files].sort();
+    if (
+      sortedChangedFiles.some(
+        (changedFile, index) => changedFile !== subject.changed_files[index],
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "changed_files must use canonical sort order",
+        path: ["changed_files"],
+        input: subject.changed_files,
+      });
+    }
+    if (
+      new Set(
+        subject.command_evidence.map((record) =>
+          record.name.toLocaleLowerCase(),
+        ),
+      ).size !== subject.command_evidence.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "command evidence names must not contain duplicates",
+        path: ["command_evidence"],
+        input: subject.command_evidence,
+      });
+    }
+  });
+
+const executeResultContractSchema = z.strictObject({
+  schema_version: z.literal(RESULT_CONTRACT_SCHEMA_VERSION),
+  output_path: workspaceRelativePosixPathSchema,
+  result_schema_version: z.literal(RESULT_SCHEMA_VERSION),
+  required_fields: z.tuple([
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[0]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[1]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[2]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[3]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[4]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[5]),
+    z.literal(EXECUTE_RESULT_REQUIRED_FIELDS[6]),
+  ]),
+});
+
+const reviewResultContractSchema = z.strictObject({
+  schema_version: z.literal(RESULT_CONTRACT_SCHEMA_VERSION),
+  output_path: workspaceRelativePosixPathSchema,
+  result_schema_version: z.literal(RESULT_SCHEMA_VERSION),
+  required_fields: z.tuple([
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[0]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[1]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[2]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[3]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[4]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[5]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[6]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[7]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[8]),
+    z.literal(REVIEW_RESULT_REQUIRED_FIELDS[9]),
+  ]),
+});
+
+const missionPackageCommonShape = {
+  mission_schema_version: z.literal(MISSION_SCHEMA_VERSION),
+  goal: missionGoalSchema,
+  source_revision: missionSourceRevisionSchema,
+  task_path: workspaceRelativePosixPathSchema,
+  content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+};
+
+const executeMissionPackageSchema: z.ZodType<ExecuteMissionPackage> =
+  z.strictObject({
+    ...missionPackageCommonShape,
+    identity: executeMissionIdentitySchema,
+    controller_run: z.strictObject({
+      run_id: z.uuid(),
+      idempotency_key: nonEmptyTrimmedStringSchema,
+      phase: z.literal("execute"),
+      started_at: z.iso.datetime(),
+      completed_at: z.iso.datetime(),
+    }),
+    result_contract: executeResultContractSchema,
+  });
+
+const reviewMissionPackageSchema: z.ZodType<ReviewMissionPackage> =
+  z
+    .strictObject({
+      ...missionPackageCommonShape,
+      identity: reviewMissionIdentitySchema,
+      controller_run: z.strictObject({
+        run_id: z.uuid(),
+        idempotency_key: nonEmptyTrimmedStringSchema,
+        phase: z.literal("review"),
+        started_at: z.iso.datetime(),
+        completed_at: z.iso.datetime(),
+      }),
+      review_subject: reviewSubjectSchema,
+      independence_attested: z.literal(true),
+      result_contract: reviewResultContractSchema,
+    })
+    .superRefine((mission, context) => {
+      if (
+        mission.source_revision.git_base_commit !==
+        mission.review_subject.git_base_commit
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "source revision must match the review subject Git base",
+          path: ["source_revision", "git_base_commit"],
+          input: mission.source_revision.git_base_commit,
+        });
+      }
+    });
+
+export const missionPackageSchema: z.ZodType<MissionPackage> = z
+  .union([executeMissionPackageSchema, reviewMissionPackageSchema])
+  .superRefine((mission, context) => {
     if (mission.content_sha256 !== hashMissionContent(mission)) {
       context.addIssue({
         code: "custom",
@@ -190,26 +417,42 @@ export const missionPackageSchema: z.ZodType<MissionPackage> =
     }
   });
 
-const compilableWorkItemSchema = z.object({
-  goal: z.object({
-    schema_version: z.literal(2),
-    work_item_id: workItemIdSchema,
-    title: nonEmptyTrimmedStringSchema,
-    type: z.enum(missionWorkItemTypes).optional(),
-    goal_contract: z.object({
-      schema_version: z.literal(1),
-      goal_version: positiveSafeIntegerSchema,
-      purpose: purposeSchema,
-      acceptance_criteria: nonEmptyStringListSchema,
-      non_goals: nonEmptyStringListSchema,
-      allowed_scope: allowedScopeSchema,
-      review_ready: nonEmptyStringListSchema,
-    }),
+const compilableWorkItemGoalSchema = z.object({
+  schema_version: z.literal(2),
+  work_item_id: workItemIdSchema,
+  title: nonEmptyTrimmedStringSchema,
+  type: z.enum(missionWorkItemTypes).optional(),
+  goal_contract: z.object({
+    schema_version: z.literal(1),
+    goal_version: positiveSafeIntegerSchema,
+    purpose: purposeSchema,
+    acceptance_criteria: nonEmptyStringListSchema,
+    non_goals: nonEmptyStringListSchema,
+    allowed_scope: allowedScopeSchema,
+    review_ready: nonEmptyStringListSchema,
   }),
+});
+
+const compilableExecuteWorkItemSchema = z.object({
+  goal: compilableWorkItemGoalSchema,
   state: z.object({
     schema_version: z.literal(1),
     work_item_id: workItemIdSchema,
     phase: z.literal("execute"),
+    status: z.literal("active"),
+    updated_at: z.iso.datetime(),
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+  }),
+});
+
+const compilableReviewWorkItemSchema = z.object({
+  goal: compilableWorkItemGoalSchema,
+  state: z.object({
+    schema_version: z.literal(1),
+    work_item_id: workItemIdSchema,
+    phase: z.literal("review"),
     status: z.literal("active"),
     updated_at: z.iso.datetime(),
     goal_version: positiveSafeIntegerSchema,
@@ -231,6 +474,21 @@ const appliedExecuteManifestSchema = z.strictObject({
   completed_at: z.iso.datetime(),
   outcome: z.literal("applied"),
 });
+
+const reviewMissionControllerRunSchema: z.ZodType<ReviewMissionControllerRun> =
+  z.strictObject({
+    schema_version: z.literal(1),
+    run_id: z.uuid(),
+    work_item_id: workItemIdSchema,
+    idempotency_key: nonEmptyTrimmedStringSchema,
+    phase: z.literal("review"),
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+    started_at: z.iso.datetime(),
+    completed_at: z.iso.datetime(),
+    outcome: z.literal("applied"),
+  });
 
 const missionPathsSchema = z
   .strictObject({
@@ -272,7 +530,7 @@ const missionPathsSchema = z
 
 const missionCompileInputSchema = z
   .strictObject({
-    work_item: compilableWorkItemSchema,
+    work_item: compilableExecuteWorkItemSchema,
     execute_manifest: appliedExecuteManifestSchema,
     paths: missionPathsSchema,
   })
@@ -312,12 +570,94 @@ const missionCompileInputSchema = z
     }
   });
 
-function missionContent(
-  mission: Omit<MissionPackage, "content_sha256"> | MissionPackage,
-) {
+const reviewMissionCompileInputSchema = z
+  .strictObject({
+    work_item: compilableReviewWorkItemSchema,
+    controller_run: reviewMissionControllerRunSchema,
+    review_subject: reviewSubjectSchema,
+    paths: missionPathsSchema,
+    independence_attested: z.literal(true),
+  })
+  .superRefine(({ work_item: workItem, controller_run: run, review_subject: subject, paths }, context) => {
+    const expected = {
+      work_item_id: workItem.goal.work_item_id,
+      goal_version: workItem.goal.goal_contract.goal_version,
+      input_revision: workItem.state.input_revision,
+      attempt: workItem.state.attempt,
+    };
+
+    if (workItem.state.work_item_id !== expected.work_item_id) {
+      context.addIssue({
+        code: "custom",
+        message: "goal and state work_item_id values must match",
+        path: ["work_item", "state", "work_item_id"],
+        input: workItem.state.work_item_id,
+      });
+    }
+    if (workItem.state.goal_version !== expected.goal_version) {
+      context.addIssue({
+        code: "custom",
+        message: "goal and state goal_version values must match",
+        path: ["work_item", "state", "goal_version"],
+        input: workItem.state.goal_version,
+      });
+    }
+    for (const [field, value] of Object.entries(expected)) {
+      if (run[field as keyof typeof expected] !== value) {
+        context.addIssue({
+          code: "custom",
+          message: `review controller run ${field} must match the governed work item`,
+          path: ["controller_run", field],
+          input: run[field as keyof typeof expected],
+        });
+      }
+    }
+    if (paths.git_base_commit !== subject.git_base_commit) {
+      context.addIssue({
+        code: "custom",
+        message: "mission paths Git base must match the review subject",
+        path: ["paths", "git_base_commit"],
+        input: paths.git_base_commit,
+      });
+    }
+  });
+
+type MissionPackageWithoutHash =
+  | Omit<ExecuteMissionPackage, "content_sha256">
+  | Omit<ReviewMissionPackage, "content_sha256">;
+
+function canonicalReviewSubject(subject: ReviewSubject): ReviewSubject {
   return {
+    execute_mission_content_sha256: subject.execute_mission_content_sha256,
+    execute_result_content_sha256: subject.execute_result_content_sha256,
+    git_base_commit: subject.git_base_commit,
+    accepted_result_commit: subject.accepted_result_commit,
+    changed_files: subject.changed_files,
+    execute_mission_path: subject.execute_mission_path,
+    execute_evidence_path: subject.execute_evidence_path,
+    command_evidence: subject.command_evidence.map((record) => ({
+      name: record.name,
+      argv: record.argv,
+      started_at: record.started_at,
+      completed_at: record.completed_at,
+      duration_ms: record.duration_ms,
+      status: record.status,
+      exit_code: record.exit_code,
+      signal: record.signal,
+      stdout: record.stdout,
+      stderr: record.stderr,
+      output_truncated: record.output_truncated,
+    })),
+  };
+}
+
+function missionContent(
+  mission: MissionPackageWithoutHash | MissionPackage,
+) {
+  const common = {
     mission_schema_version: mission.mission_schema_version,
     identity: {
+      phase: mission.identity.phase,
       work_item_id: mission.identity.work_item_id,
       goal_version: mission.identity.goal_version,
       input_revision: mission.identity.input_revision,
@@ -342,24 +682,40 @@ function missionContent(
     source_revision: {
       git_base_commit: mission.source_revision.git_base_commit,
     },
-    result_contract: {
-      schema_version: mission.result_contract.schema_version,
-      output_path: mission.result_contract.output_path,
-      result_schema_version: mission.result_contract.result_schema_version,
-      required_fields: mission.result_contract.required_fields,
-    },
+  };
+
+  const resultContract = {
+    schema_version: mission.result_contract.schema_version,
+    output_path: mission.result_contract.output_path,
+    result_schema_version: mission.result_contract.result_schema_version,
+    required_fields: mission.result_contract.required_fields,
+  };
+
+  if ("review_subject" in mission) {
+    return {
+      ...common,
+      review_subject: canonicalReviewSubject(mission.review_subject),
+      independence_attested: mission.independence_attested,
+      result_contract: resultContract,
+      task_path: mission.task_path,
+    };
+  }
+
+  return {
+    ...common,
+    result_contract: resultContract,
     task_path: mission.task_path,
   };
 }
 
 export function serializeMissionContent(
-  mission: Omit<MissionPackage, "content_sha256"> | MissionPackage,
+  mission: MissionPackageWithoutHash | MissionPackage,
 ): string {
   return JSON.stringify(missionContent(mission));
 }
 
 export function hashMissionContent(
-  mission: Omit<MissionPackage, "content_sha256"> | MissionPackage,
+  mission: MissionPackageWithoutHash | MissionPackage,
 ): string {
   return createHash("sha256")
     .update(serializeMissionContent(mission))
@@ -378,19 +734,46 @@ export function serializeMissionPackage(mission: MissionPackage): string {
   )}\n`;
 }
 
+function missionGoal(workItem: {
+  goal: {
+    title: string;
+    type?: WorkItemType;
+    goal_contract: {
+      purpose: string;
+      acceptance_criteria: string[];
+      non_goals: string[];
+      allowed_scope: string[];
+      review_ready: string[];
+    };
+  };
+}): MissionGoal {
+  return {
+    title: workItem.goal.title,
+    ...(workItem.goal.type === undefined
+      ? {}
+      : { type: workItem.goal.type }),
+    purpose: workItem.goal.goal_contract.purpose,
+    acceptance_criteria: workItem.goal.goal_contract.acceptance_criteria,
+    non_goals: workItem.goal.goal_contract.non_goals,
+    allowed_scope: workItem.goal.goal_contract.allowed_scope,
+    review_ready: workItem.goal.goal_contract.review_ready,
+  };
+}
+
 export function compileMission(
   workItem: WorkItem,
   executeManifest: ControllerRunManifest,
   paths: MissionPaths,
-): MissionPackage {
+): ExecuteMissionPackage {
   const input = missionCompileInputSchema.parse({
     work_item: workItem,
     execute_manifest: executeManifest,
     paths,
   });
-  const content: Omit<MissionPackage, "content_sha256"> = {
+  const content: Omit<ExecuteMissionPackage, "content_sha256"> = {
     mission_schema_version: MISSION_SCHEMA_VERSION,
     identity: {
+      phase: "execute",
       work_item_id: input.work_item.goal.work_item_id,
       goal_version: input.work_item.goal.goal_contract.goal_version,
       input_revision: input.work_item.state.input_revision,
@@ -403,31 +786,61 @@ export function compileMission(
       started_at: input.execute_manifest.started_at,
       completed_at: input.execute_manifest.completed_at,
     },
-    goal: {
-      title: input.work_item.goal.title,
-      ...(input.work_item.goal.type === undefined
-        ? {}
-        : { type: input.work_item.goal.type }),
-      purpose: input.work_item.goal.goal_contract.purpose,
-      acceptance_criteria:
-        input.work_item.goal.goal_contract.acceptance_criteria,
-      non_goals: input.work_item.goal.goal_contract.non_goals,
-      allowed_scope: input.work_item.goal.goal_contract.allowed_scope,
-      review_ready: input.work_item.goal.goal_contract.review_ready,
-    },
+    goal: missionGoal(input.work_item),
     source_revision: {
       git_base_commit: input.paths.git_base_commit,
     },
     result_contract: {
       schema_version: RESULT_CONTRACT_SCHEMA_VERSION,
       output_path: input.paths.output_path,
-      result_schema_version: 1,
-      required_fields: [...RESULT_REQUIRED_FIELDS],
+      result_schema_version: RESULT_SCHEMA_VERSION,
+      required_fields: [...EXECUTE_RESULT_REQUIRED_FIELDS],
     },
     task_path: input.paths.task_path,
   };
 
-  return missionPackageSchema.parse({
+  return executeMissionPackageSchema.parse({
+    ...content,
+    content_sha256: hashMissionContent(content),
+  });
+}
+
+export function compileReviewMission(
+  input: ReviewMissionCompileInput,
+): ReviewMissionPackage {
+  const validated = reviewMissionCompileInputSchema.parse(input);
+  const content: Omit<ReviewMissionPackage, "content_sha256"> = {
+    mission_schema_version: MISSION_SCHEMA_VERSION,
+    identity: {
+      phase: "review",
+      work_item_id: validated.work_item.goal.work_item_id,
+      goal_version: validated.work_item.goal.goal_contract.goal_version,
+      input_revision: validated.work_item.state.input_revision,
+      attempt: validated.work_item.state.attempt,
+    },
+    controller_run: {
+      run_id: validated.controller_run.run_id,
+      idempotency_key: validated.controller_run.idempotency_key,
+      phase: validated.controller_run.phase,
+      started_at: validated.controller_run.started_at,
+      completed_at: validated.controller_run.completed_at,
+    },
+    goal: missionGoal(validated.work_item),
+    source_revision: {
+      git_base_commit: validated.paths.git_base_commit,
+    },
+    review_subject: validated.review_subject,
+    independence_attested: validated.independence_attested,
+    result_contract: {
+      schema_version: RESULT_CONTRACT_SCHEMA_VERSION,
+      output_path: validated.paths.output_path,
+      result_schema_version: RESULT_SCHEMA_VERSION,
+      required_fields: [...REVIEW_RESULT_REQUIRED_FIELDS],
+    },
+    task_path: validated.paths.task_path,
+  };
+
+  return reviewMissionPackageSchema.parse({
     ...content,
     content_sha256: hashMissionContent(content),
   });
@@ -437,55 +850,59 @@ function renderList(values: string[]): string {
   return values.map((value) => `- ${value}`).join("\n");
 }
 
-export function renderTaskMd(mission: MissionPackage): string {
-  const validatedMission = missionPackageSchema.parse(mission);
+function renderMissionHeader(mission: MissionPackage): string[] {
   const typeLine =
-    validatedMission.goal.type === undefined
-      ? []
-      : [`Type: ${validatedMission.goal.type}`, ""];
-
+    mission.goal.type === undefined ? [] : [`Type: ${mission.goal.type}`, ""];
   return [
-    `# ${validatedMission.goal.title}`,
+    `# ${mission.goal.title}`,
     "",
-    `Mission schema version: ${validatedMission.mission_schema_version}`,
-    `Package hash: ${validatedMission.content_sha256}`,
+    `Mission schema version: ${mission.mission_schema_version}`,
+    `Mission phase: ${mission.identity.phase}`,
+    `Package hash: ${mission.content_sha256}`,
     "",
     ...typeLine,
     "## Purpose",
     "",
-    validatedMission.goal.purpose,
+    mission.goal.purpose,
     "",
     "## Acceptance criteria",
     "",
-    renderList(validatedMission.goal.acceptance_criteria),
+    renderList(mission.goal.acceptance_criteria),
     "",
     "## Non-goals",
     "",
-    renderList(validatedMission.goal.non_goals),
+    renderList(mission.goal.non_goals),
     "",
     "## Allowed scope",
     "",
-    renderList(validatedMission.goal.allowed_scope),
+    renderList(mission.goal.allowed_scope),
     "",
     "## Review ready when",
     "",
-    renderList(validatedMission.goal.review_ready),
+    renderList(mission.goal.review_ready),
     "",
+  ];
+}
+
+function renderExecuteTaskMd(mission: ExecuteMissionPackage): string {
+  return [
+    ...renderMissionHeader(mission),
     "## Result contract",
     "",
-    `Write the structured result to \`${validatedMission.result_contract.output_path}\`.`,
+    `Write the structured result to \`${mission.result_contract.output_path}\`.`,
     "Commit the code changes before returning the result.",
     "Use this complete JSON shape:",
     "",
     "```json",
     "{",
-    `  \"result_schema_version\": ${validatedMission.result_contract.result_schema_version},`,
-    `  \"mission_content_sha256\": \"${validatedMission.content_sha256}\",`,
+    `  \"result_schema_version\": ${mission.result_contract.result_schema_version},`,
+    `  \"mission_content_sha256\": \"${mission.content_sha256}\",`,
     "  \"identity\": {",
-    `    \"work_item_id\": \"${validatedMission.identity.work_item_id}\",`,
-    `    \"goal_version\": ${validatedMission.identity.goal_version},`,
-    `    \"input_revision\": ${validatedMission.identity.input_revision},`,
-    `    \"attempt\": ${validatedMission.identity.attempt}`,
+    '    "phase": "execute",',
+    `    \"work_item_id\": \"${mission.identity.work_item_id}\",`,
+    `    \"goal_version\": ${mission.identity.goal_version},`,
+    `    \"input_revision\": ${mission.identity.input_revision},`,
+    `    \"attempt\": ${mission.identity.attempt}`,
     "  },",
     "  \"commit\": \"<full 40-character Git commit SHA>\",",
     "  \"summary\": \"<concise implementation summary>\",",
@@ -504,4 +921,78 @@ export function renderTaskMd(mission: MissionPackage): string {
     "Return the result for validation; do not advance controller state.",
     "",
   ].join("\n");
+}
+
+function renderReviewTaskMd(mission: ReviewMissionPackage): string {
+  const subject = mission.review_subject;
+  return [
+    ...renderMissionHeader(mission),
+    "## Review assignment",
+    "",
+    "Assess the exact pinned implementation as a read-only reviewer.",
+    "Do not modify workspace files or execute verification commands.",
+    "",
+    `Pinned subject commit: \`${subject.accepted_result_commit}\``,
+    `Git base: \`${subject.git_base_commit}\``,
+    `Execute mission hash: \`${subject.execute_mission_content_sha256}\``,
+    `Execute result hash: \`${subject.execute_result_content_sha256}\``,
+    `Immutable mission: \`${subject.execute_mission_path}\``,
+    `Immutable evidence: \`${subject.execute_evidence_path}\``,
+    "",
+    "Changed files:",
+    renderList(subject.changed_files),
+    "",
+    "Authoritative verification:",
+    renderList(
+      subject.command_evidence.map(
+        (record) =>
+          `${record.name}: ${record.status} (${record.argv.join(" ")})`,
+      ),
+    ),
+    "",
+    "## Review result contract",
+    "",
+    `Write the structured review to \`${mission.result_contract.output_path}\`.`,
+    "Use this complete JSON shape:",
+    "",
+    "```json",
+    "{",
+    `  \"result_schema_version\": ${mission.result_contract.result_schema_version},`,
+    `  \"review_mission_content_sha256\": \"${mission.content_sha256}\",`,
+    "  \"identity\": {",
+    '    "phase": "review",',
+    `    \"work_item_id\": \"${mission.identity.work_item_id}\",`,
+    `    \"goal_version\": ${mission.identity.goal_version},`,
+    `    \"input_revision\": ${mission.identity.input_revision},`,
+    `    \"attempt\": ${mission.identity.attempt}`,
+    "  },",
+    `  \"execute_mission_content_sha256\": \"${subject.execute_mission_content_sha256}\",`,
+    `  \"execute_result_content_sha256\": \"${subject.execute_result_content_sha256}\",`,
+    `  \"git_base_commit\": \"${subject.git_base_commit}\",`,
+    `  \"accepted_result_commit\": \"${subject.accepted_result_commit}\",`,
+    "  \"summary\": \"<concise review summary>\",",
+    "  \"verdict\": \"clean | findings\",",
+    "  \"findings\": [",
+    "    {",
+    "      \"finding_id\": \"<unique id>\",",
+    "      \"severity\": \"P0 | P1 | P2 | P3\",",
+    "      \"title\": \"<finding title>\",",
+    "      \"evidence\": { \"summary\": \"<concrete evidence>\" },",
+    "      \"required_action\": \"<required correction>\",",
+    "      \"link\": { \"type\": \"defect\" }",
+    "    }",
+    "  ]",
+    "}",
+    "```",
+    "",
+    "Return the review for immutable import; do not advance controller state.",
+    "",
+  ].join("\n");
+}
+
+export function renderTaskMd(mission: MissionPackage): string {
+  const validatedMission = missionPackageSchema.parse(mission);
+  return "review_subject" in validatedMission
+    ? renderReviewTaskMd(validatedMission)
+    : renderExecuteTaskMd(validatedMission);
 }

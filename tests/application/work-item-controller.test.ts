@@ -200,6 +200,7 @@ async function createImportFixture(options?: {
   const { repository: workspace } = await createWorkspace();
   const { workItem, manifest } = await governToExecute(workspace);
   const identity = {
+    phase: "execute" as const,
     work_item_id: workItem.goal.work_item_id,
     goal_version: workItem.state.goal_version!,
     input_revision: workItem.state.input_revision!,

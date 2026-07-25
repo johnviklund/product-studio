@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   compileMission,
+  compileReviewMission,
   hashMissionContent,
   missionPackageSchema,
   renderTaskMd,
   serializeMissionPackage,
   type MissionPaths,
+  type ReviewMissionControllerRun,
+  type ReviewSubject,
 } from "../../src/domain/mission";
 import type {
   ControllerRunManifest,
@@ -59,9 +62,63 @@ const executeManifest: ControllerRunManifest = {
 };
 
 const paths: MissionPaths = {
-  task_path: `.founder/missions/${workItemId}/2-3-1/TASK.md`,
-  output_path: `.founder/missions/${workItemId}/2-3-1/result.json`,
+  task_path: `.founder/missions/${workItemId}/execute-2-3-1/TASK.md`,
+  output_path: `.founder/missions/${workItemId}/execute-2-3-1/result.json`,
   git_base_commit: "1".repeat(40),
+};
+
+const reviewWorkItem: WorkItem = {
+  ...workItem,
+  state: {
+    ...workItem.state,
+    phase: "review",
+    updated_at: "2026-07-22T12:00:02.000Z",
+  },
+};
+
+const reviewControllerRun: ReviewMissionControllerRun = {
+  schema_version: 1,
+  run_id: runId,
+  work_item_id: workItemId,
+  idempotency_key: `${workItemId}:review:2:3:1`,
+  phase: "review",
+  goal_version: 2,
+  input_revision: 3,
+  attempt: 1,
+  started_at: "2026-07-22T12:00:00.000Z",
+  completed_at: "2026-07-22T12:00:01.000Z",
+  outcome: "applied",
+};
+
+const reviewSubject: ReviewSubject = {
+  execute_mission_content_sha256: "a".repeat(64),
+  execute_result_content_sha256: "b".repeat(64),
+  git_base_commit: paths.git_base_commit,
+  accepted_result_commit: "c".repeat(40),
+  changed_files: ["src/domain/mission.ts", "tests/domain/mission.test.ts"],
+  execute_mission_path: `.founder/missions/${workItemId}/execute-2-3-1/mission.json`,
+  execute_evidence_path: `.founder/run-evidence/${workItemId}/execute-2-3-1/${"d".repeat(64)}`,
+  command_evidence: [
+    {
+      name: "Tests",
+      argv: ["npm", "test"],
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:01.000Z",
+      duration_ms: 1_000,
+      status: "passed",
+      exit_code: 0,
+      signal: null,
+      stdout: "18 files passed",
+      stderr: "",
+      output_truncated: false,
+    },
+  ],
+};
+
+const reviewPaths: MissionPaths = {
+  task_path: `.founder/missions/${workItemId}/review-2-3-1/TASK.md`,
+  output_path: `.founder/missions/${workItemId}/review-2-3-1/result.json`,
+  git_base_commit: paths.git_base_commit,
 };
 
 describe("mission domain", () => {
@@ -73,14 +130,15 @@ describe("mission domain", () => {
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(renderTaskMd(second)).toBe(renderTaskMd(first));
     expect(first.content_sha256).toBe(
-      "65dba7f5232567bff41c025cdfbf3643e6dc61d7aad865e6963c65ac52380563",
+      "fe1a2c269f789fe1e3d9a2dea439d590478bdd31b7fb7fa8248ea07267e41943",
     );
-    expect(first.mission_schema_version).toBe(2);
+    expect(first.mission_schema_version).toBe(3);
+    expect(first.identity.phase).toBe("execute");
     expect(first.source_revision.git_base_commit).toBe(paths.git_base_commit);
     expect(first.result_contract).toEqual({
-      schema_version: 2,
+      schema_version: 3,
       output_path: paths.output_path,
-      result_schema_version: 1,
+      result_schema_version: 2,
       required_fields: [
         "result_schema_version",
         "mission_content_sha256",
@@ -122,8 +180,8 @@ describe("mission domain", () => {
       idempotency_key: `${workItemId}:execute:2:4:1`,
     };
     const nextTuplePaths = {
-      task_path: `.founder/missions/${workItemId}/2-4-1/TASK.md`,
-      output_path: `.founder/missions/${workItemId}/2-4-1/result.json`,
+      task_path: `.founder/missions/${workItemId}/execute-2-4-1/TASK.md`,
+      output_path: `.founder/missions/${workItemId}/execute-2-4-1/result.json`,
       git_base_commit: paths.git_base_commit,
     };
     const nextTupleMission = compileMission(
@@ -147,7 +205,7 @@ describe("mission domain", () => {
       ...mission,
       result_contract: {
         ...mission.result_contract,
-        output_path: `.founder/missions/${workItemId}/2-3-1/alternate/result.json`,
+        output_path: `.founder/missions/${workItemId}/execute-2-3-1/alternate/result.json`,
       },
     });
 
@@ -232,10 +290,10 @@ describe("mission domain", () => {
     const mission = compileMission(workItem, executeManifest, paths);
 
     expect(() =>
-      missionPackageSchema.parse({ ...mission, provider: "not-in-version-2" }),
+      missionPackageSchema.parse({ ...mission, provider: "not-in-version-3" }),
     ).toThrow();
     expect(() =>
-      missionPackageSchema.parse({ ...mission, mission_schema_version: 1 }),
+      missionPackageSchema.parse({ ...mission, mission_schema_version: 2 }),
     ).toThrow();
     expect(() =>
       missionPackageSchema.parse({ ...mission, content_sha256: "0".repeat(64) }),
@@ -255,6 +313,52 @@ describe("mission domain", () => {
     expect(task).toContain(
       "Return the result for validation; do not advance controller state.",
     );
+    expect(task.toLowerCase()).not.toMatch(
+      /codex|claude|openai|anthropic|copilot|gemini/,
+    );
+  });
+
+  it("compiles a stable phase-distinct review package bound to immutable evidence", () => {
+    const input = {
+      work_item: reviewWorkItem,
+      controller_run: reviewControllerRun,
+      review_subject: reviewSubject,
+      paths: reviewPaths,
+      independence_attested: true as const,
+    };
+    const first = compileReviewMission(input);
+    const second = compileReviewMission(input);
+    const execute = compileMission(workItem, executeManifest, paths);
+
+    expect(second).toEqual(first);
+    expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
+    expect(first.content_sha256).toBe(
+      "96748a68fbe1d0a89abb8f10ca89f5aac43fe5268e7c2c0a1cb56281ac45cf53",
+    );
+    expect(first.content_sha256).not.toBe(execute.content_sha256);
+    expect(first.identity.phase).toBe("review");
+    expect(first.controller_run.phase).toBe("review");
+    expect(first.independence_attested).toBe(true);
+    expect(first.review_subject).toEqual(reviewSubject);
+    expect(first.result_contract.schema_version).toBe(3);
+  });
+
+  it("renders review as a pinned read-only assessment without execution instructions", () => {
+    const mission = compileReviewMission({
+      work_item: reviewWorkItem,
+      controller_run: reviewControllerRun,
+      review_subject: reviewSubject,
+      paths: reviewPaths,
+      independence_attested: true,
+    });
+    const task = renderTaskMd(mission);
+
+    expect(task).toContain(reviewSubject.accepted_result_commit);
+    expect(task).toContain(reviewSubject.execute_mission_path);
+    expect(task).toContain(reviewSubject.execute_evidence_path);
+    expect(task).toContain("Do not modify workspace files");
+    expect(task).not.toContain("Commit the code changes");
+    expect(task).not.toMatch(/run (?:the )?checks/i);
     expect(task.toLowerCase()).not.toMatch(
       /codex|claude|openai|anthropic|copilot|gemini/,
     );

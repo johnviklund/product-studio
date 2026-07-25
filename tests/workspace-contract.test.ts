@@ -213,6 +213,7 @@ function missionIdentity(
   overrides: Partial<Omit<MissionIdentity, "work_item_id">> = {},
 ): MissionIdentity {
   return {
+    phase: overrides.phase ?? "execute",
     work_item_id: workItemId,
     goal_version: overrides.goal_version ?? 1,
     input_revision: overrides.input_revision ?? 1,

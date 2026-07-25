@@ -15,6 +15,7 @@ const submission: ExternalResultSubmission = {
   result_schema_version: 1,
   mission_content_sha256: "a".repeat(64),
   identity: {
+    phase: "execute",
     work_item_id: "wi_550e8400-e29b-41d4-a716-446655440000",
     goal_version: 2,
     input_revision: 3,

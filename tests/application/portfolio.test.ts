@@ -1053,6 +1053,7 @@ describe("PortfolioService", () => {
           result_content_sha256: "c".repeat(64),
           mission_content_sha256: "d".repeat(64),
           identity: {
+            phase: "execute",
             work_item_id: workItemId,
             goal_version: 2,
             input_revision: 3,
@@ -1081,6 +1082,7 @@ describe("PortfolioService", () => {
           result_content_sha256: "b".repeat(64),
           mission_content_sha256: "d".repeat(64),
           identity: {
+            phase: "execute",
             work_item_id: workItemId,
             goal_version: 1,
             input_revision: 1,

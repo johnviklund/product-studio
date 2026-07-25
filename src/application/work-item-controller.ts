@@ -452,6 +452,7 @@ export class WorkItemController {
     const validatedInput = importExternalResultInputSchema.parse(input);
     const repository = this.repository;
     const identity = {
+      phase: "execute" as const,
       work_item_id: validatedId,
       goal_version: validatedInput.expected_goal_version,
       input_revision: validatedInput.expected_input_revision,
