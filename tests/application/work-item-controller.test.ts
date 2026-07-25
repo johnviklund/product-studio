@@ -11,14 +11,18 @@ import {
 } from "../../src/application/work-item-controller";
 import {
   compileMission,
+  compileReviewMission,
   type MissionIdentity,
+  type ReviewSubject,
 } from "../../src/domain/mission";
 import {
   importEvidenceSummarySchema,
   serializeExternalResult,
+  type AppliedExecuteReviewSubject,
   type ExecuteExternalResultSubmission,
   type ImportEvidenceWriteInput,
   type MissionResultSnapshot,
+  type ReviewExternalResultSubmission,
   type StoredImportEvidence,
 } from "../../src/domain/result";
 import type {
@@ -264,6 +268,203 @@ async function createImportFixture(options?: {
     workItem,
     input: {
       expected_phase: "execute",
+      expected_status: "active",
+      expected_schema_version: 1,
+      expected_goal_version: identity.goal_version,
+      expected_input_revision: identity.input_revision,
+      attempt: identity.attempt,
+    },
+    evidence,
+    evidenceWrites,
+  };
+}
+
+async function createReviewImportFixture(options?: {
+  resultSource?: string;
+  transformResult?: (
+    result: ReviewExternalResultSubmission,
+  ) => ReviewExternalResultSubmission;
+  transformCurrentSubject?: (subject: ReviewSubject) => ReviewSubject;
+}): Promise<{
+  repository: ImportTestRepository;
+  workItem: WorkItem;
+  input: {
+    expected_phase: "review";
+    expected_status: "active";
+    expected_schema_version: 1;
+    expected_goal_version: number;
+    expected_input_revision: number;
+    attempt: number;
+  };
+  evidence: Map<string, StoredImportEvidence>;
+  evidenceWrites: { count: number };
+}> {
+  const { repository: workspace } = await createWorkspace();
+  const execute = await governToExecute(workspace);
+  const controller = createController(workspace);
+  const transitioned = await controller.transition(
+    execute.workItem.goal.work_item_id,
+    {
+      target_phase: "review",
+      target_status: "active",
+      expected_phase: "execute",
+      expected_status: "active",
+      expected_schema_version: 1,
+      expected_goal_version: execute.workItem.state.goal_version!,
+      expected_input_revision: execute.workItem.state.input_revision!,
+      attempt: execute.workItem.state.attempt!,
+    },
+  );
+  const workItem = transitioned.work_item;
+  const identity = {
+    phase: "review" as const,
+    work_item_id: workItem.goal.work_item_id,
+    goal_version: workItem.state.goal_version!,
+    input_revision: workItem.state.input_revision!,
+    attempt: workItem.state.attempt!,
+  };
+  const commandEvidence = [
+    {
+      name: "Tests",
+      argv: ["npm", "test"] as [string, ...string[]],
+      started_at: "2026-07-21T20:58:00.000Z",
+      completed_at: "2026-07-21T20:58:01.000Z",
+      duration_ms: 1_000,
+      status: "passed" as const,
+      exit_code: 0 as const,
+      signal: null,
+      stdout: "green",
+      stderr: "",
+      output_truncated: false,
+    },
+    {
+      name: "Typecheck",
+      argv: ["npm", "run", "typecheck"] as [string, ...string[]],
+      started_at: "2026-07-21T20:58:01.000Z",
+      completed_at: "2026-07-21T20:58:02.000Z",
+      duration_ms: 1_000,
+      status: "passed" as const,
+      exit_code: 0 as const,
+      signal: null,
+      stdout: "green",
+      stderr: "",
+      output_truncated: false,
+    },
+  ];
+  const subject: ReviewSubject = {
+    execute_mission_content_sha256: "1".repeat(64),
+    execute_result_content_sha256: "2".repeat(64),
+    git_base_commit: "0".repeat(40),
+    accepted_result_commit: testCommit,
+    changed_files: ["src/domain/result.ts"],
+    execute_mission_path: `.founder/missions/${identity.work_item_id}/execute-1-1-0/mission.json`,
+    execute_evidence_path: `.founder/run-evidence/${identity.work_item_id}/execute-1-1-0/${"3".repeat(64)}`,
+    command_evidence: commandEvidence,
+  };
+  const paths = {
+    task_path: `.founder/missions/${identity.work_item_id}/review-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/TASK.md`,
+    output_path: `.founder/missions/${identity.work_item_id}/review-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/result.json`,
+    git_base_commit: subject.git_base_commit,
+  };
+  const mission = compileReviewMission({
+    work_item: workItem,
+    controller_run: {
+      schema_version: 1,
+      run_id: "77777777-7777-4777-8777-777777777777",
+      work_item_id: identity.work_item_id,
+      idempotency_key: `${identity.work_item_id}:review:1:1:0:mission`,
+      phase: "review",
+      goal_version: identity.goal_version,
+      input_revision: identity.input_revision,
+      attempt: identity.attempt,
+      started_at: "2026-07-21T20:59:00.000Z",
+      completed_at: "2026-07-21T20:59:01.000Z",
+      outcome: "applied",
+    },
+    review_subject: subject,
+    paths,
+    independence_attested: true,
+  });
+  const defaultResult: ReviewExternalResultSubmission = {
+    result_schema_version: 2,
+    review_mission_content_sha256: mission.content_sha256,
+    identity,
+    execute_mission_content_sha256:
+      subject.execute_mission_content_sha256,
+    execute_result_content_sha256: subject.execute_result_content_sha256,
+    git_base_commit: subject.git_base_commit,
+    accepted_result_commit: subject.accepted_result_commit,
+    summary: "Review found no blocking issues.",
+    verdict: "clean",
+    findings: [],
+  };
+  const resultSource =
+    options?.resultSource ??
+    serializeExternalResult(
+      options?.transformResult?.(defaultResult) ?? defaultResult,
+    );
+  const snapshot: MissionResultSnapshot = {
+    mission,
+    mission_path: paths.task_path.replace(/TASK\.md$/, "mission.json"),
+    result_path: paths.output_path,
+    result_source: resultSource,
+  };
+  const evidence = new Map<string, StoredImportEvidence>();
+  const evidenceWrites = { count: 0 };
+  const appliedSubject: AppliedExecuteReviewSubject = {
+    review_subject:
+      options?.transformCurrentSubject?.(subject) ?? subject,
+    submission_source: "{\"execute\":\"result\"}\n",
+    evidence: {
+      schema_version: 2,
+      phase: "execute",
+      import_run_id: "3".repeat(64),
+      result_content_sha256: subject.execute_result_content_sha256,
+      mission_content_sha256: subject.execute_mission_content_sha256,
+      identity: { ...identity, phase: "execute" },
+      git_base_commit: subject.git_base_commit,
+      result_commit: subject.accepted_result_commit,
+      controller_run_id: transitioned.manifest.run_id,
+      started_at: "2026-07-21T20:58:00.000Z",
+      completed_at: "2026-07-21T20:58:02.000Z",
+      outcome: "applied",
+      reasons: [],
+    },
+    verification: commandEvidence,
+  };
+  const repository = Object.assign(workspace, {
+    async readMissionResult() {
+      return snapshot;
+    },
+    async readAppliedExecuteReviewSubject() {
+      return appliedSubject;
+    },
+    async readImportEvidence(_identity: MissionIdentity, importRunId: string) {
+      return evidence.get(importRunId) ?? null;
+    },
+    async writeImportEvidence(input: ImportEvidenceWriteInput) {
+      evidenceWrites.count += 1;
+      const summary = importEvidenceSummarySchema.parse({
+        phase: input.evidence.phase,
+        import_run_id: input.evidence.import_run_id,
+        outcome: input.evidence.outcome,
+        evidence_path: `.founder/run-evidence/${identity.work_item_id}/review-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/${input.evidence.import_run_id}`,
+        reasons: input.evidence.reasons,
+      });
+      evidence.set(input.evidence.import_run_id, {
+        evidence: input.evidence,
+        summary,
+        verification: input.verification,
+      });
+      return summary;
+    },
+  }) as ImportTestRepository;
+
+  return {
+    repository,
+    workItem,
+    input: {
+      expected_phase: "review",
       expected_status: "active",
       expected_schema_version: 1,
       expected_goal_version: identity.goal_version,
@@ -813,6 +1014,232 @@ describe("WorkItemController", () => {
     expect(imported.evidence).toMatchObject({ outcome: "rejected" });
     expect(imported.evidence.reasons.join(" ")).toContain(testCase.reason);
     expect(commandRuns).toBe(0);
+  });
+
+  it("imports review findings once without commands or a work-item transition", async () => {
+    const fixture = await createReviewImportFixture({
+      transformResult: (result) => ({
+        ...result,
+        summary: "Review found one correctness issue.",
+        verdict: "findings",
+        findings: [
+          {
+            finding_id: "F-1",
+            severity: "P1",
+            title: "Preserve immutable evidence",
+            evidence: {
+              path: "src/application/work-item-controller.ts",
+              summary: "The rejected branch must not mutate controller state.",
+            },
+            required_action: "Keep rejected review imports evidence-only.",
+            link: {
+              type: "acceptance_criteria",
+              criterion: "Reject stale transitions",
+            },
+          },
+        ],
+      }),
+    });
+    const before = await fixture.repository.read(
+      fixture.workItem.goal.work_item_id,
+    );
+    let commandRuns = 0;
+    const runner: VerificationRunner = {
+      async run(command) {
+        commandRuns += 1;
+        return passingRunner.run(command);
+      },
+    };
+    const controller = createController(
+      fixture.repository,
+      passingGit,
+      runner,
+    );
+
+    const imported = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(imported.work_item).toEqual(before);
+    expect(await fixture.repository.read(fixture.workItem.goal.work_item_id))
+      .toEqual(before);
+    expect(imported).toMatchObject({
+      manifest: { phase: "review", outcome: "applied" },
+      evidence: { phase: "review", outcome: "applied" },
+      result: { verdict: "findings", findings: [{ finding_id: "F-1" }] },
+    });
+    expect([...fixture.evidence.values()][0].verification).toEqual([]);
+    expect(commandRuns).toBe(0);
+    expect(fixture.evidenceWrites.count).toBe(1);
+
+    const replay = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(replay).toEqual(imported);
+    expect(commandRuns).toBe(0);
+    expect(fixture.evidenceWrites.count).toBe(1);
+    expect(fixture.evidence.size).toBe(1);
+  });
+
+  it("preserves malformed review output as replayable rejected evidence only", async () => {
+    const fixture = await createReviewImportFixture({ resultSource: "{invalid" });
+    const before = await fixture.repository.read(
+      fixture.workItem.goal.work_item_id,
+    );
+    const runsDirectory = join(
+      fixture.repository.workspaceRoot,
+      ".founder",
+      "work-items",
+      fixture.workItem.goal.work_item_id,
+      "runs",
+    );
+    const runsBefore = await readdir(runsDirectory);
+    const controller = createController(fixture.repository);
+
+    const imported = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(imported).toMatchObject({
+      manifest: null,
+      evidence: {
+        phase: "review",
+        outcome: "rejected",
+        reasons: ["result.json is not valid JSON."],
+      },
+    });
+    expect(imported.result).toBeUndefined();
+    expect(imported.work_item).toEqual(before);
+    expect(await fixture.repository.read(fixture.workItem.goal.work_item_id))
+      .toEqual(before);
+    expect(await readdir(runsDirectory)).toEqual(runsBefore);
+
+    const replay = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(replay).toEqual(imported);
+    expect(fixture.evidenceWrites.count).toBe(1);
+    expect(
+      await readdir(
+        join(
+          fixture.repository.workspaceRoot,
+          ".founder",
+          "work-items",
+          fixture.workItem.goal.work_item_id,
+        ),
+      ),
+    ).not.toContain(".controller.lock");
+    expect(
+      (await fixture.repository.read(fixture.workItem.goal.work_item_id))?.state
+        .active_run,
+    ).toBeUndefined();
+  });
+
+  it("recovers an applied review import from evidence written before a failed commit", async () => {
+    const fixture = await createReviewImportFixture();
+    const commit = fixture.repository.commitControllerMutation.bind(
+      fixture.repository,
+    );
+    Object.assign(fixture.repository, {
+      async commitControllerMutation() {
+        throw new Error("simulated state-preserving commit failure");
+      },
+    });
+    const controller = createController(fixture.repository);
+
+    await expect(
+      controller.importReviewResult(
+        fixture.workItem.goal.work_item_id,
+        fixture.input,
+      ),
+    ).rejects.toThrow("simulated state-preserving commit failure");
+    expect(fixture.evidenceWrites.count).toBe(1);
+    expect([...fixture.evidence.values()][0]).toMatchObject({
+      evidence: { phase: "review", outcome: "applied" },
+      verification: [],
+    });
+    expect(
+      (await fixture.repository.read(fixture.workItem.goal.work_item_id))?.state
+        .active_run,
+    ).toBeUndefined();
+
+    Object.assign(fixture.repository, { commitControllerMutation: commit });
+    const recovered = await createController(
+      fixture.repository,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+    expect(recovered).toMatchObject({
+      manifest: { phase: "review", outcome: "applied" },
+      evidence: { phase: "review", outcome: "applied" },
+      result: { verdict: "clean", findings: [] },
+    });
+    expect(fixture.evidenceWrites.count).toBe(1);
+  });
+
+  it.each([
+    {
+      name: "a changed HEAD",
+      git: { ...passingGit, readHeadCommit: async () => "b".repeat(40) },
+      reason: "HEAD",
+    },
+    {
+      name: "a dirty worktree",
+      git: {
+        ...passingGit,
+        isWorktreeCleanExcludingFounder: async () => false,
+      },
+      reason: "uncommitted changes",
+    },
+  ])("rejects review import for $name without mutating state", async ({ git, reason }) => {
+    const fixture = await createReviewImportFixture();
+    const before = await fixture.repository.read(
+      fixture.workItem.goal.work_item_id,
+    );
+
+    const imported = await createController(
+      fixture.repository,
+      git,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.manifest).toBeNull();
+    expect(imported.evidence).toMatchObject({ outcome: "rejected" });
+    expect(imported.evidence.reasons.join(" ")).toContain(reason);
+    expect(imported.work_item).toEqual(before);
+    expect(await fixture.repository.read(fixture.workItem.goal.work_item_id))
+      .toEqual(before);
+  });
+
+  it.each([
+    {
+      name: "a mismatched review mission hash",
+      options: {
+        transformResult: (result: ReviewExternalResultSubmission) => ({
+          ...result,
+          review_mission_content_sha256: "f".repeat(64),
+        }),
+      },
+      reason: "mission hash",
+    },
+    {
+      name: "a stale execute subject",
+      options: {
+        transformCurrentSubject: (subject: ReviewSubject) => ({
+          ...subject,
+          accepted_result_commit: "b".repeat(40),
+        }),
+      },
+      reason: "stale",
+    },
+  ])("rejects review import for $name without a controller run", async ({ options, reason }) => {
+    const fixture = await createReviewImportFixture(options);
+    const imported = await createController(
+      fixture.repository,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.manifest).toBeNull();
+    expect(imported.evidence).toMatchObject({ outcome: "rejected" });
+    expect(imported.evidence.reasons.join(" ")).toContain(reason);
   });
 
   it("rejects repair attempts unless execute is blocked at the exact tuple", async () => {

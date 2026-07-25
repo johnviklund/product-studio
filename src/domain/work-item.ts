@@ -325,7 +325,7 @@ export interface ReviewWorkItemRepository extends WorkItemRepository {
   ): Promise<MissionArtifactWriteResult<ReviewMissionPackage>>;
 }
 
-export type ControllerWorkItemRepository = WorkItemRepository;
+export type ControllerWorkItemRepository = ReviewWorkItemRepository;
 
 export const workItemIdSchema = z
   .string()

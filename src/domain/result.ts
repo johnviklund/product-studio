@@ -136,6 +136,7 @@ export interface ExecuteImportEvidenceEnvelope
 
 export interface ReviewImportEvidenceEnvelope
   extends ImportEvidenceEnvelopeBase<"review"> {
+  outcome: "rejected" | "applied";
   result_commit: string;
 }
 
@@ -408,6 +409,7 @@ const reviewImportEvidenceEnvelopeSchema = z.strictObject({
   ...importEvidenceEnvelopeBaseShape,
   phase: z.literal("review"),
   identity: reviewMissionIdentitySchema,
+  outcome: z.enum(["rejected", "applied"]),
   result_commit: gitCommitSchema,
 });
 

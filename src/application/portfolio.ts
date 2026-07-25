@@ -88,6 +88,8 @@ type WorkspaceGateway = Pick<
   | "acquireControllerLease"
   | "readControllerRunManifest"
   | "findAppliedExecuteManifest"
+  | "readAppliedExecuteReviewSubject"
+  | "writeReviewMissionPackage"
   | "writeMissionPackage"
   | "readMissionResult"
   | "readImportEvidence"

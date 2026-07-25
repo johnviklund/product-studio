@@ -1,16 +1,19 @@
 import { createHash } from "node:crypto";
 
+import type { ReviewSubject } from "../domain/mission";
 import {
   commandEvidenceRecordSchema,
   createImportRunId,
   executeExternalResultSubmissionSchema,
   hashResultContent,
   importEvidenceEnvelopeSchema,
+  reviewExternalResultSubmissionSchema,
   type CommandEvidenceRecord,
   type ExecuteExternalResultSubmission,
   type ImportEvidenceOutcome,
   type ImportEvidenceSummary,
   type MissionResultSnapshot,
+  type ReviewExternalResultSubmission,
   type StoredImportEvidence,
 } from "../domain/result";
 import type {
@@ -22,6 +25,7 @@ import {
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   importExternalResultInputSchema,
+  importReviewResultInputSchema,
   retryExecuteAttemptInputSchema,
   saveWorkItemInputSchema,
   workItemIdSchema,
@@ -33,6 +37,7 @@ import {
   type ControllerTransitionInput,
   type ControllerWorkItemRepository,
   type ImportExternalResultInput,
+  type ImportReviewResultInput,
   type ProductManifest,
   type RetryExecuteAttemptInput,
   type SaveWorkItemInput,
@@ -55,11 +60,24 @@ export interface ImportExternalResultResult extends ControllerMutationResult {
   evidence: ImportEvidenceSummary;
 }
 
+export interface ImportReviewResultResult {
+  work_item: WorkItem;
+  manifest: ControllerRunManifest | null;
+  evidence: ImportEvidenceSummary;
+  result?: ReviewExternalResultSubmission;
+}
+
 interface ExternalResultAssessment {
   outcome: ImportEvidenceOutcome;
   reasons: string[];
   result?: ExecuteExternalResultSubmission;
   verification: CommandEvidenceRecord[];
+}
+
+interface ReviewResultAssessment {
+  outcome: "rejected" | "applied";
+  reasons: string[];
+  result?: ReviewExternalResultSubmission;
 }
 
 export function deriveControllerIdempotencyKey(
@@ -604,6 +622,161 @@ export class WorkItemController {
     }
   }
 
+  async importReviewResult(
+    workItemId: string,
+    input: ImportReviewResultInput,
+  ): Promise<ImportReviewResultResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = importReviewResultInputSchema.parse(input);
+    const repository = this.repository;
+    const identity = {
+      phase: "review" as const,
+      work_item_id: validatedId,
+      goal_version: validatedInput.expected_goal_version,
+      input_revision: validatedInput.expected_input_revision,
+      attempt: validatedInput.attempt,
+    };
+    const snapshot = await repository.readMissionResult(identity);
+    if (!("review_subject" in snapshot.mission)) {
+      throw this.conflict(
+        "mission_not_ready",
+        validatedId,
+        "Review result import requires an immutable review mission.",
+      );
+    }
+    const resultContentSha256 = hashResultContent(snapshot.result_source);
+    const importRunId = createImportRunId(
+      snapshot.mission.content_sha256,
+      resultContentSha256,
+    );
+    const idempotencyKey = [
+      deriveControllerIdempotencyKey(
+        validatedId,
+        "review",
+        identity.goal_version,
+        identity.input_revision,
+        identity.attempt,
+      ),
+      "import",
+      resultContentSha256,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "import_review_result", importRunId }),
+    );
+    const storedEvidence = await repository.readImportEvidence(
+      identity,
+      importRunId,
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await repository.acquireControllerLease(validatedId, activeRun);
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const existingManifest = await repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (storedEvidence !== null) {
+        return await this.reconcileStoredReviewImport(
+          repository,
+          lease,
+          existingManifest,
+          storedEvidence,
+          validatedInput,
+          activeRun,
+          idempotencyKey,
+          snapshot,
+        );
+      }
+      if (existingManifest !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Review import run ${runId} has a controller manifest but no immutable evidence.`,
+        );
+      }
+
+      this.validateReviewExpectation(
+        validatedId,
+        lease.work_item,
+        validatedInput,
+      );
+      const executeSubject = await repository.readAppliedExecuteReviewSubject({
+        ...identity,
+        phase: "execute",
+      });
+      const assessment = await this.assessReviewResult(
+        snapshot,
+        identity,
+        executeSubject.review_subject,
+      );
+      const completedAt = nextTimestamp(activeRun.acquired_at, this.clock);
+      const evidence = importEvidenceEnvelopeSchema.parse({
+        schema_version: 2,
+        phase: "review",
+        import_run_id: importRunId,
+        result_content_sha256: resultContentSha256,
+        mission_content_sha256: snapshot.mission.content_sha256,
+        identity,
+        git_base_commit: snapshot.mission.review_subject.git_base_commit,
+        result_commit:
+          snapshot.mission.review_subject.accepted_result_commit,
+        controller_run_id: runId,
+        started_at: activeRun.acquired_at,
+        completed_at: completedAt,
+        outcome: assessment.outcome,
+        reasons: assessment.reasons,
+      });
+      const evidenceSummary = await repository.writeImportEvidence({
+        submission_source: snapshot.result_source,
+        evidence,
+        verification: [],
+      });
+      if (assessment.outcome === "rejected") {
+        return {
+          work_item: lease.work_item,
+          manifest: null,
+          evidence: evidenceSummary,
+          ...(assessment.result === undefined
+            ? {}
+            : { result: assessment.result }),
+        };
+      }
+
+      const pendingManifest = this.pendingManifest(
+        {
+          work_item_id: validatedId,
+          run_id: runId,
+          idempotency_key: idempotencyKey,
+          phase: "review",
+          goal_version: identity.goal_version,
+          input_revision: identity.input_revision,
+          attempt: identity.attempt,
+        },
+        activeRun.acquired_at,
+      );
+      const mutation = await repository.commitControllerMutation(lease, {
+        goal: lease.work_item.goal,
+        state: lease.work_item.state,
+        manifest: pendingManifest,
+      });
+      return {
+        ...mutation,
+        evidence: evidenceSummary,
+        result: assessment.result,
+      };
+    } finally {
+      await repository.releaseControllerLease(lease);
+    }
+  }
+
   async retryExecuteAttempt(
     workItemId: string,
     input: RetryExecuteAttemptInput,
@@ -702,6 +875,87 @@ export class WorkItemController {
     } finally {
       await this.repository.releaseControllerLease(lease);
     }
+  }
+
+  private async assessReviewResult(
+    snapshot: MissionResultSnapshot,
+    identity: ReviewExternalResultSubmission["identity"],
+    currentSubject: ReviewSubject,
+  ): Promise<ReviewResultAssessment> {
+    const mission = snapshot.mission;
+    if (!("review_subject" in mission)) {
+      return {
+        outcome: "rejected",
+        reasons: ["Mission snapshot is not a review mission."],
+      };
+    }
+
+    const reasons: string[] = [];
+    if (JSON.stringify(mission.identity) !== JSON.stringify(identity)) {
+      reasons.push("Review mission identity does not match the requested governed tuple.");
+    }
+    if (mission.result_contract.output_path !== snapshot.result_path) {
+      reasons.push("Review result path does not match the immutable snapshot path.");
+    }
+    if (
+      JSON.stringify(mission.review_subject) !== JSON.stringify(currentSubject)
+    ) {
+      reasons.push("Review mission subject is stale or does not match applied execute evidence.");
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(snapshot.result_source);
+    } catch {
+      return {
+        outcome: "rejected",
+        reasons: [...reasons, "result.json is not valid JSON."],
+      };
+    }
+    const parsedResult = reviewExternalResultSubmissionSchema.safeParse(parsedJson);
+    if (!parsedResult.success) {
+      return {
+        outcome: "rejected",
+        reasons: [
+          ...reasons,
+          ...parsedResult.error.issues.map(
+            (issue) =>
+              `result.json ${issue.path.map(String).join(".") || "value"}: ${issue.message}`,
+          ),
+        ],
+      };
+    }
+
+    const result = parsedResult.data;
+    if (result.review_mission_content_sha256 !== mission.content_sha256) {
+      reasons.push("Review result mission hash does not match the immutable review mission.");
+    }
+    if (JSON.stringify(result.identity) !== JSON.stringify(identity)) {
+      reasons.push("Review result identity does not match the requested governed tuple.");
+    }
+    const subjectBindings = {
+      execute_mission_content_sha256:
+        mission.review_subject.execute_mission_content_sha256,
+      execute_result_content_sha256:
+        mission.review_subject.execute_result_content_sha256,
+      git_base_commit: mission.review_subject.git_base_commit,
+      accepted_result_commit: mission.review_subject.accepted_result_commit,
+    };
+    for (const [field, expected] of Object.entries(subjectBindings)) {
+      if (result[field as keyof typeof subjectBindings] !== expected) {
+        reasons.push(`Review result ${field} does not match the immutable subject.`);
+      }
+    }
+    if ((await this.git.readHeadCommit()) !== currentSubject.accepted_result_commit) {
+      reasons.push("Workspace HEAD no longer equals the accepted execute commit.");
+    }
+    if (!(await this.git.isWorktreeCleanExcludingFounder())) {
+      reasons.push("Workspace has uncommitted changes outside .founder/.");
+    }
+
+    return reasons.length === 0
+      ? { outcome: "applied", reasons: [], result }
+      : { outcome: "rejected", reasons, result };
   }
 
   private async assessExternalResult(
@@ -869,6 +1123,138 @@ export class WorkItemController {
     return [];
   }
 
+  private async reconcileStoredReviewImport(
+    repository: ControllerWorkItemRepository,
+    lease: ControllerLease,
+    existingManifest: ControllerRunManifest | null,
+    stored: StoredImportEvidence,
+    input: ImportReviewResultInput,
+    activeRun: ActiveRun,
+    idempotencyKey: string,
+    snapshot: MissionResultSnapshot,
+  ): Promise<ImportReviewResultResult> {
+    const workItemId = lease.work_item.goal.work_item_id;
+    const identity = {
+      phase: "review" as const,
+      work_item_id: workItemId,
+      goal_version: input.expected_goal_version,
+      input_revision: input.expected_input_revision,
+      attempt: input.attempt,
+    };
+    if (!("review_subject" in snapshot.mission)) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Stored review evidence is not backed by a review mission snapshot.",
+      );
+    }
+    if (
+      stored.evidence.phase !== "review" ||
+      stored.evidence.controller_run_id !== activeRun.run_id ||
+      JSON.stringify(stored.evidence.identity) !== JSON.stringify(identity) ||
+      stored.evidence.mission_content_sha256 !==
+        snapshot.mission.content_sha256 ||
+      stored.evidence.result_content_sha256 !==
+        hashResultContent(snapshot.result_source) ||
+      stored.evidence.git_base_commit !==
+        snapshot.mission.review_subject.git_base_commit ||
+      stored.evidence.result_commit !==
+        snapshot.mission.review_subject.accepted_result_commit ||
+      stored.summary.import_run_id !== stored.evidence.import_run_id ||
+      stored.summary.phase !== "review" ||
+      stored.summary.outcome !== stored.evidence.outcome ||
+      JSON.stringify(stored.summary.reasons) !==
+        JSON.stringify(stored.evidence.reasons) ||
+      stored.verification.length !== 0
+    ) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Stored review import evidence does not match its controller run or summary.",
+      );
+    }
+    this.validateReviewExpectation(workItemId, lease.work_item, input);
+
+    let result: ReviewExternalResultSubmission | undefined;
+    try {
+      const parsed = reviewExternalResultSubmissionSchema.safeParse(
+        JSON.parse(snapshot.result_source),
+      );
+      result = parsed.success ? parsed.data : undefined;
+    } catch {
+      result = undefined;
+    }
+
+    if (stored.evidence.outcome === "rejected") {
+      if (existingManifest !== null) {
+        throw this.conflict(
+          "idempotency_conflict",
+          workItemId,
+          `Rejected review run ${activeRun.run_id} must not have a controller manifest.`,
+        );
+      }
+      return {
+        work_item: lease.work_item,
+        manifest: null,
+        evidence: stored.summary,
+        ...(result === undefined ? {} : { result }),
+      };
+    }
+
+    const manifestIdentity = {
+      work_item_id: workItemId,
+      run_id: activeRun.run_id,
+      idempotency_key: idempotencyKey,
+      phase: "review" as const,
+      goal_version: input.expected_goal_version,
+      input_revision: input.expected_input_revision,
+      attempt: input.attempt,
+    };
+    if (existingManifest !== null) {
+      if (manifestMatches(existingManifest, manifestIdentity)) {
+        return {
+          work_item: lease.work_item,
+          manifest: existingManifest,
+          evidence: stored.summary,
+          ...(result === undefined ? {} : { result }),
+        };
+      }
+      throw this.conflict(
+        "idempotency_conflict",
+        workItemId,
+        `Review run ${activeRun.run_id} already has a non-matching durable result.`,
+      );
+    }
+
+    const executeSubject = await repository.readAppliedExecuteReviewSubject({
+      ...identity,
+      phase: "execute",
+    });
+    const assessment = await this.assessReviewResult(
+      snapshot,
+      identity,
+      executeSubject.review_subject,
+    );
+    if (assessment.outcome !== "applied") {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        "Applied review evidence no longer validates for state-preserving recovery.",
+      );
+    }
+
+    const mutation = await repository.commitControllerMutation(lease, {
+      goal: lease.work_item.goal,
+      state: lease.work_item.state,
+      manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
+    });
+    return {
+      ...mutation,
+      evidence: stored.summary,
+      result: assessment.result,
+    };
+  }
+
   private async reconcileStoredImport(
     repository: ControllerWorkItemRepository,
     lease: ControllerLease,
@@ -1002,6 +1388,40 @@ export class WorkItemController {
         "stale_expectation",
         workItemId,
         "External result expectations do not match durable state.",
+      );
+    }
+    if (current.state.attempt !== input.attempt) {
+      throw this.conflict(
+        "attempt_conflict",
+        workItemId,
+        `Expected attempt ${input.attempt} but found ${current.state.attempt}.`,
+      );
+    }
+  }
+
+  private validateReviewExpectation(
+    workItemId: string,
+    current: WorkItem,
+    input: ImportReviewResultInput,
+  ): void {
+    if (current.goal.goal_contract === undefined) {
+      throw this.conflict(
+        "contract_required",
+        workItemId,
+        "Review result import requires an active goal contract.",
+      );
+    }
+    if (
+      current.state.phase !== input.expected_phase ||
+      current.state.status !== input.expected_status ||
+      current.state.schema_version !== input.expected_schema_version ||
+      current.state.goal_version !== input.expected_goal_version ||
+      current.state.input_revision !== input.expected_input_revision
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Review result expectations do not match durable state.",
       );
     }
     if (current.state.attempt !== input.attempt) {
