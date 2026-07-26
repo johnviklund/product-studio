@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  MISSION_SCHEMA_VERSION,
   reviewSubjectSchema,
   type MissionIdentity,
   type ReviewSubject,
@@ -2404,7 +2405,9 @@ export class WorkItemController {
     snapshot: MissionResultSnapshot,
     workItemId: string,
   ): asserts snapshot is ActiveMissionResultSnapshot {
-    if (snapshot.mission.mission_schema_version !== 4) {
+    if (
+      snapshot.mission.mission_schema_version !== MISSION_SCHEMA_VERSION
+    ) {
       throw this.conflict(
         "mission_not_ready",
         workItemId,

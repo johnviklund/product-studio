@@ -35,6 +35,7 @@ import {
   portfolioWorkItemSchema,
 } from "../domain/portfolio";
 import {
+  MISSION_SCHEMA_VERSION,
   compileMission as compileMissionPackage,
   compilePatchMission as compilePatchMissionPackage,
   compileReviewMission as compileReviewMissionPackage,
@@ -1403,7 +1404,7 @@ export class PortfolioService {
       reviewPatchCycle === 0 ? undefined : reviewPatchCycle,
     );
     if (
-      snapshot.mission.mission_schema_version !== 4 ||
+      snapshot.mission.mission_schema_version !== MISSION_SCHEMA_VERSION ||
       !("review_subject" in snapshot.mission)
     ) {
       throw this.missionNotReady(

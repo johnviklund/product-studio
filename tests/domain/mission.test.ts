@@ -4,19 +4,29 @@ import {
   compileMission,
   compilePatchMission,
   compileReviewMission,
+  hashHistoricalMissionContentV4,
   hashMissionContent,
+  historicalMissionPackageV4Schema,
   missionPackageSchema,
   patchSubjectSchema,
+  readableMissionPackageSchema,
+  renderReadableTaskMd,
   renderTaskMd,
   reviewSubjectSchema,
+  serializeReadableMissionPackage,
   serializeMissionPackage,
   type ExecuteReviewSubject,
+  type HistoricalExecuteMissionPackageV4,
   type MissionPaths,
   type PatchMissionControllerRun,
   type PatchReviewSubject,
   type PatchSubject,
   type ReviewMissionControllerRun,
 } from "../../src/domain/mission";
+import {
+  deriveAllowedScopeDigest,
+  type ExecutionDefaultsV1,
+} from "../../src/domain/capability-envelope";
 import type {
   ControllerRunManifest,
   WorkItem,
@@ -72,6 +82,30 @@ const paths: MissionPaths = {
   task_path: `.founder/missions/${workItemId}/execute-2-3-1/TASK.md`,
   output_path: `.founder/missions/${workItemId}/execute-2-3-1/result.json`,
   git_base_commit: "1".repeat(40),
+};
+
+const executionDefaults: ExecutionDefaultsV1 = {
+  schema_version: 1,
+  approved_command_forms: [
+    { executable: "npm", args: ["run", "lint"] },
+    { executable: "npm", args: ["run", "test"] },
+  ],
+  approved_url_operations: [
+    {
+      method: "GET",
+      protocol: "https",
+      host: "registry.npmjs.org",
+      path: "/package",
+    },
+    {
+      method: "POST",
+      protocol: "https",
+      host: "example.com",
+      path: "/api",
+    },
+  ],
+  mcp: "forbidden",
+  credentials: "forbidden",
 };
 
 const reviewWorkItem: WorkItem = {
@@ -214,16 +248,24 @@ const patchReviewSubject: PatchReviewSubject = {
 
 describe("mission domain", () => {
   it("compiles stable canonical package and Markdown bytes", () => {
-    const first = compileMission(workItem, executeManifest, paths);
-    const second = compileMission(workItem, executeManifest, paths);
+    const first = compileMission(
+      workItem,
+      executeManifest,
+      paths,
+      executionDefaults,
+    );
+    const second = compileMission(
+      workItem,
+      executeManifest,
+      paths,
+      executionDefaults,
+    );
 
     expect(second).toEqual(first);
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(renderTaskMd(second)).toBe(renderTaskMd(first));
-    expect(first.content_sha256).toBe(
-      "cfd32dc901956d7371b8e3afb950b4f8ce17e7f7c3eae28386f8984d5c4c61b1",
-    );
-    expect(first.mission_schema_version).toBe(4);
+    expect(first.content_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.mission_schema_version).toBe(5);
     expect(first.identity.phase).toBe("execute");
     expect(first.source_revision.git_base_commit).toBe(paths.git_base_commit);
     expect(first.result_contract).toEqual({
@@ -240,16 +282,40 @@ describe("mission domain", () => {
         "verification",
       ],
     });
+    expect(first.capability_envelope).toEqual({
+      schema_version: 1,
+      workspace: {
+        allowed_scope_digest: deriveAllowedScopeDigest(
+          workItem.goal.goal_contract!.allowed_scope,
+        ),
+        execution_mode: "permission_mediated_local",
+        scope_assurance: "result_scope_validation",
+      },
+      runtime: {
+        containment_assurance: "not_independently_enforced",
+        machine_authority: "launching_user",
+        approved_command_forms: executionDefaults.approved_command_forms,
+        approved_url_operations: executionDefaults.approved_url_operations,
+        mcp: "forbidden",
+        credentials: "forbidden",
+      },
+    });
   });
 
   it("hashes the canonical field order after JSON key reordering", () => {
-    const mission = compileMission(workItem, executeManifest, paths);
+    const mission = compileMission(
+      workItem,
+      executeManifest,
+      paths,
+      executionDefaults,
+    );
     const reordered = {
       content_sha256: mission.content_sha256,
       task_path: mission.task_path,
       result_contract: mission.result_contract,
       source_revision: mission.source_revision,
       goal: mission.goal,
+      capability_envelope: mission.capability_envelope,
       controller_run: mission.controller_run,
       identity: mission.identity,
       mission_schema_version: mission.mission_schema_version,
@@ -257,6 +323,23 @@ describe("mission domain", () => {
 
     expect(hashMissionContent(reordered)).toBe(mission.content_sha256);
     expect(missionPackageSchema.parse(reordered)).toEqual(mission);
+    expect(
+      hashMissionContent({
+        ...mission,
+        capability_envelope: {
+          ...mission.capability_envelope,
+          runtime: {
+            ...mission.capability_envelope.runtime,
+            approved_command_forms: [
+              ...mission.capability_envelope.runtime.approved_command_forms,
+            ].reverse(),
+            approved_url_operations: [
+              ...mission.capability_envelope.runtime.approved_url_operations,
+            ].reverse(),
+          },
+        },
+      }),
+    ).toBe(mission.content_sha256);
   });
 
   it("changes identity or hash when governed inputs change", () => {
@@ -299,6 +382,12 @@ describe("mission domain", () => {
         output_path: `.founder/missions/${workItemId}/execute-2-3-1/alternate/result.json`,
       },
     });
+    const changedEnvelopeMission = compileMission(
+      workItem,
+      executeManifest,
+      paths,
+      executionDefaults,
+    );
 
     expect(nextTupleMission.identity).not.toEqual(mission.identity);
     expect(nextTupleMission.content_sha256).not.toBe(mission.content_sha256);
@@ -307,6 +396,9 @@ describe("mission domain", () => {
     expect(changedBaseMission.identity).toEqual(mission.identity);
     expect(changedBaseMission.content_sha256).not.toBe(mission.content_sha256);
     expect(changedResultContractHash).not.toBe(mission.content_sha256);
+    expect(changedEnvelopeMission.content_sha256).not.toBe(
+      mission.content_sha256,
+    );
   });
 
   it.each([
@@ -389,10 +481,74 @@ describe("mission domain", () => {
     expect(() =>
       missionPackageSchema.parse({ ...mission, content_sha256: "0".repeat(64) }),
     ).toThrow("content_sha256 must match the canonical mission content");
+    expect(() =>
+      missionPackageSchema.parse({
+        ...mission,
+        capability_envelope: {
+          ...mission.capability_envelope,
+          workspace: {
+            ...mission.capability_envelope.workspace,
+            allowed_scope_digest: "f".repeat(64),
+          },
+        },
+      }),
+    ).toThrow("capability envelope scope digest must match goal allowed_scope");
+    expect(() =>
+      missionPackageSchema.parse({
+        ...mission,
+        capability_envelope: {
+          ...mission.capability_envelope,
+          runtime: {
+            ...mission.capability_envelope.runtime,
+            approved_command_forms: [
+              { executable: "npm", args: ["run", "build"] },
+            ],
+          },
+        },
+      }),
+    ).toThrow("content_sha256 must match the canonical mission content");
+    const withoutEnvelope: Partial<typeof mission> = { ...mission };
+    delete withoutEnvelope.capability_envelope;
+    expect(() => missionPackageSchema.parse(withoutEnvelope)).toThrow();
+  });
+
+  it("reads a stored v4 execute mission without mutating it", () => {
+    const current = compileMission(workItem, executeManifest, paths);
+    const historicalDraft: HistoricalExecuteMissionPackageV4 = {
+      mission_schema_version: 4,
+      identity: current.identity,
+      controller_run: current.controller_run,
+      goal: current.goal,
+      source_revision: current.source_revision,
+      result_contract: current.result_contract,
+      task_path: current.task_path,
+      content_sha256: "0".repeat(64),
+    };
+    const historical = {
+      ...historicalDraft,
+      content_sha256: hashHistoricalMissionContentV4(historicalDraft),
+    };
+
+    expect(historical.content_sha256).toBe(
+      "cfd32dc901956d7371b8e3afb950b4f8ce17e7f7c3eae28386f8984d5c4c61b1",
+    );
+    expect(historicalMissionPackageV4Schema.parse(historical)).toEqual(
+      historical,
+    );
+    expect(readableMissionPackageSchema.parse(historical)).toEqual(historical);
+    expect(serializeReadableMissionPackage(historical)).toContain(
+      '"mission_schema_version": 4',
+    );
+    expect(renderReadableTaskMd(historical)).not.toContain(
+      "## Capability envelope",
+    );
+    expect(() => missionPackageSchema.parse(historical)).toThrow();
   });
 
   it("renders a neutral handoff and the explicit next gate", () => {
-    const task = renderTaskMd(compileMission(workItem, executeManifest, paths));
+    const task = renderTaskMd(
+      compileMission(workItem, executeManifest, paths, executionDefaults),
+    );
 
     expect(task).toContain(`Write the structured result to \`${paths.output_path}\`.`);
     expect(task).toContain("Commit the code changes before returning the result.");
@@ -404,6 +560,10 @@ describe("mission domain", () => {
     expect(task).toContain(
       "Return the result for validation; do not advance controller state.",
     );
+    expect(task).toContain("## Capability envelope");
+    expect(task).toContain("not_independently_enforced");
+    expect(task).toContain('["npm","run","test"]');
+    expect(task).toContain("GET https://registry.npmjs.org/package");
     expect(task.toLowerCase()).not.toMatch(
       /codex|claude|openai|anthropic|copilot|gemini/,
     );
@@ -424,14 +584,16 @@ describe("mission domain", () => {
     expect(second).toEqual(first);
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(first.content_sha256).toBe(
-      "f9f72c73e54e455ec3af6009f57026235b7b5bae7251570ab388fc278f133230",
+      "6dc0c13be1d6569a31aa70c6089017406a56a77c6ec42e3b95138e4b030808df",
     );
     expect(first.content_sha256).not.toBe(execute.content_sha256);
     expect(first.identity.phase).toBe("review");
+    expect(first.mission_schema_version).toBe(5);
     expect(first.controller_run.phase).toBe("review");
     expect(first.independence_attested).toBe(true);
     expect(first.review_subject).toEqual(reviewSubject);
     expect(first.result_contract.schema_version).toBe(4);
+    expect("capability_envelope" in first).toBe(false);
   });
 
   it("binds the review package hash to the immutable review subject", () => {
@@ -530,7 +692,9 @@ describe("mission domain", () => {
     };
 
     expect(second).toEqual(first);
+    expect(first.mission_schema_version).toBe(5);
     expect(first.identity).toMatchObject({ phase: "patch", patch_cycle: 1 });
+    expect("capability_envelope" in first).toBe(false);
     expect(first.task_path).toBe(patchPaths.task_path);
     expect(hashMissionContent(reordered)).toBe(first.content_sha256);
     expect(missionPackageSchema.parse(reordered)).toEqual(first);

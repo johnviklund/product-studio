@@ -10,6 +10,7 @@ import {
   deriveControllerIdempotencyKey,
 } from "../../src/application/work-item-controller";
 import {
+  MISSION_SCHEMA_VERSION,
   compileMission,
   compilePatchMission,
   compileReviewMission,
@@ -607,7 +608,8 @@ async function createPatchImportFixture(options?: {
   if (
     reviewResult.verdict !== "findings" ||
     reviewResult.findings.length === 0 ||
-    reviewFixture.snapshot.mission.mission_schema_version !== 4 ||
+    reviewFixture.snapshot.mission.mission_schema_version !==
+      MISSION_SCHEMA_VERSION ||
     !("review_subject" in reviewFixture.snapshot.mission)
   ) {
     throw new Error("Patch fixture requires an applied review with findings.");
