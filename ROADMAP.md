@@ -153,6 +153,16 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Traceability:** PRD §11, §12, §9.7, FR-011/012.
 - **Dependencies:** 2.3–2.4 and 3.1.
 - **Completion signal:** A real feature reaches review-ready, blocked, budget, or cycle-limit status without silent looping, repeated ambiguous retries, or lost contract context.
+- **Status:** Delivered — commits `84c939a`–`22d8b36` (state v2 contract with governed
+  `patch_cycle` and discriminated `attention`; `patch` mission/result contracts and a
+  `ReviewSubject` execute|patch union with canonical finding-resolution coverage; controller
+  `acceptPatchPlan`/`importPatchResult` and deterministic review-result routing bounded at three
+  cycles; durable patch workspace, cache projection, source-qualified API routes; board patch
+  handoff/attention projection folded into the Review column; DetailPanel patch-plan/escalation/
+  review-ready controls; the cross-project attention inbox page). Deterministic verification is
+  green: lint, typecheck, 301 tests, and production build. Phase 4 review passed clean — ship
+  as-is, one deferred P3 (`ambiguous_goal`/`missing_permission` attention kinds are schema-defined
+  but never produced this slice; tracked in `TODO.md`); see `WORKLOG.md`.
 
 ### 3.3 Learning, skill, and evaluation proposals
 

@@ -8,14 +8,23 @@ delivery phases.
 
 ## Deferred Initiatives
 
-### Add an Inbox page for review and approvals
+### Wire the `ambiguous_goal` and `missing_permission` attention decisions
 
-- **Status:** Revisit after the Kanban view and full workflow cycle work end to end.
-- **Idea:** Add an inbox-style, cross-project review page inspired by T3 Code. It should let the
-  founder quickly scan items needing attention, open the relevant update, and approve or choose
-  the next step without using the Kanban view.
-- **Boundary:** This is an alternate view over Product Studio's existing workflow state and
-  evidence, not a replacement for the Kanban or a second workflow.
+- **Status:** Deferred — needs new contract fields, out of ROADMAP 3.2's scope.
+- **Idea:** ROADMAP 3.2 (bounded patch loop and attention inbox) defines all 7 attention decision
+  kinds in the schema (`work-item.ts`) and wires all 7 into the board projection switch
+  (`board.ts`), but only 5 are ever produced: `spec_approval`/`plan_approval` (phase-derived) and
+  `review_ready`/`unresolved_finding`/`cycle_limit`/`patch_plan_approval` (controller-routed).
+  `ambiguous_goal` and `missing_permission` have no producer — no result or import contract
+  carries a "missing required clarification" or "durable permission/harness reason" signal, so a
+  genuinely ambiguous goal or missing-permission precondition currently surfaces as a generic
+  rejected-import error instead of its dedicated, human-answerable inbox row (Phase 4 review,
+  2026-07-25, P3, disposition: defer).
+- **Boundary:** Wiring `ambiguous_goal` needs a new result-contract field for an agent to report
+  required clarification; wiring `missing_permission` needs a compile/import precondition that
+  reports a durable permission/harness reason — the latter brushes ROADMAP 3.2's explicit
+  non-goal (no managed runner or harness launcher). Scope narrowly when picked up; don't fold in
+  the broader non-goals.
 
 ### Enforce writer/reviewer model independence for review missions
 
@@ -77,3 +86,11 @@ Build a local web-based Kanban interface that coordinates **Codex CLI**, **Claud
 ### Price per task metric
 
 - The main metric that matters is price per task completion. Second is speed to task completion.
+
+## Archived
+
+### Add an Inbox page for review and approvals
+
+- **Status:** Delivered — superseded by ROADMAP 3.2 (commits `84c939a`–`22d8b36`). The
+  cross-project attention inbox (`app/inbox/page.tsx`, `listAttention()`) ships this as an
+  alternate view over durable workflow state/evidence, per the original boundary.

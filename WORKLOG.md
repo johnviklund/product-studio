@@ -5,6 +5,36 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-25 · Bounded patch loop and attention inbox (roadmap 3.2) · Copilot/Codex mixed
+- Cut a clean state-v2 contract: required non-negative `patch_cycle` on governed items plus a
+  discriminated `attention` record (7 kinds) pinning the current human decision's paths/commit/
+  hashes; agent-reported cost/model fields are schema-rejected. v1 durable state upgrades on
+  read (`patch_cycle: 0`); no write-time compat shim.
+  Added `patch` to `MISSION_PHASES`/`WORK_ITEM_PHASES` with a `PatchMissionPackage` and a
+  `ReviewSubject` execute|patch union; patch-subject re-reviews carry a canonical
+  `finding_id → resolved|unresolved` resolution list that rejects unknown/missing/duplicate/
+  reordered IDs.
+- Added controller `acceptPatchPlan`/`importPatchResult` with the same lease/evidence-before-
+  mutation/idempotent-replay shape as execute import, and extended review-result assessment to
+  route deterministically: clean → `review_ready` (never completed); any unresolved assigned
+  finding → immediate escalation; new findings → next bounded patch while `patch_cycle < 3`;
+  a 4th cycle fails closed independently in both the router and `acceptPatchPlan`. A red patch
+  import never consumes a cycle.
+- Wired durable patch workspace/evidence dirs, a rebuildable cache projection (schema v5→v6),
+  source-qualified patch/attention API routes, a patch handoff/attention board projection that
+  folds `patch` into the existing Review column (no new column), DetailPanel patch-plan/
+  escalation/review-ready controls, and a new cross-project attention inbox page
+  (`app/inbox/page.tsx`) reachable from a real accessible nav link.
+- Verified: lint, typecheck, 301 tests, and production build pass. Phase 4 review (Claude Opus
+  4.8, cross-vendor) traced the cycle gate, evidence-before-mutation, and resolution-coverage
+  guarantees against real code and found no P0–P2; one deferred P3 (`ambiguous_goal`/
+  `missing_permission` attention kinds are wired but never produced this slice — no contract
+  carries the trigger signal; tracked in `TODO.md`).
+- Commits: 84c939a 0f1beb8 f17bd32 8172c98 426e13f bd09710 d6ce0e2 537e19a 30043d8 f7d6152 9ee41e3 22d8b36
+- Why: delivers roadmap 3.2's bounded repair loop and the attention inbox together — the loop's
+  real durable decisions (patch-plan approval, escalation, review-ready) now have both a
+  three-cycle-bounded enforcement path and a dedicated cross-project surface to act on them.
+
 ## 2026-07-25 · Independent review mission and finding contract (roadmap 3.1) · Copilot/Codex mixed
 - Added a phase-qualified v3 mission/result contract (`MissionPhase = "execute" | "review"`),
   advancing mission/result-contract to v3 and submission/evidence to v2 in lockstep; phase-prefixed
