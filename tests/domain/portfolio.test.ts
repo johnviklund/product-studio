@@ -26,7 +26,7 @@ const workItem = {
     type: "Feature" as const,
   },
   state: {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     work_item_id: "wi_550e8400-e29b-41d4-a716-446655440000",
     phase: "brainstorm" as const,
     status: "active" as const,

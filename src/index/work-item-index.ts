@@ -9,7 +9,7 @@ import {
   type PortfolioWorkItemIndex,
 } from "../domain/portfolio";
 
-const PORTFOLIO_CACHE_SCHEMA_VERSION = 5;
+const PORTFOLIO_CACHE_SCHEMA_VERSION = 6;
 
 const PORTFOLIO_SCHEMA = `
   CREATE TABLE IF NOT EXISTS portfolio_work_items (
@@ -39,6 +39,8 @@ const PORTFOLIO_SCHEMA = `
     state_goal_version INTEGER,
     input_revision INTEGER,
     attempt INTEGER,
+    patch_cycle INTEGER,
+    attention TEXT,
     active_run TEXT,
     PRIMARY KEY (source_id, work_item_id)
   )
@@ -71,6 +73,8 @@ interface PortfolioWorkItemRow {
   state_goal_version: number | null;
   input_revision: number | null;
   attempt: number | null;
+  patch_cycle: number | null;
+  attention: string | null;
   active_run: string | null;
 }
 
@@ -125,6 +129,8 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         state_goal_version,
         input_revision,
         attempt,
+        patch_cycle,
+        attention,
         active_run
       ) VALUES (
         @source_id,
@@ -153,6 +159,8 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         @state_goal_version,
         @input_revision,
         @attempt,
+        @patch_cycle,
+        @attention,
         @active_run
       )
     `);
@@ -206,6 +214,11 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             state_goal_version: item.work_item.state.goal_version ?? null,
             input_revision: item.work_item.state.input_revision ?? null,
             attempt: item.work_item.state.attempt ?? null,
+            patch_cycle: item.work_item.state.patch_cycle ?? null,
+            attention:
+              item.work_item.state.attention === undefined
+                ? null
+                : JSON.stringify(item.work_item.state.attention),
             active_run:
               item.work_item.state.active_run === undefined
                 ? null
@@ -254,6 +267,8 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
             state_goal_version,
             input_revision,
             attempt,
+            patch_cycle,
+            attention,
             active_run
           FROM portfolio_work_items
           ORDER BY updated_at DESC, source_id ASC, work_item_id ASC
@@ -318,7 +333,7 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
               : { goal_contract: goalContract }),
           },
           state: {
-            schema_version: 1,
+            schema_version: 2,
             work_item_id: row.work_item_id,
             phase: row.phase,
             status: row.status,
@@ -330,6 +345,12 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
               ? {}
               : { input_revision: row.input_revision }),
             ...(row.attempt === null ? {} : { attempt: row.attempt }),
+            ...(row.patch_cycle === null
+              ? {}
+              : { patch_cycle: row.patch_cycle }),
+            ...(row.attention === null
+              ? {}
+              : { attention: JSON.parse(row.attention) }),
             ...(row.active_run === null
               ? {}
               : { active_run: JSON.parse(row.active_run) }),

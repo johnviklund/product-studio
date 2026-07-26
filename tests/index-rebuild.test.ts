@@ -158,6 +158,27 @@ describe("SQLitePortfolioIndex", () => {
         input_revision: 3,
         attempt: 1,
         patch_cycle: 0,
+        attention: {
+          kind: "plan_approval",
+          question:
+            "Does the current goal contract and allowed scope authorize execution?",
+          recommendation:
+            "Open the item and approve its existing transition to Execute.",
+          created_at: "2026-07-21T21:00:00.000Z",
+          governed_tuple: {
+            goal_version: 2,
+            input_revision: 3,
+            attempt: 1,
+            patch_cycle: 0,
+          },
+          pins: {
+            artifact_paths: [
+              ".founder/work-items/wi_ffffffff-ffff-4fff-afff-ffffffffffff/goal.yaml",
+              ".founder/work-items/wi_ffffffff-ffff-4fff-afff-ffffffffffff/state.json",
+            ],
+            evidence_paths: [],
+          },
+        },
         active_run: {
           run_id: "550e8400-e29b-41d4-a716-446655440000",
           idempotency_key:
@@ -186,7 +207,7 @@ describe("SQLitePortfolioIndex", () => {
     index.close();
   });
 
-  it("drops and recreates a v3 cache instead of migrating its rows", async () => {
+  it("drops and recreates a stale v5 cache instead of migrating its rows", async () => {
     const databasePath = await createDatabasePath();
     const oldDatabase = new Database(databasePath);
     oldDatabase.exec(`
@@ -210,7 +231,7 @@ describe("SQLitePortfolioIndex", () => {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (source_id, work_item_id)
       );
-      PRAGMA user_version = 3;
+      PRAGMA user_version = 5;
     `);
     oldDatabase.close();
 
@@ -219,7 +240,7 @@ describe("SQLitePortfolioIndex", () => {
     index.close();
 
     const inspected = new Database(databasePath, { readonly: true });
-    expect(inspected.pragma("user_version", { simple: true })).toBe(5);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(6);
     expect(
       inspected
         .prepare(
@@ -259,6 +280,8 @@ describe("SQLitePortfolioIndex", () => {
         "state_goal_version",
         "input_revision",
         "attempt",
+        "patch_cycle",
+        "attention",
         "active_run",
       ]),
     );
