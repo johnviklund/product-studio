@@ -372,6 +372,41 @@ describe("connected-run workspace storage", () => {
     ).toBe("");
   });
 
+  it("terminalizes a run exactly once and releases its launch guard", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    await workspace.createConnectedRun(connectedRun(firstRunId));
+    const terminal = {
+      outcome: "failed" as const,
+      partial: true,
+      reason: "The connected runtime failed before completion.",
+    };
+
+    const completed = await workspace.completeConnectedRun(
+      workItemId,
+      firstRunId,
+      terminal,
+    );
+    expect(completed.lifecycle).toMatchObject({
+      status: "terminal",
+      terminal,
+    });
+    await expect(
+      workspace.completeConnectedRun(workItemId, firstRunId, terminal),
+    ).resolves.toEqual(completed);
+    await expect(
+      workspace.completeConnectedRun(workItemId, firstRunId, {
+        outcome: "cancelled",
+        partial: true,
+        reason: "A different terminal outcome.",
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict", workItemId });
+
+    await expect(
+      workspace.createConnectedRun(connectedRun(secondRunId)),
+    ).resolves.toMatchObject({ created: true });
+  });
+
   it("marks an unpublished partial launch interrupted and never completed", async () => {
     const root = await createWorkspace();
     const workspace = new ProductWorkspace(root, {

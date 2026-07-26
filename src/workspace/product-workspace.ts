@@ -101,6 +101,8 @@ import {
 import {
   connectedRunProcessIdentitySchema,
   connectedRunRecordV1Schema,
+  type ConnectedRunProtocolIdentity,
+  type ConnectedRunTerminal,
   type ConnectedRunProcessIdentity,
   type ConnectedRunRecordV1,
 } from "../domain/connected-run";
@@ -955,6 +957,111 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       process: validatedProcess,
     });
     await this.writeJsonAtomically(paths.run, updated);
+    return updated;
+  }
+
+  async startConnectedRun(
+    workItemId: string,
+    connectedRunId: string,
+    acp: ConnectedRunProtocolIdentity,
+    processIdentity: ConnectedRunProcessIdentity,
+  ): Promise<ConnectedRunRecordV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    const validatedProcess = connectedRunProcessIdentitySchema.parse(
+      processIdentity,
+    );
+    const record = await this.requireConnectedRun(
+      validatedWorkItemId,
+      validatedRunId,
+    );
+    if (record.lifecycle.status === "terminal") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "A terminal connected run cannot acquire an ACP session.",
+      );
+    }
+
+    const paths = this.connectedRunPaths(validatedWorkItemId, validatedRunId);
+    const storedProcess = await this.readConnectedRunProcess(paths.process);
+    if (
+      storedProcess !== null &&
+      JSON.stringify(storedProcess) !== JSON.stringify(validatedProcess)
+    ) {
+      throw this.invalid(
+        paths.process,
+        "connected process identity is immutable once recorded",
+      );
+    }
+    const updated = connectedRunRecordV1Schema.parse({
+      ...record,
+      acp,
+      lifecycle: {
+        ...record.lifecycle,
+        status: "running",
+        updated_at: timestampAtOrAfter(
+          record.lifecycle.updated_at,
+          validatedProcess.started_at,
+        ),
+      },
+      process: validatedProcess,
+    });
+    if (record.lifecycle.status === "running") {
+      if (
+        JSON.stringify(record.acp) !== JSON.stringify(updated.acp) ||
+        JSON.stringify(record.process) !== JSON.stringify(updated.process)
+      ) {
+        throw this.invalid(
+          paths.run,
+          "running connected run identity is immutable",
+        );
+      }
+      return record;
+    }
+
+    await this.writeJsonAtomically(paths.process, validatedProcess);
+    await this.writeJsonAtomically(paths.run, updated);
+    return updated;
+  }
+
+  async completeConnectedRun(
+    workItemId: string,
+    connectedRunId: string,
+    terminal: ConnectedRunTerminal,
+  ): Promise<ConnectedRunRecordV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    const record = await this.requireConnectedRun(
+      validatedWorkItemId,
+      validatedRunId,
+    );
+    const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
+    const updated = connectedRunRecordV1Schema.parse({
+      ...record,
+      lifecycle: {
+        status: "terminal",
+        started_at: record.lifecycle.started_at,
+        updated_at: completedAt,
+        completed_at: completedAt,
+        terminal,
+      },
+    });
+
+    if (record.lifecycle.status === "terminal") {
+      if (JSON.stringify(record.lifecycle.terminal) !== JSON.stringify(terminal)) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          validatedWorkItemId,
+          "A terminal connected run cannot be completed with a different outcome.",
+        );
+      }
+      return record;
+    }
+
+    const paths = this.connectedRunPaths(validatedWorkItemId, validatedRunId);
+    await this.writeJsonAtomically(paths.run, updated);
+    await this.releaseConnectedRunGuardForRecord(updated);
     return updated;
   }
 

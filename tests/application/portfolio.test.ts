@@ -12,7 +12,12 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
 
-import { PortfolioService } from "../../src/application/portfolio";
+import {
+  CopilotConnectedExecuteRuntime,
+  PortfolioService,
+  type ConnectedExecuteRuntime,
+  type PreparedConnectedRuntime,
+} from "../../src/application/portfolio";
 import { WorkItemController } from "../../src/application/work-item-controller";
 import {
   createImportRunId,
@@ -45,6 +50,12 @@ import type {
 import { SQLitePortfolioIndex } from "../../src/index/work-item-index";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
 import { PortfolioRegistry } from "../../src/workspace/portfolio-registry";
+import type {
+  AcpClientAdapter,
+  AcpEventSink,
+  AcpRunResult,
+  AcpSession,
+} from "../../src/infrastructure/acp/acp-client";
 
 const createdRoots: string[] = [];
 const controllerGit: GitVerificationAdapter = {
@@ -81,6 +92,55 @@ const controllerRunner: VerificationRunner = {
     };
   },
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function preparedRuntime(
+  session: AcpSession,
+  requestedModel = "copilot-default",
+): { runtime: ConnectedExecuteRuntime; prepare: ReturnType<typeof vi.fn> } {
+  const prepared: PreparedConnectedRuntime = {
+    requested_model: requestedModel,
+    reasoning_effort: "high",
+    sanitized_profile: {
+      adapter_id: "copilot-acp",
+      adapter_version: "1.0.0",
+      profile_id: "noninteractive-execute-v1",
+      executable: "copilot",
+      argv: ["--acp", "--stdio"],
+      requested_model: requestedModel,
+      reasoning_effort: "high",
+      available_tools: ["edit"],
+      excluded_tools: ["delete"],
+      authentication: "noninteractive_authenticated",
+      execution_mode: "permission_mediated_local",
+      containment_assurance: "not_independently_enforced",
+      machine_authority: "launching_user",
+      requested_mcp_server_count: 0,
+      credential_environment: "explicit_allowlist_without_credential_values",
+    },
+    start: vi.fn(async (eventSink: AcpEventSink) => {
+      await eventSink.append({
+        schema_version: 1,
+        sequence: 1,
+        observed_at: "2026-07-26T18:00:00.000Z",
+        kind: "session_started",
+        payload: {},
+        previous_event_sha256: null,
+        event_sha256: "a".repeat(64),
+      });
+      return session;
+    }),
+  };
+  const prepare = vi.fn(async () => prepared);
+  return { runtime: { prepare }, prepare };
+}
 
 function createMemoryIndex() {
   let items: Parameters<PortfolioWorkItemIndex["rebuild"]>[0] = [];
@@ -129,6 +189,7 @@ async function createWorkspace(productName: string): Promise<string> {
 async function createService(
   index: PortfolioWorkItemIndex = new SQLitePortfolioIndex(":memory:"),
   makeWorkspace?: (workspacePath: string) => ProductWorkspace,
+  connectedRuntime?: ConnectedExecuteRuntime,
 ) {
   const applicationRoot = await createRoot("product-studio-service-app-");
   const registry = new PortfolioRegistry(
@@ -145,6 +206,7 @@ async function createService(
           git: controllerGit,
           verificationRunner: controllerRunner,
         })),
+    connectedRuntime,
   );
   const legacyService = Object.assign(service, {
     async updateWorkItemDetails(
@@ -1051,6 +1113,224 @@ describe("PortfolioService", () => {
       "Return the result for validation; do not advance controller state.",
     );
     restartedIndex.close();
+  });
+
+  it("launches one connected run, imports its completed result, and never spawns a duplicate", async () => {
+    const root = await createWorkspace("Connected Execute Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Run a connected execute mission",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const result = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      process: {
+        pid: 4001,
+        process_group_id: 4001,
+        started_at: "2026-07-26T18:00:00.000Z",
+      },
+      run: vi.fn(() => result.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedRuntime(session);
+    const { index, service } = await createService(
+      undefined,
+      () => repository,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const mission = await service.compileMission(sourceId, created.goal.work_item_id);
+    await writeFile(
+      join(dirname(mission.task_path), "result.json"),
+      serializeExternalResult({
+        result_schema_version: 2,
+        mission_content_sha256: mission.mission.content_sha256,
+        identity: mission.mission.identity,
+        commit: "a".repeat(40),
+        summary: "Completed through the connected ACP run.",
+        changed_files: ["src/application/portfolio.ts"],
+        verification: [{ name: "Tests", status: "passed" }],
+      }),
+      "utf8",
+    );
+
+    const first = await service.launchConnectedExecute(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const replay = await service.launchConnectedExecute(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(replay.connected_run.connected_run_id).toBe(
+      first.connected_run.connected_run_id,
+    );
+    expect(fake.prepare).toHaveBeenCalledOnce();
+    expect(session.run).toHaveBeenCalledOnce();
+    expect((await service.listConnectedRuns(sourceId, created.goal.work_item_id))[0])
+      .toMatchObject({ lifecycle: { status: "running" } });
+
+    result.resolve({
+      outcome: "completed",
+      partial: false,
+      stop_reason: "end_turn",
+      permissions: [],
+    });
+    await expect.poll(async () => {
+      const item = (await service.list()).find(
+        (candidate) =>
+          candidate.source_id === sourceId &&
+          candidate.work_item.goal.work_item_id === created.goal.work_item_id,
+      );
+      return item?.work_item.state.phase;
+    }).toBe("review");
+    await expect.poll(async () => {
+      const [run] = await service.listConnectedRuns(
+        sourceId,
+        created.goal.work_item_id,
+      );
+      return run?.lifecycle.terminal_outcome;
+    }).toBe("completed");
+    index.close();
+  });
+
+  it("fails an unavailable model before ACP spawn and surfaces exact missing permission attention", async () => {
+    const root = await createWorkspace("Connected Permission Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Require connected permission attention",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const unavailableAdapter: AcpClientAdapter = { start: vi.fn() };
+    const unavailableRuntime = new CopilotConnectedExecuteRuntime(
+      unavailableAdapter,
+      {
+        profile: {
+          preflight: {
+            executable: "/tmp/copilot",
+            version: "1.0.0",
+            authentication: "noninteractive_authenticated",
+            available_model_ids: ["copilot-default"],
+          },
+          default_model: "copilot-default",
+          reasoning_effort: "high",
+          available_tools: ["edit"],
+          excluded_tools: ["delete"],
+          environment: { PATH: "/usr/bin" },
+        },
+      },
+    );
+    const unavailable = await createService(
+      undefined,
+      () => repository,
+      unavailableRuntime,
+    );
+    const registration = await unavailable.service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    await expect(
+      unavailable.service.launchConnectedExecute(
+        sourceId,
+        created.goal.work_item_id,
+        { model_override: "unavailable-model" },
+      ),
+    ).rejects.toThrow("Requested Copilot model is unavailable.");
+    expect(unavailableAdapter.start).not.toHaveBeenCalled();
+    expect(await repository.listConnectedRuns(created.goal.work_item_id)).toEqual([]);
+    unavailable.index.close();
+
+    const missingResult = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      process: {
+        pid: 4002,
+        process_group_id: 4002,
+        started_at: "2026-07-26T18:00:00.000Z",
+      },
+      run: vi.fn(() => missingResult.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedRuntime(session);
+    const connectedIndex = new SQLitePortfolioIndex(":memory:");
+    const connectedService = new PortfolioService(
+      unavailable.registry,
+      connectedIndex,
+      unavailable.inboxRoot,
+      () => repository,
+      fake.runtime,
+    );
+    await connectedService.rebuild();
+    const launched = await connectedService.launchConnectedExecute(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const deniedOperation = {
+      schema_version: 1 as const,
+      kind: "outside_workspace_write" as const,
+      path: "/tmp/outside-product-studio",
+    };
+    const { hashCanonicalCapabilityRequest } = await import(
+      "../../src/domain/capability-envelope"
+    );
+    missingResult.resolve({
+      outcome: "missing_permission",
+      partial: true,
+      stop_reason: "end_turn",
+      permissions: [
+        {
+          kind: "missing_permission",
+          request: deniedOperation,
+          operation_sha256: hashCanonicalCapabilityRequest(deniedOperation),
+          reason: "outside_capability_envelope",
+        },
+      ],
+    });
+    await expect.poll(async () => {
+      const attention = await connectedService.listAttention();
+      return attention[0]?.attention.kind;
+    }).toBe("missing_permission");
+    const attention = (await connectedService.listAttention())[0]!;
+    expect(attention).toMatchObject({
+      item: { source_id: sourceId },
+      attention: {
+        kind: "missing_permission",
+        operation: {
+          connected_run_id: launched.connected_run.connected_run_id,
+          operation_sha256: hashCanonicalCapabilityRequest(deniedOperation),
+        },
+      },
+    });
+    const decision = await connectedService.decideConnectedPermission(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        decision: "allow_once",
+        connected_run_id: launched.connected_run.connected_run_id,
+        operation_sha256: hashCanonicalCapabilityRequest(deniedOperation),
+      },
+    );
+    expect(decision.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      attempt: 1,
+    });
+    await expect(connectedService.listAttention()).resolves.toEqual([]);
+    connectedIndex.close();
   });
 
   it("lists source-qualified historical evidence without controller or cache mutation", async () => {

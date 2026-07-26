@@ -40,6 +40,7 @@ import {
   compilePatchMission as compilePatchMissionPackage,
   compileReviewMission as compileReviewMissionPackage,
   patchSubjectSchema,
+  type ExecuteMissionPackage,
   type MissionArtifactWriteResult,
   type MissionIdentity,
   type PatchMissionPackage,
@@ -81,6 +82,28 @@ import {
   canUpdateGoalContract,
   validatePhaseTransition,
 } from "../domain/workflow-policy";
+import {
+  hashResolvedCapabilityEnvelope,
+  summarizeConnectedRun,
+  type ConnectedRunRecordV1,
+  type ConnectedRunSummary,
+} from "../domain/connected-run";
+import {
+  capabilityEnvelopeV1Schema,
+  isCapabilityEnvelopeNarrowing,
+  type CapabilityEnvelopeV1,
+} from "../domain/capability-envelope";
+import type {
+  AcpClientAdapter,
+  AcpEventSink,
+  AcpRunResult,
+  AcpSession,
+} from "../infrastructure/acp/acp-client";
+import {
+  createCopilotRuntimeProfile,
+  type CopilotRuntimeProfileInput,
+  type CopilotSanitizedProfileEvidence,
+} from "../infrastructure/acp/copilot-runtime-profile";
 import { ProductWorkspace } from "../workspace/product-workspace";
 import { PortfolioRegistry } from "../workspace/portfolio-registry";
 
@@ -113,6 +136,9 @@ type WorkspaceGateway = Pick<
   | "createConnectedRun"
   | "readConnectedRun"
   | "listConnectedRuns"
+  | "startConnectedRun"
+  | "appendConnectedRunEvent"
+  | "completeConnectedRun"
   | "readImportEvidence"
   | "listImportEvidence"
   | "writeImportEvidence"
@@ -236,7 +262,7 @@ export interface RegisterWorkspaceResult {
   rebuild: PortfolioRebuildResult;
 }
 
-export type MissionCompilation = MissionArtifactWriteResult;
+export type MissionCompilation = MissionArtifactWriteResult<ExecuteMissionPackage>;
 export type ReviewMissionCompilation =
   MissionArtifactWriteResult<ReviewMissionPackage>;
 export type PatchMissionCompilation =
@@ -280,6 +306,102 @@ export interface PortfolioAttentionItem {
 export interface PortfolioRetryResult extends PortfolioWorkItem {
   controller_run: ControllerRunManifest;
 }
+
+export interface LaunchConnectedExecuteRequest {
+  model_override?: string;
+  narrowed_capability_envelope?: CapabilityEnvelopeV1;
+}
+
+export interface PortfolioConnectedRunResult extends PortfolioWorkItem {
+  connected_run: ConnectedRunSummary;
+}
+
+export interface ConnectedRuntimePrepareInput {
+  workspace_cwd: string;
+  capability_envelope: CapabilityEnvelopeV1;
+  limits: ConnectedRunRecordV1["limits"];
+  model_override?: string;
+}
+
+export interface PreparedConnectedRuntime {
+  requested_model: string;
+  reasoning_effort: string;
+  sanitized_profile: CopilotSanitizedProfileEvidence;
+  start(event_sink: AcpEventSink): Promise<AcpSession>;
+}
+
+export interface ConnectedExecuteRuntime {
+  prepare(input: ConnectedRuntimePrepareInput): Promise<PreparedConnectedRuntime>;
+}
+
+export interface CopilotConnectedExecuteRuntimeOptions {
+  profile: Omit<
+    CopilotRuntimeProfileInput,
+    "requested_model" | "workspace_cwd" | "capability_envelope" | "limits"
+  > & {
+    default_model: string;
+  };
+}
+
+export class CopilotConnectedExecuteRuntime
+  implements ConnectedExecuteRuntime
+{
+  constructor(
+    private readonly adapter: AcpClientAdapter,
+    private readonly options: CopilotConnectedExecuteRuntimeOptions,
+  ) {}
+
+  async prepare(
+    input: ConnectedRuntimePrepareInput,
+  ): Promise<PreparedConnectedRuntime> {
+    const requestedModel = input.model_override ?? this.options.profile.default_model;
+    const profile = createCopilotRuntimeProfile({
+      ...this.options.profile,
+      requested_model: requestedModel,
+      workspace_cwd: input.workspace_cwd,
+      capability_envelope: input.capability_envelope,
+      limits: input.limits,
+    });
+    return {
+      requested_model: requestedModel,
+      reasoning_effort: this.options.profile.reasoning_effort,
+      sanitized_profile: profile.sanitized_profile_evidence,
+      start: (eventSink) => this.adapter.start(profile.runtime_profile, eventSink),
+    };
+  }
+}
+
+const CONNECTED_RUN_LIMITS: ConnectedRunRecordV1["limits"] = {
+  wall_clock_timeout_ms: 900_000,
+  max_event_count: 1_000,
+  max_event_bytes: 1_000_000,
+  max_output_bytes: 100_000,
+  termination_grace_ms: 5_000,
+  drain_grace_ms: 1_000,
+};
+
+const launchConnectedExecuteRequestSchema: z.ZodType<LaunchConnectedExecuteRequest> =
+  z.strictObject({
+    model_override: z.string().trim().min(1).max(200).optional(),
+    narrowed_capability_envelope: capabilityEnvelopeV1Schema.optional(),
+  });
+
+export interface ConnectedPermissionDecisionRequest {
+  connected_run_id: string;
+  operation_sha256: string;
+  decision: "allow_once" | "keep_denied";
+}
+
+export interface PortfolioConnectedPermissionResult extends PortfolioWorkItem {
+  controller_run: ControllerRunManifest | null;
+}
+
+const connectedPermissionDecisionRequestSchema: z.ZodType<ConnectedPermissionDecisionRequest> =
+  z.strictObject({
+    connected_run_id: controllerRunIdSchema,
+    operation_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    decision: z.enum(["allow_once", "keep_denied"]),
+  });
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -345,6 +467,7 @@ export class PortfolioService {
     inboxRoot: string,
     private readonly makeWorkspace: WorkspaceFactory = (workspacePath) =>
       new ProductWorkspace(workspacePath),
+    private readonly connectedRuntime?: ConnectedExecuteRuntime,
   ) {
     this.inboxRoot = resolve(inboxRoot);
     this.transfersRoot = join(dirname(this.inboxRoot), "transfers");
@@ -352,6 +475,7 @@ export class PortfolioService {
 
   readonly inboxRoot: string;
   readonly transfersRoot: string;
+  private readonly liveConnectedSessions = new Map<string, AcpSession>();
 
   listWorkspaces(): Promise<RegisteredWorkspace[]> {
     return this.registry.read();
@@ -569,7 +693,249 @@ export class PortfolioService {
 
     return source.workspace.writeMissionPackage(identity, (paths) =>
       compileMissionPackage(workItem, executeManifest, paths),
+    ) as Promise<MissionCompilation>;
+  }
+
+  async launchConnectedExecute(
+    sourceId: string,
+    workItemId: string,
+    input: LaunchConnectedExecuteRequest = {},
+  ): Promise<PortfolioConnectedRunResult> {
+    const validatedInput = launchConnectedExecuteRequestSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedExecuteIdentity(source, workItem);
+    const governedTuple = this.governedExecuteTuple(workItem, identity);
+    const controller = this.workItemController(source.workspace);
+    const activeRuns = (await source.workspace.listConnectedRuns(workItemId)).filter(
+      (record) => record.lifecycle.status !== "terminal",
     );
+    if (activeRuns.length > 1) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Only one connected run may be active for a governed item.",
+      );
+    }
+    if (activeRuns.length === 1) {
+      const activeRun = activeRuns[0]!;
+      const replay = await controller.launchConnectedExecute(
+        workItemId,
+        this.connectedLaunchInput(
+          governedTuple,
+          activeRun.mission.content_sha256,
+          validatedInput.model_override,
+        ),
+        activeRun,
+      );
+      return {
+        ...this.toPortfolioItem(source, replay.work_item),
+        connected_run: summarizeConnectedRun(replay.connected_run),
+      };
+    }
+    if (this.connectedRuntime === undefined) {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected execution is not configured for this Product Studio service.",
+      );
+    }
+
+    const mission = await this.compileMission(sourceId, workItemId);
+    const capabilityEnvelope = this.resolveConnectedCapabilityEnvelope(
+      workItemId,
+      mission.mission.capability_envelope,
+      validatedInput.narrowed_capability_envelope,
+    );
+    const launchInput = this.connectedLaunchInput(
+      governedTuple,
+      mission.mission.content_sha256,
+      validatedInput.model_override,
+    );
+
+    const prepared = await this.connectedRuntime.prepare({
+      workspace_cwd: source.workspace.workspaceRoot,
+      capability_envelope: capabilityEnvelope,
+      limits: CONNECTED_RUN_LIMITS,
+      ...(validatedInput.model_override === undefined
+        ? {}
+        : { model_override: validatedInput.model_override }),
+    });
+    const record = this.connectedRunRecord(
+      mission,
+      governedTuple,
+      capabilityEnvelope,
+      prepared,
+    );
+    const launched = await controller.launchConnectedExecute(
+      workItemId,
+      launchInput,
+      record,
+    );
+    if (!launched.created) {
+      return {
+        ...this.toPortfolioItem(source, launched.work_item),
+        connected_run: summarizeConnectedRun(launched.connected_run),
+      };
+    }
+
+    const eventSink: AcpEventSink = {
+      append: (event) =>
+        source.workspace.appendConnectedRunEvent(
+          workItemId,
+          launched.connected_run.connected_run_id,
+          event,
+        ),
+    };
+    let session: AcpSession | undefined;
+    let running: ConnectedRunRecordV1;
+    try {
+      session = await prepared.start(eventSink);
+      running = await source.workspace.startConnectedRun(
+        workItemId,
+        launched.connected_run.connected_run_id,
+        {
+          protocol_version: {
+            value: session.protocol_version,
+            assurance: "adapter_attested",
+          },
+          session_id: {
+            value: session.session_id,
+            assurance: "adapter_attested",
+          },
+        },
+        session.process,
+      );
+      const key = this.connectedSessionKey(
+        source.source_id,
+        workItemId,
+        running.connected_run_id,
+      );
+      this.liveConnectedSessions.set(key, session);
+      void this.observeConnectedRun(source, workItemId, mission, running, session);
+    } catch (error) {
+      if (session !== undefined) {
+        await session.close().catch(() => undefined);
+      }
+      await source.workspace
+        .completeConnectedRun(
+          workItemId,
+          launched.connected_run.connected_run_id,
+          this.failedConnectedTerminal(),
+        )
+        .catch(() => undefined);
+      throw error;
+    }
+    await this.rebuild();
+    return {
+      ...this.toPortfolioItem(source, launched.work_item),
+      connected_run: summarizeConnectedRun(running),
+    };
+  }
+
+  async listConnectedRuns(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<ConnectedRunSummary[]> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    return (await source.workspace.listConnectedRuns(workItemId)).map(
+      summarizeConnectedRun,
+    );
+  }
+
+  async cancelConnectedRun(
+    sourceId: string,
+    workItemId: string,
+    connectedRunId: string,
+  ): Promise<PortfolioConnectedRunResult> {
+    const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const record = await source.workspace.readConnectedRun(workItemId, validatedRunId);
+    if (record === null) {
+      throw this.missionNotReady(workItemId, "Connected run was not found.");
+    }
+    if (record.lifecycle.status === "terminal") {
+      return {
+        ...this.toPortfolioItem(source, workItem),
+        connected_run: summarizeConnectedRun(record),
+      };
+    }
+    const key = this.connectedSessionKey(source.source_id, workItemId, validatedRunId);
+    const session = this.liveConnectedSessions.get(key);
+    if (session === undefined) {
+      throw this.missionNotReady(
+        workItemId,
+        "This service cannot safely cancel a connected run it did not start.",
+      );
+    }
+    await session.cancel();
+    const terminal = await source.workspace.completeConnectedRun(
+      workItemId,
+      validatedRunId,
+      {
+        outcome: "cancelled",
+        partial: true,
+        reason: "Cancellation was requested by the Product Studio operator.",
+      },
+    );
+    this.liveConnectedSessions.delete(key);
+    await this.rebuild();
+    return {
+      ...this.toPortfolioItem(source, workItem),
+      connected_run: summarizeConnectedRun(terminal),
+    };
+  }
+
+  async decideConnectedPermission(
+    sourceId: string,
+    workItemId: string,
+    input: ConnectedPermissionDecisionRequest,
+  ): Promise<PortfolioConnectedPermissionResult> {
+    const validatedInput = connectedPermissionDecisionRequestSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedExecuteIdentity(source, workItem);
+    const governedTuple = this.governedExecuteTuple(workItem, identity);
+    const attention = workItem.state.attention;
+    if (attention?.kind !== "missing_permission") {
+      throw this.missionNotReady(
+        workItemId,
+        "A connected permission decision requires active missing-permission attention.",
+      );
+    }
+    const missionContentSha256 = attention.pins.mission_content_sha256;
+    if (missionContentSha256 === undefined) {
+      throw this.missionNotReady(
+        workItemId,
+        "Missing-permission attention does not pin its connected mission.",
+      );
+    }
+    const decided = await this.workItemController(
+      source.workspace,
+    ).resolveConnectedPermission(workItemId, {
+      decision: validatedInput.decision,
+      governed_tuple: governedTuple,
+      connected_run_id: validatedInput.connected_run_id,
+      operation_sha256: validatedInput.operation_sha256,
+      mission_content_sha256: missionContentSha256,
+    });
+    await this.rebuild();
+    return {
+      ...this.toPortfolioItem(source, decided.work_item),
+      controller_run: decided.manifest,
+    };
   }
 
   async compileReviewMission(
@@ -1639,6 +2005,268 @@ export class PortfolioService {
     );
   }
 
+  private resolveConnectedCapabilityEnvelope(
+    workItemId: string,
+    compiled: CapabilityEnvelopeV1,
+    narrowed: CapabilityEnvelopeV1 | undefined,
+  ): CapabilityEnvelopeV1 {
+    if (narrowed === undefined) {
+      return compiled;
+    }
+    if (!isCapabilityEnvelopeNarrowing(narrowed, compiled)) {
+      throw this.missionNotReady(
+        workItemId,
+        "A connected capability envelope may only narrow the compiled mission envelope.",
+      );
+    }
+    return narrowed;
+  }
+
+  private connectedRunRecord(
+    mission: MissionCompilation,
+    governedTuple: ConnectedRunRecordV1["governed_tuple"],
+    capabilityEnvelope: CapabilityEnvelopeV1,
+    prepared: PreparedConnectedRuntime,
+  ): ConnectedRunRecordV1 {
+    const profileSha256 = this.hashConnectedValue(prepared.sanitized_profile);
+    const authorizationSha256 = this.hashConnectedValue({
+      mission_content_sha256: mission.mission.content_sha256,
+      capability_envelope_sha256: hashResolvedCapabilityEnvelope(capabilityEnvelope),
+      requested_model: prepared.requested_model,
+    });
+    const timestamp = new Date().toISOString();
+    const envelopeSha256 = hashResolvedCapabilityEnvelope(capabilityEnvelope);
+    return {
+      schema_version: 1,
+      connected_run_id: randomUUID(),
+      mission: {
+        identity: mission.mission.identity,
+        path: mission.mission_path.slice(
+          mission.workspace_path.length + 1,
+        ),
+        content_sha256: mission.mission.content_sha256,
+        source_commit: mission.mission.source_revision.git_base_commit,
+      },
+      governed_tuple: governedTuple,
+      provenance: {
+        role: { value: "writer", assurance: "controller_observed" },
+        seat: { value: "executor", assurance: "controller_observed" },
+        requested_model: {
+          value: prepared.requested_model,
+          assurance: "user_declared",
+        },
+        effective_model: {
+          assurance: "unknown",
+          model_id: null,
+          deployment_id: null,
+          observed_event_sha256: null,
+        },
+        effort: {
+          value: prepared.reasoning_effort,
+          assurance: "user_declared",
+        },
+        harness: {
+          value: {
+            id: prepared.sanitized_profile.adapter_id,
+            version: prepared.sanitized_profile.adapter_version,
+          },
+          assurance: "adapter_attested",
+        },
+        adapter_profile: {
+          value: {
+            adapter_id: prepared.sanitized_profile.adapter_id,
+            adapter_version: prepared.sanitized_profile.adapter_version,
+            profile_id: prepared.sanitized_profile.profile_id,
+          },
+          assurance: "adapter_attested",
+        },
+        resolved_profile_sha256: {
+          value: profileSha256,
+          assurance: "controller_observed",
+        },
+        resolved_skill_set_sha256: { value: null, assurance: "unknown" },
+        capability_envelope_sha256: {
+          value: envelopeSha256,
+          assurance: "controller_observed",
+        },
+        authorization_sha256: {
+          value: authorizationSha256,
+          assurance: "controller_observed",
+        },
+      },
+      resolved_capability_envelope: {
+        envelope: capabilityEnvelope,
+        envelope_sha256: envelopeSha256,
+      },
+      acp: {
+        protocol_version: { value: null, assurance: "unknown" },
+        session_id: { value: null, assurance: "unknown" },
+      },
+      lifecycle: {
+        status: "starting",
+        started_at: timestamp,
+        updated_at: timestamp,
+        completed_at: null,
+        terminal: null,
+      },
+      limits: CONNECTED_RUN_LIMITS,
+      process: null,
+      diagnostics: { entries: [], truncated: false },
+    };
+  }
+
+  private async observeConnectedRun(
+    source: ResolvedSource,
+    workItemId: string,
+    mission: MissionCompilation,
+    record: ConnectedRunRecordV1,
+    session: AcpSession,
+  ): Promise<void> {
+    const key = this.connectedSessionKey(
+      source.source_id,
+      workItemId,
+      record.connected_run_id,
+    );
+    try {
+      const result = await session.run(
+        `Execute the governed task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
+      );
+      const terminal = await this.completeObservedConnectedRun(
+        source,
+        workItemId,
+        record.connected_run_id,
+        result,
+      );
+      if (terminal.lifecycle.terminal?.outcome !== result.outcome) {
+        return;
+      }
+      if (result.outcome === "missing_permission") {
+        await this.recordMissingPermission(
+          source,
+          workItemId,
+          mission,
+          record,
+          result,
+        );
+      } else if (result.outcome === "completed") {
+        await this.importResult(source.source_id, workItemId);
+      }
+      await this.rebuild();
+    } catch {
+      await source.workspace
+        .completeConnectedRun(
+          workItemId,
+          record.connected_run_id,
+          this.failedConnectedTerminal(),
+        )
+        .catch(() => undefined);
+      await this.rebuild().catch(() => undefined);
+    } finally {
+      if (this.liveConnectedSessions.get(key) === session) {
+        this.liveConnectedSessions.delete(key);
+      }
+      await session.close().catch(() => undefined);
+    }
+  }
+
+  private async completeObservedConnectedRun(
+    source: ResolvedSource,
+    workItemId: string,
+    connectedRunId: string,
+    result: AcpRunResult,
+  ): Promise<ConnectedRunRecordV1> {
+    const terminal = this.connectedTerminalFromResult(result);
+    try {
+      return await source.workspace.completeConnectedRun(
+        workItemId,
+        connectedRunId,
+        terminal,
+      );
+    } catch (error) {
+      const current = await source.workspace.readConnectedRun(
+        workItemId,
+        connectedRunId,
+      );
+      if (current?.lifecycle.status === "terminal") {
+        return current;
+      }
+      throw error;
+    }
+  }
+
+  private async recordMissingPermission(
+    source: ResolvedSource,
+    workItemId: string,
+    mission: MissionCompilation,
+    record: ConnectedRunRecordV1,
+    result: AcpRunResult,
+  ): Promise<void> {
+    const missing = result.permissions.find(
+      (permission) => permission.kind === "missing_permission",
+    );
+    if (missing === undefined) {
+      throw this.missionNotReady(
+        workItemId,
+        "A missing-permission run did not retain an exact denied operation.",
+      );
+    }
+    await this.workItemController(source.workspace).recordConnectedPermissionDenial(
+      workItemId,
+      {
+        expected_phase: "execute",
+        expected_status: "active",
+        expected_schema_version: 2,
+        governed_tuple: record.governed_tuple,
+        mission_content_sha256: mission.mission.content_sha256,
+        operation: {
+          normalized_operation: missing.request,
+          canonical_args_sha256: this.hashConnectedValue(missing.request),
+          operation_sha256: missing.operation_sha256,
+          reason: missing.reason,
+          resolved_envelope_sha256:
+            record.resolved_capability_envelope.envelope_sha256,
+          connected_run_id: record.connected_run_id,
+        },
+      },
+    );
+  }
+
+  private connectedTerminalFromResult(result: AcpRunResult) {
+    if (result.outcome === "completed") {
+      return { outcome: "completed" as const, partial: false, reason: null };
+    }
+    return {
+      outcome: result.outcome,
+      partial: result.partial,
+      reason:
+        result.outcome === "missing_permission"
+          ? "The ACP adapter denied an operation outside the approved capability envelope."
+          : "The ACP adapter did not complete the governed mission.",
+    };
+  }
+
+  private failedConnectedTerminal() {
+    return {
+      outcome: "failed" as const,
+      partial: true,
+      reason: "The ACP runtime failed before the governed mission completed.",
+    };
+  }
+
+  private connectedSessionKey(
+    sourceId: string,
+    workItemId: string,
+    connectedRunId: string,
+  ): string {
+    return `${sourceId}:${workItemId}:${connectedRunId}`;
+  }
+
+  private hashConnectedValue(value: unknown): string {
+    return createHash("sha256")
+      .update(`${JSON.stringify(value)}\n`)
+      .digest("hex");
+  }
+
   private governedExecuteIdentity(
     source: ResolvedSource,
     workItem: WorkItem,
@@ -1661,6 +2289,39 @@ export class PortfolioService {
       goal_version: workItem.state.goal_version,
       input_revision: workItem.state.input_revision,
       attempt: workItem.state.attempt,
+    };
+  }
+
+  private governedExecuteTuple(
+    workItem: WorkItem,
+    identity: MissionIdentity<"execute">,
+  ): ConnectedRunRecordV1["governed_tuple"] {
+    if (workItem.state.patch_cycle === undefined) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Connected execution requires an explicit patch-cycle pin.",
+      );
+    }
+    return {
+      goal_version: identity.goal_version,
+      input_revision: identity.input_revision,
+      attempt: identity.attempt,
+      patch_cycle: workItem.state.patch_cycle,
+    };
+  }
+
+  private connectedLaunchInput(
+    governedTuple: ConnectedRunRecordV1["governed_tuple"],
+    missionContentSha256: string,
+    modelOverride: string | undefined,
+  ) {
+    return {
+      expected_phase: "execute" as const,
+      expected_status: "active" as const,
+      expected_schema_version: 2 as const,
+      governed_tuple: governedTuple,
+      mission_content_sha256: missionContentSha256,
+      ...(modelOverride === undefined ? {} : { model_override: modelOverride }),
     };
   }
 
