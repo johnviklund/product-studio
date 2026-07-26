@@ -46,6 +46,10 @@ import * as portfolioPatchMissionImportRoute from "../../app/api/portfolio/work-
 import * as portfolioPatchPlanRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route";
 import * as portfolioAttentionRoute from "../../app/api/portfolio/attention/route";
 import * as portfolioMissionRetryRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route";
+import * as portfolioConnectedLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/launch/route";
+import * as portfolioConnectedRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/run/route";
+import * as portfolioConnectedCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/cancel/route";
+import * as portfolioConnectedPermissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/permission/route";
 import { GET as getPortfolioRunEvidence } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/run-evidence/route";
 import {
   PATCH as updatePortfolioWorkItem,
@@ -65,6 +69,10 @@ const importPortfolioPatchMission = portfolioPatchMissionImportRoute.POST;
 const acceptPortfolioPatchPlan = portfolioPatchPlanRoute.POST;
 const getPortfolioAttention = portfolioAttentionRoute.GET;
 const retryPortfolioMission = portfolioMissionRetryRoute.POST;
+const launchPortfolioConnectedMission = portfolioConnectedLaunchRoute.POST;
+const getPortfolioConnectedRuns = portfolioConnectedRunRoute.GET;
+const cancelPortfolioConnectedRun = portfolioConnectedCancelRoute.POST;
+const decidePortfolioConnectedPermission = portfolioConnectedPermissionRoute.POST;
 
 const createdRoots: string[] = [];
 const openIndexes: SQLitePortfolioIndex[] = [];
@@ -301,6 +309,27 @@ function reviewMissionImportRequest(): Request {
 function runEvidenceRequest(): Request {
   return new Request(
     "http://localhost/api/portfolio/work-items/source/item/run-evidence",
+    { method: "GET" },
+  );
+}
+
+function connectedRequest(
+  action: "launch" | "cancel" | "permission",
+  body: unknown,
+): Request {
+  return new Request(
+    `http://localhost/api/portfolio/work-items/source/item/mission/connected/${action}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+function connectedRunRequest(): Request {
+  return new Request(
+    "http://localhost/api/portfolio/work-items/source/item/mission/connected/run",
     { method: "GET" },
   );
 }
@@ -720,6 +749,195 @@ describe("portfolio API routes", () => {
     expect(portfolioPatchMissionImportRoute.runtime).toBe("nodejs");
     expect(portfolioPatchPlanRoute.runtime).toBe("nodejs");
     expect(portfolioAttentionRoute.runtime).toBe("nodejs");
+  });
+
+  it("exposes source-qualified connected summaries and exact permission decisions", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const connectedRunId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
+    const summary = {
+      schema_version: 1,
+      connected_run_id: connectedRunId,
+      mission: {
+        identity: {
+          phase: "execute",
+          work_item_id: workItemId,
+          goal_version: 1,
+          input_revision: 1,
+          attempt: 0,
+        },
+        content_sha256: "a".repeat(64),
+        source_commit: "b".repeat(40),
+      },
+      governed_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      lifecycle: {
+        status: "running",
+        started_at: "2026-07-26T18:00:00.000Z",
+        updated_at: "2026-07-26T18:00:01.000Z",
+        completed_at: null,
+        terminal_outcome: null,
+        partial: false,
+      },
+    };
+    const launchConnectedExecute = vi.fn().mockResolvedValue({
+      source_id: sourceId,
+      work_item: { state: { phase: "execute", status: "active" } },
+      connected_run: summary,
+      raw_runtime_token: "must-not-cross-http",
+    });
+    const listConnectedRuns = vi.fn().mockResolvedValue([summary]);
+    const cancelConnectedRun = vi.fn().mockResolvedValue({
+      source_id: sourceId,
+      work_item: { state: { phase: "execute", status: "active" } },
+      connected_run: summary,
+      process: { pid: 9999 },
+    });
+    const decideConnectedPermission = vi.fn().mockResolvedValue({
+      source_id: sourceId,
+      work_item: { state: { phase: "execute", status: "active", attempt: 1 } },
+      controller_run: { phase: "execute", outcome: "applied", attempt: 1 },
+    });
+    getService.mockResolvedValue({
+      launchConnectedExecute,
+      listConnectedRuns,
+      cancelConnectedRun,
+      decideConnectedPermission,
+    });
+    const context = phaseUpdateContext(sourceId, workItemId);
+    const operationSha256 = "c".repeat(64);
+
+    const launched = await launchPortfolioConnectedMission(
+      connectedRequest("launch", { model_override: "one-run-model" }),
+      context,
+    );
+    const replay = await launchPortfolioConnectedMission(
+      connectedRequest("launch", { model_override: "one-run-model" }),
+      context,
+    );
+    const listed = await getPortfolioConnectedRuns(connectedRunRequest(), context);
+    const cancelled = await cancelPortfolioConnectedRun(
+      connectedRequest("cancel", { connected_run_id: connectedRunId }),
+      context,
+    );
+    const decided = await decidePortfolioConnectedPermission(
+      connectedRequest("permission", {
+        connected_run_id: connectedRunId,
+        operation_sha256: operationSha256,
+        decision: "allow_once",
+      }),
+      context,
+    );
+
+    expect(launched.status).toBe(200);
+    expect(await launched.json()).toEqual(summary);
+    expect(await replay.json()).toEqual(summary);
+    expect(await listed.json()).toEqual([summary]);
+    expect(await cancelled.json()).toEqual(summary);
+    expect(await decided.json()).toEqual({
+      source_id: sourceId,
+      work_item: { state: { phase: "execute", status: "active", attempt: 1 } },
+      controller_run: { phase: "execute", outcome: "applied", attempt: 1 },
+    });
+    expect(launchConnectedExecute).toHaveBeenCalledTimes(2);
+    expect(launchConnectedExecute).toHaveBeenCalledWith(sourceId, workItemId, {
+      model_override: "one-run-model",
+    });
+    expect(listConnectedRuns).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(cancelConnectedRun).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      connectedRunId,
+    );
+    expect(decideConnectedPermission).toHaveBeenCalledWith(sourceId, workItemId, {
+      connected_run_id: connectedRunId,
+      operation_sha256: operationSha256,
+      decision: "allow_once",
+    });
+    expect(Object.keys(portfolioConnectedLaunchRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioConnectedRunRoute).sort()).toEqual([
+      "GET",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioConnectedCancelRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioConnectedPermissionRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(portfolioConnectedLaunchRoute.runtime).toBe("nodejs");
+    expect(portfolioConnectedRunRoute.runtime).toBe("nodejs");
+    expect(portfolioConnectedCancelRoute.runtime).toBe("nodejs");
+    expect(portfolioConnectedPermissionRoute.runtime).toBe("nodejs");
+  });
+
+  it("rejects malformed, oversized, and foreign connected-route payloads", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const connectedRunId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
+    const launchConnectedExecute = vi.fn();
+    const cancelConnectedRun = vi.fn();
+    const decideConnectedPermission = vi.fn();
+    getService.mockResolvedValue({
+      launchConnectedExecute,
+      cancelConnectedRun,
+      decideConnectedPermission,
+    });
+    const context = phaseUpdateContext(sourceId, workItemId);
+
+    const responses = await Promise.all([
+      launchPortfolioConnectedMission(
+        connectedRequest("launch", { capability_envelope: {} }),
+        context,
+      ),
+      launchPortfolioConnectedMission(
+        connectedRequest("launch", { model_override: "x".repeat(5_000) }),
+        context,
+      ),
+      cancelPortfolioConnectedRun(
+        connectedRequest("cancel", {
+          connected_run_id: connectedRunId,
+          pid: 1234,
+        }),
+        context,
+      ),
+      decidePortfolioConnectedPermission(
+        connectedRequest("permission", {
+          connected_run_id: connectedRunId,
+          operation_sha256: "d".repeat(64),
+          decision: "keep_denied",
+          authorization: "must-not-cross-http",
+        }),
+        context,
+      ),
+      launchPortfolioConnectedMission(
+        new Request("http://localhost/connected/launch", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{invalid",
+        }),
+        context,
+      ),
+    ]);
+
+    expect(responses.map(({ status }) => status)).toEqual([400, 400, 400, 400, 400]);
+    for (const response of responses) {
+      expect(await response.json()).toEqual({
+        error: { code: "invalid_request", message: "Invalid request" },
+      });
+    }
+    expect(launchConnectedExecute).not.toHaveBeenCalled();
+    expect(cancelConnectedRun).not.toHaveBeenCalled();
+    expect(decideConnectedPermission).not.toHaveBeenCalled();
   });
 
   it("maps patch and attention conflicts through the established response contract", async () => {
