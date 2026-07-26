@@ -3,10 +3,12 @@ import { z } from "zod";
 import {
   workItemIdSchema,
   type WorkItemCapture,
+  type WorkItemAttention,
   type WorkItemPhase,
   type WorkItemStatus,
 } from "../domain/work-item";
 import { INBOX_SOURCE_ID } from "../domain/portfolio-source";
+import type { ExternalResultSubmission } from "../domain/result";
 import {
   ALLOWED_PHASE_TRANSITIONS,
   validatePhaseTransition as validateDomainPhaseTransition,
@@ -66,6 +68,78 @@ export type ReviewHandoffProjection =
       can_compile: false;
       can_import: false;
     };
+
+type EscalationAttention = Extract<
+  WorkItemAttention,
+  {
+    kind:
+      | "unresolved_finding"
+      | "ambiguous_goal"
+      | "cycle_limit"
+      | "missing_permission";
+  }
+>;
+
+export type PatchAttentionProjection =
+  | {
+      mode: "patch_plan";
+      action: "accept_patch_plan";
+      attention: Extract<WorkItemAttention, { kind: "patch_plan_approval" }>;
+      patch_cycle: number;
+    }
+  | {
+      mode: "patch_active";
+      action: "compile_or_import_patch";
+      attention: null;
+      patch_cycle: number;
+    }
+  | {
+      mode: "escalation";
+      action: "resolve_escalation";
+      attention: EscalationAttention;
+      patch_cycle: number;
+    }
+  | {
+      mode: "review_ready";
+      action: "review_result";
+      attention: Extract<WorkItemAttention, { kind: "review_ready" }>;
+      patch_cycle: number;
+    }
+  | {
+      mode: "hidden";
+      action: null;
+      attention: null;
+      patch_cycle: null;
+    };
+
+interface BoardReviewSubmissionProjection {
+  review_mission_content_sha256: string;
+  accepted_result_commit?: string;
+  verdict?: "clean" | "findings";
+  execute_mission_content_sha256?: string;
+  execute_result_content_sha256?: string;
+  patch_mission_content_sha256?: string;
+  patch_result_content_sha256?: string;
+}
+
+interface BoardEvidenceProjection {
+  evidence: {
+    phase: "execute" | "review" | "patch";
+    outcome: "rejected" | "failed" | "applied";
+    mission_content_sha256?: string;
+    result_content_sha256?: string;
+    result_commit?: string | null;
+    identity: {
+      work_item_id: string;
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+      patch_cycle?: number;
+    };
+  };
+  summary?: { evidence_path: string };
+  submission?: ExternalResultSubmission | BoardReviewSubmissionProjection;
+}
 
 export interface BoardTransitionAction {
   target_column_id: BoardColumnId;
@@ -265,31 +339,24 @@ export function reviewHandoffForItem(
         goal_version?: number;
         input_revision?: number;
         attempt?: number;
+        patch_cycle?: number;
       };
     };
   },
-  evidence: readonly {
-    evidence: {
-      phase: "execute" | "review" | "patch";
-      outcome: "rejected" | "failed" | "applied";
-      identity: {
-        work_item_id: string;
-        goal_version: number;
-        input_revision: number;
-        attempt: number;
-      };
-    };
-  }[],
+  evidence: readonly BoardEvidenceProjection[],
 ): ReviewHandoffProjection {
   const { goal, state } = item.work_item;
-  const matchingAppliedExecuteSubjects = evidence.filter(
+  const matchingAppliedSubjects = evidence.filter(
     (stored) =>
-      stored.evidence.phase === "execute" &&
+      stored.evidence.phase ===
+        (state.patch_cycle === 0 ? "execute" : "patch") &&
       stored.evidence.outcome === "applied" &&
       stored.evidence.identity.work_item_id === goal.work_item_id &&
       stored.evidence.identity.goal_version === state.goal_version &&
       stored.evidence.identity.input_revision === state.input_revision &&
-      stored.evidence.identity.attempt === state.attempt,
+      stored.evidence.identity.attempt === state.attempt &&
+      (state.patch_cycle === 0 ||
+        stored.evidence.identity.patch_cycle === state.patch_cycle),
   ).length;
   const eligible =
     item.source_id !== INBOX_SOURCE_ID &&
@@ -299,7 +366,8 @@ export function reviewHandoffForItem(
     state.goal_version !== undefined &&
     state.input_revision !== undefined &&
     state.attempt !== undefined &&
-    matchingAppliedExecuteSubjects === 1;
+    state.patch_cycle !== undefined &&
+    matchingAppliedSubjects === 1;
 
   return eligible
     ? {
@@ -314,6 +382,241 @@ export function reviewHandoffForItem(
         can_compile: false,
         can_import: false,
       };
+}
+
+function hiddenPatchAttention(): PatchAttentionProjection {
+  return {
+    mode: "hidden",
+    action: null,
+    attention: null,
+    patch_cycle: null,
+  };
+}
+
+function evidenceMatchesTuple(
+  stored: BoardEvidenceProjection,
+  tuple: {
+    work_item_id: string;
+    goal_version: number;
+    input_revision: number;
+    attempt: number;
+  },
+): boolean {
+  return (
+    stored.evidence.identity.work_item_id === tuple.work_item_id &&
+    stored.evidence.identity.goal_version === tuple.goal_version &&
+    stored.evidence.identity.input_revision === tuple.input_revision &&
+    stored.evidence.identity.attempt === tuple.attempt
+  );
+}
+
+function reviewSubmissionForEvidence(
+  stored: BoardEvidenceProjection,
+): BoardReviewSubmissionProjection | null {
+  const { submission } = stored;
+  return submission !== undefined &&
+    "review_mission_content_sha256" in submission
+    ? submission
+    : null;
+}
+
+function attentionMatchesCurrentReview(
+  attention: WorkItemAttention,
+  evidence: readonly BoardEvidenceProjection[],
+  tuple: {
+    work_item_id: string;
+    goal_version: number;
+    input_revision: number;
+    attempt: number;
+  },
+): boolean {
+  const [missionPath, resultPath] = attention.pins.artifact_paths;
+  if (
+    attention.pins.artifact_paths.length !== 2 ||
+    !missionPath.endsWith("/mission.json") ||
+    !resultPath.endsWith("/result.json") ||
+    attention.pins.evidence_paths.length !== 1 ||
+    attention.pins.git_commit === undefined ||
+    attention.pins.mission_content_sha256 === undefined ||
+    attention.pins.result_content_sha256 === undefined
+  ) {
+    return false;
+  }
+
+  const matching = evidence.filter((stored) => {
+    const submission = reviewSubmissionForEvidence(stored);
+    return (
+      stored.evidence.phase === "review" &&
+      stored.evidence.outcome === "applied" &&
+      evidenceMatchesTuple(stored, tuple) &&
+      stored.evidence.mission_content_sha256 ===
+        attention.pins.mission_content_sha256 &&
+      stored.evidence.result_content_sha256 ===
+        attention.pins.result_content_sha256 &&
+      stored.evidence.result_commit === attention.pins.git_commit &&
+      stored.summary?.evidence_path === attention.pins.evidence_paths[0] &&
+      submission !== null &&
+      submission.review_mission_content_sha256 ===
+        attention.pins.mission_content_sha256 &&
+      submission.accepted_result_commit === attention.pins.git_commit
+    );
+  });
+
+  if (matching.length !== 1) {
+    return false;
+  }
+  const verdict = reviewSubmissionForEvidence(matching[0])?.verdict;
+  return attention.kind === "review_ready"
+    ? verdict === "clean"
+    : verdict === "findings";
+}
+
+function activePatchMatchesReviewLineage(
+  evidence: readonly BoardEvidenceProjection[],
+  tuple: {
+    work_item_id: string;
+    goal_version: number;
+    input_revision: number;
+    attempt: number;
+    patch_cycle: number;
+  },
+): boolean {
+  const subjectPhase = tuple.patch_cycle === 1 ? "execute" : "patch";
+  const subjects = evidence.filter(
+    (stored) =>
+      stored.evidence.phase === subjectPhase &&
+      stored.evidence.outcome === "applied" &&
+      evidenceMatchesTuple(stored, tuple) &&
+      (subjectPhase === "execute" ||
+        stored.evidence.identity.patch_cycle === tuple.patch_cycle - 1),
+  );
+  if (subjects.length !== 1) {
+    return false;
+  }
+  const subject = subjects[0].evidence;
+  const reviews = evidence.filter((stored) => {
+    const submission = reviewSubmissionForEvidence(stored);
+    if (
+      stored.evidence.phase !== "review" ||
+      stored.evidence.outcome !== "applied" ||
+      !evidenceMatchesTuple(stored, tuple) ||
+      submission?.verdict !== "findings" ||
+      submission.review_mission_content_sha256 !==
+        stored.evidence.mission_content_sha256 ||
+      submission.accepted_result_commit !== stored.evidence.result_commit
+    ) {
+      return false;
+    }
+
+    return subjectPhase === "execute"
+      ? submission.execute_mission_content_sha256 ===
+          subject.mission_content_sha256 &&
+          submission.execute_result_content_sha256 ===
+            subject.result_content_sha256
+      : submission.patch_mission_content_sha256 ===
+          subject.mission_content_sha256 &&
+          submission.patch_result_content_sha256 ===
+            subject.result_content_sha256;
+  });
+  return reviews.length === 1;
+}
+
+export function patchAttentionForItem(
+  item: {
+    source_id: string;
+    work_item: {
+      goal: {
+        work_item_id: string;
+        goal_contract?: { goal_version: number };
+      };
+      state: {
+        phase: WorkItemPhase;
+        status: WorkItemStatus;
+        goal_version?: number;
+        input_revision?: number;
+        attempt?: number;
+        patch_cycle?: number;
+        attention?: WorkItemAttention;
+      };
+    };
+  },
+  evidence: readonly BoardEvidenceProjection[],
+): PatchAttentionProjection {
+  const { goal, state } = item.work_item;
+  if (
+    item.source_id === INBOX_SOURCE_ID ||
+    goal.goal_contract === undefined ||
+    state.status !== "active" ||
+    state.goal_version === undefined ||
+    goal.goal_contract.goal_version !== state.goal_version ||
+    state.input_revision === undefined ||
+    state.attempt === undefined ||
+    state.patch_cycle === undefined
+  ) {
+    return hiddenPatchAttention();
+  }
+  const tuple = {
+    work_item_id: goal.work_item_id,
+    goal_version: state.goal_version,
+    input_revision: state.input_revision,
+    attempt: state.attempt,
+    patch_cycle: state.patch_cycle,
+  };
+
+  if (state.phase === "patch") {
+    return state.attention === undefined &&
+      state.patch_cycle > 0 &&
+      activePatchMatchesReviewLineage(evidence, tuple)
+      ? {
+          mode: "patch_active",
+          action: "compile_or_import_patch",
+          attention: null,
+          patch_cycle: state.patch_cycle,
+        }
+      : hiddenPatchAttention();
+  }
+
+  const attention = state.attention;
+  if (
+    state.phase !== "review" ||
+    attention === undefined ||
+    attention.governed_tuple.goal_version !== state.goal_version ||
+    attention.governed_tuple.input_revision !== state.input_revision ||
+    attention.governed_tuple.attempt !== state.attempt ||
+    attention.governed_tuple.patch_cycle !== state.patch_cycle ||
+    !attentionMatchesCurrentReview(attention, evidence, tuple)
+  ) {
+    return hiddenPatchAttention();
+  }
+
+  switch (attention.kind) {
+    case "patch_plan_approval":
+      return {
+        mode: "patch_plan",
+        action: "accept_patch_plan",
+        attention,
+        patch_cycle: state.patch_cycle,
+      };
+    case "unresolved_finding":
+    case "ambiguous_goal":
+    case "cycle_limit":
+    case "missing_permission":
+      return {
+        mode: "escalation",
+        action: "resolve_escalation",
+        attention,
+        patch_cycle: state.patch_cycle,
+      };
+    case "review_ready":
+      return {
+        mode: "review_ready",
+        action: "review_result",
+        attention,
+        patch_cycle: state.patch_cycle,
+      };
+    default:
+      return hiddenPatchAttention();
+  }
 }
 
 export function boardTransitionActionsForPhase(phase: WorkItemPhase): {

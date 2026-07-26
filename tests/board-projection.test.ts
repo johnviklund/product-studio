@@ -10,6 +10,7 @@ import {
   isBoardSourceVisible,
   missionHandoffModeForItem,
   nextActionForPhase,
+  patchAttentionForItem,
   parseBoardItemIdentityKey,
   parseBoardView,
   reviewHandoffForItem,
@@ -35,6 +36,7 @@ describe("board projection", () => {
     expect(boardColumnForPhase("idea").id).toBe("todo");
     expect(boardColumnForPhase("brainstorm").id).toBe("todo");
     expect(boardColumnForPhase("review").id).toBe("review");
+    expect(boardColumnForPhase("patch").id).toBe("review");
     expect(boardColumnForPhase("test").id).toBe("review");
     expect(boardColumnForPhase("learn").id).toBe("done");
   });
@@ -82,6 +84,7 @@ describe("board projection", () => {
   it("provides one phase-derived next action", () => {
     expect(nextActionForPhase("idea")).toBe("Brainstorm the idea");
     expect(nextActionForPhase("execute")).toBe("Review the result");
+    expect(nextActionForPhase("patch")).toBe("Review the patch");
     expect(nextActionForPhase("ship")).toBe("Capture the learning");
   });
 
@@ -126,6 +129,7 @@ describe("board projection", () => {
           status: "active" as const,
           input_revision: 2,
           attempt: 1,
+          patch_cycle: 0,
         },
       },
     };
@@ -177,6 +181,7 @@ describe("board projection", () => {
           goal_version: 3,
           input_revision: 2,
           attempt: 1,
+          patch_cycle: 0,
         },
       },
     };
@@ -238,6 +243,278 @@ describe("board projection", () => {
       reviewHandoffForItem({ ...item, source_id: "inbox" }, [appliedExecute]),
     ).toMatchObject({ mode: "hidden" });
     expect(missionHandoffModeForItem(item)).toBe("hidden");
+
+    const appliedPatch = {
+      evidence: {
+        ...appliedExecute.evidence,
+        phase: "patch" as const,
+        identity: {
+          ...appliedExecute.evidence.identity,
+          patch_cycle: 1,
+        },
+      },
+    };
+    const reReviewItem = {
+      ...item,
+      work_item: {
+        ...item.work_item,
+        state: { ...item.work_item.state, patch_cycle: 1 },
+      },
+    };
+    expect(reviewHandoffForItem(reReviewItem, [appliedPatch])).toMatchObject({
+      mode: "active",
+      can_compile: true,
+      can_import: true,
+    });
+    expect(
+      reviewHandoffForItem(reReviewItem, [
+        {
+          evidence: {
+            ...appliedPatch.evidence,
+            identity: { ...appliedPatch.evidence.identity, patch_cycle: 2 },
+          },
+        },
+      ]),
+    ).toMatchObject({ mode: "hidden" });
+    expect(
+      reviewHandoffForItem(reReviewItem, [appliedPatch, appliedPatch]),
+    ).toMatchObject({ mode: "hidden" });
+  });
+
+  it("exposes one evidence-bound patch or attention action and hides stale projections", () => {
+    const missionContentSha256 = "a".repeat(64);
+    const resultContentSha256 = "b".repeat(64);
+    const gitCommit = "c".repeat(40);
+    const evidencePath = `.founder/run-evidence/${workItemId}/review-3-2-1/${"d".repeat(64)}`;
+    const attention = {
+      kind: "patch_plan_approval" as const,
+      question: "Approve one patch that addresses these exact findings?",
+      recommendation: "Approve the bounded patch plan.",
+      created_at: "2026-07-25T12:00:00.000Z",
+      governed_tuple: {
+        goal_version: 3,
+        input_revision: 2,
+        attempt: 1,
+        patch_cycle: 0,
+      },
+      pins: {
+        artifact_paths: [
+          `.founder/missions/${workItemId}/review-3-2-1/mission.json`,
+          `.founder/missions/${workItemId}/review-3-2-1/result.json`,
+        ] as [string, ...string[]],
+        evidence_paths: [evidencePath],
+        git_commit: gitCommit,
+        mission_content_sha256: missionContentSha256,
+        result_content_sha256: resultContentSha256,
+      },
+    };
+    const item = {
+      source_id: "ws_product",
+      work_item: {
+        goal: {
+          work_item_id: workItemId,
+          goal_contract: { goal_version: 3 },
+        },
+        state: {
+          phase: "review" as const,
+          status: "active" as const,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+          patch_cycle: 0,
+          attention,
+        },
+      },
+    };
+    const appliedReview = {
+      evidence: {
+        phase: "review" as const,
+        outcome: "applied" as const,
+        mission_content_sha256: missionContentSha256,
+        result_content_sha256: resultContentSha256,
+        result_commit: gitCommit,
+        identity: {
+          work_item_id: workItemId,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+        },
+      },
+      summary: { evidence_path: evidencePath },
+      submission: {
+        review_mission_content_sha256: missionContentSha256,
+        accepted_result_commit: gitCommit,
+        verdict: "findings" as const,
+      },
+    };
+
+    expect(patchAttentionForItem(item, [appliedReview])).toMatchObject({
+      mode: "patch_plan",
+      action: "accept_patch_plan",
+      patch_cycle: 0,
+    });
+    expect(
+      patchAttentionForItem(
+        {
+          ...item,
+          work_item: {
+            ...item.work_item,
+            state: {
+              ...item.work_item.state,
+              attention: { ...attention, kind: "unresolved_finding" },
+            },
+          },
+        },
+        [appliedReview],
+      ),
+    ).toMatchObject({ mode: "escalation", action: "resolve_escalation" });
+    expect(
+      patchAttentionForItem(
+        {
+          ...item,
+          work_item: {
+            ...item.work_item,
+            state: {
+              ...item.work_item.state,
+              attention: { ...attention, kind: "review_ready" },
+            },
+          },
+        },
+        [
+          {
+            ...appliedReview,
+            submission: { ...appliedReview.submission, verdict: "clean" },
+          },
+        ],
+      ),
+    ).toMatchObject({ mode: "review_ready", action: "review_result" });
+    expect(
+      patchAttentionForItem(
+        {
+          ...item,
+          work_item: {
+            ...item.work_item,
+            state: {
+              ...item.work_item.state,
+              attention: {
+                ...attention,
+                governed_tuple: {
+                  ...attention.governed_tuple,
+                  input_revision: 1,
+                },
+              },
+            },
+          },
+        },
+        [appliedReview],
+      ),
+    ).toMatchObject({ mode: "hidden", action: null });
+    expect(
+      patchAttentionForItem(item, [appliedReview, appliedReview]),
+    ).toMatchObject({ mode: "hidden", action: null });
+    expect(
+      patchAttentionForItem({ ...item, source_id: "inbox" }, [appliedReview]),
+    ).toMatchObject({ mode: "hidden", action: null });
+    expect(
+      patchAttentionForItem(
+        {
+          ...item,
+          work_item: {
+            ...item.work_item,
+            goal: { work_item_id: workItemId },
+          },
+        },
+        [appliedReview],
+      ),
+    ).toMatchObject({ mode: "hidden", action: null });
+    expect(
+      patchAttentionForItem(
+        {
+          ...item,
+          work_item: {
+            ...item.work_item,
+            state: { ...item.work_item.state, status: "blocked" },
+          },
+        },
+        [appliedReview],
+      ),
+    ).toMatchObject({ mode: "hidden", action: null });
+  });
+
+  it("shows active patch handoff only for one exact prompting review lineage", () => {
+    const executeMissionContentSha256 = "a".repeat(64);
+    const executeResultContentSha256 = "b".repeat(64);
+    const reviewMissionContentSha256 = "c".repeat(64);
+    const execute = {
+      evidence: {
+        phase: "execute" as const,
+        outcome: "applied" as const,
+        mission_content_sha256: executeMissionContentSha256,
+        result_content_sha256: executeResultContentSha256,
+        identity: {
+          work_item_id: workItemId,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+        },
+      },
+    };
+    const review = {
+      evidence: {
+        phase: "review" as const,
+        outcome: "applied" as const,
+        mission_content_sha256: reviewMissionContentSha256,
+        result_content_sha256: "d".repeat(64),
+        result_commit: "e".repeat(40),
+        identity: { ...execute.evidence.identity },
+      },
+      submission: {
+        review_mission_content_sha256: reviewMissionContentSha256,
+        accepted_result_commit: "e".repeat(40),
+        verdict: "findings" as const,
+        execute_mission_content_sha256: executeMissionContentSha256,
+        execute_result_content_sha256: executeResultContentSha256,
+      },
+    };
+    const item = {
+      source_id: "ws_product",
+      work_item: {
+        goal: {
+          work_item_id: workItemId,
+          goal_contract: { goal_version: 3 },
+        },
+        state: {
+          phase: "patch" as const,
+          status: "active" as const,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+          patch_cycle: 1,
+        },
+      },
+    };
+
+    expect(patchAttentionForItem(item, [execute, review])).toEqual({
+      mode: "patch_active",
+      action: "compile_or_import_patch",
+      attention: null,
+      patch_cycle: 1,
+    });
+    expect(
+      patchAttentionForItem(item, [execute, review, review]),
+    ).toMatchObject({ mode: "hidden" });
+    expect(
+      patchAttentionForItem(item, [
+        execute,
+        {
+          ...review,
+          submission: {
+            ...review.submission,
+            execute_result_content_sha256: "f".repeat(64),
+          },
+        },
+      ]),
+    ).toMatchObject({ mode: "hidden" });
   });
 
   it("derives only valid forward and backward board transition actions", () => {
@@ -248,6 +525,7 @@ describe("board projection", () => {
       "plan",
       "execute",
       "review",
+      "patch",
       "test",
       "ship",
       "learn",
@@ -279,7 +557,10 @@ describe("board projection", () => {
       }
 
       expect(actions.forward === null || actions.back === null).toBe(
-        phase === "idea" || phase === "brainstorm" || phase === "learn",
+        phase === "idea" ||
+          phase === "brainstorm" ||
+          phase === "patch" ||
+          phase === "learn",
       );
     }
 
