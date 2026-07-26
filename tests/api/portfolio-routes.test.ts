@@ -41,6 +41,10 @@ import * as portfolioMissionRoute from "../../app/api/portfolio/work-items/[sour
 import * as portfolioMissionImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route";
 import * as portfolioReviewMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route";
 import * as portfolioReviewMissionImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route";
+import * as portfolioPatchMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route";
+import * as portfolioPatchMissionImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route";
+import * as portfolioPatchPlanRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route";
+import * as portfolioAttentionRoute from "../../app/api/portfolio/attention/route";
 import * as portfolioMissionRetryRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route";
 import { GET as getPortfolioRunEvidence } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/run-evidence/route";
 import {
@@ -56,6 +60,10 @@ const compilePortfolioMission = portfolioMissionRoute.POST;
 const importPortfolioMission = portfolioMissionImportRoute.POST;
 const compilePortfolioReviewMission = portfolioReviewMissionRoute.POST;
 const importPortfolioReviewMission = portfolioReviewMissionImportRoute.POST;
+const compilePortfolioPatchMission = portfolioPatchMissionRoute.POST;
+const importPortfolioPatchMission = portfolioPatchMissionImportRoute.POST;
+const acceptPortfolioPatchPlan = portfolioPatchPlanRoute.POST;
+const getPortfolioAttention = portfolioAttentionRoute.GET;
 const retryPortfolioMission = portfolioMissionRetryRoute.POST;
 
 const createdRoots: string[] = [];
@@ -623,6 +631,133 @@ describe("portfolio API routes", () => {
       independence_attested: true,
     });
     expect(importReviewResult).toHaveBeenCalledWith(sourceId, workItemId);
+  });
+
+  it("exposes bodyless patch actions and a read-only attention projection", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const mission = {
+      mission: { identity: { phase: "patch", work_item_id: workItemId } },
+    };
+    const imported = {
+      source_id: sourceId,
+      project: null,
+      work_item: { state: { phase: "review", status: "active" } },
+      evidence: { phase: "patch", outcome: "applied" },
+    };
+    const accepted = {
+      source_id: sourceId,
+      project: null,
+      work_item: { state: { phase: "patch", status: "active" } },
+      controller_run: { phase: "patch", outcome: "applied" },
+    };
+    const attention = [
+      {
+        item: { source_id: sourceId, project: null },
+        attention: { kind: "patch_plan_approval" },
+        acceptance_criteria: [],
+        verification: { status: "unknown", commands: [] },
+        findings: [],
+        patch_cycle_limit: 3,
+        cost_capacity: "unknown",
+      },
+    ];
+    const compilePatchMission = vi.fn().mockResolvedValue(mission);
+    const importPatchResult = vi.fn().mockResolvedValue(imported);
+    const acceptPatchPlan = vi.fn().mockResolvedValue(accepted);
+    const listAttention = vi.fn().mockResolvedValue(attention);
+    getService.mockResolvedValue({
+      compilePatchMission,
+      importPatchResult,
+      acceptPatchPlan,
+      listAttention,
+    });
+    const context = phaseUpdateContext(sourceId, workItemId);
+
+    const compiledResponse = await compilePortfolioPatchMission(
+      missionRequest(),
+      context,
+    );
+    const importedResponse = await importPortfolioPatchMission(
+      missionActionRequest("import"),
+      context,
+    );
+    const acceptedResponse = await acceptPortfolioPatchPlan(
+      missionActionRequest("retry"),
+      context,
+    );
+    const attentionResponse = await getPortfolioAttention();
+
+    expect(compiledResponse.status).toBe(200);
+    expect(await compiledResponse.json()).toEqual(mission);
+    expect(importedResponse.status).toBe(200);
+    expect(await importedResponse.json()).toEqual(imported);
+    expect(acceptedResponse.status).toBe(200);
+    expect(await acceptedResponse.json()).toEqual(accepted);
+    expect(attentionResponse.status).toBe(200);
+    expect(await attentionResponse.json()).toEqual({ items: attention });
+    expect(compilePatchMission).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(importPatchResult).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(acceptPatchPlan).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(listAttention).toHaveBeenCalledOnce();
+    expect(Object.keys(portfolioPatchMissionRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioPatchMissionImportRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioPatchPlanRoute).sort()).toEqual([
+      "POST",
+      "runtime",
+    ]);
+    expect(Object.keys(portfolioAttentionRoute).sort()).toEqual([
+      "GET",
+      "runtime",
+    ]);
+    expect(portfolioPatchMissionRoute.runtime).toBe("nodejs");
+    expect(portfolioPatchMissionImportRoute.runtime).toBe("nodejs");
+    expect(portfolioPatchPlanRoute.runtime).toBe("nodejs");
+    expect(portfolioAttentionRoute.runtime).toBe("nodejs");
+  });
+
+  it("maps patch and attention conflicts through the established response contract", async () => {
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const conflict = () =>
+      new ControllerConflictError(
+        "mission_not_ready",
+        workItemId,
+        "The governed patch operation is not ready.",
+      );
+    const compilePatchMission = vi.fn().mockRejectedValue(conflict());
+    const importPatchResult = vi.fn().mockRejectedValue(conflict());
+    const acceptPatchPlan = vi.fn().mockRejectedValue(conflict());
+    const listAttention = vi.fn().mockRejectedValue(conflict());
+    getService.mockResolvedValue({
+      compilePatchMission,
+      importPatchResult,
+      acceptPatchPlan,
+      listAttention,
+    });
+    const context = phaseUpdateContext("inbox", workItemId);
+
+    const responses = await Promise.all([
+      compilePortfolioPatchMission(missionRequest(), context),
+      importPortfolioPatchMission(missionActionRequest("import"), context),
+      acceptPortfolioPatchPlan(missionActionRequest("retry"), context),
+      getPortfolioAttention(),
+    ]);
+
+    expect(responses.map(({ status }) => status)).toEqual([409, 409, 409, 409]);
+    for (const response of responses) {
+      expect(await response.json()).toEqual({
+        error: {
+          code: "mission_not_ready",
+          message: "The governed patch operation is not ready.",
+        },
+      });
+    }
   });
 
   it("maps mission compile failures through the established response contract", async () => {
