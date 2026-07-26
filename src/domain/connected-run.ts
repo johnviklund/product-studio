@@ -323,7 +323,7 @@ export const connectedRunLimitsSchema: z.ZodType<ConnectedRunLimits> =
     drain_grace_ms: nonNegativeSafeIntegerSchema,
   });
 
-const connectedRunProcessIdentitySchema: z.ZodType<ConnectedRunProcessIdentity> =
+export const connectedRunProcessIdentitySchema: z.ZodType<ConnectedRunProcessIdentity> =
   z.strictObject({
     pid: positiveSafeIntegerSchema,
     process_group_id: positiveSafeIntegerSchema,

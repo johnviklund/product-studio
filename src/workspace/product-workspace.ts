@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import {
+  appendFile,
   lstat,
   mkdir,
   readFile,
@@ -93,6 +94,16 @@ import type {
   GitVerificationAdapter,
   VerificationRunner,
 } from "../domain/verification";
+import {
+  executionDefaultsV1Schema,
+  type ExecutionDefaultsV1,
+} from "../domain/capability-envelope";
+import {
+  connectedRunProcessIdentitySchema,
+  connectedRunRecordV1Schema,
+  type ConnectedRunProcessIdentity,
+  type ConnectedRunRecordV1,
+} from "../domain/connected-run";
 
 const FOUNDER_DIRECTORY = ".founder";
 const WORK_ITEMS_DIRECTORY = "work-items";
@@ -101,6 +112,14 @@ const STATE_FILE = "state.json";
 const RUNS_DIRECTORY = "runs";
 const MISSIONS_DIRECTORY = "missions";
 const RUN_EVIDENCE_DIRECTORY = "run-evidence";
+const EXECUTION_DIRECTORY = "execution";
+const EXECUTION_DEFAULTS_FILE = "defaults.json";
+const CONNECTED_RUNS_DIRECTORY = "connected-runs";
+const CONNECTED_RUN_FILE = "run.json";
+const CONNECTED_RUN_EVENTS_FILE = "events.ndjson";
+const CONNECTED_RUN_PROCESS_FILE = "process.json";
+const CONNECTED_RUN_LAUNCH_GUARD_FILE = ".launch-guard.json";
+const CONNECTED_RUN_EVENTS_LOCK_FILE = ".events.lock";
 const MISSION_JSON_FILE = "mission.json";
 const TASK_MD_FILE = "TASK.md";
 const RESULT_JSON_FILE = "result.json";
@@ -116,6 +135,53 @@ const STAGING_DIRECTORY_PATTERN = new RegExp(
   `^\\.wi_${UUID_PATTERN}\\.${UUID_PATTERN}\\.staging$`,
   "i",
 );
+const CONNECTED_RUN_STAGING_DIRECTORY_PATTERN = new RegExp(
+  `^\\.${UUID_PATTERN}\\.${UUID_PATTERN}\\.staging$`,
+  "i",
+);
+const SHA256_SCHEMA = z.string().regex(/^[0-9a-f]{64}$/);
+const FAIL_CLOSED_EXECUTION_DEFAULTS: ExecutionDefaultsV1 = {
+  schema_version: 1,
+  approved_command_forms: [],
+  approved_url_operations: [],
+  mcp: "forbidden",
+  credentials: "forbidden",
+};
+const REDACTED_EVENT_VALUE = "[REDACTED]";
+const TRUNCATED_EVENT_VALUE = "...[TRUNCATED]";
+const MAX_EVENT_DEPTH = 8;
+const MAX_EVENT_ARRAY_ITEMS = 100;
+const MAX_EVENT_OBJECT_KEYS = 100;
+
+const connectedRunLaunchGuardSchema = z
+  .strictObject({
+    schema_version: z.literal(1),
+    work_item_id: workItemIdSchema,
+    connected_run_id: controllerRunIdSchema,
+    launch_fingerprint: SHA256_SCHEMA,
+    record: connectedRunRecordV1Schema,
+    created_at: z.iso.datetime(),
+  })
+  .superRefine((guard, context) => {
+    if (guard.record.connected_run_id !== guard.connected_run_id) {
+      context.addIssue({
+        code: "custom",
+        message: "record connected_run_id must match launch guard",
+        path: ["record", "connected_run_id"],
+        input: guard.record.connected_run_id,
+      });
+    }
+    if (guard.record.mission.identity.work_item_id !== guard.work_item_id) {
+      context.addIssue({
+        code: "custom",
+        message: "record work_item_id must match launch guard",
+        path: ["record", "mission", "identity", "work_item_id"],
+        input: guard.record.mission.identity.work_item_id,
+      });
+    }
+  });
+
+type ConnectedRunLaunchGuard = z.infer<typeof connectedRunLaunchGuardSchema>;
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
@@ -144,6 +210,178 @@ function execFileExitCode(error: unknown): number | null {
     return error.code;
   }
   return null;
+}
+
+type SanitizedEventValue =
+  | null
+  | boolean
+  | number
+  | string
+  | SanitizedEventValue[]
+  | { [key: string]: SanitizedEventValue };
+
+function isSensitiveEventKey(key: string): boolean {
+  const normalized = key
+    .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
+    .replaceAll("-", "_")
+    .toLowerCase();
+  return (
+    [
+      "access_key",
+      "api_key",
+      "authorization",
+      "cookie",
+      "credentials",
+      "env",
+      "environment",
+      "narration",
+      "password",
+      "private_key",
+      "prompt",
+      "raw_input",
+      "raw_output",
+      "secret",
+      "set_cookie",
+      "stderr",
+      "stdout",
+      "token",
+    ].includes(normalized) ||
+    /(?:^|_)(?:access_key|api_key|authorization|cookie|credentials|password|private_key|secret|token)$/u.test(
+      normalized,
+    )
+  );
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) {
+    return value;
+  }
+  if (maxBytes <= Buffer.byteLength(TRUNCATED_EVENT_VALUE, "utf8")) {
+    return "";
+  }
+
+  const availableBytes =
+    maxBytes - Buffer.byteLength(TRUNCATED_EVENT_VALUE, "utf8");
+  let result = "";
+  let usedBytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (usedBytes + characterBytes > availableBytes) {
+      break;
+    }
+    result += character;
+    usedBytes += characterBytes;
+  }
+  return `${result}${TRUNCATED_EVENT_VALUE}`;
+}
+
+function sanitizeConnectedRunEvent(
+  value: unknown,
+  maxStringBytes: number,
+  depth = 0,
+  seen = new WeakSet<object>(),
+): SanitizedEventValue {
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return truncateUtf8(value, maxStringBytes);
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "bigint") {
+    return truncateUtf8(value.toString(), maxStringBytes);
+  }
+  if (typeof value !== "object") {
+    return null;
+  }
+  if (depth >= MAX_EVENT_DEPTH || seen.has(value)) {
+    return TRUNCATED_EVENT_VALUE;
+  }
+
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const sanitized = value
+      .slice(0, MAX_EVENT_ARRAY_ITEMS)
+      .map((item) =>
+        sanitizeConnectedRunEvent(item, maxStringBytes, depth + 1, seen),
+      );
+    if (value.length > MAX_EVENT_ARRAY_ITEMS) {
+      sanitized.push(TRUNCATED_EVENT_VALUE);
+    }
+    seen.delete(value);
+    return sanitized;
+  }
+
+  const entries = Object.entries(value)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(0, MAX_EVENT_OBJECT_KEYS);
+  const sanitized: Record<string, SanitizedEventValue> = {};
+  for (const [key, entryValue] of entries) {
+    sanitized[key] = isSensitiveEventKey(key)
+      ? REDACTED_EVENT_VALUE
+      : sanitizeConnectedRunEvent(
+          entryValue,
+          maxStringBytes,
+          depth + 1,
+          seen,
+        );
+  }
+  if (Object.keys(value).length > MAX_EVENT_OBJECT_KEYS) {
+    sanitized.__truncated__ = TRUNCATED_EVENT_VALUE;
+  }
+  seen.delete(value);
+  return sanitized;
+}
+
+function connectedRunLaunchFingerprint(record: ConnectedRunRecordV1): string {
+  const launchIdentity = {
+    schema_version: record.schema_version,
+    mission: record.mission,
+    governed_tuple: record.governed_tuple,
+    provenance: {
+      role: record.provenance.role,
+      seat: record.provenance.seat,
+      requested_model: record.provenance.requested_model,
+      effort: record.provenance.effort,
+      harness: record.provenance.harness,
+      adapter_profile: record.provenance.adapter_profile,
+      resolved_profile_sha256: record.provenance.resolved_profile_sha256,
+      resolved_skill_set_sha256:
+        record.provenance.resolved_skill_set_sha256,
+      capability_envelope_sha256:
+        record.provenance.capability_envelope_sha256,
+      authorization_sha256: record.provenance.authorization_sha256,
+    },
+    resolved_capability_envelope_sha256:
+      record.resolved_capability_envelope.envelope_sha256,
+    acp_protocol_version: record.acp.protocol_version,
+    limits: record.limits,
+  };
+  return createHash("sha256")
+    .update(`${JSON.stringify(launchIdentity, null, 2)}\n`)
+    .digest("hex");
+}
+
+function timestampAtOrAfter(...timestamps: string[]): string {
+  const now = new Date().toISOString();
+  return [now, ...timestamps].sort().at(-1) ?? now;
+}
+
+async function defaultConnectedProcessProbe(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ESRCH") {
+      return false;
+    }
+    if (isNodeError(error) && error.code === "EPERM") {
+      return true;
+    }
+    throw error;
+  }
 }
 
 export class NodeGitVerificationAdapter implements GitVerificationAdapter {
@@ -441,6 +679,21 @@ export class NodeVerificationRunner implements VerificationRunner {
 export interface ProductWorkspaceOptions {
   git?: GitVerificationAdapter;
   verificationRunner?: VerificationRunner;
+  connectedProcessProbe?: ConnectedProcessProbe;
+}
+
+export type ConnectedProcessProbe = (pid: number) => Promise<boolean>;
+
+export interface ConnectedRunCreateResult {
+  record: ConnectedRunRecordV1;
+  created: boolean;
+}
+
+export interface ConnectedRunEventAppendResult {
+  appended: boolean;
+  limit_reached: boolean;
+  event_count: number;
+  event_bytes: number;
 }
 
 export class ProductWorkspace implements ReviewWorkItemRepository {
@@ -450,6 +703,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   private readonly workItemsDirectory: string;
   private readonly gitAdapter: GitVerificationAdapter;
   private readonly commandRunner: VerificationRunner;
+  private readonly connectedProcessProbe: ConnectedProcessProbe;
 
   constructor(
     workspaceRoot: string,
@@ -466,6 +720,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     this.commandRunner =
       options.verificationRunner ??
       new NodeVerificationRunner(this.workspaceRoot);
+    this.connectedProcessProbe =
+      options.connectedProcessProbe ?? defaultConnectedProcessProbe;
   }
 
   gitVerificationAdapter(): GitVerificationAdapter {
@@ -474,6 +730,335 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
   verificationRunner(): VerificationRunner {
     return this.commandRunner;
+  }
+
+  async readExecutionDefaults(): Promise<ExecutionDefaultsV1> {
+    await this.readManifest();
+    const executionDirectory = join(
+      this.founderDirectory,
+      EXECUTION_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(executionDirectory))) {
+      return executionDefaultsV1Schema.parse(FAIL_CLOSED_EXECUTION_DEFAULTS);
+    }
+
+    const defaultsPath = join(executionDirectory, EXECUTION_DEFAULTS_FILE);
+    const source = await this.readOptionalFile(defaultsPath);
+    if (source === null) {
+      return executionDefaultsV1Schema.parse(FAIL_CLOSED_EXECUTION_DEFAULTS);
+    }
+    return this.parseJson(source, defaultsPath, executionDefaultsV1Schema);
+  }
+
+  async createConnectedRun(
+    record: ConnectedRunRecordV1,
+  ): Promise<ConnectedRunCreateResult> {
+    const validated = connectedRunRecordV1Schema.parse(record);
+    const workItemId = validated.mission.identity.work_item_id;
+    if (validated.lifecycle.status === "terminal") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        workItemId,
+        "A new connected run must be nonterminal.",
+      );
+    }
+
+    await this.readManifest();
+    if (
+      !(await this.hasSafeWorkItemsDirectory()) ||
+      (await this.readValidated(workItemId)) === null
+    ) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Work item ${workItemId} was not found.`,
+      );
+    }
+
+    const itemDirectory = await this.ensureConnectedRunItemDirectory(
+      workItemId,
+    );
+    const existingNonterminalRuns = (
+      await this.readConnectedRunsFromItemDirectory(workItemId, itemDirectory)
+    ).filter((existing) => existing.lifecycle.status !== "terminal");
+    if (existingNonterminalRuns.length > 1) {
+      throw this.invalid(
+        itemDirectory,
+        "only one nonterminal connected run may exist per work item",
+      );
+    }
+    const existingNonterminalRun = existingNonterminalRuns[0];
+    if (existingNonterminalRun !== undefined) {
+      if (
+        connectedRunLaunchFingerprint(existingNonterminalRun) ===
+        connectedRunLaunchFingerprint(validated)
+      ) {
+        return { record: existingNonterminalRun, created: false };
+      }
+      throw new ControllerConflictError(
+        "lease_held",
+        workItemId,
+        "A different connected run is already active for this work item.",
+      );
+    }
+    const guardPath = join(
+      itemDirectory,
+      CONNECTED_RUN_LAUNCH_GUARD_FILE,
+    );
+    const launchFingerprint = connectedRunLaunchFingerprint(validated);
+    const guard = connectedRunLaunchGuardSchema.parse({
+      schema_version: 1,
+      work_item_id: workItemId,
+      connected_run_id: validated.connected_run_id,
+      launch_fingerprint: launchFingerprint,
+      record: validated,
+      created_at: timestampAtOrAfter(validated.lifecycle.started_at),
+    });
+
+    try {
+      await writeFile(guardPath, `${JSON.stringify(guard, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        return this.resolveExistingConnectedRunLaunch(
+          validated,
+        );
+      }
+      throw error;
+    }
+
+    try {
+      await this.publishConnectedRunDirectory(validated);
+      return { record: validated, created: true };
+    } catch (error) {
+      try {
+        await this.releaseConnectedRunGuard(guard);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Connected run creation failed and its launch guard could not be released",
+        );
+      }
+      throw error;
+    }
+  }
+
+  async readConnectedRun(
+    workItemId: string,
+    connectedRunId: string,
+  ): Promise<ConnectedRunRecordV1 | null> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    await this.readManifest();
+    const connectedRunsDirectory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(connectedRunsDirectory))) {
+      return null;
+    }
+    const itemDirectory = join(
+      connectedRunsDirectory,
+      validatedWorkItemId,
+    );
+    if (!(await this.hasSafeDirectory(itemDirectory))) {
+      return null;
+    }
+    return this.readConnectedRunFromDirectory(
+      validatedWorkItemId,
+      validatedRunId,
+      itemDirectory,
+    );
+  }
+
+  async listConnectedRuns(
+    workItemId: string,
+  ): Promise<ConnectedRunRecordV1[]> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+    const connectedRunsDirectory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(connectedRunsDirectory))) {
+      return [];
+    }
+    const itemDirectory = join(
+      connectedRunsDirectory,
+      validatedWorkItemId,
+    );
+    if (!(await this.hasSafeDirectory(itemDirectory))) {
+      return [];
+    }
+    return this.readConnectedRunsFromItemDirectory(
+      validatedWorkItemId,
+      itemDirectory,
+    );
+  }
+
+  async writeConnectedRunProcessIdentity(
+    workItemId: string,
+    connectedRunId: string,
+    processIdentity: ConnectedRunProcessIdentity,
+  ): Promise<ConnectedRunRecordV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    const validatedProcess = connectedRunProcessIdentitySchema.parse(
+      processIdentity,
+    );
+    const record = await this.requireConnectedRun(
+      validatedWorkItemId,
+      validatedRunId,
+    );
+    if (record.lifecycle.status === "terminal") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "A terminal connected run cannot acquire a process identity.",
+      );
+    }
+
+    const paths = this.connectedRunPaths(validatedWorkItemId, validatedRunId);
+    const storedProcess = await this.readConnectedRunProcess(paths.process);
+    if (
+      storedProcess !== null &&
+      JSON.stringify(storedProcess) !== JSON.stringify(validatedProcess)
+    ) {
+      throw this.invalid(
+        paths.process,
+        "connected process identity is immutable once recorded",
+      );
+    }
+    if (
+      record.process !== null &&
+      JSON.stringify(record.process) !== JSON.stringify(validatedProcess)
+    ) {
+      throw this.invalid(
+        paths.run,
+        "run record process identity must match process.json",
+      );
+    }
+
+    await this.writeJsonAtomically(paths.process, validatedProcess);
+    const updated = connectedRunRecordV1Schema.parse({
+      ...record,
+      lifecycle: {
+        ...record.lifecycle,
+        status: "running",
+        updated_at: timestampAtOrAfter(
+          record.lifecycle.updated_at,
+          validatedProcess.started_at,
+        ),
+      },
+      process: validatedProcess,
+    });
+    await this.writeJsonAtomically(paths.run, updated);
+    return updated;
+  }
+
+  async appendConnectedRunEvent(
+    workItemId: string,
+    connectedRunId: string,
+    event: unknown,
+  ): Promise<ConnectedRunEventAppendResult> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    const paths = this.connectedRunPaths(validatedWorkItemId, validatedRunId);
+    const eventLockPath = join(paths.directory, CONNECTED_RUN_EVENTS_LOCK_FILE);
+    try {
+      await writeFile(eventLockPath, `${validatedRunId}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        throw new ControllerConflictError(
+          "lease_held",
+          validatedWorkItemId,
+          "Another event append is already in progress for this connected run.",
+        );
+      }
+      throw error;
+    }
+
+    try {
+      const record = await this.requireConnectedRun(
+        validatedWorkItemId,
+        validatedRunId,
+      );
+      if (record.lifecycle.status === "terminal") {
+        throw new ControllerConflictError(
+          "invalid_transition",
+          validatedWorkItemId,
+          "A terminal connected run cannot accept new events.",
+        );
+      }
+      const stats = await this.readConnectedRunEventStats(paths.events);
+      const maxStringBytes = Math.min(
+        record.limits.max_output_bytes,
+        record.limits.max_event_bytes,
+      );
+      const sanitized = sanitizeConnectedRunEvent(event, maxStringBytes);
+      const line = `${JSON.stringify(sanitized)}\n`;
+      const lineBytes = Buffer.byteLength(line, "utf8");
+      const limitReached =
+        stats.event_count + 1 > record.limits.max_event_count ||
+        stats.event_bytes + lineBytes > record.limits.max_event_bytes;
+      if (limitReached) {
+        return {
+          appended: false,
+          limit_reached: true,
+          ...stats,
+        };
+      }
+
+      await appendFile(paths.events, line, "utf8");
+      return {
+        appended: true,
+        limit_reached: false,
+        event_count: stats.event_count + 1,
+        event_bytes: stats.event_bytes + lineBytes,
+      };
+    } finally {
+      await this.unlinkIfPresent(eventLockPath);
+    }
+  }
+
+  async reconcileConnectedRuns(): Promise<ConnectedRunRecordV1[]> {
+    await this.readManifest();
+    const connectedRunsDirectory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(connectedRunsDirectory))) {
+      return [];
+    }
+
+    const reconciled: ConnectedRunRecordV1[] = [];
+    const itemEntries = await readdir(connectedRunsDirectory, {
+      withFileTypes: true,
+    });
+    for (const itemEntry of itemEntries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      const itemPath = join(connectedRunsDirectory, itemEntry.name);
+      if (
+        !itemEntry.isDirectory() ||
+        itemEntry.isSymbolicLink() ||
+        !workItemIdSchema.safeParse(itemEntry.name).success
+      ) {
+        throw this.invalid(
+          itemPath,
+          "connected-runs entries must be regular work-item directories",
+        );
+      }
+      reconciled.push(
+        ...(await this.reconcileConnectedRunItem(itemEntry.name, itemPath)),
+      );
+    }
+    return reconciled;
   }
 
   async readManifest(): Promise<ProductManifest> {
@@ -2833,6 +3418,445 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       }
       throw error;
     }
+  }
+
+  private async ensureConnectedRunItemDirectory(
+    workItemId: string,
+  ): Promise<string> {
+    const connectedRunsDirectory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+    );
+    await this.ensureDirectory(connectedRunsDirectory);
+    const itemDirectory = join(connectedRunsDirectory, workItemId);
+    await this.ensureDirectory(itemDirectory);
+    return itemDirectory;
+  }
+
+  private connectedRunPaths(workItemId: string, connectedRunId: string) {
+    const directory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+      workItemId,
+      connectedRunId,
+    );
+    return {
+      directory,
+      run: join(directory, CONNECTED_RUN_FILE),
+      events: join(directory, CONNECTED_RUN_EVENTS_FILE),
+      process: join(directory, CONNECTED_RUN_PROCESS_FILE),
+    };
+  }
+
+  private async publishConnectedRunDirectory(
+    record: ConnectedRunRecordV1,
+  ): Promise<void> {
+    const validated = connectedRunRecordV1Schema.parse(record);
+    const workItemId = validated.mission.identity.work_item_id;
+    const itemDirectory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+      workItemId,
+    );
+    await this.assertDirectory(itemDirectory);
+    const paths = this.connectedRunPaths(
+      workItemId,
+      validated.connected_run_id,
+    );
+    const stagingName = `.${validated.connected_run_id}.${randomUUID()}.staging`;
+    if (!CONNECTED_RUN_STAGING_DIRECTORY_PATTERN.test(stagingName)) {
+      throw this.invalid(itemDirectory, "invalid connected-run staging name");
+    }
+    const stagingDirectory = join(itemDirectory, stagingName);
+    await mkdir(stagingDirectory);
+
+    try {
+      await writeFile(
+        join(stagingDirectory, CONNECTED_RUN_FILE),
+        `${JSON.stringify(validated, null, 2)}\n`,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await writeFile(join(stagingDirectory, CONNECTED_RUN_EVENTS_FILE), "", {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await writeFile(
+        join(stagingDirectory, CONNECTED_RUN_PROCESS_FILE),
+        `${JSON.stringify(validated.process, null, 2)}\n`,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await rename(stagingDirectory, paths.directory);
+    } catch (error) {
+      try {
+        await rm(stagingDirectory, { recursive: true, force: true });
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Connected run publication failed and its staging directory could not be removed",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async resolveExistingConnectedRunLaunch(
+    candidate: ConnectedRunRecordV1,
+  ): Promise<ConnectedRunCreateResult> {
+    const workItemId = candidate.mission.identity.work_item_id;
+    const itemDirectory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+      workItemId,
+    );
+    const guard = await this.readConnectedRunGuard(itemDirectory);
+    if (guard === null) {
+      return this.createConnectedRun(candidate);
+    }
+
+    const existing = await this.readConnectedRunFromDirectory(
+      workItemId,
+      guard.connected_run_id,
+      itemDirectory,
+    );
+    if (existing?.lifecycle.status === "terminal") {
+      await this.releaseConnectedRunGuard(guard);
+      return this.createConnectedRun(candidate);
+    }
+
+    const candidateFingerprint = connectedRunLaunchFingerprint(candidate);
+    if (guard.launch_fingerprint !== candidateFingerprint) {
+      throw new ControllerConflictError(
+        "lease_held",
+        workItemId,
+        "A different connected run launch already holds the item guard.",
+      );
+    }
+    return { record: existing ?? guard.record, created: false };
+  }
+
+  private async readConnectedRunGuard(
+    itemDirectory: string,
+  ): Promise<ConnectedRunLaunchGuard | null> {
+    const guardPath = join(
+      itemDirectory,
+      CONNECTED_RUN_LAUNCH_GUARD_FILE,
+    );
+    const source = await this.readOptionalFile(guardPath);
+    if (source === null) {
+      return null;
+    }
+    const guard = this.parseJson(
+      source,
+      guardPath,
+      connectedRunLaunchGuardSchema,
+    );
+    if (
+      guard.launch_fingerprint !== connectedRunLaunchFingerprint(guard.record)
+    ) {
+      throw this.invalid(
+        guardPath,
+        "launch_fingerprint must hash the guarded launch identity",
+      );
+    }
+    return guard;
+  }
+
+  private async releaseConnectedRunGuard(
+    expected: ConnectedRunLaunchGuard,
+  ): Promise<void> {
+    const itemDirectory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+      expected.work_item_id,
+    );
+    const current = await this.readConnectedRunGuard(itemDirectory);
+    if (
+      current !== null &&
+      current.connected_run_id === expected.connected_run_id &&
+      current.launch_fingerprint === expected.launch_fingerprint
+    ) {
+      await this.unlinkIfPresent(
+        join(itemDirectory, CONNECTED_RUN_LAUNCH_GUARD_FILE),
+      );
+    }
+  }
+
+  private async releaseConnectedRunGuardForRecord(
+    record: ConnectedRunRecordV1,
+  ): Promise<void> {
+    const itemDirectory = join(
+      this.founderDirectory,
+      CONNECTED_RUNS_DIRECTORY,
+      record.mission.identity.work_item_id,
+    );
+    const guard = await this.readConnectedRunGuard(itemDirectory);
+    if (
+      guard !== null &&
+      guard.connected_run_id === record.connected_run_id &&
+      guard.launch_fingerprint === connectedRunLaunchFingerprint(record)
+    ) {
+      await this.releaseConnectedRunGuard(guard);
+    }
+  }
+
+  private async readConnectedRunFromDirectory(
+    workItemId: string,
+    connectedRunId: string,
+    itemDirectory: string,
+  ): Promise<ConnectedRunRecordV1 | null> {
+    const paths = this.connectedRunPaths(workItemId, connectedRunId);
+    if (!(await this.hasSafeDirectory(paths.directory))) {
+      return null;
+    }
+    if (resolve(paths.directory) !== resolve(itemDirectory, connectedRunId)) {
+      throw this.invalid(paths.directory, "connected-run path escaped its item");
+    }
+
+    const runSource = await this.readRequiredFile(paths.run);
+    const record = this.parseJson(
+      runSource,
+      paths.run,
+      connectedRunRecordV1Schema,
+    );
+    if (record.connected_run_id !== connectedRunId) {
+      throw this.invalid(
+        paths.run,
+        `connected_run_id must equal containing directory name ${connectedRunId}`,
+      );
+    }
+    if (record.mission.identity.work_item_id !== workItemId) {
+      throw this.invalid(
+        paths.run,
+        `work_item_id must equal containing directory name ${workItemId}`,
+      );
+    }
+
+    const storedProcess = await this.readConnectedRunProcess(paths.process);
+    if (
+      record.process !== null &&
+      (storedProcess === null ||
+        JSON.stringify(record.process) !== JSON.stringify(storedProcess))
+    ) {
+      throw this.invalid(
+        paths.process,
+        "process.json must match the connected run process identity",
+      );
+    }
+    const eventStats = await this.readConnectedRunEventStats(paths.events);
+    if (
+      eventStats.event_count > record.limits.max_event_count ||
+      eventStats.event_bytes > record.limits.max_event_bytes
+    ) {
+      throw this.invalid(
+        paths.events,
+        "stored events exceed the immutable connected-run limits",
+      );
+    }
+    return record;
+  }
+
+  private async readConnectedRunsFromItemDirectory(
+    workItemId: string,
+    itemDirectory: string,
+  ): Promise<ConnectedRunRecordV1[]> {
+    const records: ConnectedRunRecordV1[] = [];
+    const entries = await readdir(itemDirectory, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      if (entry.name === CONNECTED_RUN_LAUNCH_GUARD_FILE) {
+        if (!entry.isFile() || entry.isSymbolicLink()) {
+          throw this.invalid(
+            join(itemDirectory, entry.name),
+            "launch guard must be a regular file",
+          );
+        }
+        continue;
+      }
+      if (CONNECTED_RUN_STAGING_DIRECTORY_PATTERN.test(entry.name)) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) {
+          throw this.invalid(
+            join(itemDirectory, entry.name),
+            "connected-run staging entry must be a regular directory",
+          );
+        }
+        continue;
+      }
+      const runIdResult = controllerRunIdSchema.safeParse(entry.name);
+      if (
+        !runIdResult.success ||
+        !entry.isDirectory() ||
+        entry.isSymbolicLink()
+      ) {
+        throw this.invalid(
+          join(itemDirectory, entry.name),
+          "connected-run entries must be UUID-named regular directories",
+        );
+      }
+      const record = await this.readConnectedRunFromDirectory(
+        workItemId,
+        runIdResult.data,
+        itemDirectory,
+      );
+      if (record === null) {
+        throw this.invalid(
+          join(itemDirectory, entry.name),
+          "connected-run directory disappeared during read",
+        );
+      }
+      records.push(record);
+    }
+    return records;
+  }
+
+  private async readConnectedRunProcess(
+    processPath: string,
+  ): Promise<ConnectedRunProcessIdentity | null> {
+    const source = await this.readRequiredFile(processPath);
+    return this.parseJson(
+      source,
+      processPath,
+      connectedRunProcessIdentitySchema.nullable(),
+    );
+  }
+
+  private async readConnectedRunEventStats(
+    eventsPath: string,
+  ): Promise<{ event_count: number; event_bytes: number }> {
+    const source = await this.readRequiredFile(eventsPath);
+    if (source.length > 0 && !source.endsWith("\n")) {
+      throw this.invalid(eventsPath, "events.ndjson must end with a newline");
+    }
+    const lines = source.length === 0 ? [] : source.slice(0, -1).split("\n");
+    for (const line of lines) {
+      this.parseJsonValue(line, eventsPath);
+    }
+    return {
+      event_count: lines.length,
+      event_bytes: Buffer.byteLength(source, "utf8"),
+    };
+  }
+
+  private async requireConnectedRun(
+    workItemId: string,
+    connectedRunId: string,
+  ): Promise<ConnectedRunRecordV1> {
+    const record = await this.readConnectedRun(workItemId, connectedRunId);
+    if (record === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Connected run ${connectedRunId} was not found.`,
+      );
+    }
+    return record;
+  }
+
+  private interruptedConnectedRun(
+    record: ConnectedRunRecordV1,
+    reason: string,
+  ): ConnectedRunRecordV1 {
+    const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
+    return connectedRunRecordV1Schema.parse({
+      ...record,
+      lifecycle: {
+        status: "terminal",
+        started_at: record.lifecycle.started_at,
+        updated_at: completedAt,
+        completed_at: completedAt,
+        terminal: {
+          outcome: "interrupted",
+          partial: true,
+          reason,
+        },
+      },
+    });
+  }
+
+  private async reconcileConnectedRunItem(
+    workItemId: string,
+    itemDirectory: string,
+  ): Promise<ConnectedRunRecordV1[]> {
+    const guard = await this.readConnectedRunGuard(itemDirectory);
+    if (guard !== null) {
+      const guardedRecord = await this.readConnectedRunFromDirectory(
+        workItemId,
+        guard.connected_run_id,
+        itemDirectory,
+      );
+      if (guardedRecord === null) {
+        const interrupted = this.interruptedConnectedRun(
+          guard.record,
+          "The launch was interrupted before its run directory was published.",
+        );
+        await this.publishConnectedRunDirectory(interrupted);
+        await this.releaseConnectedRunGuard(guard);
+      }
+    }
+
+    const records = await this.readConnectedRunsFromItemDirectory(
+      workItemId,
+      itemDirectory,
+    );
+    if (
+      records.filter((record) => record.lifecycle.status !== "terminal")
+        .length > 1
+    ) {
+      throw this.invalid(
+        itemDirectory,
+        "only one nonterminal connected run may exist per work item",
+      );
+    }
+
+    const reconciled: ConnectedRunRecordV1[] = [];
+    for (const storedRecord of records) {
+      if (storedRecord.lifecycle.status === "terminal") {
+        await this.releaseConnectedRunGuardForRecord(storedRecord);
+        reconciled.push(storedRecord);
+        continue;
+      }
+
+      const paths = this.connectedRunPaths(
+        workItemId,
+        storedRecord.connected_run_id,
+      );
+      const storedProcess = await this.readConnectedRunProcess(paths.process);
+      let record = storedRecord;
+      if (storedProcess !== null && record.process === null) {
+        record = connectedRunRecordV1Schema.parse({
+          ...record,
+          lifecycle: {
+            ...record.lifecycle,
+            status: "running",
+            updated_at: timestampAtOrAfter(
+              record.lifecycle.updated_at,
+              storedProcess.started_at,
+            ),
+          },
+          process: storedProcess,
+        });
+        await this.writeJsonAtomically(paths.run, record);
+      }
+
+      const processIsAlive =
+        storedProcess !== null &&
+        (await this.connectedProcessProbe(storedProcess.pid));
+      if (processIsAlive) {
+        reconciled.push(record);
+        continue;
+      }
+
+      const interrupted = this.interruptedConnectedRun(
+        record,
+        storedProcess === null
+          ? "The connected run had no recoverable process identity."
+          : "The connected agent process was not running during recovery.",
+      );
+      await this.writeJsonAtomically(paths.run, interrupted);
+      await this.releaseConnectedRunGuardForRecord(interrupted);
+      reconciled.push(interrupted);
+    }
+    return reconciled;
   }
 
   private async writeJsonAtomically(
