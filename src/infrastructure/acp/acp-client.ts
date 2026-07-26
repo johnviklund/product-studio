@@ -25,6 +25,13 @@ export interface AcpRuntimeProfile {
   readonly normalize_permission: (
     request: acp.RequestPermissionRequest,
   ) => CanonicalCapabilityRequest | null;
+  readonly initialize_session?: (
+    session: AcpSessionInitializer,
+  ) => Promise<void>;
+}
+
+export interface AcpSessionInitializer {
+  prompt(command: string): Promise<{ readonly stopReason: acp.StopReason }>;
 }
 
 export interface AcpEventSink {
@@ -273,6 +280,7 @@ class StdioAcpSession implements AcpSession {
   private closed = false;
   private cancellationRequested = false;
   private processClosed: Promise<void>;
+  private callbackQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly profile: AcpRuntimeProfile,
@@ -317,6 +325,7 @@ class StdioAcpSession implements AcpSession {
           timeout.unref();
         }),
       ]);
+      await this.callbackQueue;
       const result = this.resultFromStopReason(response.stopReason);
       await this.recorder.record("run_finished", {
         outcome: result.outcome,
@@ -389,18 +398,26 @@ class StdioAcpSession implements AcpSession {
   async handleSessionUpdate(
     notification: acp.SessionNotification,
   ): Promise<void> {
-    const event = summarizeSessionUpdate(notification);
-    await this.recorder.record("session_update", {
-      session_id: event.session_id,
-      update_kind: event.update_kind,
-      tool_call_id: event.tool_call_id,
-      tool_kind: event.tool_kind,
-      tool_status: event.tool_status,
+    return this.enqueueCallback(async () => {
+      const event = summarizeSessionUpdate(notification);
+      await this.recorder.record("session_update", {
+        session_id: event.session_id,
+        update_kind: event.update_kind,
+        tool_call_id: event.tool_call_id,
+        tool_kind: event.tool_kind,
+        tool_status: event.tool_status,
+      });
+      await this.callbacks.on_session_update?.(event);
     });
-    await this.callbacks.on_session_update?.(event);
   }
 
   async handlePermission(
+    request: acp.RequestPermissionRequest,
+  ): Promise<acp.RequestPermissionResponse> {
+    return this.enqueueCallback(() => this.handlePermissionRequest(request));
+  }
+
+  private async handlePermissionRequest(
     request: acp.RequestPermissionRequest,
   ): Promise<acp.RequestPermissionResponse> {
     let normalized: CanonicalCapabilityRequest | null;
@@ -456,6 +473,15 @@ class StdioAcpSession implements AcpSession {
       reason: "outside_capability_envelope",
     });
     return selectOption(request.options, "reject_once");
+  }
+
+  private enqueueCallback<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = this.callbackQueue.then(operation);
+    this.callbackQueue = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
   }
 
   private resultFromStopReason(stopReason: acp.StopReason): AcpRunResult {
@@ -631,8 +657,12 @@ export class StdioAcpClientAdapter implements AcpClientAdapter {
         requested_mcp_server_count: 0,
         session_id: session.session_id,
       });
+      await profile.initialize_session?.({
+        prompt: async (command) => activeSession.prompt(command),
+      });
       return session;
     } catch (error) {
+      await session?.close(true);
       child.kill("SIGTERM");
       throw error;
     }

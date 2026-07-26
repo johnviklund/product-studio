@@ -192,6 +192,29 @@ describe("stdio ACP client adapter", () => {
     );
   });
 
+  it("runs a profile initializer after newSession before making mission work available", async () => {
+    const root = await createRoot();
+    const sink = new MemoryEventSink();
+    const startupPrompts: string[] = [];
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(root, {}, join(root, "initializer-sentinel")),
+        initialize_session: async (initializer) => {
+          startupPrompts.push("/sandbox enable");
+          await expect(initializer.prompt("/sandbox enable")).resolves.toEqual({
+            stopReason: "end_turn",
+          });
+        },
+      },
+      sink,
+    );
+
+    expect(startupPrompts).toEqual(["/sandbox enable"]);
+    await expect(session.run("Begin the mission.")).resolves.toMatchObject({
+      outcome: "completed",
+    });
+  });
+
   it("rejects an exact out-of-envelope request, keeps its canonical identity, and prevents its sentinel", async () => {
     const root = await createRoot();
     const sentinel = join(root, "out-of-envelope-sentinel");
