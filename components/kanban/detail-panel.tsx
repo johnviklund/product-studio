@@ -17,7 +17,10 @@ import {
 
 import type {
   MissionCompilation,
+  PatchMissionCompilation,
   PortfolioImportResult,
+  PortfolioPatchImportResult,
+  PortfolioPatchPlanResult,
   PortfolioReviewImportResult,
   PortfolioRetryResult,
   ReviewMissionCompilation,
@@ -45,8 +48,10 @@ import {
   detailPanelModeForItem,
   missionHandoffModeForItem,
   nextActionForPhase,
+  patchAttentionForItem,
   reviewHandoffForItem,
   type BoardColumnId,
+  type PatchAttentionProjection,
 } from "@/src/presentation/board";
 
 interface DetailPanelProps {
@@ -86,6 +91,18 @@ interface ReviewMissionImportState {
   itemKey: string;
   result: PortfolioReviewImportResult;
 }
+
+interface PatchMissionCompilationState {
+  itemKey: string;
+  result: PatchMissionCompilation;
+}
+
+interface PatchMissionImportState {
+  itemKey: string;
+  result: PortfolioPatchImportResult["evidence"];
+}
+
+type PatchMutation = "accepting_plan" | "compiling" | "importing";
 
 interface ReviewAttestationState {
   itemKey: string;
@@ -266,7 +283,7 @@ function commandExitLabel(command: CommandEvidenceRecord): string {
   return command.status === "not_run" ? "Not run" : "No exit code";
 }
 
-function RunEvidenceSection({
+export function RunEvidenceSection({
   fieldId,
   evidence,
   loading,
@@ -566,6 +583,258 @@ function RunEvidenceSection({
   );
 }
 
+interface PatchWorkflowSectionProps {
+  fieldId: string;
+  projection: PatchAttentionProjection;
+  patchCycle: number | null;
+  mutation: PatchMutation | null;
+  compilation: PatchMissionCompilation | null;
+  importedEvidence: PortfolioPatchImportResult["evidence"] | null;
+  copied: boolean;
+  onAcceptPatchPlan: () => void;
+  onCompilePatch: () => void;
+  onImportPatch: () => void;
+  onCopyLaunchInstruction: () => void;
+}
+
+function patchWorkflowHeading(projection: PatchAttentionProjection): string {
+  switch (projection.mode) {
+    case "patch_plan":
+      return "Patch plan";
+    case "patch_active":
+      return "Patch handoff";
+    case "escalation":
+      return "Needs your decision";
+    case "review_ready":
+      return "Review ready";
+    case "hidden":
+      return "Patch handoff";
+  }
+}
+
+function patchWorkflowStatus(projection: PatchAttentionProjection): string {
+  switch (projection.mode) {
+    case "patch_plan":
+      return "Needs approval";
+    case "patch_active":
+      return "Active";
+    case "escalation":
+      return "Escalated";
+    case "review_ready":
+      return "Human gate";
+    case "hidden":
+      return "Processed";
+  }
+}
+
+function patchWorkflowNextAction(
+  projection: PatchAttentionProjection,
+): string | null {
+  switch (projection.mode) {
+    case "patch_plan":
+      return "Approve the patch plan";
+    case "patch_active":
+      return "Compile or import the patch";
+    case "escalation":
+      return "Resolve the escalation";
+    case "review_ready":
+      return "Review the result";
+    case "hidden":
+      return null;
+  }
+}
+
+export function PatchWorkflowSection({
+  fieldId,
+  projection,
+  patchCycle,
+  mutation,
+  compilation,
+  importedEvidence,
+  copied,
+  onAcceptPatchPlan,
+  onCompilePatch,
+  onImportPatch,
+  onCopyLaunchInstruction,
+}: PatchWorkflowSectionProps) {
+  if (
+    projection.mode === "hidden" &&
+    compilation === null &&
+    importedEvidence === null
+  ) {
+    return null;
+  }
+
+  const attention = projection.attention;
+  const busy = mutation !== null;
+
+  return (
+    <section
+      aria-labelledby={`${fieldId}-patch-workflow`}
+      className="border-y py-4"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 id={`${fieldId}-patch-workflow`} className="text-xs font-medium">
+            {patchWorkflowHeading(projection)}
+          </h3>
+          {projection.mode === "patch_active" ? (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Compile durable patch instructions, then import the exact result
+              returned by the external agent.
+            </p>
+          ) : attention !== null ? (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {attention.question}
+            </p>
+          ) : null}
+        </div>
+        <span className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+          {patchWorkflowStatus(projection)}
+        </span>
+      </div>
+
+      {attention !== null ? (
+        <p className="mt-3 border-l-2 border-primary bg-background px-3 py-2.5 text-xs leading-5">
+          {attention.recommendation}
+        </p>
+      ) : null}
+
+      {patchCycle !== null ? (
+        <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-y py-3 text-[11px]">
+          <div>
+            <dt className="text-muted-foreground">Patch cycle</dt>
+            <dd className="mt-0.5">{patchCycle} of 3</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Cost/capacity</dt>
+            <dd className="mt-0.5">unknown</dd>
+          </div>
+          {attention?.pins.evidence_paths[0] ? (
+            <div className="col-span-2">
+              <dt className="text-muted-foreground">Pinned evidence</dt>
+              <dd
+                className="mt-0.5 break-all leading-5"
+                title={attention.pins.evidence_paths[0]}
+              >
+                {shortEvidencePath(attention.pins.evidence_paths[0])}
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : null}
+
+      {projection.mode === "patch_plan" ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onAcceptPatchPlan}
+          className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {mutation === "accepting_plan" ? "Approving…" : "Approve patch plan"}
+        </button>
+      ) : null}
+
+      {projection.mode === "patch_active" ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCompilePatch}
+            className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {mutation === "compiling" ? "Compiling…" : "Compile patch mission"}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onImportPatch}
+            className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {mutation === "importing" ? "Importing…" : "Import patch result"}
+          </button>
+        </div>
+      ) : null}
+
+      {projection.mode === "escalation" ? (
+        <p className="mt-3 text-xs font-medium" role="status">
+          Resolve the decision above before another patch attempt.
+        </p>
+      ) : null}
+
+      {projection.mode === "review_ready" ? (
+        <p className="mt-3 text-xs font-medium" role="status">
+          Review the pinned result; completion remains a separate human gate.
+        </p>
+      ) : null}
+
+      {importedEvidence !== null ? (
+        <div
+          className={`mt-4 border-l-2 px-3 py-3 text-xs ${
+            importedEvidence.outcome === "applied"
+              ? "border-success bg-success/10"
+              : "border-destructive bg-destructive/10"
+          }`}
+          role="status"
+        >
+          <p className="font-medium">
+            {importedEvidence.outcome === "applied"
+              ? "Patch imported; ready for re-review"
+              : "Patch import blocked"}
+          </p>
+          <p
+            className="mt-1 break-all leading-5 text-muted-foreground"
+            title={importedEvidence.evidence_path}
+          >
+            Evidence · {shortEvidencePath(importedEvidence.evidence_path)}
+          </p>
+        </div>
+      ) : null}
+
+      {compilation !== null ? (
+        <div className="mt-4 border-l-2 border-border bg-background px-3 py-3">
+          <dl className="space-y-3 text-xs">
+            <div>
+              <dt className="text-muted-foreground">TASK.md</dt>
+              <dd className="mt-1 break-all leading-5">
+                {compilation.task_path}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Mission JSON</dt>
+              <dd className="mt-1 break-all leading-5">
+                {compilation.mission_path}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Package hash</dt>
+              <dd className="mt-1 break-all text-[11px] leading-5">
+                {compilation.mission.content_sha256}
+              </dd>
+            </div>
+          </dl>
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onCopyLaunchInstruction}
+              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            >
+              Copy patch instruction
+            </button>
+            <span
+              className="text-[11px] text-muted-foreground"
+              role="status"
+              aria-live="polite"
+            >
+              {copied ? "Copied" : ""}
+            </span>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function DetailPanel({
   item,
   workspaces,
@@ -606,6 +875,7 @@ export function DetailPanel({
   const [startingRepair, setStartingRepair] = useState(false);
   const [compilingReviewMission, setCompilingReviewMission] = useState(false);
   const [importingReviewResult, setImportingReviewResult] = useState(false);
+  const [patchMutation, setPatchMutation] = useState<PatchMutation | null>(null);
   const [missionCompilationState, setMissionCompilationState] =
     useState<MissionCompilationState | null>(null);
   const [missionImportState, setMissionImportState] =
@@ -614,6 +884,10 @@ export function DetailPanel({
     useState<ReviewMissionCompilationState | null>(null);
   const [reviewMissionImportState, setReviewMissionImportState] =
     useState<ReviewMissionImportState | null>(null);
+  const [patchMissionCompilationState, setPatchMissionCompilationState] =
+    useState<PatchMissionCompilationState | null>(null);
+  const [patchMissionImportState, setPatchMissionImportState] =
+    useState<PatchMissionImportState | null>(null);
   const [reviewAttestationState, setReviewAttestationState] =
     useState<ReviewAttestationState | null>(null);
   const [copiedMissionKey, setCopiedMissionKey] = useState<string | null>(null);
@@ -670,6 +944,15 @@ export function DetailPanel({
     state.input_revision,
     state.attempt,
   ].join(":");
+  const patchMissionItemKey = [
+    "patch",
+    item.source_id,
+    goal.work_item_id,
+    goalContract?.goal_version,
+    state.input_revision,
+    state.attempt,
+    state.patch_cycle,
+  ].join(":");
   const missionHandoffMode = missionHandoffModeForItem(item);
   const missionEligible = missionHandoffMode === "active";
   const repairEligible = missionHandoffMode === "repair";
@@ -687,8 +970,10 @@ export function DetailPanel({
     mode === "governed" && runEvidenceState?.itemKey === runEvidenceItemKey
       ? runEvidenceState.result
       : [];
+  const patchAttention = patchAttentionForItem(item, runEvidence);
   const reviewHandoff = reviewHandoffForItem(item, runEvidence);
-  const reviewEligible = reviewHandoff.mode === "active";
+  const reviewEligible =
+    reviewHandoff.mode === "active" && patchAttention.mode === "hidden";
   const reviewAttested =
     reviewAttestationState?.itemKey === reviewMissionItemKey &&
     reviewAttestationState.checked;
@@ -701,14 +986,26 @@ export function DetailPanel({
     reviewMissionImportState?.itemKey === reviewMissionItemKey
       ? reviewMissionImportState.result
       : null;
-  const appliedExecuteSubject = runEvidence.find(
+  const patchMissionCompilation =
+    patchMissionCompilationState?.itemKey === patchMissionItemKey
+      ? patchMissionCompilationState.result
+      : null;
+  const patchMissionImport =
+    patchMissionImportState?.itemKey === patchMissionItemKey
+      ? patchMissionImportState.result
+      : null;
+  const appliedReviewSubject = runEvidence.find(
     (stored) =>
-      stored.evidence.phase === "execute" &&
+      stored.evidence.phase ===
+        (state.patch_cycle === 0 ? "execute" : "patch") &&
       stored.evidence.outcome === "applied" &&
       stored.evidence.identity.work_item_id === goal.work_item_id &&
       stored.evidence.identity.goal_version === state.goal_version &&
       stored.evidence.identity.input_revision === state.input_revision &&
-      stored.evidence.identity.attempt === state.attempt,
+      stored.evidence.identity.attempt === state.attempt &&
+      (state.patch_cycle === 0 ||
+        (stored.evidence.phase === "patch" &&
+          stored.evidence.identity.patch_cycle === state.patch_cycle)),
   );
   const runEvidenceLoading =
     mode === "governed" &&
@@ -1065,9 +1362,9 @@ export function DetailPanel({
         imported,
         imported.evidence.outcome === "applied"
           ? imported.result?.verdict === "findings"
-            ? "Review findings imported; workflow state is unchanged."
-            : "Clean review imported; workflow state is unchanged."
-          : "Review output was rejected; workflow state is unchanged.",
+            ? "Review findings imported; the next decision is ready."
+            : "Clean review imported; human review is ready."
+          : "Review output was rejected; the current workflow state is unchanged.",
       );
     } catch {
       setError(
@@ -1075,6 +1372,121 @@ export function DetailPanel({
       );
     } finally {
       setImportingReviewResult(false);
+    }
+  }
+
+  async function handleAcceptPatchPlan() {
+    setPatchMutation("accepting_plan");
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/patch-plan`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | PortfolioPatchPlanResult
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The patch plan could not be approved."
+            : "The patch plan could not be approved.",
+        );
+        return;
+      }
+
+      const accepted = body as PortfolioPatchPlanResult;
+      setPatchMissionCompilationState(null);
+      setPatchMissionImportState(null);
+      onUpdated(
+        accepted,
+        `Patch cycle ${accepted.work_item.state.patch_cycle ?? "unknown"} started.`,
+      );
+    } catch {
+      setError(
+        "The patch plan could not be approved. Check the local server and try again.",
+      );
+    } finally {
+      setPatchMutation(null);
+    }
+  }
+
+  async function handleCompilePatchMission() {
+    setPatchMutation("compiling");
+    setError(null);
+    setCopiedMissionKey(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/patch`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | PatchMissionCompilation
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The patch mission could not be compiled."
+            : "The patch mission could not be compiled.",
+        );
+        return;
+      }
+
+      setPatchMissionCompilationState({
+        itemKey: patchMissionItemKey,
+        result: body as PatchMissionCompilation,
+      });
+    } catch {
+      setError(
+        "The patch mission could not be compiled. Check the local server and try again.",
+      );
+    } finally {
+      setPatchMutation(null);
+    }
+  }
+
+  async function handleImportPatchResult() {
+    setPatchMutation("importing");
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/patch/import`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | PortfolioPatchImportResult
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The patch result could not be imported."
+            : "The patch result could not be imported.",
+        );
+        return;
+      }
+
+      const imported = body as PortfolioPatchImportResult;
+      setPatchMissionImportState({
+        itemKey: patchMissionItemKey,
+        result: imported.evidence,
+      });
+      markRunEvidenceLoading();
+      await loadRunEvidence();
+      onUpdated(
+        imported,
+        imported.evidence.outcome === "applied"
+          ? "Patch imported and ready for independent re-review."
+          : "Patch imported; correct the rejected result before retrying.",
+      );
+    } catch {
+      setError(
+        "The patch result could not be imported. Check the local server and try again.",
+      );
+    } finally {
+      setPatchMutation(null);
     }
   }
 
@@ -1115,7 +1527,10 @@ export function DetailPanel({
   }
 
   async function handleCopyLaunchInstruction(
-    compilation: MissionCompilation | ReviewMissionCompilation,
+    compilation:
+      | MissionCompilation
+      | ReviewMissionCompilation
+      | PatchMissionCompilation,
     itemKey: string,
   ) {
     try {
@@ -1129,6 +1544,8 @@ export function DetailPanel({
   }
 
   const transitionActions = boardTransitionActionsForPhase(state.phase);
+  const displayedNextAction =
+    patchWorkflowNextAction(patchAttention) ?? nextActionForPhase(state.phase);
   const goalContractFields: Array<[string, string[] | undefined]> = [
     ["Acceptance criteria", goalContract?.acceptance_criteria],
     ["Non-goals", goalContract?.non_goals],
@@ -1384,7 +1801,7 @@ export function DetailPanel({
                     <h3 id={`${fieldId}-next-action`} className="text-[11px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
                       Next action
                     </h3>
-                    <p className="mt-1 text-sm font-medium">{nextActionForPhase(state.phase)}</p>
+                    <p className="mt-1 text-sm font-medium">{displayedNextAction}</p>
                   </section>
 
                   <section
@@ -1526,7 +1943,28 @@ export function DetailPanel({
                     </section>
                   ) : null}
 
-                  {reviewEligible && appliedExecuteSubject ? (
+                  <PatchWorkflowSection
+                    fieldId={fieldId}
+                    projection={patchAttention}
+                    patchCycle={state.patch_cycle ?? null}
+                    mutation={patchMutation}
+                    compilation={patchMissionCompilation}
+                    importedEvidence={patchMissionImport}
+                    copied={copiedMissionKey === patchMissionItemKey}
+                    onAcceptPatchPlan={() => void handleAcceptPatchPlan()}
+                    onCompilePatch={() => void handleCompilePatchMission()}
+                    onImportPatch={() => void handleImportPatchResult()}
+                    onCopyLaunchInstruction={() => {
+                      if (patchMissionCompilation !== null) {
+                        void handleCopyLaunchInstruction(
+                          patchMissionCompilation,
+                          patchMissionItemKey,
+                        );
+                      }
+                    }}
+                  />
+
+                  {reviewEligible && appliedReviewSubject ? (
                     <section
                       aria-labelledby={`${fieldId}-review-handoff`}
                       className="border-y py-4"
@@ -1540,7 +1978,7 @@ export function DetailPanel({
                             Review handoff
                           </h3>
                           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                            Assess the pinned execute result without editing files or rerunning checks.
+                            Assess the pinned {appliedReviewSubject.evidence.phase} result without editing files or rerunning checks.
                           </p>
                         </div>
                         <span className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
@@ -1553,19 +1991,21 @@ export function DetailPanel({
                           <dt className="text-muted-foreground">Subject commit</dt>
                           <dd
                             className="mt-0.5 truncate"
-                            title={appliedExecuteSubject.evidence.result_commit ?? undefined}
+                            title={appliedReviewSubject.evidence.result_commit ?? undefined}
                           >
-                            {appliedExecuteSubject.evidence.result_commit?.slice(0, 12) ??
+                            {appliedReviewSubject.evidence.result_commit?.slice(0, 12) ??
                               "Unavailable"}
                           </dd>
                         </div>
                         <div>
-                          <dt className="text-muted-foreground">Execute mission</dt>
+                          <dt className="text-muted-foreground capitalize">
+                            {appliedReviewSubject.evidence.phase} mission
+                          </dt>
                           <dd
                             className="mt-0.5 truncate"
-                            title={appliedExecuteSubject.evidence.mission_content_sha256}
+                            title={appliedReviewSubject.evidence.mission_content_sha256}
                           >
-                            {appliedExecuteSubject.evidence.mission_content_sha256.slice(
+                            {appliedReviewSubject.evidence.mission_content_sha256.slice(
                               0,
                               12,
                             )}
@@ -1574,13 +2014,13 @@ export function DetailPanel({
                         <div className="col-span-2">
                           <dt className="text-muted-foreground">Immutable mission</dt>
                           <dd className="mt-0.5 break-all leading-5">
-                            {`.founder/missions/${goal.work_item_id}/execute-${appliedExecuteSubject.evidence.identity.goal_version}-${appliedExecuteSubject.evidence.identity.input_revision}-${appliedExecuteSubject.evidence.identity.attempt}/mission.json`}
+                            {`.founder/missions/${goal.work_item_id}/${appliedReviewSubject.evidence.phase}-${appliedReviewSubject.evidence.identity.goal_version}-${appliedReviewSubject.evidence.identity.input_revision}-${appliedReviewSubject.evidence.identity.attempt}${appliedReviewSubject.evidence.phase === "patch" ? `-${appliedReviewSubject.evidence.identity.patch_cycle}` : ""}/mission.json`}
                           </dd>
                         </div>
                         <div className="col-span-2">
                           <dt className="text-muted-foreground">Immutable evidence</dt>
                           <dd className="mt-0.5 break-all leading-5">
-                            {appliedExecuteSubject.summary.evidence_path}
+                            {appliedReviewSubject.summary.evidence_path}
                           </dd>
                         </div>
                       </dl>

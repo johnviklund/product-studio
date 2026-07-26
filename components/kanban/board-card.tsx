@@ -41,6 +41,34 @@ function statusDotClass(
   }
 }
 
+export function nextActionForCardState(
+  state: Pick<
+    PortfolioWorkItem["work_item"]["state"],
+    "phase" | "status" | "attention"
+  >,
+): string {
+  if (state.status !== "active") {
+    return nextActionForPhase(state.phase);
+  }
+  if (state.phase === "patch") {
+    return "Compile or import the patch";
+  }
+
+  switch (state.attention?.kind) {
+    case "patch_plan_approval":
+      return "Approve the patch plan";
+    case "unresolved_finding":
+    case "ambiguous_goal":
+    case "cycle_limit":
+    case "missing_permission":
+      return "Resolve the escalation";
+    case "review_ready":
+      return "Review the result";
+    default:
+      return nextActionForPhase(state.phase);
+  }
+}
+
 function BoardCardContent({ item }: { item: PortfolioWorkItem }) {
   const { goal, state } = item.work_item;
 
@@ -70,7 +98,7 @@ function BoardCardContent({ item }: { item: PortfolioWorkItem }) {
 
       <span className="mt-3 flex items-center justify-between gap-3 border-t pt-2.5">
         <span className="flex min-w-0 items-center text-xs text-foreground">
-          <span className="truncate">{nextActionForPhase(state.phase)}</span>
+          <span className="truncate">{nextActionForCardState(state)}</span>
         </span>
         <time
           dateTime={state.updated_at}
