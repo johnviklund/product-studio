@@ -134,7 +134,7 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 ### 3.1 Independent review mission and finding contract
 
 - **Goal:** Review an exact result against its accepted goal contract without allowing the reviewer to modify the implementation.
-- **Primary scope:** Reviewer missions, independence checks, exact-result binding, and structured findings linked to acceptance criteria, non-goals, defects, security, or deterministic checks.
+- **Primary scope:** Reviewer missions, human-attested writer/reviewer independence, exact-result binding, and structured findings linked to acceptance criteria, non-goals, defects, security, or deterministic checks.
 - **Traceability:** PRD §8.6, FR-010.
 - **Dependencies:** 2.2–2.5.
 - **Completion signal:** An independent reviewer returns criteria-linked findings for the exact result under review without modifying the implementation or authorizing completion.
@@ -164,9 +164,108 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
   as-is, one deferred P3 (`ambiguous_goal`/`missing_permission` attention kinds are schema-defined
   but never produced this slice; tracked in `TODO.md`); see `WORKLOG.md`.
 
-### 3.3 Learning, skill, and evaluation proposals
+### 3.3 Transport-neutral connected execution and run provenance
 
-- **Goal:** Produce reviewable product-memory, evaluation-case, and skill-change proposals from completed work.
+- **Goal:** Make connected agent execution part of version one so the founder can launch a
+  contracted workflow step from Product Studio without copying prompts or result files between
+  applications.
+- **User boundary:** The transport is an implementation detail. Product Studio owns one canonical
+  JSON connection, capability, mission, and result boundary that may be carried by a CLI or another
+  approved local transport. Version one selects one evidence-backed reference adapter; the product
+  UI does not ask the founder to understand or choose a transport for each run.
+- **Model choice:** The founder can select or configure the exact eligible LLM model for each
+  agent-driven phase or seat. A real version-one cycle must use at least two distinct model
+  identities. Automatic model selection, cost optimization, and evidence-based routing remain
+  Milestone 6 concerns.
+- **Run-actor provenance:** Bind each run immutably to its logical role or seat, exact model or
+  deployment identity, effort, harness and adapter version, resolved profile and skill digests,
+  and relevant capability and authorization-envelope digests. Record each identity group's
+  assurance as controller-observed, adapter-attested, user-declared, or unknown. Model or harness
+  identity never grants authority by itself.
+- **Independence and authorization:** Keep the execution actor separate from the human or policy
+  principal that authorized an action. Enforce exact writer/reviewer model separation only when
+  identity assurance is sufficient to fail closed; otherwise retain explicit human attestation.
+  Approvals remain bound to the exact governed tuple and action and cannot be replayed or
+  transferred to an agent identity.
+- **Trust boundary:** Every connected run receives an explicit capability envelope for workspace
+  paths, write scope, tools, network, and credentials. Product Studio does not inherit credentials
+  wholesale, treats adapter output as untrusted until existing validation and verification pass,
+  bounds output and process lifetime where it owns them, and fails closed on connection or adapter
+  errors.
+- **MCP boundary:** MCP is unsupported in the target organizational environment and is an explicit
+  non-goal. Product Studio does not configure, start, connect to, proxy, or expose MCP servers or
+  tools. Every adapter must disable automatic MCP loading and fail before launch if a run would
+  require MCP.
+- **Other non-goals:** No multi-provider orchestration platform, live chain-of-thought or full
+  terminal stream, token-budget manager, provider-shaped state machine, or broad adapter catalog.
+- **Dependencies:** 2.2–2.4 and 3.2.
+- **Completion signal:** The same immutable mission can round-trip through the existing manual
+  artifact handoff and one connected adapter with identical controller validation, evidence, and
+  transition behavior, and can be run with two distinct model identities without expanding either
+  model's authority.
+
+### 3.4 Version-one end-to-end multi-model workflow
+
+- **Goal:** Let the founder drive one governed feature from initial shaping through approved
+  implementation using different LLM models for different workflow steps.
+- **Primary scope:** Extend the portable mission, connected-run, structured-result, deterministic
+  verification, and approval contracts across the agent-driven Brainstorm, Spec, Plan, Execute,
+  and independent Review or Patch steps. The controller continues to expose one next action and
+  exact human gates; agents cannot approve their own output or mark work completed.
+- **Version-one experience:** The founder can start the next eligible step, choose its model when
+  needed, see a truthful bounded state such as queued, working, blocked, failed, or ready for
+  review, and approve or reject the exact result through the existing detail panel and attention
+  inbox. Manual artifact handoff remains a recovery path, not the normal connected flow.
+- **Cycle boundary:** Version one proves capture and shaping through reviewed, verified, and
+  human-approved implementation. Automated deployment and operations, semantic live-update
+  streams, broad feedback routing, and automatic learning or model routing remain later
+  milestones.
+- **Dependencies:** 2.1–2.5 and 3.1–3.3.
+- **Completion signal:** A real feature completes the version-one cycle without manual prompt or
+  result assembly, uses at least two distinct recorded LLM model identities across its
+  agent-driven steps, preserves every required human gate, and leaves reproducible mission, result,
+  verification, review, and approval evidence.
+
+**Milestone exit:** Version one can drive a real feature from shaping through approved
+implementation using different recorded LLM models for different steps, with the controller,
+verification, independent review, bounded patch loop, and human authority preserved end to end.
+
+## Post-MVP placeholders
+
+### Milestone 4 — Live workflow experience and governed learning
+
+#### 4.1 Semantic activity, live updates, and update review
+
+- **Goal:** Build on the working connected cycle so the founder can see meaningful live progress,
+  return after time away, and approve the next phase without reconstructing agent sessions.
+- **Primary scope:** A provider-neutral semantic-event contract backed by durable controller changes
+  and published evidence; stable event identity; an item-scoped Activity chronology; a
+  cross-project, email-like Updates sequence; the existing Needs You decision queue as the
+  actionable subset; and the Since-you-were-away entry point. Current work-item state, missions,
+  results, and evidence remain authoritative; event records preserve meaningful history but never
+  authorize or determine workflow state, and every read model remains rebuildable.
+- **Live semantics:** Show bounded states and meaningful outcomes for connected runs, phase changes,
+  verification, findings, decisions, approvals, and result replacement. Exclude raw reasoning,
+  token streams, unbounded terminal output, indexing, autosaves, and duplicate controller churn.
+  Entries carry a concise outcome, time, logical actor role, run identity, and immutable evidence
+  handles.
+- **View and action boundaries:** The Board remains the primary spatial workflow view; Activity is
+  the complete semantic history for one governed item; Updates is the cross-project seen/unseen
+  review sequence; Needs You contains unresolved human decisions only. Actionable entries open the
+  existing exact-result-bound DetailPanel control rather than creating a second approval contract.
+- **Acknowledgment:** Viewing, acknowledging, and resolving are distinct. Dismissal advances a
+  stable last-acknowledged event position rather than recording wall-clock time; resolved and
+  superseded entries leave active queues according to explicit rules but remain in item Activity.
+- **Dependencies:** 3.3–3.4.
+- **Completion signal:** The founder can watch truthful bounded progress, enter from Since you were
+  away or Updates, inspect exact evidence, approve or answer through the existing governed control,
+  and reach an honest caught-up state while every surface agrees about event identity and
+  acknowledgment.
+
+#### 4.2 Learning, skill, and evaluation proposals
+
+- **Goal:** Produce reviewable product-memory, evaluation-case, and skill-change proposals from
+  completed work.
 - **Primary scope:** Provenance-aware learning classification; evaluation-case capture; candidate
   skill creation, update, merge, or retirement; and human promotion. Repository-specific facts,
   reusable skill guidance, model-routing evidence, and concrete regression cases remain distinct
@@ -183,18 +282,17 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
   bounded, human-readable recent index that points back to durable evidence rather than becoming
   another source of truth.
 - **Traceability:** PRD §14–15, FR-018.
-- **Dependencies:** 3.2.
+- **Dependencies:** 3.4.
 - **Completion signal:** Completed work can propose evidence-linked durable learning, evaluation,
   and skill changes, every captured candidate has an explicit disposition, and none can silently
   change the active skills or agent behavior.
 
-**Milestone exit:** A real feature can move through executor, reviewer, and patch missions until human review without restating context or manually assembling prompts.
+#### 4.3 Workflow expansion and integrations
 
-## Post-MVP placeholders
-
-### Milestone 4 — Full product workflow
-
-Post-MVP: expand Idea through Learn, feedback routing, approval binding, autonomy configuration, GitHub links/sync, and at most one justified managed adapter. **Exit:** a real idea can move from capture through approved implementation.
+Post-MVP: add broader feedback routing, autonomy configuration, GitHub links/sync, remaining
+Ship/Learn integrations, and additional adapters only when version-one evidence justifies them.
+**Exit:** the proven connected cycle can expand without changing its controller, authorization,
+evidence, or non-MCP boundaries.
 
 ### Milestone 5 — Deployment and operations
 
@@ -220,7 +318,7 @@ provider-neutral contracts informed by evidence from that manual workflow.
   plan-step overlays; required tool capabilities; bounded context selectors; and output and
   verification contracts. Each compiled mission pins the resolved profile, skill versions, and
   content digests so retries remain reproducible after the active registry changes.
-- **Dependencies:** 3.1–3.3 and the full-workflow contracts from Milestone 4.
+- **Dependencies:** 3.1–3.4 and the learning-proposal contracts from 4.2.
 - **Completion signal:** The same pinned profile can be materialized for two capable agent
   adapters, while a missing or incompatible required skill or capability fails closed.
 
@@ -241,7 +339,7 @@ provider-neutral contracts informed by evidence from that manual workflow.
 - **Registry hygiene:** Detect name and scope collisions before publication. Keep active skills and
   learning indexes bounded by consolidating overlaps, superseding stale versions, and retiring
   weak or unused skills instead of treating growth as append-only.
-- **Dependencies:** 3.3 and 6.1.
+- **Dependencies:** 4.2 and 6.1.
 - **Completion signal:** A completed cycle can produce a reviewable candidate skill diff with its
   supporting evidence, expected improvement, evaluation cases, and rollback target; promotion
   remains an explicit human or authorized policy decision, and rejected proposals retain a reason
@@ -253,25 +351,29 @@ provider-neutral contracts informed by evidence from that manual workflow.
   one work item or model.
 - **Primary scope:** Real-work golden cases; replay or shadow evaluation; candidate-versus-active
   comparisons across fixed model baselines; regression thresholds; immutable publication; and
-  rollback. Measure task completion, deterministic verification, review severity, retry and human
-  intervention rates, cost, and time to completion.
+  rollback. Quality, deterministic verification, and review thresholds gate eligibility; among
+  eligible results, measure total cost per successfully completed task, including retries, as the
+  primary efficiency metric and time to successful completion as the second, alongside retry and
+  human-intervention rates.
 - **Golden-case intake:** Admit only cases likely to discriminate capability: an approved output
   that required real judgment, a known-correct mechanical transform, or a confirmed failure and
   the finding that caught it. Each case is self-contained with input, approved output, grading
-  criteria and traps, profile/skill versions, commit or run provenance, and the producing and
-  approving agents. Keep a bounded rolling set per phase/profile; when full, a stronger case
+  criteria and traps, profile/skill versions, commit or run provenance, and separate producing,
+  grading, and approving identities. Keep a bounded rolling set per phase/profile; when full, a stronger case
   displaces the weakest. The manual workflow's roughly fifteen cases per seat is a reference,
   while Product Studio owns the configurable policy.
 - **Exam protocol:** Run one candidate against one phase/profile at a time in fresh context with
   the approved output withheld and the same tools, skill versions, and repository conditions as
   the real seat. Grade with an independent strong reviewer, cross-vendor where practical, then
-  require human review of every failure plus a sample of passes. Record exact model, harness,
-  effort, quality, cost, latency, and any human overturn in a durable scorecard.
+  require human review of every failure plus a sample of passes. Record candidate and grader model,
+  harness, effort, provenance assurance, quality, total cost, latency, and any human overturn
+  separately in a durable scorecard. Unknown or merely user-declared runtime identity may remain as
+  historical evidence but cannot support automatic qualification or independence enforcement.
 - **Corpus health:** Detect malformed, stale, redundant, weak, or trivially easy cases and profiles
   without enough discriminating evidence. Refuse to publish a meaningful-looking qualification
   when the usable corpus is too small; identify the missing cases future workflow runs should
   capture instead.
-- **Dependencies:** 6.1–6.2.
+- **Dependencies:** 3.3 and 6.1–6.2.
 - **Completion signal:** A qualified skill or profile version can be promoted with evidence while
   prior missions remain pinned to their original versions, the evaluation corpus stays bounded
   and healthy, and failed or partial qualification remains visible without mutating active skills.
@@ -285,10 +387,11 @@ provider-neutral contracts informed by evidence from that manual workflow.
   content.
 - **Qualification controls:** Confirm the exact candidate model and effort are available in the
   target harness and present the expected evaluation cost before running. Keep model exams
-  separate from workflow execution, qualify one seat/profile at a time, and treat grader output as
-  a hypothesis subject to the human spot check. Scorecards propose promote, fallback, demote, or
-  reject decisions; only an authorized human or policy gate changes active routing.
-- **Dependencies:** 6.1 and 6.3.
+  separate from workflow execution, qualify one seat/profile at a time, record candidate and grader
+  identities separately, and treat grader output as a hypothesis subject to the human spot check.
+  Scorecards propose promote, fallback, demote, or reject decisions; only an authorized human or
+  policy gate changes active routing.
+- **Dependencies:** 3.3, 6.1, and 6.3.
 - **Completion signal:** A newly available model can earn and assume a workflow seat without
   changing the workflow, active skills, mission contracts, or historical evidence, and a model
   that lacks availability or sufficient evidence cannot be silently selected.

@@ -11,9 +11,9 @@ delivery phases.
 ### Wire the `ambiguous_goal` and `missing_permission` attention decisions
 
 - **Status:** Deferred — needs new contract fields, out of ROADMAP 3.2's scope.
-- **Idea:** ROADMAP 3.2 (bounded patch loop and attention inbox) defines all 7 attention decision
-  kinds in the schema (`work-item.ts`) and wires all 7 into the board projection switch
-  (`board.ts`), but only 5 are ever produced: `spec_approval`/`plan_approval` (phase-derived) and
+- **Idea:** ROADMAP 3.2 (bounded patch loop and attention inbox) defines all 8 attention decision
+  kinds in the schema (`work-item.ts`) and wires all 8 into the board projection switch
+  (`board.ts`), but only 6 are ever produced: `spec_approval`/`plan_approval` (phase-derived) and
   `review_ready`/`unresolved_finding`/`cycle_limit`/`patch_plan_approval` (controller-routed).
   `ambiguous_goal` and `missing_permission` have no producer — no result or import contract
   carries a "missing required clarification" or "durable permission/harness reason" signal, so a
@@ -24,21 +24,8 @@ delivery phases.
   required clarification; wiring `missing_permission` needs a compile/import precondition that
   reports a durable permission/harness reason — the latter brushes ROADMAP 3.2's explicit
   non-goal (no managed runner or harness launcher). Scope narrowly when picked up; don't fold in
-  the broader non-goals.
-
-### Enforce writer/reviewer model independence for review missions
-
-- **Status:** Revisit once execution stops being fully manual/BYOA (e.g. a managed runner or
-  mission launcher captures model identity automatically).
-- **Idea:** ROADMAP 3.1 (Independent review mission and finding contract) trusts the founder to
-  use a genuinely different model for review than for execution (FR-010's "different eligible
-  model or vendor from the writer"), with no system check. Once model identity can be captured
-  reliably rather than self-reported, add a required model-identity field to the writer's
-  external-result submission and the review-mission compile request, and fail-closed block
-  compiling the review mission if the reviewer's declared model exactly matches the writer's.
-  Same vendor is fine; same model is not.
-- **Boundary:** Independence enforcement only — not a general model-routing or evaluation system
-  (that's ROADMAP Milestone 6).
+  the broader non-goals. ROADMAP 4.1 is a natural specification checkpoint for
+  `missing_permission`, but neither producer is automatically in that milestone's scope.
 
 ## Small UI Changes
 
@@ -59,35 +46,32 @@ delivery phases.
 
 ## Open Questions
 
+## Archived
+
+### Enforce writer/reviewer model independence for review missions
+
+- **Status:** Roadmap-owned — superseded by ROADMAP 4.1.
+- **Resolution:** ROADMAP 4.1 introduces a shared run-actor provenance contract and enforces exact
+  writer/reviewer model separation only when the identity source is trustworthy enough to fail
+  closed. Fully manual/BYOA runs retain human independence attestation rather than promoting
+  self-reported identity to fact.
+
 ### Implement Multi-Agent AG-UI Kanban Orchestrator
 
-This is an export from a short brainstorming session with Gemini. Dont strictly follow this, its only for inspiration and a baseline.
-
-#### 🎯 Objective
-Build a local web-based Kanban interface that coordinates **Codex CLI**, **Claude CLI**, and **Copilot CLI** as modular steps in a development workflow (Spec → Plan → Code → Review). The system must optimize model selection, manage token budgets, and stream full agent reasoning/terminal interactions directly to the UI.
-
-#### 🧱 Architectural Components
-
-##### 1. Frontend (AG-UI Client)
-*   **Kanban Board:** Handles card transitions. Emits `STATE_DELTA` events on card drag-and-drop actions.
-*   **Interactive Console Component:** Subscribes to the AG-UI event stream. Renders collapsible agent `thinking steps`, `TOOL_CALL` milestones, and interactive confirmation prompts (Human-in-the-Loop interrupts).
-
-##### 2. Local Backend (AG-UI Orchestrator Server)
-*   **State Evaluator:** Listens for Kanban column transitions and dynamically maps tasks to the optimal CLI tool.
-*   **Token Budget Manager:** Tracks API usage across CLIs. Enforces model-steering rules or fallbacks if thresholds are reached.
-*   **Process Wrapper:** Spawns selected CLIs as local subprocesses. Captures and translates raw standard output (`stdio`) into formatted AG-UI protocol events.
-
-#### 🚀 Implementation & Documentation Links
-*   **Project Scaffolder:** `npx create-ag-ui-app` (Initial framework setup)
-*   **Protocol Specification:** [AG-UI Introduction & Specs](https://ag-ui.com)
-*   **Python SDK:** [agent-framework-ag-ui (PyPI)](https://pypi.org)
-*   **UI Foundation:** CopilotKit components adhering to the AG-UI streaming standard.
+- **Status:** Roadmap-owned — the validated connection need is superseded by ROADMAP 4.1.
+- **Resolution:** Preserve a provider-neutral JSON connection boundary that can use a CLI or
+  another approved local transport and begin with one evidence-selected adapter. MCP is unsupported
+  and explicitly out of scope for every adapter. The exported vendor list, AG-UI framework choice,
+  live reasoning/terminal stream, token-budget manager, automatic model selection, and board-driven
+  provider orchestration were inspiration rather than accepted product direction and are not
+  roadmap commitments.
 
 ### Price per task metric
 
-- The main metric that matters is price per task completion. Second is speed to task completion.
-
-## Archived
+- **Status:** Roadmap-owned — merged into ROADMAP 6.3.
+- **Resolution:** Quality and deterministic review remain eligibility gates. Among eligible
+  outcomes, total cost per successfully completed task, including retries, is the primary
+  efficiency metric and time to successful completion is the second.
 
 ### Add an Inbox page for review and approvals
 

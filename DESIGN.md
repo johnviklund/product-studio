@@ -276,13 +276,19 @@ The collapsed rail is the normal focus state. Use a vertical sequence of 20px li
 The expanded state may show:
 
 - All work.
-- Inbox with count.
-- Needs you with count.
+- Inbox with unassigned-capture count.
+- Updates with unseen meaningful-update count when the post-v1 view is implemented.
+- Needs you with unresolved-decision count.
 - Live products when implemented.
 - Project list.
 - Settings and trash at the bottom.
 
 The rail must always expose a visible collapse/expand control. Expanded content must not force a change in the board's filters or selection.
+
+`Inbox`, `Updates`, and `Needs you` are distinct concepts. Inbox is the unassigned capture source.
+Updates is an email-like, cross-project sequence of meaningful workflow changes. Needs you is the
+actionable subset containing unresolved human decisions. Do not reuse `Inbox` as the label for an
+updates or attention route.
 
 ### Top bar
 
@@ -297,22 +303,50 @@ The top bar contains, in order:
 
 Do not add global metrics, agent-cost charts, greetings, or decorative product messaging to this area.
 
-### Since-you-were-away summary
+### Since-you-were-away summary (post-v1)
 
 When meaningful changes occurred after the user's last acknowledged visit, show one compact strip immediately below the top bar:
 
 > Since you were away · 7 updates across 3 projects
 
-The strip has one primary text action, `Review updates`, plus a dismiss control. It is an entry point into a filtered sequence of changes, not a dashboard or activity feed.
+The strip has one primary text action, `Review updates`, plus a dismiss control. It is an entry point into Updates, not a dashboard or generic activity feed.
 
 Rules:
 
 - Hide the strip when there are no meaningful updates.
 - Count completed agent attempts, new review findings, newly blocked work, and human decisions requested.
 - Do not count background indexing, autosaves, or duplicate status events.
-- `Review updates` should advance through relevant cards in chronological or priority order using the existing right panel.
+- `Review updates` opens the relevant Updates sequence and advances through cards in chronological or priority order using the existing right panel.
 - Dismissal records the last acknowledged event, not merely the current time.
 - A critical blocked item may add a warning dot, but the strip stays visually calm.
+
+### Semantic activity and update review (post-v1)
+
+All update surfaces use the same stable semantic-event identity and evidence handles:
+
+- **Board:** The primary spatial workflow view. It shows current state and one next action, not a
+  chronology.
+- **Activity:** The complete meaningful history for one governed work item, including resolved and
+  superseded entries.
+- **Updates:** An email-like cross-project review sequence with seen and unseen state.
+- **Needs you:** Unresolved human decisions only; it is the actionable subset of the same semantic
+  history.
+- **Since you were away:** A temporary entry point into the current Updates sequence.
+
+Viewing, acknowledging, and resolving are separate actions. Opening an update may reveal it, but
+only the defined acknowledgment action advances the last-acknowledged event position; resolving a
+decision removes it from Needs you without deleting it from Activity. Empty, loading, failed,
+filtered-out, superseded, already-resolved, and caught-up states must be explicit.
+
+Updates should support efficient sequential review and preserve project scope while moving to the
+next entry. An actionable row opens the existing detail panel at the exact evidence-bound approval
+or reply control, then continues the sequence without creating a second mutation path.
+
+Persist concise typed outcomes and immutable evidence references, not raw reasoning, token streams,
+unbounded terminal output, autosaves, indexing activity, or duplicate controller events. Show the
+logical actor role on the semantic entry. Model, harness, effort, and adapter details remain behind
+progressive disclosure, carry their observed/attested/declared/unknown assurance, and never imply
+authorization.
 
 ### Kanban board
 
@@ -428,6 +462,10 @@ Overview prioritizes:
 For review-ready work, the footer uses primary `Approve result` and secondary `Send comments`. Approval binds to the exact result being displayed. If the result changes, invalidate the prior approval and make that visible.
 
 `Edit details` exposes project, priority, type, goal, or scope without replacing the entire panel. Editing must preserve the original capture and activity history.
+
+Activity uses the shared semantic history rather than reconstructing a separate feed. Entries lead
+with a human-readable outcome and timestamp, retain resolved decisions and superseded results, and
+link to exact evidence when available. Raw tool and provider detail remains collapsed.
 
 For a captured idea/todo, keep refinement in a narrow structural side panel: show the immutable original thought, kind, and captured-at timestamp read-only above the editable metadata (project, type, tags, notes). Do not let this panel accrete activity feed, review, or approval surfaces — those stay part of the full work-item detail panel once a capture has been promoted into a governed work item.
 

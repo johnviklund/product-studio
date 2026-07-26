@@ -6,8 +6,9 @@ Product Studio is a local-first control plane for a technical solo founder to ca
 progress, review, and approve AI-assisted product work across several repositories. It
 productizes the workflow skill's deliberate work loop into durable product behavior. Its MVP
 makes the daily portfolio workflow calmer and more trustworthy: a focused Kanban,
-one-sentence capture, portable agent missions, deterministic verification, independent
-review, and a clear human decision when attention is required.
+one-sentence capture, portable agent missions, connected execution using different LLM models,
+deterministic verification, independent review, and a clear human decision when attention is
+required.
 
 ## 2. User, positioning, and non-goals
 
@@ -17,6 +18,10 @@ portfolio-level operating system for governed product outcomes, not an IDE, term
 multiplexer, generic project-management suite, model chat application, or wrapper for
 one vendor. It is not initially a multi-user hosted product, a full autonomous delivery
 system, or a replacement for Git, pull requests, CI, or hosting.
+
+MCP is unsupported in the target organizational environment and is not a Product Studio
+integration option. Local agent connections must operate without configuring, starting,
+connecting to, proxying, or exposing MCP servers or tools.
 
 ## 3. Settled product principles
 
@@ -39,9 +44,12 @@ Milestones 1–3 form the MVP:
 1. A focused, cross-project Kanban with Todo, Spec, Plan, Execute, Review, Ship, and
    Done; project filtering; context-preserving side panels; and fast, unassigned capture.
 2. Provider-neutral portable missions, durable controller state, result import, and
-   deterministic verification for manual bring-your-own-agent handoff.
-3. An independent, read-only cross-agent review and patch loop with bounded retries,
-   attention handling, and durable learning/evaluation proposals.
+   deterministic verification, with manual bring-your-own-agent handoff retained as a recovery
+   path.
+3. An independent, read-only cross-agent review and patch loop with bounded retries, attention
+   handling, and one transport-neutral connected adapter that can drive the agent-assisted
+   workflow from shaping through approved implementation using different founder-selected LLM
+   models for different steps.
 
 The intended application stack is one deployable Next.js App Router application using
 TypeScript, Tailwind CSS, shadcn/ui, and better-sqlite3 for its rebuildable local cache.
@@ -49,10 +57,11 @@ TypeScript, Tailwind CSS, shadcn/ui, and better-sqlite3 for its rebuildable loca
 
 ## 5. Post-MVP boundaries
 
-Managed execution and broad assisted-launch integrations, deployment and operational
-adapters, model evaluation/routing expansion, multi-user collaboration, and a hosted
-control plane are post-MVP. They require dogfooding evidence rather than speculative
-architecture. Product Studio does not add them merely to remove every manual action.
+Semantic Activity and live Updates, additional execution adapters, deployment and operational
+adapters, governed learning proposals, model evaluation/routing expansion, multi-user
+collaboration, and a hosted control plane are post-MVP. They require dogfooding evidence rather
+than speculative architecture. Product Studio does not add them merely to remove every manual
+action.
 
 ## 6. Lifecycle and gates
 
@@ -73,7 +82,7 @@ SQLite is a disposable local cache/index that can be rebuilt from durable files;
 never the only copy of product or workflow state.
 
 Product workspaces use `.founder/` as the initial metadata directory. Its version-2 product
-manifest, version-2 goal contract, and version-1 state contract are implemented in
+manifest, version-2 goal contract, and version-2 state contract are implemented in
 [`src/domain/work-item.ts`](src/domain/work-item.ts) and demonstrated by the checked-in
 [`fixtures/sample-workspace`](fixtures/sample-workspace).
 
@@ -82,7 +91,8 @@ controller fields, while governed items carry a complete nested version-1 goal c
 purpose, acceptance criteria, non-goals, allowed scope, and review readiness. Its `goal_version`
 must match state `goal_version`, `input_revision`, and `attempt`. Controller runs use exclusive
 per-item leases and strict durable manifests; incompatible or partial combinations fail closed.
-SQLite schema v5 is a rebuildable projection of those files, including purpose and non-goals, not
+SQLite schema v6 is a rebuildable projection of those files, including purpose, non-goals,
+patch-cycle state, and attention, not
 a migration authority.
 
 ## 8. Core documents
@@ -102,7 +112,9 @@ The following remain unresolved and must be decided with implementation evidence
 - The first two proof repositories for provider-neutral manual handoff.
 - Canonical mission and result-submission schemas, including which agent-specific renderers
   add real value.
-- The scope and first integration of assisted launch or managed execution.
+- The first approved non-MCP local transport and reference adapter. Whether it uses a CLI or
+  another approved local protocol is an implementation decision and must not alter the user
+  workflow.
 - Whether a future managed runner needs subprocess-only execution or PTY support.
 - GitHub synchronization depth: repositories and pull requests only, or optional issue
   mirroring.
