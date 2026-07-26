@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -36,6 +37,7 @@ import type {
   ReviewFinding,
   StoredImportEvidence,
 } from "@/src/domain/result";
+import type { ConnectedRunSummary } from "@/src/domain/connected-run";
 import {
   WORK_ITEM_PRIORITIES,
   WORK_ITEM_TYPES,
@@ -45,12 +47,14 @@ import {
 import { canUpdateGoalContract } from "@/src/domain/workflow-policy";
 import {
   boardTransitionActionsForPhase,
+  connectedExecuteForItem,
   detailPanelModeForItem,
   missionHandoffModeForItem,
   nextActionForPhase,
   patchAttentionForItem,
   reviewHandoffForItem,
   type BoardColumnId,
+  type ConnectedExecuteProjection,
   type PatchAttentionProjection,
 } from "@/src/presentation/board";
 
@@ -121,6 +125,15 @@ interface ExpandedRunEvidenceState {
   runIds: Set<string>;
 }
 
+interface ConnectedRunState {
+  itemKey: string;
+  result: ConnectedRunSummary[];
+  loading: boolean;
+  error: string | null;
+}
+
+type ConnectedMutation = "launching" | "allowing_once" | "keeping_denied";
+
 interface RunEvidenceSectionProps {
   fieldId: string;
   evidence: StoredImportEvidence[];
@@ -142,6 +155,43 @@ const runCompletedAtFormatter = new Intl.DateTimeFormat(undefined, {
   timeStyle: "short",
 });
 const EMPTY_RUN_IDS = new Set<string>();
+
+function connectedRunValue(value: { value: string | null }): string {
+  return value.value ?? "unknown";
+}
+
+function connectedHarnessValue(
+  value: ConnectedRunSummary["provenance"]["harness"],
+): string {
+  return value.value === null
+    ? "unknown"
+    : `${value.value.id} ${value.value.version}`;
+}
+
+function effectiveModelValue(
+  value: ConnectedRunSummary["provenance"]["effective_model"],
+): string {
+  return value.model_id === null ? "unknown" : value.model_id;
+}
+
+function latestConnectedRun(
+  runs: readonly ConnectedRunSummary[],
+): ConnectedRunSummary | null {
+  return runs.reduce<ConnectedRunSummary | null>((latest, run) => {
+    if (
+      latest === null ||
+      new Date(run.lifecycle.updated_at).getTime() >
+        new Date(latest.lifecycle.updated_at).getTime()
+    ) {
+      return run;
+    }
+    return latest;
+  }, null);
+}
+
+function connectedStatusLabel(value: string): string {
+  return value.replaceAll("_", " ");
+}
 
 function tagsFromInput(value: string): string[] {
   return value
@@ -203,6 +253,45 @@ async function requestRunEvidence(
     return {
       result: null,
       error: "Run evidence could not be loaded. Check the local server and try again.",
+    };
+  }
+}
+
+async function requestConnectedRuns(
+  sourceId: string,
+  workItemId: string,
+  signal?: AbortSignal,
+): Promise<
+  { result: ConnectedRunSummary[] | null; error: string | null } | null
+> {
+  try {
+    const response = await fetch(
+      `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/mission/connected/run`,
+      { signal },
+    );
+    const body = (await response.json()) as
+      | ConnectedRunSummary[]
+      | MutationErrorResponse;
+    if (signal?.aborted) {
+      return null;
+    }
+    if (!response.ok || !Array.isArray(body)) {
+      return {
+        result: null,
+        error:
+          !Array.isArray(body) && body.error?.message
+            ? body.error.message
+            : "Connected run status could not be loaded.",
+      };
+    }
+    return { result: body, error: null };
+  } catch {
+    if (signal?.aborted) {
+      return null;
+    }
+    return {
+      result: null,
+      error: "Connected run status could not be loaded. Check the local server and try again.",
     };
   }
 }
@@ -835,6 +924,206 @@ export function PatchWorkflowSection({
   );
 }
 
+interface ConnectedExecuteSectionProps {
+  fieldId: string;
+  projection: ConnectedExecuteProjection;
+  runs: readonly ConnectedRunSummary[];
+  loading: boolean;
+  error: string | null;
+  modelOverride: string;
+  mutation: ConnectedMutation | null;
+  onModelOverrideChange: (value: string) => void;
+  onLaunch: () => void;
+  onAllowOnce: () => void;
+  onKeepDenied: () => void;
+}
+
+export function ConnectedExecuteSection({
+  fieldId,
+  projection,
+  runs,
+  loading,
+  error,
+  modelOverride,
+  mutation,
+  onModelOverrideChange,
+  onLaunch,
+  onAllowOnce,
+  onKeepDenied,
+}: ConnectedExecuteSectionProps) {
+  const latest = latestConnectedRun(runs);
+  const busy = mutation !== null;
+
+  if (
+    projection.mode === "hidden" &&
+    latest === null &&
+    !loading &&
+    error === null
+  ) {
+    return null;
+  }
+
+  return (
+    <section
+      aria-labelledby={`${fieldId}-connected-execute`}
+      className="border-y py-4"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 id={`${fieldId}-connected-execute`} className="text-xs font-medium">
+            Connected execution
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Launch the governed Execute mission here, or use the manual mission handoff below to recover.
+          </p>
+        </div>
+        {latest ? (
+          <span className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+            {connectedStatusLabel(latest.lifecycle.status)}
+          </span>
+        ) : null}
+      </div>
+
+      <p className="mt-3 border-l-2 border-border bg-background px-3 py-2.5 text-[11px] leading-5 text-muted-foreground">
+        Local execution has the same machine authority as launching the agent manually. Product Studio enforces mission permissions and result gates; it does not physically sandbox approved operations.
+      </p>
+
+      {projection.mode === "launch" ? (
+        <div className="mt-4 space-y-3">
+          <div>
+            <label
+              htmlFor={`${fieldId}-connected-model-override`}
+              className="mb-2 block text-xs font-medium"
+            >
+              Model override <span className="text-muted-foreground">(this run only)</span>
+            </label>
+            <input
+              id={`${fieldId}-connected-model-override`}
+              value={modelOverride}
+              maxLength={200}
+              autoComplete="off"
+              onChange={(event) => onModelOverrideChange(event.target.value)}
+              placeholder="Use the configured model"
+              className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none placeholder:text-[#7f8794] focus:border-primary focus:ring-1 focus:ring-primary"
+            />
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onLaunch}
+            className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {mutation === "launching" ? "Launching…" : "Launch connected run"}
+          </button>
+        </div>
+      ) : null}
+
+      {projection.mode === "permission" ? (
+        <div className="mt-4 border-l-2 border-warning bg-background px-3 py-3">
+          <p className="text-xs font-medium">Permission required</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {projection.permission.question}
+          </p>
+          <p className="mt-2 break-all text-[11px] text-muted-foreground">
+            Exact operation hash · {projection.permission.operation.operation_sha256}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onAllowOnce}
+              className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "allowing_once" ? "Allowing…" : "Allow once and retry"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onKeepDenied}
+              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "keeping_denied" ? "Keeping denied…" : "Keep denied"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {error ? (
+        <p
+          className="mt-3 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-foreground"
+          role="alert"
+        >
+          {error}
+        </p>
+      ) : null}
+
+      {loading && latest === null ? (
+        <p className="mt-3 text-xs text-muted-foreground" role="status">
+          Loading connected run status…
+        </p>
+      ) : null}
+
+      {latest ? (
+        <div className="mt-4 border-l-2 border-border bg-background px-3 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-medium">Latest sanitized run</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {latest.connected_run_id.slice(0, 12)} · updated {runCompletedAtFormatter.format(new Date(latest.lifecycle.updated_at))}
+              </p>
+            </div>
+            {latest.lifecycle.terminal_outcome ? (
+              <span className="shrink-0 text-[11px] font-medium text-muted-foreground capitalize">
+                {connectedStatusLabel(latest.lifecycle.terminal_outcome)}
+              </span>
+            ) : null}
+          </div>
+          <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-y py-3 text-[11px]">
+            <div>
+              <dt className="text-muted-foreground">Runtime</dt>
+              <dd className="mt-0.5 break-words">
+                {connectedHarnessValue(latest.provenance.harness)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Effective model</dt>
+              <dd className="mt-0.5 break-words">
+                {effectiveModelValue(latest.provenance.effective_model)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Requested model</dt>
+              <dd className="mt-0.5 break-words">
+                {connectedRunValue(latest.provenance.requested_model)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Effort</dt>
+              <dd className="mt-0.5 break-words">
+                {connectedRunValue(latest.provenance.effort)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Bounded diagnostics</dt>
+              <dd className="mt-0.5">
+                {latest.diagnostics.count}
+                {latest.diagnostics.truncated ? " (truncated)" : ""}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Run state</dt>
+              <dd className="mt-0.5 capitalize">
+                {connectedStatusLabel(latest.lifecycle.status)}
+                {latest.lifecycle.partial ? " · partial" : ""}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function DetailPanel({
   item,
   workspaces,
@@ -896,6 +1185,12 @@ export function DetailPanel({
     useState<RunEvidenceState | null>(null);
   const [expandedRunEvidenceState, setExpandedRunEvidenceState] =
     useState<ExpandedRunEvidenceState | null>(null);
+  const [connectedRunState, setConnectedRunState] =
+    useState<ConnectedRunState | null>(null);
+  const [connectedModelOverride, setConnectedModelOverride] = useState("");
+  const [connectedMutation, setConnectedMutation] =
+    useState<ConnectedMutation | null>(null);
+  const connectedMutationRef = useRef(false);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const detailsDirty =
     title !== goal.title ||
@@ -954,6 +1249,7 @@ export function DetailPanel({
     state.patch_cycle,
   ].join(":");
   const missionHandoffMode = missionHandoffModeForItem(item);
+  const connectedExecute = connectedExecuteForItem(item);
   const missionEligible = missionHandoffMode === "active";
   const repairEligible = missionHandoffMode === "repair";
   const missionBusy = compilingMission || importingResult || startingRepair;
@@ -966,10 +1262,31 @@ export function DetailPanel({
       ? missionImportState.result
       : null;
   const runEvidenceItemKey = `${item.source_id}:${goal.work_item_id}`;
+  const connectedRunItemKey = [
+    item.source_id,
+    goal.work_item_id,
+    state.goal_version,
+    state.input_revision,
+    state.attempt,
+  ].join(":");
   const runEvidence =
     mode === "governed" && runEvidenceState?.itemKey === runEvidenceItemKey
       ? runEvidenceState.result
       : [];
+  const connectedRuns =
+    mode === "governed" &&
+    connectedRunState?.itemKey === connectedRunItemKey
+      ? connectedRunState.result
+      : [];
+  const connectedRunsLoading =
+    mode === "governed" &&
+    (connectedRunState?.itemKey !== connectedRunItemKey ||
+      connectedRunState.loading);
+  const connectedRunsError =
+    mode === "governed" &&
+    connectedRunState?.itemKey === connectedRunItemKey
+      ? connectedRunState.error
+      : null;
   const patchAttention = patchAttentionForItem(item, runEvidence);
   const reviewHandoff = reviewHandoffForItem(item, runEvidence);
   const reviewEligible =
@@ -1070,6 +1387,38 @@ export function DetailPanel({
     [runEvidenceItemKey],
   );
 
+  const loadConnectedRuns = useCallback(
+    async (signal?: AbortSignal) => {
+      const loaded = await requestConnectedRuns(
+        item.source_id,
+        goal.work_item_id,
+        signal,
+      );
+      if (loaded === null) {
+        return;
+      }
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          loaded.result ??
+          (current?.itemKey === connectedRunItemKey ? current.result : []),
+        loading: false,
+        error: loaded.error,
+      }));
+    },
+    [connectedRunItemKey, goal.work_item_id, item.source_id],
+  );
+
+  const markConnectedRunsLoading = useCallback(() => {
+    setConnectedRunState((current) => ({
+      itemKey: connectedRunItemKey,
+      result:
+        current?.itemKey === connectedRunItemKey ? current.result : [],
+      loading: true,
+      error: null,
+    }));
+  }, [connectedRunItemKey]);
+
   const attemptClose = useCallback(() => {
     if (
       mode === "capture" &&
@@ -1117,6 +1466,36 @@ export function DetailPanel({
     });
     return () => controller.abort();
   }, [goal.work_item_id, item.source_id, mode, runEvidenceItemKey]);
+
+  useEffect(() => {
+    if (mode !== "governed") {
+      return;
+    }
+    const controller = new AbortController();
+    void requestConnectedRuns(
+      item.source_id,
+      goal.work_item_id,
+      controller.signal,
+    ).then((loaded) => {
+      if (loaded === null) {
+        return;
+      }
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          loaded.result ??
+          (current?.itemKey === connectedRunItemKey ? current.result : []),
+        loading: false,
+        error: loaded.error,
+      }));
+    });
+    return () => controller.abort();
+  }, [
+    connectedRunItemKey,
+    goal.work_item_id,
+    item.source_id,
+    mode,
+  ]);
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1543,6 +1922,132 @@ export function DetailPanel({
     }
   }
 
+  async function handleLaunchConnectedRun() {
+    if (connectedMutationRef.current || !connectedExecute.can_launch) {
+      return;
+    }
+    connectedMutationRef.current = true;
+    setConnectedMutation("launching");
+    markConnectedRunsLoading();
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/connected/launch`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            connectedModelOverride.trim().length === 0
+              ? {}
+              : { model_override: connectedModelOverride.trim() },
+          ),
+        },
+      );
+      const body = (await response.json()) as
+        | ConnectedRunSummary
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setConnectedRunState((current) => ({
+          itemKey: connectedRunItemKey,
+          result:
+            current?.itemKey === connectedRunItemKey ? current.result : [],
+          loading: false,
+          error:
+            "error" in body
+              ? body.error?.message ?? "The connected run could not be launched."
+              : "The connected run could not be launched.",
+        }));
+        return;
+      }
+
+      setConnectedRunState({
+        itemKey: connectedRunItemKey,
+        result: [body as ConnectedRunSummary],
+        loading: false,
+        error: null,
+      });
+      setConnectedModelOverride("");
+    } catch {
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          current?.itemKey === connectedRunItemKey ? current.result : [],
+        loading: false,
+        error: "The connected run could not be launched. Check the local server and try again.",
+      }));
+    } finally {
+      connectedMutationRef.current = false;
+      setConnectedMutation(null);
+    }
+  }
+
+  async function handleConnectedPermission(
+    decision: "allow_once" | "keep_denied",
+  ) {
+    if (
+      connectedMutationRef.current ||
+      connectedExecute.mode !== "permission"
+    ) {
+      return;
+    }
+    connectedMutationRef.current = true;
+    setConnectedMutation(
+      decision === "allow_once" ? "allowing_once" : "keeping_denied",
+    );
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/connected/permission`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            connected_run_id: connectedExecute.permission.operation.connected_run_id,
+            operation_sha256:
+              connectedExecute.permission.operation.operation_sha256,
+            decision,
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | PortfolioWorkItem
+        | MutationErrorResponse;
+      if (!response.ok) {
+        setConnectedRunState((current) => ({
+          itemKey: connectedRunItemKey,
+          result:
+            current?.itemKey === connectedRunItemKey ? current.result : [],
+          loading: false,
+          error:
+            "error" in body
+              ? body.error?.message ?? "The permission decision could not be recorded."
+              : "The permission decision could not be recorded.",
+        }));
+        return;
+      }
+
+      markConnectedRunsLoading();
+      await loadConnectedRuns();
+      onUpdated(
+        body as PortfolioWorkItem,
+        decision === "allow_once"
+          ? "Exact permission allowed once; a fresh Execute attempt is ready."
+          : "Exact permission remains denied.",
+      );
+    } catch {
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          current?.itemKey === connectedRunItemKey ? current.result : [],
+        loading: false,
+        error: "The permission decision could not be recorded. Check the local server and try again.",
+      }));
+    } finally {
+      connectedMutationRef.current = false;
+      setConnectedMutation(null);
+    }
+  }
+
   const transitionActions = boardTransitionActionsForPhase(state.phase);
   const displayedNextAction =
     patchWorkflowNextAction(patchAttention) ?? nextActionForPhase(state.phase);
@@ -1810,6 +2315,24 @@ export function DetailPanel({
                   >
                     {goalContractContent}
                   </section>
+
+                  <ConnectedExecuteSection
+                    fieldId={fieldId}
+                    projection={connectedExecute}
+                    runs={connectedRuns}
+                    loading={connectedRunsLoading}
+                    error={connectedRunsError}
+                    modelOverride={connectedModelOverride}
+                    mutation={connectedMutation}
+                    onModelOverrideChange={setConnectedModelOverride}
+                    onLaunch={() => void handleLaunchConnectedRun()}
+                    onAllowOnce={() =>
+                      void handleConnectedPermission("allow_once")
+                    }
+                    onKeepDenied={() =>
+                      void handleConnectedPermission("keep_denied")
+                    }
+                  />
 
                   {missionEligible || repairEligible || missionImport ? (
                     <section

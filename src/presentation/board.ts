@@ -55,6 +55,23 @@ export type BoardColumnId = BoardColumn["id"];
 export type DetailPanelMode = "capture" | "governed";
 export type MissionHandoffMode = "active" | "repair" | "hidden";
 
+export type ConnectedExecuteProjection =
+  | {
+      mode: "launch";
+      can_launch: true;
+      permission: null;
+    }
+  | {
+      mode: "permission";
+      can_launch: false;
+      permission: Extract<WorkItemAttention, { kind: "missing_permission" }>;
+    }
+  | {
+      mode: "hidden";
+      can_launch: false;
+      permission: null;
+    };
+
 export type ReviewHandoffProjection =
   | {
       mode: "active";
@@ -323,6 +340,58 @@ export function missionHandoffModeForItem(item: {
     return "repair";
   }
   return "hidden";
+}
+
+export function connectedExecuteForItem(item: {
+  source_id: string;
+  work_item: {
+    goal: { goal_contract?: { goal_version: number } };
+    state: {
+      phase: WorkItemPhase;
+      status: WorkItemStatus;
+      goal_version?: number;
+      input_revision?: number;
+      attempt?: number;
+      patch_cycle?: number;
+      attention?: WorkItemAttention;
+    };
+  };
+}): ConnectedExecuteProjection {
+  const { goal, state } = item.work_item;
+  const governedExecute =
+    item.source_id !== INBOX_SOURCE_ID &&
+    goal.goal_contract !== undefined &&
+    state.phase === "execute" &&
+    state.status === "active" &&
+    state.goal_version === goal.goal_contract.goal_version &&
+    state.input_revision !== undefined &&
+    state.attempt !== undefined &&
+    state.patch_cycle === 0;
+
+  if (!governedExecute) {
+    return { mode: "hidden", can_launch: false, permission: null };
+  }
+
+  if (state.attention === undefined) {
+    return { mode: "launch", can_launch: true, permission: null };
+  }
+
+  if (
+    state.attention.kind === "missing_permission" &&
+    state.attention.governed_tuple.goal_version === state.goal_version &&
+    state.attention.governed_tuple.input_revision === state.input_revision &&
+    state.attention.governed_tuple.attempt === state.attempt &&
+    state.attention.governed_tuple.patch_cycle === state.patch_cycle &&
+    state.attention.pins.mission_content_sha256 !== undefined
+  ) {
+    return {
+      mode: "permission",
+      can_launch: false,
+      permission: state.attention,
+    };
+  }
+
+  return { mode: "hidden", can_launch: false, permission: null };
 }
 
 export function reviewHandoffForItem(

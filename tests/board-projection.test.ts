@@ -5,6 +5,7 @@ import {
   boardTransitionActionsForPhase,
   boardColumnForPhase,
   boardItemIdentityKey,
+  connectedExecuteForItem,
   createDefaultBoardView,
   detailPanelModeForItem,
   isBoardSourceVisible,
@@ -165,6 +166,91 @@ describe("board projection", () => {
         },
       }),
     ).toBe("hidden");
+  });
+
+  it("exposes only a current governed connected launch or exact permission decision", () => {
+    const item = {
+      source_id: "ws_product",
+      work_item: {
+        goal: { goal_contract: { goal_version: 3 } },
+        state: {
+          phase: "execute" as const,
+          status: "active" as const,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+          patch_cycle: 0,
+        },
+      },
+    };
+
+    expect(connectedExecuteForItem(item)).toEqual({
+      mode: "launch",
+      can_launch: true,
+      permission: null,
+    });
+
+    const permission = {
+      kind: "missing_permission" as const,
+      question: "Allow this exact operation once?",
+      recommendation: "Keep it denied unless it is required.",
+      created_at: "2026-07-26T12:00:00.000Z",
+      governed_tuple: {
+        goal_version: 3,
+        input_revision: 2,
+        attempt: 1,
+        patch_cycle: 0,
+      },
+      pins: {
+        artifact_paths: [".founder/missions/wi/mission.json"] as [string, ...string[]],
+        evidence_paths: [],
+        mission_content_sha256: "a".repeat(64),
+      },
+      operation: {
+        normalized_operation: {
+          schema_version: 1 as const,
+          kind: "command" as const,
+          executable: "git",
+          args: ["status"],
+        },
+        canonical_args_sha256: "b".repeat(64),
+        operation_sha256: "c".repeat(64),
+        reason: "The command is outside the governed envelope.",
+        resolved_envelope_sha256: "d".repeat(64),
+        connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+      },
+    };
+    expect(
+      connectedExecuteForItem({
+        ...item,
+        work_item: {
+          ...item.work_item,
+          state: { ...item.work_item.state, attention: permission },
+        },
+      }),
+    ).toEqual({
+      mode: "permission",
+      can_launch: false,
+      permission,
+    });
+    expect(
+      connectedExecuteForItem({
+        ...item,
+        work_item: {
+          ...item.work_item,
+          state: {
+            ...item.work_item.state,
+            attention: {
+              ...permission,
+              governed_tuple: { ...permission.governed_tuple, attempt: 0 },
+            },
+          },
+        },
+      }),
+    ).toEqual({ mode: "hidden", can_launch: false, permission: null });
+    expect(
+      connectedExecuteForItem({ ...item, source_id: "inbox" }),
+    ).toEqual({ mode: "hidden", can_launch: false, permission: null });
   });
 
   it("shows review handoff affordances only for the current applied execute subject", () => {
