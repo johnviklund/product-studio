@@ -19,6 +19,7 @@ import {
   importReviewResultInputSchema,
   parseWorkItemStateForRead,
   productManifestSchema,
+  recordConnectedPermissionDenialInputSchema,
   retryExecuteAttemptInputSchema,
   updateWorkItemPhaseInputSchema,
   workItemGoalSchema,
@@ -398,6 +399,41 @@ describe("durable work-item schemas", () => {
       ).toThrow();
     },
   );
+
+  it("requires an exact, hash-verified operation for connected permission denial", () => {
+    const denial = {
+      expected_phase: "execute" as const,
+      expected_status: "active" as const,
+      expected_schema_version: 2 as const,
+      governed_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      mission_content_sha256: "b".repeat(64),
+      operation: missingPermissionOperation,
+    };
+
+    expect(recordConnectedPermissionDenialInputSchema.parse(denial)).toEqual(
+      denial,
+    );
+    expect(() =>
+      recordConnectedPermissionDenialInputSchema.parse({
+        ...denial,
+        operation: {
+          ...missingPermissionOperation,
+          operation_sha256: "f".repeat(64),
+        },
+      }),
+    ).toThrow("operation_sha256 must hash normalized_operation");
+    expect(() =>
+      recordConnectedPermissionDenialInputSchema.parse({
+        ...denial,
+        adapter_outcome: "missing_permission",
+      }),
+    ).toThrow();
+  });
 
   it("rejects agent-reported cost and model fields in attention", () => {
     const attention = {

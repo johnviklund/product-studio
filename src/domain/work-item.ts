@@ -6,6 +6,7 @@ import {
   type CanonicalCapabilityRequest,
 } from "./capability-envelope";
 import type {
+  MissionArtifactReadResult,
   MissionArtifactWriteResult,
   MissionIdentity,
   MissionPackageBuilder,
@@ -13,6 +14,7 @@ import type {
   PatchSubject,
   ReviewMissionPackage,
 } from "./mission";
+import type { ConnectedRunRecordV1 } from "./connected-run";
 import { portfolioSourceIdSchema } from "./portfolio-source";
 import type {
   AppliedExecuteReviewSubject,
@@ -206,6 +208,15 @@ export interface ConnectedPermissionResolutionInput {
   operation_sha256: string;
   connected_run_id: string;
   mission_content_sha256: string;
+}
+
+export interface RecordConnectedPermissionDenialInput {
+  expected_phase: "execute";
+  expected_status: "active";
+  expected_schema_version: 2;
+  governed_tuple: GovernedTuple;
+  mission_content_sha256: string;
+  operation: MissingPermissionOperation;
 }
 
 export interface WorkItemState {
@@ -408,6 +419,18 @@ export interface WorkItemRepository {
     identity: MissionIdentity,
     reviewPatchCycle?: number,
   ): Promise<MissionResultSnapshot>;
+  readMissionPackage(
+    identity: MissionIdentity,
+    reviewPatchCycle?: number,
+  ): Promise<MissionArtifactReadResult>;
+  createConnectedRun(
+    record: ConnectedRunRecordV1,
+  ): Promise<{ record: ConnectedRunRecordV1; created: boolean }>;
+  readConnectedRun(
+    workItemId: string,
+    connectedRunId: string,
+  ): Promise<ConnectedRunRecordV1 | null>;
+  listConnectedRuns(workItemId: string): Promise<ConnectedRunRecordV1[]>;
   readImportEvidence(
     identity: MissionIdentity,
     importRunId: string,
@@ -705,6 +728,16 @@ export const connectedPermissionResolutionInputSchema: z.ZodType<ConnectedPermis
     allowOnceConnectedPermissionInputSchema,
     keepDeniedConnectedPermissionInputSchema,
   ]);
+
+export const recordConnectedPermissionDenialInputSchema: z.ZodType<RecordConnectedPermissionDenialInput> =
+  z.strictObject({
+    expected_phase: z.literal("execute"),
+    expected_status: z.literal("active"),
+    expected_schema_version: z.literal(2),
+    governed_tuple: governedTupleSchema,
+    mission_content_sha256: sha256Schema,
+    operation: missingPermissionOperationSchema,
+  });
 
 interface VersionedStateFields {
   goal_version?: number;

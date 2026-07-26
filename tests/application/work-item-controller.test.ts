@@ -20,6 +20,15 @@ import {
   type PatchSubject,
 } from "../../src/domain/mission";
 import {
+  hashCanonicalCapabilityRequest,
+  resolveCapabilityEnvelope,
+  type ExecutionDefaultsV1,
+} from "../../src/domain/capability-envelope";
+import {
+  hashResolvedCapabilityEnvelope,
+  type ConnectedRunRecordV1,
+} from "../../src/domain/connected-run";
+import {
   hashResultContent,
   importEvidenceSummarySchema,
   serializeExternalResult,
@@ -153,7 +162,13 @@ async function createWorkspace(): Promise<{
     }),
     "utf8",
   );
-  return { root, repository: new ProductWorkspace(root) };
+  return {
+    root,
+    repository: new ProductWorkspace(root, {
+      git: passingGit,
+      verificationRunner: passingRunner,
+    }),
+  };
 }
 
 interface ImportTestRepository extends ProductWorkspace {
@@ -893,6 +908,142 @@ function reviewFinding(
   };
 }
 
+async function createConnectedFixture(): Promise<{
+  repository: ProductWorkspace;
+  workItem: WorkItem;
+  controller: WorkItemController;
+  input: {
+    expected_phase: "execute";
+    expected_status: "active";
+    expected_schema_version: 2;
+    governed_tuple: {
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+      patch_cycle: number;
+    };
+    mission_content_sha256: string;
+  };
+  record: ConnectedRunRecordV1;
+}> {
+  const { repository } = await createWorkspace();
+  const { workItem, manifest } = await governToExecute(repository);
+  const identity = {
+    phase: "execute" as const,
+    work_item_id: workItem.goal.work_item_id,
+    goal_version: workItem.state.goal_version!,
+    input_revision: workItem.state.input_revision!,
+    attempt: workItem.state.attempt!,
+  };
+  const artifact = await repository.writeMissionPackage(identity, (paths) =>
+    compileMission(workItem, manifest, paths),
+  );
+  const defaults: ExecutionDefaultsV1 = {
+    schema_version: 1,
+    approved_command_forms: [{ executable: "npm", args: ["run", "test"] }],
+    approved_url_operations: [],
+    mcp: "forbidden",
+    credentials: "forbidden",
+  };
+  const envelope = resolveCapabilityEnvelope(["src", "tests"], defaults);
+  const envelopeSha256 = hashResolvedCapabilityEnvelope(envelope);
+  const input = {
+    expected_phase: "execute" as const,
+    expected_status: "active" as const,
+    expected_schema_version: 2 as const,
+    governed_tuple: {
+      goal_version: identity.goal_version,
+      input_revision: identity.input_revision,
+      attempt: identity.attempt,
+      patch_cycle: workItem.state.patch_cycle!,
+    },
+    mission_content_sha256: artifact.mission.content_sha256,
+  };
+  const record: ConnectedRunRecordV1 = {
+    schema_version: 1,
+    connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+    mission: {
+      identity,
+      path: artifact.mission.task_path.replace(/TASK\.md$/, "mission.json"),
+      content_sha256: artifact.mission.content_sha256,
+      source_commit: artifact.mission.source_revision.git_base_commit,
+    },
+    governed_tuple: input.governed_tuple,
+    provenance: {
+      role: { value: "writer", assurance: "controller_observed" },
+      seat: { value: "executor", assurance: "controller_observed" },
+      requested_model: { value: "default", assurance: "user_declared" },
+      effective_model: {
+        assurance: "unknown",
+        model_id: null,
+        deployment_id: null,
+        observed_event_sha256: null,
+      },
+      effort: { value: "high", assurance: "user_declared" },
+      harness: {
+        value: { id: "fake-acp", version: "1.0.0" },
+        assurance: "controller_observed",
+      },
+      adapter_profile: {
+        value: {
+          adapter_id: "fake-acp",
+          adapter_version: "1.0.0",
+          profile_id: "test",
+        },
+        assurance: "controller_observed",
+      },
+      resolved_profile_sha256: {
+        value: "b".repeat(64),
+        assurance: "controller_observed",
+      },
+      resolved_skill_set_sha256: {
+        value: "c".repeat(64),
+        assurance: "controller_observed",
+      },
+      capability_envelope_sha256: {
+        value: envelopeSha256,
+        assurance: "controller_observed",
+      },
+      authorization_sha256: {
+        value: "d".repeat(64),
+        assurance: "controller_observed",
+      },
+    },
+    resolved_capability_envelope: {
+      envelope,
+      envelope_sha256: envelopeSha256,
+    },
+    acp: {
+      protocol_version: { value: 1, assurance: "adapter_attested" },
+      session_id: { value: "test-session", assurance: "adapter_attested" },
+    },
+    lifecycle: {
+      status: "starting",
+      started_at: "2026-07-26T18:00:00.000Z",
+      updated_at: "2026-07-26T18:00:00.000Z",
+      completed_at: null,
+      terminal: null,
+    },
+    limits: {
+      wall_clock_timeout_ms: 60_000,
+      max_event_count: 100,
+      max_event_bytes: 100_000,
+      max_output_bytes: 100_000,
+      termination_grace_ms: 1_000,
+      drain_grace_ms: 1_000,
+    },
+    process: null,
+    diagnostics: { entries: [], truncated: false },
+  };
+  return {
+    repository,
+    workItem,
+    controller: createController(repository),
+    input,
+    record,
+  };
+}
+
 afterEach(async () => {
   await Promise.all(
     createdRoots.splice(0).map((root) =>
@@ -902,6 +1053,242 @@ afterEach(async () => {
 });
 
 describe("WorkItemController", () => {
+  it("persists immutable connected-run evidence before releasing the launch lease", async () => {
+    const fixture = await createConnectedFixture();
+    const commit = fixture.repository.commitControllerMutation.bind(
+      fixture.repository,
+    );
+    let recordExistedBeforeMutation = false;
+    fixture.repository.commitControllerMutation = async (lease, input) => {
+      recordExistedBeforeMutation =
+        (await fixture.repository.readConnectedRun(
+          fixture.workItem.goal.work_item_id,
+          fixture.record.connected_run_id,
+        )) !== null;
+      return commit(lease, input);
+    };
+
+    const launched = await fixture.controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+
+    expect(recordExistedBeforeMutation).toBe(true);
+    expect(launched).toMatchObject({
+      created: true,
+      connected_run: { connected_run_id: fixture.record.connected_run_id },
+      work_item: { state: { phase: "execute", status: "active" } },
+    });
+    expect(launched.work_item.state.active_run).toBeUndefined();
+
+    const replay = await fixture.controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    expect(replay).toMatchObject({
+      created: false,
+      connected_run: { connected_run_id: fixture.record.connected_run_id },
+    });
+    expect(replay.work_item.state.active_run).toBeUndefined();
+  });
+
+  it("creates missing-permission attention only for an exact out-of-envelope operation", async () => {
+    const fixture = await createConnectedFixture();
+    await fixture.controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    const operation = {
+      normalized_operation: {
+        schema_version: 1 as const,
+        kind: "command" as const,
+        executable: "git",
+        args: ["status"],
+      },
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest({
+        schema_version: 1,
+        kind: "command",
+        executable: "git",
+        args: ["status"],
+      }),
+      reason: "outside_capability_envelope",
+      resolved_envelope_sha256:
+        fixture.record.resolved_capability_envelope.envelope_sha256,
+      connected_run_id: fixture.record.connected_run_id,
+    };
+
+    const denied = await fixture.controller.recordConnectedPermissionDenial(
+      fixture.workItem.goal.work_item_id,
+      { ...fixture.input, operation },
+    );
+
+    expect(denied.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      attention: {
+        kind: "missing_permission",
+        governed_tuple: fixture.input.governed_tuple,
+        operation,
+      },
+    });
+    expect(denied.work_item.state.active_run).toBeUndefined();
+  });
+
+  it("does not fabricate missing-permission attention for in-envelope or non-permission signals", async () => {
+    const fixture = await createConnectedFixture();
+    fixture.record.diagnostics = {
+      entries: [
+        {
+          observed_at: "2026-07-26T18:00:01.000Z",
+          code: "static_analysis_decline_timeout_malformed_auth_failure",
+          message: "No adapter-observed out-of-envelope permission callback occurred.",
+        },
+      ],
+      truncated: false,
+    };
+    await fixture.controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    const inEnvelopeOperation = {
+      normalized_operation: {
+        schema_version: 1 as const,
+        kind: "command" as const,
+        executable: "npm",
+        args: ["run", "test"],
+      },
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest({
+        schema_version: 1,
+        kind: "command",
+        executable: "npm",
+        args: ["run", "test"],
+      }),
+      reason: "outside_capability_envelope",
+      resolved_envelope_sha256:
+        fixture.record.resolved_capability_envelope.envelope_sha256,
+      connected_run_id: fixture.record.connected_run_id,
+    };
+
+    await expect(
+      fixture.controller.recordConnectedPermissionDenial(
+        fixture.workItem.goal.work_item_id,
+        { ...fixture.input, operation: inEnvelopeOperation },
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_transition" });
+    expect(
+      (await fixture.repository.read(fixture.workItem.goal.work_item_id))?.state
+        .attention,
+    ).toBeUndefined();
+  });
+
+  it("binds a permission decision to its original attention and retries as a fresh attempt", async () => {
+    const fixture = await createConnectedFixture();
+    await fixture.controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    const operation = {
+      normalized_operation: {
+        schema_version: 1 as const,
+        kind: "command" as const,
+        executable: "git",
+        args: ["status"],
+      },
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest({
+        schema_version: 1,
+        kind: "command",
+        executable: "git",
+        args: ["status"],
+      }),
+      reason: "outside_capability_envelope",
+      resolved_envelope_sha256:
+        fixture.record.resolved_capability_envelope.envelope_sha256,
+      connected_run_id: fixture.record.connected_run_id,
+    };
+    const denied = await fixture.controller.recordConnectedPermissionDenial(
+      fixture.workItem.goal.work_item_id,
+      { ...fixture.input, operation },
+    );
+    const decision = {
+      governed_tuple: fixture.input.governed_tuple,
+      operation_sha256: operation.operation_sha256,
+      connected_run_id: operation.connected_run_id,
+      mission_content_sha256: fixture.input.mission_content_sha256,
+    };
+
+    await expect(
+      fixture.controller.resolveConnectedPermission(
+        fixture.workItem.goal.work_item_id,
+        { ...decision, decision: "allow_once", operation_sha256: "f".repeat(64) },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    await expect(
+      fixture.controller.resolveConnectedPermission(
+        fixture.workItem.goal.work_item_id,
+        {
+          ...decision,
+          decision: "allow_once",
+          mission_content_sha256: "f".repeat(64),
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    await expect(
+      fixture.controller.resolveConnectedPermission(
+        fixture.workItem.goal.work_item_id,
+        {
+          ...decision,
+          decision: "allow_once",
+          governed_tuple: {
+            ...decision.governed_tuple,
+            attempt: decision.governed_tuple.attempt + 1,
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "attempt_conflict" });
+
+    const kept = await fixture.controller.resolveConnectedPermission(
+      fixture.workItem.goal.work_item_id,
+      { ...decision, decision: "keep_denied" },
+    );
+    expect(kept).toEqual({ work_item: denied.work_item, manifest: null });
+
+    const retried = await fixture.controller.resolveConnectedPermission(
+      fixture.workItem.goal.work_item_id,
+      { ...decision, decision: "allow_once" },
+    );
+    expect(retried.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      attempt: fixture.input.governed_tuple.attempt + 1,
+    });
+    expect(retried.work_item.state.attention).toBeUndefined();
+    if (retried.manifest === null) {
+      throw new Error("Allow once must commit a fresh execute attempt.");
+    }
+    const retriedIdentity = {
+      phase: "execute" as const,
+      work_item_id: retried.work_item.goal.work_item_id,
+      goal_version: retried.work_item.state.goal_version!,
+      input_revision: retried.work_item.state.input_revision!,
+      attempt: retried.work_item.state.attempt!,
+    };
+    const retriedMission = await fixture.repository.writeMissionPackage(
+      retriedIdentity,
+      (paths) => compileMission(retried.work_item, retried.manifest!, paths),
+    );
+    expect(retriedMission.mission.content_sha256).not.toBe(
+      fixture.input.mission_content_sha256,
+    );
+  });
+
   it("activates and updates a goal contract exactly once per expected revision", async () => {
     const { root, repository } = await createWorkspace();
     const created = await createUncontractedItem(repository);

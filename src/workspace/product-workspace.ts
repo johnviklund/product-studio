@@ -2138,6 +2138,21 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     };
   }
 
+  async readMissionPackage(
+    identity: MissionIdentity,
+    reviewPatchCycle?: number,
+  ) {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    const snapshot = await this.readMissionPackageSnapshot(
+      validatedIdentity,
+      reviewPatchCycle,
+    );
+    return {
+      mission: snapshot.mission,
+      mission_path: snapshot.relativeMissionPath,
+    };
+  }
+
   async readImportEvidence(
     identity: MissionIdentity,
     importRunId: string,

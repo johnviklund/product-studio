@@ -7,6 +7,15 @@ import {
   type ReviewSubject,
 } from "../domain/mission";
 import {
+  capabilityRequestMatchesEnvelope,
+} from "../domain/capability-envelope";
+import {
+  connectedRunRecordV1Schema,
+  launchConnectedExecuteInputSchema,
+  type ConnectedRunRecordV1,
+  type LaunchConnectedExecuteInput,
+} from "../domain/connected-run";
+import {
   commandEvidenceRecordSchema,
   createImportRunId,
   executeExternalResultSubmissionSchema,
@@ -33,10 +42,12 @@ import {
   acceptPatchPlanInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
+  connectedPermissionResolutionInputSchema,
   importExternalResultInputSchema,
   importPatchResultInputSchema,
   importReviewResultInputSchema,
   retryExecuteAttemptInputSchema,
+  recordConnectedPermissionDenialInputSchema,
   saveWorkItemInputSchema,
   workItemIdSchema,
   workItemSchema,
@@ -51,6 +62,9 @@ import {
   type ImportPatchResultInput,
   type ImportReviewResultInput,
   type ProductManifest,
+  type ConnectedPermissionResolutionInput,
+  type MissingPermissionOperation,
+  type RecordConnectedPermissionDenialInput,
   type RetryExecuteAttemptInput,
   type SaveWorkItemInput,
   type WorkItem,
@@ -85,6 +99,25 @@ export interface ImportPatchResultResult {
   manifest: ControllerRunManifest | null;
   evidence: ImportEvidenceSummary;
   result?: PatchExternalResultSubmission;
+}
+
+export interface ConnectedLaunchResult extends ControllerMutationResult {
+  connected_run: ConnectedRunRecordV1;
+  created: boolean;
+}
+
+export interface ConnectedPermissionDecisionResult {
+  work_item: WorkItem;
+  manifest: ControllerRunManifest | null;
+}
+
+interface ExecuteExpectation {
+  expected_phase: "execute";
+  expected_status: WorkItemStatus;
+  expected_schema_version: 2;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
 }
 
 interface ExternalResultAssessment {
@@ -1282,6 +1315,70 @@ export class WorkItemController {
         input_revision: validatedInput.expected_input_revision,
         attempt: nextAttempt,
       };
+      return await this.retryExecuteAttemptWithLease({
+        work_item_id: validatedId,
+        lease,
+        active_run: activeRun,
+        manifest_identity: manifestIdentity,
+        next_attempt: nextAttempt,
+        clear_attention: false,
+        validate_current: () =>
+          this.validateExecuteExpectation(
+            validatedId,
+            lease.work_item,
+            validatedInput,
+          ),
+      });
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
+  }
+
+  async launchConnectedExecute(
+    workItemId: string,
+    input: LaunchConnectedExecuteInput,
+    record: ConnectedRunRecordV1,
+  ): Promise<ConnectedLaunchResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = launchConnectedExecuteInputSchema.parse(input);
+    const validatedRecord = connectedRunRecordV1Schema.parse(record);
+    const expectation = this.executeExpectationFromConnectedInput(
+      validatedInput,
+    );
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      validatedId,
+      "execute",
+      expectation.expected_goal_version,
+      expectation.expected_input_revision,
+      expectation.attempt,
+    );
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "launch_connected_execute", input: validatedInput }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const manifestIdentity = {
+        work_item_id: validatedId,
+        run_id: runId,
+        idempotency_key: idempotencyKey,
+        phase: "execute" as const,
+        goal_version: expectation.expected_goal_version,
+        input_revision: expectation.expected_input_revision,
+        attempt: expectation.attempt,
+      };
       const existing = await this.repository.readControllerRunManifest(
         validatedId,
         runId,
@@ -1289,13 +1386,146 @@ export class WorkItemController {
       if (existing !== null) {
         if (
           manifestMatches(existing, manifestIdentity) &&
-          lease.work_item.state.phase === "execute" &&
-          lease.work_item.state.status === "active" &&
-          lease.work_item.state.goal_version ===
-            validatedInput.expected_goal_version &&
-          lease.work_item.state.input_revision ===
-            validatedInput.expected_input_revision &&
-          lease.work_item.state.attempt === nextAttempt
+          this.matchesActiveExecuteState(
+            lease.work_item,
+            expectation,
+            expectation.attempt,
+            true,
+          )
+        ) {
+          const activeConnectedRuns = (
+            await this.repository.listConnectedRuns(validatedId)
+          ).filter((record) => record.lifecycle.status !== "terminal");
+          if (activeConnectedRuns.length !== 1) {
+            throw this.conflict(
+              "repair_required",
+              validatedId,
+              "A connected launch replay requires exactly one durable active run.",
+            );
+          }
+          const connected = activeConnectedRuns[0];
+          await this.validateConnectedMissionReference(
+            validatedId,
+            connected,
+            validatedInput.governed_tuple,
+            validatedInput.mission_content_sha256,
+          );
+          if (
+            validatedInput.model_override !== undefined &&
+            connected.provenance.requested_model.value !==
+              validatedInput.model_override
+          ) {
+            throw this.conflict(
+              "idempotency_conflict",
+              validatedId,
+              "A connected launch replay cannot change its requested one-run model.",
+            );
+          }
+          return {
+            work_item: lease.work_item,
+            manifest: existing,
+            connected_run: connected,
+            created: false,
+          };
+        }
+        throw this.conflict(
+          "idempotency_conflict",
+          validatedId,
+          `Run ${runId} already has a non-matching durable result.`,
+        );
+      }
+
+      await this.validateConnectedLaunch(
+        validatedId,
+        lease.work_item,
+        validatedInput,
+        validatedRecord,
+      );
+      const connected = await this.repository.createConnectedRun(validatedRecord);
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...lease.work_item.state,
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const mutation = await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
+      });
+      return {
+        ...mutation,
+        connected_run: connected.record,
+        created: connected.created,
+      };
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
+  }
+
+  async recordConnectedPermissionDenial(
+    workItemId: string,
+    input: RecordConnectedPermissionDenialInput,
+  ): Promise<ControllerMutationResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = recordConnectedPermissionDenialInputSchema.parse(
+      input,
+    );
+    const expectation = this.executeExpectationFromConnectedInput(
+      validatedInput,
+    );
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      validatedId,
+      "execute",
+      expectation.expected_goal_version,
+      expectation.expected_input_revision,
+      expectation.attempt,
+    );
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({
+        operation: "record_connected_permission_denial",
+        input: validatedInput,
+      }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const manifestIdentity = {
+        work_item_id: validatedId,
+        run_id: runId,
+        idempotency_key: idempotencyKey,
+        phase: "execute" as const,
+        goal_version: expectation.expected_goal_version,
+        input_revision: expectation.expected_input_revision,
+        attempt: expectation.attempt,
+      };
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (existing !== null) {
+        if (
+          manifestMatches(existing, manifestIdentity) &&
+          this.matchesMissingPermissionAttention(
+            lease.work_item,
+            validatedInput,
+          )
         ) {
           return { work_item: lease.work_item, manifest: existing };
         }
@@ -1306,35 +1536,588 @@ export class WorkItemController {
         );
       }
 
-      this.validateExecuteExpectation(
+      const record = await this.validateConnectedPermissionDenial(
         validatedId,
         lease.work_item,
         validatedInput,
       );
+      const updatedAt = nextTimestamp(lease.work_item.state.updated_at, this.clock);
       const nextItem = workItemSchema.parse({
         goal: lease.work_item.goal,
         state: {
           ...lease.work_item.state,
-          status: "active",
-          attempt: nextAttempt,
-          updated_at: nextTimestamp(
-            lease.work_item.state.updated_at,
-            this.clock,
+          attention: this.missingPermissionAttention(
+            validatedId,
+            validatedInput.operation,
+            validatedInput.governed_tuple,
+            validatedInput.mission_content_sha256,
+            record,
+            updatedAt,
           ),
+          updated_at: updatedAt,
         },
       });
-      const manifest = this.pendingManifest(
-        manifestIdentity,
-        activeRun.acquired_at,
-      );
       return await this.repository.commitControllerMutation(lease, {
         goal: nextItem.goal,
         state: nextItem.state,
-        manifest,
+        manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
       });
     } finally {
       await this.repository.releaseControllerLease(lease);
     }
+  }
+
+  async resolveConnectedPermission(
+    workItemId: string,
+    input: ConnectedPermissionResolutionInput,
+  ): Promise<ConnectedPermissionDecisionResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = connectedPermissionResolutionInputSchema.parse(input);
+    const nextAttempt = this.incrementVersion(
+      validatedInput.governed_tuple.attempt,
+      validatedId,
+      "attempt",
+    );
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      validatedId,
+      "execute",
+      validatedInput.governed_tuple.goal_version,
+      validatedInput.governed_tuple.input_revision,
+      nextAttempt,
+    );
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({
+        operation: "resolve_connected_permission",
+        input: validatedInput,
+      }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const manifestIdentity = {
+        work_item_id: validatedId,
+        run_id: runId,
+        idempotency_key: idempotencyKey,
+        phase: "execute" as const,
+        goal_version: validatedInput.governed_tuple.goal_version,
+        input_revision: validatedInput.governed_tuple.input_revision,
+        attempt: nextAttempt,
+      };
+      if (validatedInput.decision === "allow_once") {
+        const existing = await this.repository.readControllerRunManifest(
+          validatedId,
+          runId,
+        );
+        if (existing !== null) {
+          if (
+            manifestMatches(existing, manifestIdentity) &&
+            this.matchesActiveExecuteState(
+              lease.work_item,
+              {
+                expected_phase: "execute",
+                expected_status: "active",
+                expected_schema_version: 2,
+                expected_goal_version:
+                  validatedInput.governed_tuple.goal_version,
+                expected_input_revision:
+                  validatedInput.governed_tuple.input_revision,
+                attempt: validatedInput.governed_tuple.attempt,
+              },
+              nextAttempt,
+              true,
+            )
+          ) {
+            return { work_item: lease.work_item, manifest: existing };
+          }
+          throw this.conflict(
+            "idempotency_conflict",
+            validatedId,
+            `Run ${runId} already has a non-matching durable result.`,
+          );
+        }
+      }
+
+      const record = await this.validateConnectedPermissionResolution(
+        validatedId,
+        lease.work_item,
+        validatedInput,
+      );
+      if (validatedInput.decision === "keep_denied") {
+        return { work_item: lease.work_item, manifest: null };
+      }
+      const mutation = await this.retryExecuteAttemptWithLease({
+        work_item_id: validatedId,
+        lease,
+        active_run: activeRun,
+        manifest_identity: manifestIdentity,
+        next_attempt: nextAttempt,
+        clear_attention: true,
+        validate_current: async () => {
+          await this.validateConnectedPermissionResolution(
+            validatedId,
+            lease.work_item,
+            validatedInput,
+            record,
+          );
+        },
+      });
+      return mutation;
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
+  }
+
+  private async retryExecuteAttemptWithLease(input: {
+    work_item_id: string;
+    lease: ControllerLease;
+    active_run: ActiveRun;
+    manifest_identity: Omit<
+      ControllerRunManifest,
+      "schema_version" | "started_at" | "completed_at" | "outcome"
+    >;
+    next_attempt: number;
+    clear_attention: boolean;
+    validate_current: () => void | Promise<void>;
+  }): Promise<ControllerMutationResult> {
+    const existing = await this.repository.readControllerRunManifest(
+      input.work_item_id,
+      input.manifest_identity.run_id,
+    );
+    if (existing !== null) {
+      if (
+        manifestMatches(existing, input.manifest_identity) &&
+        this.matchesActiveExecuteState(
+          input.lease.work_item,
+          {
+            expected_phase: "execute",
+            expected_status: "active",
+            expected_schema_version: 2,
+            expected_goal_version: input.manifest_identity.goal_version,
+            expected_input_revision: input.manifest_identity.input_revision,
+            attempt: input.next_attempt,
+          },
+          input.next_attempt,
+          input.clear_attention,
+        )
+      ) {
+        return { work_item: input.lease.work_item, manifest: existing };
+      }
+      throw this.conflict(
+        "idempotency_conflict",
+        input.work_item_id,
+        `Run ${input.manifest_identity.run_id} already has a non-matching durable result.`,
+      );
+    }
+
+    await input.validate_current();
+    const nextState = {
+      ...input.lease.work_item.state,
+      status: "active" as const,
+      attempt: input.next_attempt,
+      updated_at: nextTimestamp(
+        input.lease.work_item.state.updated_at,
+        this.clock,
+      ),
+    };
+    if (input.clear_attention) {
+      delete nextState.attention;
+    }
+    const nextItem = workItemSchema.parse({
+      goal: input.lease.work_item.goal,
+      state: nextState,
+    });
+    return this.repository.commitControllerMutation(input.lease, {
+      goal: nextItem.goal,
+      state: nextItem.state,
+      manifest: this.pendingManifest(
+        input.manifest_identity,
+        input.active_run.acquired_at,
+      ),
+    });
+  }
+
+  private executeExpectationFromConnectedInput(input: {
+    expected_phase: "execute";
+    expected_status: "active";
+    expected_schema_version: 2;
+    governed_tuple: {
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+    };
+  }): ExecuteExpectation {
+    return {
+      expected_phase: input.expected_phase,
+      expected_status: input.expected_status,
+      expected_schema_version: input.expected_schema_version,
+      expected_goal_version: input.governed_tuple.goal_version,
+      expected_input_revision: input.governed_tuple.input_revision,
+      attempt: input.governed_tuple.attempt,
+    };
+  }
+
+  private matchesActiveExecuteState(
+    current: WorkItem,
+    expectation: ExecuteExpectation,
+    attempt: number,
+    requires_no_attention: boolean,
+  ): boolean {
+    return (
+      current.state.phase === "execute" &&
+      current.state.status === "active" &&
+      current.state.schema_version === expectation.expected_schema_version &&
+      current.state.goal_version === expectation.expected_goal_version &&
+      current.state.input_revision === expectation.expected_input_revision &&
+      current.state.attempt === attempt &&
+      (!requires_no_attention || current.state.attention === undefined)
+    );
+  }
+
+  private matchesMissingPermissionAttention(
+    current: WorkItem,
+    input: RecordConnectedPermissionDenialInput,
+  ): boolean {
+    const attention = current.state.attention;
+    return (
+      this.matchesActiveExecuteState(
+        current,
+        this.executeExpectationFromConnectedInput(input),
+        input.governed_tuple.attempt,
+        false,
+      ) &&
+      attention?.kind === "missing_permission" &&
+      this.governedTuplesMatch(attention.governed_tuple, input.governed_tuple) &&
+      attention.pins.mission_content_sha256 === input.mission_content_sha256 &&
+      JSON.stringify(attention.operation) === JSON.stringify(input.operation)
+    );
+  }
+
+  private async validateConnectedLaunch(
+    workItemId: string,
+    current: WorkItem,
+    input: LaunchConnectedExecuteInput,
+    record: ConnectedRunRecordV1,
+  ): Promise<void> {
+    this.validateExecuteExpectation(
+      workItemId,
+      current,
+      this.executeExpectationFromConnectedInput(input),
+    );
+    this.validateGovernedTuple(workItemId, current, input.governed_tuple);
+    if (current.state.attention !== undefined) {
+      throw this.conflict(
+        "invalid_transition",
+        workItemId,
+        "A connected run cannot start while the work item requires attention.",
+      );
+    }
+    if (record.lifecycle.status !== "starting") {
+      throw this.conflict(
+        "invalid_transition",
+        workItemId,
+        "A controller launch record must be persisted in starting state.",
+      );
+    }
+    if (
+      input.model_override !== undefined &&
+      record.provenance.requested_model.value !== input.model_override
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "The connected record does not bind the requested one-run model override.",
+      );
+    }
+    await this.validateConnectedMissionReference(
+      workItemId,
+      record,
+      input.governed_tuple,
+      input.mission_content_sha256,
+    );
+  }
+
+  private async validateConnectedPermissionDenial(
+    workItemId: string,
+    current: WorkItem,
+    input: RecordConnectedPermissionDenialInput,
+  ): Promise<ConnectedRunRecordV1> {
+    this.validateExecuteExpectation(
+      workItemId,
+      current,
+      this.executeExpectationFromConnectedInput(input),
+    );
+    this.validateGovernedTuple(workItemId, current, input.governed_tuple);
+    if (current.state.attention !== undefined) {
+      throw this.conflict(
+        "invalid_transition",
+        workItemId,
+        "A work item with unresolved attention cannot record a second permission denial.",
+      );
+    }
+    const record = await this.requireConnectedRun(
+      workItemId,
+      input.operation.connected_run_id,
+    );
+    await this.validateConnectedMissionReference(
+      workItemId,
+      record,
+      input.governed_tuple,
+      input.mission_content_sha256,
+    );
+    if (
+      input.operation.resolved_envelope_sha256 !==
+      record.resolved_capability_envelope.envelope_sha256
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "The permission denial does not bind the connected run's resolved envelope.",
+      );
+    }
+    if (
+      capabilityRequestMatchesEnvelope(
+        input.operation.normalized_operation,
+        record.resolved_capability_envelope.envelope,
+      )
+    ) {
+      throw this.conflict(
+        "invalid_transition",
+        workItemId,
+        "An in-envelope operation cannot produce missing-permission attention.",
+      );
+    }
+    return record;
+  }
+
+  private async validateConnectedPermissionResolution(
+    workItemId: string,
+    current: WorkItem,
+    input: ConnectedPermissionResolutionInput,
+    knownRecord?: ConnectedRunRecordV1,
+  ): Promise<ConnectedRunRecordV1> {
+    const expectation: ExecuteExpectation = {
+      expected_phase: "execute",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: input.governed_tuple.goal_version,
+      expected_input_revision: input.governed_tuple.input_revision,
+      attempt: input.governed_tuple.attempt,
+    };
+    this.validateExecuteExpectation(workItemId, current, expectation);
+    this.validateGovernedTuple(workItemId, current, input.governed_tuple);
+    const attention = current.state.attention;
+    if (
+      attention?.kind !== "missing_permission" ||
+      !this.governedTuplesMatch(attention.governed_tuple, input.governed_tuple) ||
+      attention.operation.operation_sha256 !== input.operation_sha256 ||
+      attention.operation.connected_run_id !== input.connected_run_id ||
+      attention.pins.mission_content_sha256 !== input.mission_content_sha256
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "The permission decision does not match the exact unresolved attention.",
+      );
+    }
+    const record =
+      knownRecord ??
+      (await this.requireConnectedRun(workItemId, input.connected_run_id));
+    if (record.connected_run_id !== input.connected_run_id) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "The permission decision does not match the connected run.",
+      );
+    }
+    await this.validateConnectedMissionReference(
+      workItemId,
+      record,
+      input.governed_tuple,
+      input.mission_content_sha256,
+    );
+    if (
+      attention.operation.resolved_envelope_sha256 !==
+        record.resolved_capability_envelope.envelope_sha256 ||
+      capabilityRequestMatchesEnvelope(
+        attention.operation.normalized_operation,
+        record.resolved_capability_envelope.envelope,
+      )
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "The permission decision no longer binds an out-of-envelope operation.",
+      );
+    }
+    return record;
+  }
+
+  private async validateConnectedMissionReference(
+    workItemId: string,
+    record: ConnectedRunRecordV1,
+    governedTuple: {
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+      patch_cycle: number;
+    },
+    missionContentSha256: string,
+  ): Promise<void> {
+    if (
+      record.mission.identity.work_item_id !== workItemId ||
+      !this.governedTuplesMatch(record.governed_tuple, governedTuple) ||
+      record.mission.content_sha256 !== missionContentSha256
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "The connected record does not match the governed mission tuple.",
+      );
+    }
+    const snapshot = await this.repository.readMissionPackage(
+      record.mission.identity,
+    );
+    if (snapshot.mission.mission_schema_version !== MISSION_SCHEMA_VERSION) {
+      throw this.conflict(
+        "mission_not_ready",
+        workItemId,
+        "Historical mission packages cannot start or recover connected execution.",
+      );
+    }
+    if (
+      JSON.stringify(snapshot.mission.identity) !==
+        JSON.stringify(record.mission.identity) ||
+      snapshot.mission_path !== record.mission.path ||
+      snapshot.mission.content_sha256 !== record.mission.content_sha256 ||
+      snapshot.mission.source_revision.git_base_commit !==
+        record.mission.source_commit
+    ) {
+      throw this.conflict(
+        "mission_not_ready",
+        workItemId,
+        "The connected record does not match the immutable active mission package.",
+      );
+    }
+  }
+
+  private validateGovernedTuple(
+    workItemId: string,
+    current: WorkItem,
+    expected: {
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+      patch_cycle: number;
+    },
+  ): void {
+    const state = current.state;
+    if (
+      state.goal_version === undefined ||
+      state.input_revision === undefined ||
+      state.attempt === undefined ||
+      state.patch_cycle === undefined ||
+      !this.governedTuplesMatch(
+        {
+          goal_version: state.goal_version,
+          input_revision: state.input_revision,
+          attempt: state.attempt,
+          patch_cycle: state.patch_cycle,
+        },
+        expected,
+      )
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Connected execution does not match the durable governed tuple.",
+      );
+    }
+  }
+
+  private governedTuplesMatch(
+    left: {
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+      patch_cycle: number;
+    },
+    right: {
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+      patch_cycle: number;
+    },
+  ): boolean {
+    return (
+      left.goal_version === right.goal_version &&
+      left.input_revision === right.input_revision &&
+      left.attempt === right.attempt &&
+      left.patch_cycle === right.patch_cycle
+    );
+  }
+
+  private async requireConnectedRun(
+    workItemId: string,
+    connectedRunId: string,
+  ): Promise<ConnectedRunRecordV1> {
+    const record = await this.repository.readConnectedRun(
+      workItemId,
+      connectedRunId,
+    );
+    if (record === null) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "The exact connected run is no longer available for this decision.",
+      );
+    }
+    return record;
+  }
+
+  private missingPermissionAttention(
+    workItemId: string,
+    operation: MissingPermissionOperation,
+    governedTuple: {
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+      patch_cycle: number;
+    },
+    missionContentSha256: string,
+    record: ConnectedRunRecordV1,
+    createdAt: string,
+  ): WorkItemAttention {
+    const runPath = workspaceRelativePosixPathSchema.parse(
+      `.founder/connected-runs/${workItemId}/${record.connected_run_id}/run.json`,
+    );
+    return {
+      kind: "missing_permission",
+      question:
+        "Allow this exact out-of-envelope operation once and retry the fresh execute attempt?",
+      recommendation:
+        "Keep it denied unless it is required; allowing once creates a new immutable attempt.",
+      created_at: createdAt,
+      governed_tuple: governedTuple,
+      pins: {
+        artifact_paths: [record.mission.path, runPath],
+        evidence_paths: [],
+        git_commit: record.mission.source_commit,
+        mission_content_sha256: missionContentSha256,
+      },
+      operation,
+    };
   }
 
   private reviewAttention(
@@ -2300,7 +3083,7 @@ export class WorkItemController {
   private validateExecuteExpectation(
     workItemId: string,
     current: WorkItem,
-    input: ImportExternalResultInput | RetryExecuteAttemptInput,
+    input: ExecuteExpectation,
   ): void {
     if (current.goal.goal_contract === undefined) {
       throw this.conflict(

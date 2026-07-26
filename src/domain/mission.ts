@@ -506,6 +506,11 @@ export interface MissionArtifactWriteResult<
   mission_path: string;
 }
 
+export interface MissionArtifactReadResult {
+  mission: ReadableMissionPackage;
+  mission_path: string;
+}
+
 export type MissionPackageBuilder<
   TMission extends MissionPackage = MissionPackage,
 > = (paths: MissionPaths) => TMission;
