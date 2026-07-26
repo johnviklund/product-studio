@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  canonicalCapabilityRequestSchema,
+  hashCanonicalCapabilityRequest,
+  type CanonicalCapabilityRequest,
+} from "./capability-envelope";
 import type {
   MissionArtifactWriteResult,
   MissionIdentity,
@@ -166,9 +171,42 @@ interface WorkItemAttentionBase {
   pins: WorkItemAttentionPins;
 }
 
-export type WorkItemAttention = {
-  [TKind in WorkItemAttentionKind]: WorkItemAttentionBase & { kind: TKind };
-}[WorkItemAttentionKind];
+export interface MissingPermissionOperation {
+  normalized_operation: CanonicalCapabilityRequest;
+  canonical_args_sha256: string;
+  operation_sha256: string;
+  reason: string;
+  resolved_envelope_sha256: string;
+  connected_run_id: string;
+}
+
+type StandardWorkItemAttentionKind = Exclude<
+  WorkItemAttentionKind,
+  "missing_permission"
+>;
+
+type StandardWorkItemAttention = {
+  [TKind in StandardWorkItemAttentionKind]: WorkItemAttentionBase & {
+    kind: TKind;
+  };
+}[StandardWorkItemAttentionKind];
+
+export type WorkItemAttention =
+  | StandardWorkItemAttention
+  | (WorkItemAttentionBase & {
+      kind: "missing_permission";
+      operation: MissingPermissionOperation;
+    });
+
+export type ConnectedPermissionDecision = "allow_once" | "keep_denied";
+
+export interface ConnectedPermissionResolutionInput {
+  decision: ConnectedPermissionDecision;
+  governed_tuple: GovernedTuple;
+  operation_sha256: string;
+  connected_run_id: string;
+  mission_content_sha256: string;
+}
 
 export interface WorkItemState {
   schema_version: 2;
@@ -576,6 +614,30 @@ export const workItemAttentionPinsSchema: z.ZodType<WorkItemAttentionPins> =
     result_content_sha256: sha256Schema.optional(),
   });
 
+export const missingPermissionOperationSchema: z.ZodType<MissingPermissionOperation> =
+  z
+    .strictObject({
+      normalized_operation: canonicalCapabilityRequestSchema,
+      canonical_args_sha256: sha256Schema,
+      operation_sha256: sha256Schema,
+      reason: nonEmptyIdentifierSchema,
+      resolved_envelope_sha256: sha256Schema,
+      connected_run_id: controllerRunIdSchema,
+    })
+    .superRefine((operation, context) => {
+      const expectedOperationSha256 = hashCanonicalCapabilityRequest(
+        operation.normalized_operation,
+      );
+      if (operation.operation_sha256 !== expectedOperationSha256) {
+        context.addIssue({
+          code: "custom",
+          message: "operation_sha256 must hash normalized_operation",
+          path: ["operation_sha256"],
+          input: operation.operation_sha256,
+        });
+      }
+    });
+
 const attentionRecordFields = {
   question: nonEmptyIdentifierSchema,
   recommendation: nonEmptyIdentifierSchema,
@@ -613,11 +675,35 @@ export const workItemAttentionSchema: z.ZodType<WorkItemAttention> =
     z.strictObject({
       kind: z.literal("missing_permission"),
       ...attentionRecordFields,
+      operation: missingPermissionOperationSchema,
     }),
     z.strictObject({
       kind: z.literal("review_ready"),
       ...attentionRecordFields,
     }),
+  ]);
+
+const connectedPermissionResolutionFields = {
+  governed_tuple: governedTupleSchema,
+  operation_sha256: sha256Schema,
+  connected_run_id: controllerRunIdSchema,
+  mission_content_sha256: sha256Schema,
+};
+
+export const allowOnceConnectedPermissionInputSchema = z.strictObject({
+  decision: z.literal("allow_once"),
+  ...connectedPermissionResolutionFields,
+});
+
+export const keepDeniedConnectedPermissionInputSchema = z.strictObject({
+  decision: z.literal("keep_denied"),
+  ...connectedPermissionResolutionFields,
+});
+
+export const connectedPermissionResolutionInputSchema: z.ZodType<ConnectedPermissionResolutionInput> =
+  z.discriminatedUnion("decision", [
+    allowOnceConnectedPermissionInputSchema,
+    keepDeniedConnectedPermissionInputSchema,
   ]);
 
 interface VersionedStateFields {

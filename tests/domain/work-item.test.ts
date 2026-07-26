@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { hashCanonicalCapabilityRequest } from "../../src/domain/capability-envelope";
 import {
   ControllerConflictError,
   InvalidWorkspaceError,
@@ -7,6 +8,7 @@ import {
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
   acceptPatchPlanInputSchema,
+  connectedPermissionResolutionInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   createCaptureInputSchema,
@@ -27,6 +29,22 @@ import {
 
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
 const runId = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
+const normalizedPermissionOperation = {
+  schema_version: 1 as const,
+  kind: "command" as const,
+  executable: "/usr/bin/npm",
+  args: ["run", "test"],
+};
+const missingPermissionOperation = {
+  normalized_operation: normalizedPermissionOperation,
+  canonical_args_sha256: "d".repeat(64),
+  operation_sha256: hashCanonicalCapabilityRequest(
+    normalizedPermissionOperation,
+  ),
+  reason: "The command form is not present in the resolved envelope.",
+  resolved_envelope_sha256: "e".repeat(64),
+  connected_run_id: runId,
+};
 
 const goal = {
   schema_version: 2 as const,
@@ -290,6 +308,9 @@ describe("durable work-item schemas", () => {
           mission_content_sha256: "b".repeat(64),
           result_content_sha256: "c".repeat(64),
         },
+        ...(kind === "missing_permission"
+          ? { operation: missingPermissionOperation }
+          : {}),
       };
 
       expect(workItemAttentionSchema.parse(attention)).toEqual(attention);
@@ -303,6 +324,78 @@ describe("durable work-item schemas", () => {
           attention,
         }),
       ).toMatchObject({ attention: { kind } });
+    },
+  );
+
+  it("requires an exact normalized operation for missing-permission attention only", () => {
+    const attention = {
+      kind: "missing_permission" as const,
+      question: "Should this exact command be allowed once?",
+      recommendation: "Keep the command denied unless it is required.",
+      created_at: "2026-07-26T18:00:00.000Z",
+      governed_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      pins: {
+        artifact_paths: [`.founder/work-items/${workItemId}/goal.yaml`],
+        evidence_paths: [],
+        mission_content_sha256: "b".repeat(64),
+      },
+    };
+
+    expect(() => workItemAttentionSchema.parse(attention)).toThrow();
+    expect(() =>
+      workItemAttentionSchema.parse({
+        ...attention,
+        operation: {
+          ...missingPermissionOperation,
+          operation_sha256: "f".repeat(64),
+        },
+      }),
+    ).toThrow("operation_sha256 must hash normalized_operation");
+    expect(() =>
+      workItemAttentionSchema.parse({
+        ...attention,
+        kind: "review_ready",
+        operation: missingPermissionOperation,
+      }),
+    ).toThrow();
+  });
+
+  it.each(["allow_once", "keep_denied"] as const)(
+    "round-trips the %s connected permission resolution identity",
+    (decision) => {
+      const resolution = {
+        decision,
+        governed_tuple: {
+          goal_version: 1,
+          input_revision: 1,
+          attempt: 0,
+          patch_cycle: 0,
+        },
+        operation_sha256: missingPermissionOperation.operation_sha256,
+        connected_run_id: runId,
+        mission_content_sha256: "b".repeat(64),
+      };
+
+      expect(
+        connectedPermissionResolutionInputSchema.parse(resolution),
+      ).toEqual(resolution);
+      expect(() =>
+        connectedPermissionResolutionInputSchema.parse({
+          ...resolution,
+          operation_sha256: "not-a-digest",
+        }),
+      ).toThrow();
+      expect(() =>
+        connectedPermissionResolutionInputSchema.parse({
+          ...resolution,
+          extra: true,
+        }),
+      ).toThrow();
     },
   );
 
