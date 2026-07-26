@@ -13,8 +13,6 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import {
-  FolderKanban,
-  LayoutGrid,
   Plus,
   RefreshCw,
   SlidersHorizontal,
@@ -31,6 +29,7 @@ import {
   boardColumnForPhase,
   createDefaultBoardView,
   isBoardSourceVisible,
+  parseBoardItemIdentityKey,
   parseBoardView,
   revealBoardItem,
   resolveBoardDrop,
@@ -43,6 +42,7 @@ import { BoardCardPreview } from "./board-card";
 import { CapturePanel } from "./capture-panel";
 import { DetailPanel } from "./detail-panel";
 import { KanbanColumn } from "./kanban-column";
+import { WorkspaceRail } from "../workspace-rail";
 
 interface WorkspacesResponse {
   workspaces: RegisteredWorkspace[];
@@ -124,6 +124,16 @@ function identityForItem(item: PortfolioWorkItem): BoardItemIdentity {
   };
 }
 
+function linkedBoardIdentity(): BoardItemIdentity | null {
+  const search = new URLSearchParams(window.location.search);
+  const sourceId = search.get("source");
+  const workItemId = search.get("item");
+  if (sourceId === null || workItemId === null) {
+    return null;
+  }
+  return parseBoardItemIdentityKey(JSON.stringify([sourceId, workItemId]));
+}
+
 export function KanbanBoard() {
   const [items, setItems] = useState<PortfolioWorkItem[]>([]);
   const [workspaces, setWorkspaces] = useState<RegisteredWorkspace[]>([]);
@@ -138,6 +148,7 @@ export function KanbanBoard() {
   const [panel, setPanel] = useState<PanelState>(null);
   const boardViewportRef = useRef<HTMLDivElement>(null);
   const restoredScrollRef = useRef(false);
+  const linkedItemHandledRef = useRef(false);
   const scrollPositionRef = useRef(view.scroll);
   const scrollSaveFrameRef = useRef<number | null>(null);
   const viewRef = useRef(view);
@@ -166,6 +177,31 @@ export function KanbanBoard() {
       ]);
       setWorkspaces(workspaceData.workspaces);
       setItems(itemData.items);
+      if (!linkedItemHandledRef.current) {
+        const identity = linkedBoardIdentity();
+        linkedItemHandledRef.current = true;
+        if (identity !== null) {
+          const linkedItem = itemData.items.find(
+            (item) =>
+              boardItemIdentityKey(identityForItem(item)) ===
+              boardItemIdentityKey(identity),
+          );
+          if (linkedItem === undefined) {
+            setTransitionMessage({
+              kind: "error",
+              text: "The linked work item is not available in this portfolio.",
+            });
+          } else {
+            setView((current) =>
+              revealBoardItem(current, {
+                ...identity,
+                project: linkedItem.project,
+              }),
+            );
+            setPanel({ kind: "detail", identity });
+          }
+        }
+      }
     } catch (loadError) {
       setError(
         loadError instanceof Error
@@ -480,31 +516,7 @@ export function KanbanBoard() {
 
   return (
     <main className="flex h-dvh min-h-[560px] overflow-hidden bg-background text-foreground">
-      <aside className="flex w-[58px] shrink-0 flex-col items-center border-r bg-sidebar py-3">
-        <div
-          className="grid size-9 place-items-center rounded-md bg-primary text-xs font-semibold text-primary-foreground"
-          aria-label="Product Studio"
-        >
-          PS
-        </div>
-        <nav className="mt-5 flex flex-col gap-2" aria-label="Workspace">
-          <button
-            type="button"
-            className="grid size-10 place-items-center rounded-md bg-accent text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="All work"
-            aria-current="page"
-          >
-            <LayoutGrid className="size-5" strokeWidth={1.75} />
-          </button>
-          <span
-            className="grid size-10 place-items-center text-muted-foreground"
-            aria-hidden="true"
-          >
-            <FolderKanban className="size-5" strokeWidth={1.75} />
-          </span>
-        </nav>
-        <span className="mt-auto size-1.5 rounded-full bg-success" aria-hidden="true" />
-      </aside>
+      <WorkspaceRail current="board" />
 
       <section className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-16 shrink-0 items-center gap-4 border-b px-5">
