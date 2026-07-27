@@ -96,6 +96,65 @@ const attentionItem = {
   cost_capacity: "unknown" as const,
 } satisfies PortfolioAttentionItem;
 
+const missingPermissionAttention = {
+  kind: "missing_permission" as const,
+  question: "Allow this exact command once and retry the fresh Execute attempt?",
+  recommendation: "Keep it denied unless the command is required.",
+  created_at: "2026-07-26T12:01:05.000Z",
+  governed_tuple: {
+    goal_version: 1,
+    input_revision: 1,
+    attempt: 0,
+    patch_cycle: 0,
+  },
+  pins: {
+    artifact_paths: [`.founder/missions/${workItemId}/execute-1-1-0/mission.json`] as [
+      string,
+      ...string[],
+    ],
+    evidence_paths: [],
+    mission_content_sha256: "e".repeat(64),
+  },
+  operation: {
+    normalized_operation: {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "git",
+      args: ["status"],
+    },
+    canonical_args_sha256: "f".repeat(64),
+    operation_sha256: "1".repeat(64),
+    reason: "This command is outside the compiled capability envelope.",
+    resolved_envelope_sha256: "2".repeat(64),
+    connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+  },
+} satisfies Extract<
+  PortfolioAttentionItem["attention"],
+  { kind: "missing_permission" }
+>;
+
+const connectedAttentionItem = {
+  ...attentionItem,
+  item: {
+    ...attentionItem.item,
+    work_item: {
+      ...attentionItem.item.work_item,
+      goal: {
+        ...attentionItem.item.work_item.goal,
+        title: "Recover the connected Execute run",
+      },
+      state: {
+        ...attentionItem.item.work_item.state,
+        phase: "execute" as const,
+        attention: missingPermissionAttention,
+      },
+    },
+  },
+  attention: missingPermissionAttention,
+  verification: { status: "unknown" as const, commands: [] },
+  findings: [],
+} satisfies PortfolioAttentionItem;
+
 describe("attention inbox", () => {
   it("renders an explicit empty state", () => {
     const html = renderToStaticMarkup(
@@ -139,6 +198,23 @@ describe("attention inbox", () => {
     expect(html).toContain(gitCommit);
     expect(html).toContain("Open on board");
     expect(html).toContain(`source=${sourceId}&amp;item=${workItemId}`);
+  });
+
+  it("renders one read-only connected permission recovery row", () => {
+    const html = renderToStaticMarkup(
+      <AttentionDecisionList items={[connectedAttentionItem]} totalCount={1} />,
+    );
+
+    expect(html.match(/aria-label="Connected permission recovery"/g)).toHaveLength(1);
+    expect(html).toContain("Command · git status");
+    expect(html).toContain(missingPermissionAttention.operation.reason);
+    expect(html).toContain(missingPermissionAttention.operation.operation_sha256);
+    expect(html).toContain("Allow once and retry");
+    expect(html).toContain("Keep denied");
+    expect(html).toContain("Open recovery");
+    expect(html).toContain(`source=${sourceId}&amp;item=${workItemId}`);
+    expect(html).not.toMatch(/<button[^>]*>Allow once and retry<\/button>/);
+    expect(html).not.toMatch(/<button[^>]*>Keep denied<\/button>/);
   });
 
   it("marks only the current keyboard-accessible rail link", () => {

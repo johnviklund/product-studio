@@ -5,9 +5,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowUpRight, RefreshCw } from "lucide-react";
 
 import type { PortfolioAttentionItem } from "@/src/application/portfolio";
-import type { WorkItemAttentionKind } from "@/src/domain/work-item";
+import type {
+  WorkItemAttention,
+  WorkItemAttentionKind,
+} from "@/src/domain/work-item";
 import {
   BOARD_VIEW_STORAGE_KEY,
+  connectedPermissionInboxForItem,
   createDefaultBoardView,
   isBoardSourceVisible,
   parseBoardView,
@@ -66,6 +70,75 @@ function statusLabel(value: string): string {
   return value.replaceAll("_", " ");
 }
 
+function connectedCapabilityLabel(
+  permission: Extract<WorkItemAttention, { kind: "missing_permission" }>,
+): string {
+  const operation = permission.operation.normalized_operation;
+  switch (operation.kind) {
+    case "command":
+      return `Command · ${[operation.executable, ...operation.args].join(" ")}`;
+    case "url":
+      return `URL · ${operation.method} ${operation.protocol}://${operation.host}${operation.path}`;
+    case "workspace_write":
+      return `Workspace write · ${operation.path}`;
+    case "outside_workspace_write":
+      return `Outside-workspace write · ${operation.path}`;
+    case "mcp":
+      return `MCP change · ${operation.server}`;
+    case "credential":
+      return `Credential access · ${operation.source}`;
+  }
+}
+
+function ConnectedPermissionRecovery({
+  permission,
+}: {
+  permission: Extract<WorkItemAttention, { kind: "missing_permission" }>;
+}) {
+  return (
+    <section
+      aria-label="Connected permission recovery"
+      className="mt-4 border-l-2 border-warning bg-background px-4 py-3"
+    >
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+        <div>
+          <h3 className="text-[11px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+            Requested capability
+          </h3>
+          <p className="mt-1 break-words text-sm leading-6">
+            {connectedCapabilityLabel(permission)}
+          </p>
+        </div>
+        <div>
+          <h3 className="text-[11px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+            Reason
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {permission.operation.reason}
+          </p>
+        </div>
+      </div>
+
+      <p className="mt-3 break-all border-t pt-3 text-[11px] text-muted-foreground">
+        Exact operation hash · {permission.operation.operation_sha256}
+      </p>
+
+      <div className="mt-3 border-t pt-3">
+        <h3 className="text-[11px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+          Recovery actions
+        </h3>
+        <ul className="mt-2 space-y-1.5 text-xs leading-5">
+          <li>Allow once and retry</li>
+          <li>Keep denied</li>
+        </ul>
+        <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+          Choose the exact action from the work item details; this Inbox does not authorize operations.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 function EvidencePaths({ item }: { item: PortfolioAttentionItem }) {
   const { pins } = item.attention;
 
@@ -122,6 +195,8 @@ function EvidencePaths({ item }: { item: PortfolioAttentionItem }) {
 function AttentionDecision({ item }: { item: PortfolioAttentionItem }) {
   const { goal, state } = item.item.work_item;
   const { attention } = item;
+  const connectedPermission = connectedPermissionInboxForItem(item.item);
+  const recoveryLink = connectedPermission.mode === "active";
 
   return (
     <article className="py-6 first:pt-0 last:pb-0">
@@ -141,7 +216,7 @@ function AttentionDecision({ item }: { item: PortfolioAttentionItem }) {
           href={boardHref(item)}
           className="flex h-9 shrink-0 items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
         >
-          Open on board
+          {recoveryLink ? "Open recovery" : "Open on board"}
           <ArrowUpRight className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
         </Link>
       </div>
@@ -162,6 +237,12 @@ function AttentionDecision({ item }: { item: PortfolioAttentionItem }) {
           </p>
         </div>
       </div>
+
+      {connectedPermission.mode === "active" ? (
+        <ConnectedPermissionRecovery
+          permission={connectedPermission.permission}
+        />
+      ) : null}
 
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y py-4 text-xs sm:grid-cols-3 lg:grid-cols-6">
         <div>

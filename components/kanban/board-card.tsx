@@ -60,7 +60,6 @@ export function nextActionForCardState(
     case "unresolved_finding":
     case "ambiguous_goal":
     case "cycle_limit":
-    case "missing_permission":
       return "Resolve the escalation";
     case "review_ready":
       return "Review the result";

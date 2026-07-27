@@ -6,6 +6,7 @@ import {
   boardColumnForPhase,
   boardItemIdentityKey,
   connectedExecuteForItem,
+  connectedPermissionInboxForItem,
   createDefaultBoardView,
   detailPanelModeForItem,
   isBoardSourceVisible,
@@ -234,6 +235,19 @@ describe("board projection", () => {
       permission,
     });
     expect(
+      connectedPermissionInboxForItem({
+        ...item,
+        work_item: {
+          ...item.work_item,
+          state: { ...item.work_item.state, attention: permission },
+        },
+      }),
+    ).toEqual({
+      mode: "active",
+      action: "open_recovery",
+      permission,
+    });
+    expect(
       connectedExecuteForItem({
         ...item,
         work_item: {
@@ -248,6 +262,9 @@ describe("board projection", () => {
         },
       }),
     ).toEqual({ mode: "hidden", can_launch: false, permission: null });
+    expect(
+      connectedPermissionInboxForItem({ ...item, source_id: "inbox" }),
+    ).toEqual({ mode: "hidden", action: null, permission: null });
     expect(
       connectedExecuteForItem({ ...item, source_id: "inbox" }),
     ).toEqual({ mode: "hidden", can_launch: false, permission: null });

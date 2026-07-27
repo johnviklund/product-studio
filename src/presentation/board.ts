@@ -72,6 +72,18 @@ export type ConnectedExecuteProjection =
       permission: null;
     };
 
+export type ConnectedPermissionInboxProjection =
+  | {
+      mode: "active";
+      action: "open_recovery";
+      permission: Extract<WorkItemAttention, { kind: "missing_permission" }>;
+    }
+  | {
+      mode: "hidden";
+      action: null;
+      permission: null;
+    };
+
 export type ReviewHandoffProjection =
   | {
       mode: "active";
@@ -392,6 +404,20 @@ export function connectedExecuteForItem(item: {
   }
 
   return { mode: "hidden", can_launch: false, permission: null };
+}
+
+export function connectedPermissionInboxForItem(
+  item: Parameters<typeof connectedExecuteForItem>[0],
+): ConnectedPermissionInboxProjection {
+  const connectedExecute = connectedExecuteForItem(item);
+  if (connectedExecute.mode !== "permission") {
+    return { mode: "hidden", action: null, permission: null };
+  }
+  return {
+    mode: "active",
+    action: "open_recovery",
+    permission: connectedExecute.permission,
+  };
 }
 
 export function reviewHandoffForItem(

@@ -38,6 +38,24 @@ const attention = {
   },
 };
 
+const missingPermissionAttention = {
+  ...attention,
+  kind: "missing_permission" as const,
+  operation: {
+    normalized_operation: {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "git",
+      args: ["status"],
+    },
+    canonical_args_sha256: "e".repeat(64),
+    operation_sha256: "f".repeat(64),
+    reason: "The command is outside the compiled capability envelope.",
+    resolved_envelope_sha256: "a".repeat(64),
+    connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+  },
+};
+
 const noop = () => undefined;
 const connectedRun: ConnectedRunSummary = {
   schema_version: 1,
@@ -317,5 +335,12 @@ describe("board card patch attention", () => {
         attention,
       }),
     ).toBe("Test the result");
+    expect(
+      nextActionForCardState({
+        phase: "execute",
+        status: "active",
+        attention: missingPermissionAttention,
+      }),
+    ).toBe("Review the result");
   });
 });
