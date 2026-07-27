@@ -4,6 +4,7 @@ import {
   readFile,
   readdir,
   rm,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1141,8 +1142,13 @@ describe("PortfolioService", () => {
       close: vi.fn(async () => undefined),
     };
     const fake = preparedRuntime(session);
-    const { index, service } = await createService(
-      undefined,
+    const indexPath = join(
+      await createRoot("product-studio-connected-index-"),
+      "index.sqlite",
+    );
+    const index = new SQLitePortfolioIndex(indexPath);
+    const { inboxRoot, registry, service } = await createService(
+      index,
       () => repository,
       fake.runtime,
     );
@@ -1178,6 +1184,13 @@ describe("PortfolioService", () => {
     expect(session.run).toHaveBeenCalledOnce();
     expect((await service.listConnectedRuns(sourceId, created.goal.work_item_id))[0])
       .toMatchObject({ lifecycle: { status: "running" } });
+    expect(index.listConnectedRunSummaries()).toEqual([
+      {
+        source_id: sourceId,
+        work_item_id: created.goal.work_item_id,
+        connected_run: first.connected_run,
+      },
+    ]);
 
     result.resolve({
       outcome: "completed",
@@ -1200,7 +1213,24 @@ describe("PortfolioService", () => {
       );
       return run?.lifecycle.terminal_outcome;
     }).toBe("completed");
+    await service.rebuild();
+    const summariesBeforeCacheDeletion = index.listConnectedRunSummaries();
     index.close();
+
+    await unlink(indexPath);
+    const rebuiltIndex = new SQLitePortfolioIndex(indexPath);
+    const restartedService = new PortfolioService(
+      registry,
+      rebuiltIndex,
+      inboxRoot,
+      () => repository,
+      fake.runtime,
+    );
+    await restartedService.rebuild();
+    expect(rebuiltIndex.listConnectedRunSummaries()).toEqual(
+      summariesBeforeCacheDeletion,
+    );
+    rebuiltIndex.close();
   });
 
   it("fails an unavailable model before ACP spawn and surfaces exact missing permission attention", async () => {

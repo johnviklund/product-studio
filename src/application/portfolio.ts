@@ -29,6 +29,7 @@ import {
   registerWorkspaceInputSchema,
   registeredWorkspaceSchema,
   type PortfolioRebuildResult,
+  type PortfolioConnectedRunSummary,
   type PortfolioWorkItem,
   type PortfolioWorkItemIndex,
   type RegisteredWorkspace,
@@ -1414,17 +1415,47 @@ export class PortfolioService {
     await this.recoverPendingTransfers();
     const workspaces = await this.registry.read();
     const items: PortfolioWorkItem[] = [];
+    const connectedRunSummaries: PortfolioConnectedRunSummary[] = [];
     const failures: PortfolioRebuildResult["failures"] = [];
+    const appendSourceItems = async (
+      source: ResolvedSource,
+      sourceItems: WorkItem[],
+    ): Promise<void> => {
+      const sourceSummaries = await Promise.all(
+        sourceItems.map(async (work_item) => {
+          const [latest] = [...(await source.workspace.listConnectedRuns(
+            work_item.goal.work_item_id,
+          ))].sort(
+            (left, right) =>
+              right.lifecycle.updated_at.localeCompare(left.lifecycle.updated_at) ||
+              right.connected_run_id.localeCompare(left.connected_run_id),
+          );
+          return latest === undefined
+            ? undefined
+            : {
+                source_id: source.source_id,
+                work_item_id: work_item.goal.work_item_id,
+                connected_run: summarizeConnectedRun(latest),
+              };
+        }),
+      );
+      items.push(
+        ...sourceItems.map((work_item) => this.toPortfolioItem(source, work_item)),
+      );
+      connectedRunSummaries.push(
+        ...sourceSummaries.filter(
+          (summary): summary is PortfolioConnectedRunSummary =>
+            summary !== undefined,
+        ),
+      );
+    };
 
     try {
       const inbox = await this.ensureInboxWorkspace();
       const inboxItems = await inbox.list();
-      items.push(
-        ...inboxItems.map((work_item) => ({
-          source_id: INBOX_SOURCE_ID,
-          project: null,
-          work_item,
-        })),
+      await appendSourceItems(
+        { source_id: INBOX_SOURCE_ID, project: null, workspace: inbox },
+        inboxItems,
       );
     } catch (error) {
       if (!isExpectedWorkspaceFailure(error)) {
@@ -1442,12 +1473,13 @@ export class PortfolioService {
         const reader = this.makeWorkspace(workspace.workspace_path);
         await reader.readManifest();
         const workspaceItems = await reader.list();
-        items.push(
-          ...workspaceItems.map((work_item) => ({
+        await appendSourceItems(
+          {
             source_id: workspace.workspace_id,
             project: workspace,
-            work_item,
-          })),
+            workspace: reader,
+          },
+          workspaceItems,
         );
       } catch (error) {
         if (!isExpectedWorkspaceFailure(error)) {
@@ -1461,7 +1493,7 @@ export class PortfolioService {
       }
     }
 
-    this.index.rebuild(items);
+    this.index.rebuild(items, connectedRunSummaries);
 
     return { items: this.index.list(), failures };
   }

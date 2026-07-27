@@ -4,12 +4,14 @@ import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
 
 import {
+  portfolioConnectedRunSummarySchema,
   portfolioWorkItemSchema,
+  type PortfolioConnectedRunSummary,
   type PortfolioWorkItem,
   type PortfolioWorkItemIndex,
 } from "../domain/portfolio";
 
-const PORTFOLIO_CACHE_SCHEMA_VERSION = 6;
+const PORTFOLIO_CACHE_SCHEMA_VERSION = 7;
 
 const PORTFOLIO_SCHEMA = `
   CREATE TABLE IF NOT EXISTS portfolio_work_items (
@@ -42,6 +44,7 @@ const PORTFOLIO_SCHEMA = `
     patch_cycle INTEGER,
     attention TEXT,
     active_run TEXT,
+    connected_run_summary TEXT,
     PRIMARY KEY (source_id, work_item_id)
   )
 `;
@@ -76,11 +79,19 @@ interface PortfolioWorkItemRow {
   patch_cycle: number | null;
   attention: string | null;
   active_run: string | null;
+  connected_run_summary: string | null;
+}
+
+function itemKey(sourceId: string, workItemId: string): string {
+  return `${sourceId}\u0000${workItemId}`;
 }
 
 export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
   private readonly database: Database.Database;
-  private readonly replaceAll: (items: PortfolioWorkItem[]) => void;
+  private readonly replaceAll: (
+    items: PortfolioWorkItem[],
+    connectedRunSummaries: PortfolioConnectedRunSummary[],
+  ) => void;
 
   constructor(databasePath: string) {
     const resolvedPath =
@@ -131,7 +142,8 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         attempt,
         patch_cycle,
         attention,
-        active_run
+        active_run,
+        connected_run_summary
       ) VALUES (
         @source_id,
         @project_workspace_id,
@@ -161,15 +173,42 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
         @attempt,
         @patch_cycle,
         @attention,
-        @active_run
+        @active_run,
+        @connected_run_summary
       )
     `);
 
     this.replaceAll = this.database.transaction(
-      (items: PortfolioWorkItem[]) => {
+      (
+        items: PortfolioWorkItem[],
+        connectedRunSummaries: PortfolioConnectedRunSummary[],
+      ) => {
+        const itemKeys = new Set(
+          items.map((item) =>
+            itemKey(item.source_id, item.work_item.goal.work_item_id),
+          ),
+        );
+        const summariesByItem = new Map<string, PortfolioConnectedRunSummary>();
+        for (const summary of connectedRunSummaries) {
+          const key = itemKey(summary.source_id, summary.work_item_id);
+          if (!itemKeys.has(key)) {
+            throw new Error(
+              "Connected run summary must reference a rebuilt portfolio work item.",
+            );
+          }
+          if (summariesByItem.has(key)) {
+            throw new Error(
+              "Connected run summary must be unique per portfolio work item.",
+            );
+          }
+          summariesByItem.set(key, summary);
+        }
         clearStatement.run();
         for (const item of items) {
           const goalContract = item.work_item.goal.goal_contract;
+          const connectedRunSummary = summariesByItem.get(
+            itemKey(item.source_id, item.work_item.goal.work_item_id),
+          );
           insertStatement.run({
             source_id: item.source_id,
             project_workspace_id: item.project?.workspace_id ?? null,
@@ -223,17 +262,27 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
               item.work_item.state.active_run === undefined
                 ? null
                 : JSON.stringify(item.work_item.state.active_run),
+            connected_run_summary:
+              connectedRunSummary === undefined
+                ? null
+                : JSON.stringify(connectedRunSummary.connected_run),
           });
         }
       },
     );
   }
 
-  rebuild(items: PortfolioWorkItem[]): void {
+  rebuild(
+    items: PortfolioWorkItem[],
+    connectedRunSummaries: PortfolioConnectedRunSummary[] = [],
+  ): void {
     const validatedItems = items.map((item) =>
       portfolioWorkItemSchema.parse(item),
     );
-    this.replaceAll(validatedItems);
+    const validatedConnectedRunSummaries = connectedRunSummaries.map((summary) =>
+      portfolioConnectedRunSummarySchema.parse(summary),
+    );
+    this.replaceAll(validatedItems, validatedConnectedRunSummaries);
   }
 
   list(): PortfolioWorkItem[] {
@@ -362,6 +411,30 @@ export class SQLitePortfolioIndex implements PortfolioWorkItemIndex {
 
   clear(): void {
     this.database.prepare("DELETE FROM portfolio_work_items").run();
+  }
+
+  listConnectedRunSummaries(): PortfolioConnectedRunSummary[] {
+    const rows = this.database
+      .prepare(
+        `
+          SELECT source_id, work_item_id, connected_run_summary
+          FROM portfolio_work_items
+          WHERE connected_run_summary IS NOT NULL
+          ORDER BY source_id ASC, work_item_id ASC
+        `,
+      )
+      .all() as Pick<
+      PortfolioWorkItemRow,
+      "source_id" | "work_item_id" | "connected_run_summary"
+    >[];
+
+    return rows.map((row) =>
+      portfolioConnectedRunSummarySchema.parse({
+        source_id: row.source_id,
+        work_item_id: row.work_item_id,
+        connected_run: JSON.parse(row.connected_run_summary!),
+      }),
+    );
   }
 
   close(): void {

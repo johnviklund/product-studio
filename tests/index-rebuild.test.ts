@@ -7,9 +7,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   INBOX_SOURCE_ID,
+  type PortfolioConnectedRunSummary,
   type PortfolioWorkItem,
   type RegisteredWorkspace,
 } from "../src/domain/portfolio";
+import type { ConnectedRunSummary } from "../src/domain/connected-run";
 import type { WorkItem } from "../src/domain/work-item";
 import { SQLitePortfolioIndex } from "../src/index/work-item-index";
 
@@ -58,6 +60,65 @@ function portfolioItem(
   };
 }
 
+function connectedRunSummary(workItemId: string): ConnectedRunSummary {
+  return {
+    schema_version: 1,
+    connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+    mission: {
+      identity: {
+        phase: "execute",
+        work_item_id: workItemId,
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+      },
+      content_sha256: "a".repeat(64),
+      source_commit: "b".repeat(40),
+    },
+    governed_tuple: {
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      patch_cycle: 0,
+    },
+    provenance: {
+      role: { value: "writer", assurance: "controller_observed" },
+      seat: { value: "execute", assurance: "controller_observed" },
+      requested_model: { value: "one-run-model", assurance: "user_declared" },
+      effective_model: {
+        assurance: "adapter_attested",
+        model_id: "observed-model",
+        deployment_id: null,
+        observed_event_sha256: "c".repeat(64),
+      },
+      effort: { value: "high", assurance: "user_declared" },
+      harness: {
+        value: { id: "copilot-cli", version: "1.0.75" },
+        assurance: "controller_observed",
+      },
+      adapter_profile: {
+        value: {
+          adapter_id: "copilot-acp",
+          adapter_version: "1",
+          profile_id: "execute-v1",
+        },
+        assurance: "controller_observed",
+      },
+    },
+    capability_envelope_sha256: "d".repeat(64),
+    acp_protocol_version: { value: 1, assurance: "adapter_attested" },
+    lifecycle: {
+      status: "running",
+      started_at: "2026-07-26T12:00:00.000Z",
+      updated_at: "2026-07-26T12:01:00.000Z",
+      completed_at: null,
+      terminal_outcome: null,
+      partial: false,
+    },
+    diagnostics: { count: 1, truncated: false },
+  };
+}
+
 async function createDatabasePath(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-index-"));
   createdRoots.push(root);
@@ -80,16 +141,25 @@ describe("SQLitePortfolioIndex", () => {
       portfolioItem(null, workItem(sharedId, "Unassigned item")),
     ];
     const expected = [items[2], items[1], items[0]];
+    const summaries: PortfolioConnectedRunSummary[] = [
+      {
+        source_id: firstWorkspace.workspace_id,
+        work_item_id: sharedId,
+        connected_run: connectedRunSummary(sharedId),
+      },
+    ];
     const index = new SQLitePortfolioIndex(databasePath);
-    index.rebuild(items);
+    index.rebuild(items, summaries);
 
     expect(index.list()).toEqual(expected);
+    expect(index.listConnectedRunSummaries()).toEqual(summaries);
     index.close();
     await rm(databasePath);
 
     const rebuiltIndex = new SQLitePortfolioIndex(databasePath);
-    rebuiltIndex.rebuild(items);
+    rebuiltIndex.rebuild(items, summaries);
     expect(rebuiltIndex.list()).toEqual(expected);
+    expect(rebuiltIndex.listConnectedRunSummaries()).toEqual(summaries);
     rebuiltIndex.close();
   });
 
@@ -240,7 +310,7 @@ describe("SQLitePortfolioIndex", () => {
     index.close();
 
     const inspected = new Database(databasePath, { readonly: true });
-    expect(inspected.pragma("user_version", { simple: true })).toBe(6);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(7);
     expect(
       inspected
         .prepare(
@@ -283,6 +353,7 @@ describe("SQLitePortfolioIndex", () => {
         "patch_cycle",
         "attention",
         "active_run",
+        "connected_run_summary",
       ]),
     );
     expect(

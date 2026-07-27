@@ -3,7 +3,12 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 
 import {
+  connectedRunSummarySchema,
+  type ConnectedRunSummary,
+} from "./connected-run";
+import {
   workItemSchema,
+  workItemIdSchema,
   type WorkItem,
   type WorkItemPhase,
 } from "./work-item";
@@ -41,6 +46,12 @@ export interface PortfolioWorkItem extends PortfolioSource {
   work_item: WorkItem;
 }
 
+export interface PortfolioConnectedRunSummary {
+  source_id: string;
+  work_item_id: string;
+  connected_run: ConnectedRunSummary;
+}
+
 export interface WorkspaceRebuildFailure extends PortfolioSource {
   reason: string;
 }
@@ -55,7 +66,10 @@ export interface RegisterWorkspaceInput {
 }
 
 export interface PortfolioWorkItemIndex {
-  rebuild(items: PortfolioWorkItem[]): void;
+  rebuild(
+    items: PortfolioWorkItem[],
+    connectedRunSummaries?: PortfolioConnectedRunSummary[],
+  ): void;
   list(): PortfolioWorkItem[];
   clear(): void;
   close(): void;
@@ -119,6 +133,27 @@ export const portfolioWorkItemSchema: z.ZodType<PortfolioWorkItem> =
       work_item: workItemSchema,
     })
     .superRefine(validatePortfolioSource);
+
+export const portfolioConnectedRunSummarySchema: z.ZodType<PortfolioConnectedRunSummary> =
+  z
+    .strictObject({
+      source_id: portfolioSourceIdSchema,
+      work_item_id: workItemIdSchema,
+      connected_run: connectedRunSummarySchema,
+    })
+    .superRefine((summary, context) => {
+      if (
+        summary.connected_run.mission.identity.work_item_id !==
+        summary.work_item_id
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "connected run summary must match work_item_id",
+          path: ["connected_run", "mission", "identity", "work_item_id"],
+          input: summary.connected_run.mission.identity.work_item_id,
+        });
+      }
+    });
 
 export const workspaceRebuildFailureSchema: z.ZodType<WorkspaceRebuildFailure> =
   z
