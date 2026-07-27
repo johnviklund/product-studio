@@ -246,9 +246,19 @@ function pathFromRawInput(
     (!isAbsolute(pathRelativeToWorkspace) &&
       pathRelativeToWorkspace !== ".." &&
       !pathRelativeToWorkspace.startsWith(`..${sep}`));
+  if (isWithinWorkspace) {
+    if (pathRelativeToWorkspace === "") {
+      return null;
+    }
+    return {
+      schema_version: 1,
+      kind: "workspace_write",
+      path: pathRelativeToWorkspace.split(sep).join("/"),
+    };
+  }
   return {
     schema_version: 1,
-    kind: isWithinWorkspace ? "workspace_write" : "outside_workspace_write",
+    kind: "outside_workspace_write",
     path,
   };
 }

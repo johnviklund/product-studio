@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   resolveCapabilityEnvelope,
+  canonicalizeCapabilityRequest,
+  capabilityRequestMatchesEnvelope,
   type ExecutionDefaultsV1,
 } from "../../../src/domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../../src/domain/connected-run";
@@ -155,7 +157,7 @@ describe("Copilot ACP runtime profile", () => {
     ).toEqual({
       schema_version: 1,
       kind: "workspace_write",
-      path: "/workspace/product-studio/src/example.ts",
+      path: "src/example.ts",
     });
     expect(
       normalizeCopilotPermission(
@@ -183,7 +185,7 @@ describe("Copilot ACP runtime profile", () => {
     ).toEqual({
       schema_version: 1,
       kind: "workspace_write",
-      path: "/workspace/product-studio/..draft.ts",
+      path: "..draft.ts",
     });
     expect(
       normalizeCopilotPermission(
@@ -230,6 +232,44 @@ describe("Copilot ACP runtime profile", () => {
       host: "example.com",
       path: "/status",
     });
+  });
+
+  it("auto-allows a real in-workspace write and denies an escape through the real envelope seam", () => {
+    const envelope = resolveCapabilityEnvelope(["src"], defaults);
+
+    const inside = normalizeCopilotPermission(
+      permission({
+        kind: "edit",
+        rawInput: { path: "src/example.ts" },
+        locations: [{ path: "src/example.ts" }],
+      }),
+      workspaceCwd,
+    );
+    expect(inside).not.toBeNull();
+    const canonicalInside = canonicalizeCapabilityRequest(inside!);
+    expect(canonicalInside).toEqual({
+      schema_version: 1,
+      kind: "workspace_write",
+      path: "src/example.ts",
+    });
+    expect(capabilityRequestMatchesEnvelope(canonicalInside, envelope)).toBe(true);
+
+    const escape = normalizeCopilotPermission(
+      permission({
+        kind: "edit",
+        rawInput: { path: "../outside.ts" },
+        locations: [{ path: "../outside.ts" }],
+      }),
+      workspaceCwd,
+    );
+    expect(escape).not.toBeNull();
+    const canonicalEscape = canonicalizeCapabilityRequest(escape!);
+    expect(canonicalEscape).toEqual({
+      schema_version: 1,
+      kind: "outside_workspace_write",
+      path: "/workspace/outside.ts",
+    });
+    expect(capabilityRequestMatchesEnvelope(canonicalEscape, envelope)).toBe(false);
   });
 
   it("attests a distinct effective model only from one verified ACP model option", () => {
