@@ -1345,7 +1345,16 @@ export class PortfolioService {
         project,
         workspace: this.makeWorkspace(project.workspace_path),
       };
-      for (const workItem of await source.workspace.list()) {
+      let workItems: WorkItem[];
+      try {
+        workItems = await source.workspace.list();
+      } catch (error) {
+        if (isExpectedWorkspaceFailure(error)) {
+          continue;
+        }
+        throw error;
+      }
+      for (const workItem of workItems) {
         const attentionItem = await this.projectAttention(source, workItem);
         if (attentionItem !== null) {
           attentionItems.push(attentionItem);

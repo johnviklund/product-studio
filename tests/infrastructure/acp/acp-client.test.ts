@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -132,6 +132,7 @@ describe("stdio ACP client adapter", () => {
       profile(
         root,
         {
+          write_cwd: true,
           requests: [
             {
               schema_version: 1,
@@ -171,6 +172,8 @@ describe("stdio ACP client adapter", () => {
     expect(result).toMatchObject({ outcome: "completed", partial: false });
     expect(result.permissions).toHaveLength(3);
     expect(result.permissions.every((entry) => entry.kind === "in_envelope")).toBe(true);
+    const observedCwd = (await readFile(`${sentinel}.cwd`, "utf8")).trim();
+    expect(await realpath(observedCwd)).toBe(await realpath(root));
     await expect(readFile(`${sentinel}.1`, "utf8")).resolves.toBe("allowed\n");
     await expect(readFile(`${sentinel}.2`, "utf8")).resolves.toBe("allowed\n");
     await expect(readFile(`${sentinel}.3`, "utf8")).resolves.toBe("allowed\n");

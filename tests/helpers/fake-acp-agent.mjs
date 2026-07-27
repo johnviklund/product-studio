@@ -35,6 +35,10 @@ const application = acp
       await new Promise((resolveDelay) => setTimeout(resolveDelay, scenario.delay_ms));
     }
 
+    if (scenario.write_cwd === true && sentinelPath !== null) {
+      await writeFile(`${sentinelPath}.cwd`, `${process.cwd()}\n`, "utf8");
+    }
+
     await context.client.notify(acp.methods.client.session.update, {
       sessionId,
       update: {

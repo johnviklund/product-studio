@@ -2074,6 +2074,59 @@ describe("PortfolioService", () => {
     index.close();
   });
 
+  it("skips an invalid registered workspace when listing attention", async () => {
+    const invalidRoot = await createWorkspace("Invalid Attention Source");
+    const invalidRepository = new ProductWorkspace(invalidRoot);
+    const invalidItem = await invalidRepository.create({
+      title: "Invalid goal artifact",
+      type: "Fix",
+    });
+    await writeFile(
+      join(
+        invalidRoot,
+        ".founder",
+        "work-items",
+        invalidItem.goal.work_item_id,
+        "goal.yaml",
+      ),
+      stringify({ schema_version: 1, title: "Stale goal" }),
+      "utf8",
+    );
+
+    const validRoot = await createWorkspace("Valid Attention Source");
+    const validRepository = new ProductWorkspace(validRoot);
+    const validItem = await validRepository.create({
+      title: "Approve despite another invalid workspace",
+      type: "Feature",
+    });
+    await governWorkItemThrough(validRepository, validItem, ["spec"]);
+    const { index, service } = await createService(createMemoryIndex());
+    const invalidRegistration = await service.register({
+      workspace_path: invalidRoot,
+    });
+    const validRegistration = await service.register({ workspace_path: validRoot });
+
+    await expect(service.listAttention()).resolves.toMatchObject([
+      {
+        item: {
+          source_id: validRegistration.workspace.workspace_id,
+          work_item: { goal: { work_item_id: validItem.goal.work_item_id } },
+        },
+        attention: { kind: "spec_approval" },
+      },
+    ]);
+    await expect(service.listAttention()).resolves.not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item: expect.objectContaining({
+            source_id: invalidRegistration.workspace.workspace_id,
+          }),
+        }),
+      ]),
+    );
+    index.close();
+  });
+
   it("rejects review compilation when a newer execute import makes the subject ambiguous", async () => {
     const root = await createWorkspace("Stale Review Subject");
     const repository = new ProductWorkspace(root);
