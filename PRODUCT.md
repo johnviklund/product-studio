@@ -115,6 +115,13 @@ The following remain unresolved and must be decided with implementation evidence
 - The first approved non-MCP local transport and reference adapter. Whether it uses a CLI or
   another approved local protocol is an implementation decision and must not alter the user
   workflow.
+  - **Decided (2026-07-26, ROADMAP 3.3, commits `4c51ee0`–`995bf74`):** Copilot CLI over ACP v1
+    stdio, adapter id `copilot-acp`. Version one is permission-mediated local execution — an
+    explicit versioned capability envelope (workspace scope digest, approved command/URL forms,
+    forbidden MCP/credentials) evaluated per exact normalized operation, not independent OS
+    containment (`not_independently_enforced` / `launching_user` machine authority, disclosed to
+    the founder). A future adapter must satisfy the same contract; the transport/protocol choice
+    itself must still not alter the user workflow.
 - Whether a future managed runner needs subprocess-only execution or PTY support.
 - GitHub synchronization depth: repositories and pull requests only, or optional issue
   mirroring.

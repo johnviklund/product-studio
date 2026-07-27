@@ -15,6 +15,57 @@ idea backlog.
 
 ## Learnings
 
+### 2026-07-26 — ACP's `requestPermission` callback does not gate every workspace mutation; normalize and evaluate per canonical operation
+
+- **Scope:** Any local/CLI agent adapter reached over ACP (verified against Copilot CLI 1.0.75,
+  ACP v1, SDK 1.3.0) that Product Studio must fail closed against.
+- **Evidence:** The live feasibility gate (`.workflow/acp-feasibility-evidence.json`, superseded
+  interpretation preserved as historical evidence in `.workflow/plan.superseded.md`) observed a
+  file write complete without a client `requestPermission` call, while a shell command did
+  request explicit one-shot permission — so relying on ACP's `requestPermission` callback alone
+  cannot enforce an allow-only path/tool/network envelope. ACP v1 also exposes only a generic
+  `requestPermission` tool call, not a canonical command/URL/path operation
+  (`src/infrastructure/acp/acp-client.ts`, `src/domain/capability-envelope.ts`).
+- **Guidance:** Keep raw-to-canonical request normalization inside each provider's own profile
+  (`normalize_permission`), and let the shared ACP client core evaluate only a successfully
+  normalized `CanonicalCapabilityRequest` against the immutable capability envelope. Treat any
+  operation ACP surfaces without a callback as already inside the adapter's own execution —
+  Product Studio's guarantee is result-scope validation on import, not interception of every
+  mutation (`permission_mediated_local` / `not_independently_enforced`, not physical containment).
+- **Supersession:** active.
+
+### 2026-07-26 — Copilot ACP reference profile: fail closed before spawn, never trust requested identity
+
+- **Scope:** `src/infrastructure/acp/copilot-runtime-profile.ts` and any future ACP provider
+  profile.
+- **Evidence:** `createCopilotRuntimeProfile` requires the requested model to appear in an
+  explicitly preflighted `available_model_ids` list and throws before ever invoking the adapter
+  otherwise (`tests/infrastructure/acp/copilot-runtime-profile.test.ts` — "fails an unknown model
+  before invoking the ACP adapter and never falls back"); `extractEffectiveModel` only accepts a
+  model identity sourced from a verified ACP config-option event, never from the requested
+  `--model` value or `"auto"`; the child environment is built from an explicit non-secret
+  allowlist (`SAFE_ENVIRONMENT_KEYS`), confirmed not to leak a credential value into any produced
+  record.
+- **Guidance:** A provider profile for a locally spawned agent must (1) fail before spawn on an
+  unavailable/unverified model rather than falling back silently, (2) treat "effective model" as
+  constructible only from an adapter-observed event, and (3) build the child environment from an
+  explicit allowlist rather than passing through the parent process environment.
+- **Supersession:** active.
+
+### 2026-07-26 — Serialize ACP session-update and permission callbacks before recording evidence
+
+- **Scope:** `StdioAcpSession` (`src/infrastructure/acp/acp-client.ts`) and any ACP client core
+  handling concurrent protocol callbacks.
+- **Evidence:** `requestPermission` and `session/update` notifications can arrive interleaved from
+  the agent process; recording them without ordering risks non-deterministic evidence sequencing.
+  `enqueueCallback` funnels both callback kinds through one serialized promise chain before each is
+  recorded and hashed, verified by `tests/infrastructure/acp/acp-client.test.ts`'s ordered
+  `previous_event_sha256` chain assertion.
+- **Guidance:** When a protocol exposes multiple callback types that can fire concurrently for one
+  session, funnel all of them through a single serialized queue before recording or exposing them,
+  so the hashed evidence chain and any observer callbacks preserve true protocol order.
+- **Supersession:** active.
+
 ### 2026-07-23 — Substitute a human visual-approval checkpoint when no browser-control backend exists
 
 - **Scope:** Phase 3 browser/UI QA for any UI-facing roadmap step, when the environment has no
@@ -32,16 +83,23 @@ idea backlog.
 ### 2026-07-23 — Publish immutable import evidence before the controller mutation it backs
 
 - **Scope:** External result import (roadmap 2.3), any recoverable multi-step controller
-  operation that must not repeat an authoritative side effect on replay.
+  operation that must not repeat an authoritative side effect on replay — including a connected
+  launch that starts a long-running external process (roadmap 3.3).
 - **Evidence:** `tests/application/work-item-controller.test.ts` imports a green result once and
   replays immutable evidence without rerunning the underlying verification/import command; the
   content-addressed evidence file is written and durable before the controller's state mutation
   commits, so a crash between the two leaves evidence a replay can reconcile from without
-  re-invoking the authoritative command.
+  re-invoking the authoritative command. The connected-execute launch path applies the same shape
+  one boundary earlier: the durable run record (with its atomically created launch guard) is
+  persisted and the controller lease released *before* the ACP child process is spawned, so the
+  short-lived lease never spans the long-running external run and a replay finds exactly one
+  durable nonterminal run instead of spawning a duplicate.
 - **Guidance:** Order any two-step "produce evidence, then mutate state" operation so the
   content-addressed, immutable evidence publish happens strictly before the state mutation; on
   replay, reconcile a missing mutation from the existing evidence file instead of re-running the
-  command that produced it.
+  command that produced it. When the follow-on work is a long-running external process rather
+  than an in-process step, release the controller lease before starting it — never hold a
+  short-lived lease for the duration of an external run.
 - **Supersession:** active.
 
 ### 2026-07-23 — Local verification runner: process-group kill + bounded drain backstop, not just direct-child TERM/KILL

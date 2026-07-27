@@ -203,6 +203,22 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
   artifact handoff and one connected adapter with identical controller validation, evidence, and
   transition behavior, and can be run with two distinct model identities without expanding either
   model's authority.
+- **Status:** Delivered — commits `4c51ee0`–`995bf74` (capability envelope v1 with an
+  exact-match, fail-closed evaluator and narrowing/digest contracts; mission schema v5 embedding
+  the envelope into the immutable Execute mission, `content_sha256` covering it, with v4/v3 read
+  compatibility preserved; structured `missing_permission` attention payload and permission
+  decision contracts; append-only connected-run records with durable per-item launch guard,
+  redaction, and reconciliation; the pinned `@agentclientprotocol/sdk` runtime dependency; a
+  provider-neutral ACP client core and the Copilot reference runtime profile; controller connected
+  launch/permission-denial/allow-once mutations sharing the existing lease/evidence-before-mutation
+  shape; portfolio orchestration and the four connected API routes; DetailPanel connected-run
+  controls and the connected `missing_permission` Inbox recovery row; a rebuildable connected-run
+  summary cache projection). Deterministic verification is green: lint, typecheck, 349 tests, and
+  production build. Phase 4 review found one P0 (a workspace-relative/absolute path mismatch
+  between the Copilot profile's write classifier and the envelope schema that rejected every
+  in-workspace agent write) — fixed and re-reviewed clean; see `WORKLOG.md`. Live Copilot/ACP
+  execution was not run as part of this delivery; the feasibility gate (Step 0) used a probe
+  client, and no connected launch has yet exercised the real Copilot binary end to end.
 
 ### 3.4 Version-one end-to-end multi-model workflow
 

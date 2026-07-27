@@ -5,6 +5,31 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-26 · Transport-neutral connected execution and run provenance (roadmap 3.3) · Copilot/Codex mixed
+- Cut capability envelope v1 (exact-match, fail-closed command/URL evaluator; workspace writes
+  unconditionally in-scope; narrowing + order-insensitive digest) and folded it into mission
+  schema v5 as the immutable Execute mission's versioned envelope, covered by `content_sha256`,
+  with v4/v3 read compatibility preserved. Added a structured `missing_permission` attention
+  payload and permission-decision contracts, append-only connected-run records with a durable
+  per-item launch guard/redaction/reconciliation, the pinned `@agentclientprotocol/sdk` runtime
+  dependency, a provider-neutral ACP client core, and the Copilot reference runtime profile
+  (preflighted model list, forbidden-argv guard, effective-model-from-observed-event only).
+- Wired controller connected launch/permission-denial/allow-once mutations onto the existing
+  lease/evidence-before-mutation shape, portfolio orchestration and four connected API routes,
+  DetailPanel connected-run controls, the connected `missing_permission` Inbox recovery row, and
+  a rebuildable connected-run summary cache projection.
+- Verified: lint, typecheck, 349 tests, and production build pass. Phase 4 review (Claude Opus
+  4.8, cross-vendor) found one **P0**: the Copilot profile's write classifier emitted an absolute
+  path for in-workspace writes while the envelope schema required a relative one, so every
+  in-workspace agent write was silently rejected — defeating the feature's core auto-allow
+  guarantee, undetected because the producer and consumer were unit-tested with mismatched path
+  shapes. Fixed (commit `995bf74`) with a real producer→consumer seam regression test; re-review
+  clean. No live Copilot/ACP execution was run this cycle (Step 0 used a probe client); a live
+  smoke test remains before this path is exercised against the real binary.
+- Commits: `4c51ee0`..`995bf74`
+- Why: let the founder launch a governed Execute step directly from Product Studio without
+  copying prompts or result files, per ROADMAP 3.3.
+
 ## 2026-07-25 · Bounded patch loop and attention inbox (roadmap 3.2) · Copilot/Codex mixed
 - Cut a clean state-v2 contract: required non-negative `patch_cycle` on governed items plus a
   discriminated `attention` record (7 kinds) pinning the current human decision's paths/commit/

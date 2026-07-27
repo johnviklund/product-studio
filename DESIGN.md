@@ -482,6 +482,12 @@ Summarize an agent attempt in one contained block:
 
 Do not show a live token stream by default. Use `Working · 8 min` or an indeterminate state instead of fabricated percentage progress unless the underlying workflow provides a defensible measurement.
 
+A connected (locally launched) agent run follows the same rule: project only the latest sanitized
+run summary and its provenance (runtime/model/effort, bounded status, one recovery action set) —
+never raw terminal output, protocol/token streams, or diagnostic internals. Launch controls use a
+synchronous in-flight guard for rapid-click feedback, but the durable per-item launch guard
+remains the sole authority that prevents a duplicate run.
+
 ### Reviewer finding
 
 A finding contains severity, concise title, evidence summary, and affected acceptance criterion when available. Use:
@@ -562,3 +568,6 @@ All interactive targets must be at least 36 × 36px on desktop and 44 × 44px on
 - Don't silently accept an invalid drag-and-drop transition; explain the required gate or next action.
 - Don't hide blocking findings in muted text.
 - Don't replace the board when opening details; use the right panel and preserve spatial context.
+- Don't add a second approval surface for connected-run permission recovery; keep it one
+  read-only summary (normalized capability, reason, exact decision actions) in the existing
+  Inbox/detail-panel surfaces, and keep the board card path for it intentionally hidden.

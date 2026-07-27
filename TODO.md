@@ -8,24 +8,18 @@ delivery phases.
 
 ## Deferred Initiatives
 
-### Wire the `ambiguous_goal` and `missing_permission` attention decisions
+### Wire the `ambiguous_goal` attention decision
 
-- **Status:** Deferred — needs new contract fields, out of ROADMAP 3.2's scope.
-- **Idea:** ROADMAP 3.2 (bounded patch loop and attention inbox) defines all 8 attention decision
-  kinds in the schema (`work-item.ts`) and wires all 8 into the board projection switch
-  (`board.ts`), but only 6 are ever produced: `spec_approval`/`plan_approval` (phase-derived) and
-  `review_ready`/`unresolved_finding`/`cycle_limit`/`patch_plan_approval` (controller-routed).
-  `ambiguous_goal` and `missing_permission` have no producer — no result or import contract
-  carries a "missing required clarification" or "durable permission/harness reason" signal, so a
-  genuinely ambiguous goal or missing-permission precondition currently surfaces as a generic
-  rejected-import error instead of its dedicated, human-answerable inbox row (Phase 4 review,
-  2026-07-25, P3, disposition: defer).
-- **Boundary:** Wiring `ambiguous_goal` needs a new result-contract field for an agent to report
-  required clarification; wiring `missing_permission` needs a compile/import precondition that
-  reports a durable permission/harness reason — the latter brushes ROADMAP 3.2's explicit
-  non-goal (no managed runner or harness launcher). Scope narrowly when picked up; don't fold in
-  the broader non-goals. ROADMAP 4.1 is a natural specification checkpoint for
-  `missing_permission`, but neither producer is automatically in that milestone's scope.
+- **Status:** Deferred — needs a new result-contract field, out of ROADMAP 3.3's scope.
+- **Idea:** ROADMAP 3.2 defines all 8 attention decision kinds in the schema (`work-item.ts`) and
+  wires all 8 into the board projection switch (`board.ts`); ROADMAP 3.3 added a producer for
+  `missing_permission` (connected Execute's adapter-observed out-of-envelope denial — see
+  Archived). `ambiguous_goal` still has no producer: no result or import contract carries a
+  "missing required clarification" signal, so a genuinely ambiguous goal currently surfaces as a
+  generic rejected-import error instead of its dedicated, human-answerable inbox row (Phase 4
+  review, 2026-07-25, P3, disposition: defer).
+- **Boundary:** Needs a new result-contract field for an agent to report required clarification.
+  Scope narrowly when picked up.
 
 ## Small UI Changes
 
@@ -42,7 +36,10 @@ delivery phases.
   into `detail-panel.tsx`; this item was deliberately not folded into 1.5 (spec scoped the chip
   picker out) — the free-text behavior was preserved as-is. Pointer updated 2026-07-24 (ROADMAP 2.5): the
   unified `/edit` save flow rewrote `detail-panel.tsx`'s save handlers but left `tagsFromInput`
-  and the free-text tags input untouched — this item still applies as written.*
+  and the free-text tags input untouched — this item still applies as written. Pointer updated
+  2026-07-26 (ROADMAP 3.3): the connected-run surface added ~500 lines to `detail-panel.tsx` but
+  did not touch `tagsFromInput` or the free-text tags input (spec explicitly scoped tag-chip work
+  out) — this item still applies as written.*
 
 ## Open Questions
 
@@ -78,3 +75,12 @@ delivery phases.
 - **Status:** Delivered — superseded by ROADMAP 3.2 (commits `84c939a`–`22d8b36`). The
   cross-project attention inbox (`app/inbox/page.tsx`, `listAttention()`) ships this as an
   alternate view over durable workflow state/evidence, per the original boundary.
+
+### Wire the `missing_permission` attention decision (connected Execute half)
+
+- **Status:** Delivered — ROADMAP 3.3 (commits `4c51ee0`–`995bf74`). Connected Execute's ACP
+  adapter now produces a structured `missing_permission` attention for an exact,
+  adapter-observed, out-of-envelope operation (`recordConnectedPermissionDenial`), surfaced
+  read-only in the existing Inbox/DetailPanel recovery surfaces with "allow once and retry" /
+  "keep denied" decisions bound to the exact operation hash. This was the half of the original
+  combined item scoped to connected Execute; the `ambiguous_goal` half remains open above.
