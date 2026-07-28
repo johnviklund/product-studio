@@ -60,6 +60,7 @@ describe("board projection", () => {
 
   it("allows adjacent forward and backward moves only", () => {
     expect(validatePhaseTransition("idea", "spec")).toEqual({ ok: true });
+    expect(validatePhaseTransition("idea", "brainstorm")).toEqual({ ok: true });
     expect(validatePhaseTransition("spec", "brainstorm")).toEqual({ ok: true });
     expect(validatePhaseTransition("test", "ship")).toEqual({ ok: true });
     expect(validatePhaseTransition("learn", "ship")).toEqual({ ok: true });

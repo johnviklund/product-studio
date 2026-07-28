@@ -1,7 +1,7 @@
 import type { WorkItemPhase, WorkItemStatus } from "./work-item";
 
 export const ALLOWED_PHASE_TRANSITIONS = {
-  idea: ["spec"],
+  idea: ["brainstorm", "spec"],
   brainstorm: ["spec"],
   spec: ["brainstorm", "plan"],
   plan: ["spec", "execute"],
