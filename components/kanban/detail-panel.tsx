@@ -63,6 +63,8 @@ import {
   nextActionForPhase,
   patchAttentionForItem,
   reviewHandoffForItem,
+  shapingHandoffForItem,
+  startBrainstormActionForItem,
   type BoardColumnId,
   type ConnectedExecuteProjection,
   type PatchAttentionProjection,
@@ -141,6 +143,38 @@ interface ConnectedRunState {
   result: ConnectedRunSummary[];
   loading: boolean;
   error: string | null;
+}
+
+interface ShapingArtifactState {
+  itemKey: string;
+  result: ShapingArtifactListing["artifacts"];
+  loading: boolean;
+  error: string | null;
+}
+
+interface ShapingCompilationState {
+  itemKey: string;
+  result: ShapingCompilation;
+}
+
+interface ShapingImportState {
+  itemKey: string;
+  result: ShapingImportResult;
+}
+
+interface ShapingAcceptanceState {
+  itemKey: string;
+  result: ShapingAcceptanceResult;
+}
+
+interface ShapingSelectionState {
+  itemKey: string;
+  acceptanceContentSha256: string;
+}
+
+interface ShapingCopiedState {
+  itemKey: string;
+  target: ShapingCopyTarget;
 }
 
 type ConnectedMutation = "launching" | "allowing_once" | "keeping_denied";
@@ -323,6 +357,46 @@ async function requestConnectedRuns(
     return {
       result: null,
       error: "Connected run status could not be loaded. Check the local server and try again.",
+    };
+  }
+}
+
+async function requestShapingArtifacts(
+  sourceId: string,
+  workItemId: string,
+  signal?: AbortSignal,
+): Promise<
+  { result: ShapingArtifactListing["artifacts"] | null; error: string | null } | null
+> {
+  try {
+    const response = await fetch(
+      `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/shaping`,
+      { signal },
+    );
+    const body = (await response.json()) as
+      | ShapingArtifactListing
+      | MutationErrorResponse;
+    if (signal?.aborted) {
+      return null;
+    }
+    if (!response.ok || !("artifacts" in body)) {
+      return {
+        result: null,
+        error:
+          "error" in body
+            ? body.error?.message ?? "Shaping history could not be loaded."
+            : "Shaping history could not be loaded.",
+      };
+    }
+    return { result: body.artifacts, error: null };
+  } catch {
+    if (signal?.aborted) {
+      return null;
+    }
+    return {
+      result: null,
+      error:
+        "Shaping history could not be loaded. Check the local server and try again.",
     };
   }
 }
@@ -1025,7 +1099,7 @@ export function ShapingSection({
           </h3>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
             {projection.phase === "brainstorm"
-              ? "Compile an external shaping brief, inspect its evidence, then explicitly accept the input you want to carry forward."
+              ? "Compile an external shaping brief, inspect its evidence, then explicitly select the input you want to carry forward."
               : "Choose an accepted Brainstorm input, compile the Spec brief, and inspect its proposal before filling the editor."}
           </p>
         </div>
@@ -1708,6 +1782,21 @@ export function DetailPanel({
   const [connectedMutation, setConnectedMutation] =
     useState<ConnectedMutation | null>(null);
   const connectedMutationRef = useRef(false);
+  const [shapingArtifactState, setShapingArtifactState] =
+    useState<ShapingArtifactState | null>(null);
+  const [shapingCompilationState, setShapingCompilationState] =
+    useState<ShapingCompilationState | null>(null);
+  const [shapingImportState, setShapingImportState] =
+    useState<ShapingImportState | null>(null);
+  const [shapingAcceptanceState, setShapingAcceptanceState] =
+    useState<ShapingAcceptanceState | null>(null);
+  const [shapingSelectionState, setShapingSelectionState] =
+    useState<ShapingSelectionState | null>(null);
+  const [shapingCopiedState, setShapingCopiedState] =
+    useState<ShapingCopiedState | null>(null);
+  const [shapingMutation, setShapingMutation] =
+    useState<ShapingMutation | null>(null);
+  const [startingBrainstorm, setStartingBrainstorm] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const detailsDirty =
     title !== goal.title ||
@@ -1767,6 +1856,45 @@ export function DetailPanel({
   ].join(":");
   const missionHandoffMode = missionHandoffModeForItem(item);
   const connectedExecute = connectedExecuteForItem(item);
+  const shapingHandoff = shapingHandoffForItem(item);
+  const startBrainstormAction = startBrainstormActionForItem(item);
+  const shapingItemKey = [
+    item.source_id,
+    goal.work_item_id,
+    state.phase,
+  ].join(":");
+  const shapingArtifacts =
+    shapingArtifactState?.itemKey === shapingItemKey
+      ? shapingArtifactState.result
+      : [];
+  const shapingLoading =
+    shapingHandoff.mode === "active" &&
+    (shapingArtifactState?.itemKey !== shapingItemKey ||
+      shapingArtifactState.loading);
+  const shapingError =
+    shapingArtifactState?.itemKey === shapingItemKey
+      ? shapingArtifactState.error
+      : null;
+  const shapingCompilation =
+    shapingCompilationState?.itemKey === shapingItemKey
+      ? shapingCompilationState.result
+      : null;
+  const shapingImport =
+    shapingImportState?.itemKey === shapingItemKey
+      ? shapingImportState.result
+      : null;
+  const shapingAcceptance =
+    shapingAcceptanceState?.itemKey === shapingItemKey
+      ? shapingAcceptanceState.result
+      : null;
+  const selectedAcceptanceSha256 =
+    shapingSelectionState?.itemKey === shapingItemKey
+      ? shapingSelectionState.acceptanceContentSha256
+      : "";
+  const shapingCopiedTarget =
+    shapingCopiedState?.itemKey === shapingItemKey
+      ? shapingCopiedState.target
+      : null;
   const missionEligible = missionHandoffMode === "active";
   const repairEligible = missionHandoffMode === "repair";
   const missionBusy = compilingMission || importingResult || startingRepair;
@@ -1936,6 +2064,37 @@ export function DetailPanel({
     }));
   }, [connectedRunItemKey]);
 
+  const loadShapingArtifacts = useCallback(
+    async (signal?: AbortSignal) => {
+      const loaded = await requestShapingArtifacts(
+        item.source_id,
+        goal.work_item_id,
+        signal,
+      );
+      if (loaded === null) {
+        return;
+      }
+      setShapingArtifactState((current) => ({
+        itemKey: shapingItemKey,
+        result:
+          loaded.result ??
+          (current?.itemKey === shapingItemKey ? current.result : []),
+        loading: false,
+        error: loaded.error,
+      }));
+    },
+    [goal.work_item_id, item.source_id, shapingItemKey],
+  );
+
+  const markShapingArtifactsLoading = useCallback(() => {
+    setShapingArtifactState((current) => ({
+      itemKey: shapingItemKey,
+      result: current?.itemKey === shapingItemKey ? current.result : [],
+      loading: true,
+      error: null,
+    }));
+  }, [shapingItemKey]);
+
   const attemptClose = useCallback(() => {
     if (
       mode === "capture" &&
@@ -2012,6 +2171,36 @@ export function DetailPanel({
     goal.work_item_id,
     item.source_id,
     mode,
+  ]);
+
+  useEffect(() => {
+    if (shapingHandoff.mode !== "active") {
+      return;
+    }
+    const controller = new AbortController();
+    void requestShapingArtifacts(
+      item.source_id,
+      goal.work_item_id,
+      controller.signal,
+    ).then((loaded) => {
+      if (loaded === null) {
+        return;
+      }
+      setShapingArtifactState((current) => ({
+        itemKey: shapingItemKey,
+        result:
+          loaded.result ??
+          (current?.itemKey === shapingItemKey ? current.result : []),
+        loading: false,
+        error: loaded.error,
+      }));
+    });
+    return () => controller.abort();
+  }, [
+    goal.work_item_id,
+    item.source_id,
+    shapingHandoff.mode,
+    shapingItemKey,
   ]);
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
@@ -2104,6 +2293,217 @@ export function DetailPanel({
     } finally {
       setSaving(false);
     }
+  }
+
+  function setShapingActionError(message: string | null): void {
+    setShapingArtifactState((current) => ({
+      itemKey: shapingItemKey,
+      result: current?.itemKey === shapingItemKey ? current.result : [],
+      loading: false,
+      error: message,
+    }));
+  }
+
+  async function handleStartBrainstorm(): Promise<void> {
+    if (
+      startBrainstormAction === null ||
+      startingBrainstorm ||
+      detailsDirty ||
+      assignmentDirty ||
+      contractDirty
+    ) {
+      return;
+    }
+
+    setStartingBrainstorm(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            target_phase: startBrainstormAction.target_phase,
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | PortfolioWorkItem
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "Brainstorm could not be started."
+            : "Brainstorm could not be started.",
+        );
+        return;
+      }
+      onUpdated(
+        body as PortfolioWorkItem,
+        "Brainstorm started; shaping input is ready.",
+      );
+    } catch {
+      setError(
+        "Brainstorm could not be started. Check the local server and try again.",
+      );
+    } finally {
+      setStartingBrainstorm(false);
+    }
+  }
+
+  async function handleCompileShapingMission(): Promise<void> {
+    if (shapingHandoff.mode !== "active") {
+      return;
+    }
+    const phase = shapingHandoff.phase;
+    if (phase === "spec" && selectedAcceptanceSha256.length === 0) {
+      setShapingActionError(
+        "Choose an accepted Brainstorm input before compiling the Spec mission.",
+      );
+      return;
+    }
+
+    setShapingMutation("compiling");
+    setShapingActionError(null);
+    setShapingCopiedState(null);
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/${phase}/mission`,
+        phase === "spec"
+          ? {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                brainstorm_acceptance_sha256: selectedAcceptanceSha256,
+              }),
+            }
+          : { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | ShapingCompilation
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setShapingActionError(
+          "error" in body
+            ? body.error?.message ?? "The shaping mission could not be compiled."
+            : "The shaping mission could not be compiled.",
+        );
+        return;
+      }
+      setShapingCompilationState({
+        itemKey: shapingItemKey,
+        result: body as ShapingCompilation,
+      });
+    } catch {
+      setShapingActionError(
+        "The shaping mission could not be compiled. Check the local server and try again.",
+      );
+    } finally {
+      setShapingMutation(null);
+    }
+  }
+
+  async function handleImportShapingResult(): Promise<void> {
+    if (shapingHandoff.mode !== "active") {
+      return;
+    }
+    const phase = shapingHandoff.phase;
+    setShapingMutation("importing");
+    setShapingActionError(null);
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/${phase}/import`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | ShapingImportResult
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setShapingActionError(
+          "error" in body
+            ? body.error?.message ?? "The shaping result could not be imported."
+            : "The shaping result could not be imported.",
+        );
+        return;
+      }
+      setShapingImportState({
+        itemKey: shapingItemKey,
+        result: body as ShapingImportResult,
+      });
+      markShapingArtifactsLoading();
+      await loadShapingArtifacts();
+    } catch {
+      setShapingActionError(
+        "The shaping result could not be imported. Check the local server and try again.",
+      );
+    } finally {
+      setShapingMutation(null);
+    }
+  }
+
+  async function handleAcceptBrainstormInput(): Promise<void> {
+    if (
+      shapingHandoff.mode !== "active" ||
+      shapingHandoff.phase !== "brainstorm"
+    ) {
+      return;
+    }
+    setShapingMutation("accepting");
+    setShapingActionError(null);
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/brainstorm/accept`,
+        { method: "POST" },
+      );
+      const body = (await response.json()) as
+        | ShapingAcceptanceResult
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setShapingActionError(
+          "error" in body
+            ? body.error?.message ?? "The Brainstorm input could not be selected."
+            : "The Brainstorm input could not be selected.",
+        );
+        return;
+      }
+      setShapingAcceptanceState({
+        itemKey: shapingItemKey,
+        result: body as ShapingAcceptanceResult,
+      });
+      markShapingArtifactsLoading();
+      await loadShapingArtifacts();
+    } catch {
+      setShapingActionError(
+        "The Brainstorm input could not be selected. Check the local server and try again.",
+      );
+    } finally {
+      setShapingMutation(null);
+    }
+  }
+
+  async function handleCopyShapingValue(
+    target: ShapingCopyTarget,
+    value: string,
+  ): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setShapingCopiedState({ itemKey: shapingItemKey, target });
+    } catch {
+      setShapingActionError("The shaping handoff value could not be copied.");
+    }
+  }
+
+  function handleUseSpecProposal(
+    proposal: SpecResultSubmission["proposal"],
+  ): void {
+    const draft = specProposalToGoalContractDraft(proposal);
+    setPurpose(draft.purpose);
+    setAcceptanceCriteria(draft.acceptanceCriteria);
+    setNonGoals(draft.nonGoals);
+    setAllowedScope(draft.allowedScope);
+    setReviewReady(draft.reviewReady);
+    setShapingActionError(null);
   }
 
   async function handleCompileMission() {
@@ -2694,6 +3094,67 @@ export function DetailPanel({
       </div>
     </form>
   ) : null;
+  const hasUnsavedEditorChanges =
+    detailsDirty || assignmentDirty || contractDirty;
+  const startBrainstormControl = startBrainstormAction ? (
+    <section
+      aria-labelledby={`${fieldId}-start-brainstorm`}
+      className="border-l-2 border-primary bg-background px-3 py-3"
+    >
+      <h3 id={`${fieldId}-start-brainstorm`} className="text-xs font-medium">
+        Brainstorm
+      </h3>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+        Open a shaping cycle for this idea without changing its board column.
+      </p>
+      <button
+        type="button"
+        disabled={
+          transitionPending || startingBrainstorm || hasUnsavedEditorChanges
+        }
+        onClick={() => void handleStartBrainstorm()}
+        className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {startingBrainstorm
+          ? "Starting…"
+          : startBrainstormAction.label}
+      </button>
+      {hasUnsavedEditorChanges ? (
+        <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+          Save the current editor changes before starting Brainstorm.
+        </p>
+      ) : null}
+    </section>
+  ) : null;
+  const shapingSection =
+    shapingHandoff.mode === "active" ? (
+      <ShapingSection
+        fieldId={fieldId}
+        projection={shapingHandoff}
+        artifacts={shapingArtifacts}
+        loading={shapingLoading}
+        error={shapingError}
+        selectedAcceptanceSha256={selectedAcceptanceSha256}
+        mutation={shapingMutation}
+        compilation={shapingCompilation}
+        imported={shapingImport}
+        acceptance={shapingAcceptance}
+        copiedTarget={shapingCopiedTarget}
+        onSelectAcceptance={(acceptanceContentSha256) =>
+          setShapingSelectionState({
+            itemKey: shapingItemKey,
+            acceptanceContentSha256,
+          })
+        }
+        onCompile={() => void handleCompileShapingMission()}
+        onImport={() => void handleImportShapingResult()}
+        onAccept={() => void handleAcceptBrainstormInput()}
+        onCopy={(target, value) =>
+          void handleCopyShapingValue(target, value)
+        }
+        onUseProposal={handleUseSpecProposal}
+      />
+    ) : null;
 
   return (
     <>
@@ -2753,6 +3214,10 @@ export function DetailPanel({
 
             {workItemEditor}
 
+            {startBrainstormControl}
+
+            {shapingSection}
+
             {error ? (
               <p
                 className="border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-foreground"
@@ -2795,6 +3260,7 @@ export function DetailPanel({
               {activeTab === "overview" ? (
                 <>
                   {workItemEditor}
+                  {startBrainstormControl}
                   <section aria-labelledby={`${fieldId}-summary`}>
                     <h3 id={`${fieldId}-summary`} className="text-xs font-medium text-muted-foreground">
                       Summary
@@ -2832,6 +3298,8 @@ export function DetailPanel({
                   >
                     {goalContractContent}
                   </section>
+
+                  {shapingSection}
 
                   <ConnectedExecuteSection
                     fieldId={fieldId}
