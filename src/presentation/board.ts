@@ -55,6 +55,29 @@ export type BoardColumnId = BoardColumn["id"];
 export type DetailPanelMode = "capture" | "governed";
 export type MissionHandoffMode = "active" | "repair" | "hidden";
 
+export type ShapingHandoffProjection =
+  | {
+      mode: "active";
+      phase: "brainstorm";
+      required_input: "none";
+      can_compile: true;
+      can_import: true;
+    }
+  | {
+      mode: "active";
+      phase: "spec";
+      required_input: "brainstorm_acceptance_sha256";
+      can_compile: true;
+      can_import: true;
+    }
+  | {
+      mode: "hidden";
+      phase: null;
+      required_input: null;
+      can_compile: false;
+      can_import: false;
+    };
+
 export type ConnectedExecuteProjection =
   | {
       mode: "launch";
@@ -320,6 +343,72 @@ export function detailPanelModeForItem(item: {
     boardColumnForPhase(item.work_item.state.phase).id === "todo"
     ? "capture"
     : "governed";
+}
+
+export function shapingHandoffForItem(item: {
+  source_id: string;
+  work_item: {
+    state: {
+      phase: WorkItemPhase;
+      status: WorkItemStatus;
+    };
+  };
+}): ShapingHandoffProjection {
+  const { phase, status } = item.work_item.state;
+  if (
+    item.source_id === INBOX_SOURCE_ID ||
+    status !== "active" ||
+    (phase !== "brainstorm" && phase !== "spec")
+  ) {
+    return {
+      mode: "hidden",
+      phase: null,
+      required_input: null,
+      can_compile: false,
+      can_import: false,
+    };
+  }
+
+  return phase === "brainstorm"
+    ? {
+        mode: "active",
+        phase,
+        required_input: "none",
+        can_compile: true,
+        can_import: true,
+      }
+    : {
+        mode: "active",
+        phase,
+        required_input: "brainstorm_acceptance_sha256",
+        can_compile: true,
+        can_import: true,
+      };
+}
+
+export function startBrainstormActionForItem(item: {
+  source_id: string;
+  work_item: {
+    state: {
+      phase: WorkItemPhase;
+      status: WorkItemStatus;
+    };
+  };
+}): BoardTransitionAction | null {
+  const { phase, status } = item.work_item.state;
+  if (
+    item.source_id === INBOX_SOURCE_ID ||
+    phase !== "idea" ||
+    status !== "active"
+  ) {
+    return null;
+  }
+
+  return {
+    target_column_id: "todo",
+    target_phase: "brainstorm",
+    label: "Start brainstorm",
+  };
 }
 
 export function missionHandoffModeForItem(item: {
