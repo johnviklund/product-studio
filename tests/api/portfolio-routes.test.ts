@@ -50,6 +50,12 @@ import * as portfolioConnectedLaunchRoute from "../../app/api/portfolio/work-ite
 import * as portfolioConnectedRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/run/route";
 import * as portfolioConnectedCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/cancel/route";
 import * as portfolioConnectedPermissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/permission/route";
+import * as portfolioShapingRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/route";
+import * as portfolioBrainstormMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/mission/route";
+import * as portfolioBrainstormImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/import/route";
+import * as portfolioBrainstormAcceptRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/accept/route";
+import * as portfolioSpecMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/mission/route";
+import * as portfolioSpecImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/import/route";
 import { GET as getPortfolioRunEvidence } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/run-evidence/route";
 import {
   PATCH as updatePortfolioWorkItem,
@@ -73,6 +79,12 @@ const launchPortfolioConnectedMission = portfolioConnectedLaunchRoute.POST;
 const getPortfolioConnectedRuns = portfolioConnectedRunRoute.GET;
 const cancelPortfolioConnectedRun = portfolioConnectedCancelRoute.POST;
 const decidePortfolioConnectedPermission = portfolioConnectedPermissionRoute.POST;
+const listPortfolioShaping = portfolioShapingRoute.GET;
+const compilePortfolioBrainstormMission = portfolioBrainstormMissionRoute.POST;
+const importPortfolioBrainstormResult = portfolioBrainstormImportRoute.POST;
+const acceptPortfolioBrainstormResult = portfolioBrainstormAcceptRoute.POST;
+const compilePortfolioSpecMission = portfolioSpecMissionRoute.POST;
+const importPortfolioSpecResult = portfolioSpecImportRoute.POST;
 
 const createdRoots: string[] = [];
 const openIndexes: SQLitePortfolioIndex[] = [];
@@ -269,6 +281,26 @@ function missionRequest(): Request {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{ignored-no-body-contract",
+    },
+  );
+}
+
+function shapingRequest(
+  path:
+    | ""
+    | "/brainstorm/mission"
+    | "/brainstorm/import"
+    | "/brainstorm/accept"
+    | "/spec/mission"
+    | "/spec/import",
+  body?: unknown,
+): Request {
+  return new Request(
+    `http://localhost/api/portfolio/work-items/source/item/shaping${path}`,
+    {
+      method: path === "" ? "GET" : "POST",
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     },
   );
 }
@@ -938,6 +970,135 @@ describe("portfolio API routes", () => {
     expect(launchConnectedExecute).not.toHaveBeenCalled();
     expect(cancelConnectedRun).not.toHaveBeenCalled();
     expect(decideConnectedPermission).not.toHaveBeenCalled();
+  });
+
+  it("routes every shaping operation through the source-qualified service", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const acceptanceSha256 = "a".repeat(64);
+    const payloads = {
+      listing: { source_id: sourceId, work_item_id: workItemId, artifacts: [] },
+      brainstormMission: { kind: "brainstorm-mission" },
+      brainstormImport: { kind: "brainstorm-import" },
+      brainstormAcceptance: { kind: "brainstorm-acceptance" },
+      specMission: { kind: "spec-mission" },
+      specImport: { kind: "spec-import" },
+    };
+    const listShapingArtifacts = vi.fn().mockResolvedValue(payloads.listing);
+    const compileBrainstormMission = vi
+      .fn()
+      .mockResolvedValue(payloads.brainstormMission);
+    const importBrainstormResult = vi
+      .fn()
+      .mockResolvedValue(payloads.brainstormImport);
+    const acceptBrainstormResult = vi
+      .fn()
+      .mockResolvedValue(payloads.brainstormAcceptance);
+    const compileSpecMission = vi.fn().mockResolvedValue(payloads.specMission);
+    const importSpecResult = vi.fn().mockResolvedValue(payloads.specImport);
+    getService.mockResolvedValue({
+      listShapingArtifacts,
+      compileBrainstormMission,
+      importBrainstormResult,
+      acceptBrainstormResult,
+      compileSpecMission,
+      importSpecResult,
+    });
+    const context = phaseUpdateContext(sourceId, workItemId);
+
+    const responses = await Promise.all([
+      listPortfolioShaping(shapingRequest(""), context),
+      compilePortfolioBrainstormMission(
+        shapingRequest("/brainstorm/mission"),
+        context,
+      ),
+      importPortfolioBrainstormResult(
+        shapingRequest("/brainstorm/import"),
+        context,
+      ),
+      acceptPortfolioBrainstormResult(
+        shapingRequest("/brainstorm/accept"),
+        context,
+      ),
+      compilePortfolioSpecMission(
+        shapingRequest("/spec/mission", {
+          brainstorm_acceptance_sha256: acceptanceSha256,
+        }),
+        context,
+      ),
+      importPortfolioSpecResult(shapingRequest("/spec/import"), context),
+    ]);
+
+    expect(responses.map(({ status }) => status)).toEqual([
+      200, 200, 200, 200, 200, 200,
+    ]);
+    expect(await Promise.all(responses.map((response) => response.json()))).toEqual(
+      Object.values(payloads),
+    );
+    expect(listShapingArtifacts).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(compileBrainstormMission).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(importBrainstormResult).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(acceptBrainstormResult).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(compileSpecMission).toHaveBeenCalledWith(sourceId, workItemId, {
+      brainstorm_acceptance_sha256: acceptanceSha256,
+    });
+    expect(importSpecResult).toHaveBeenCalledWith(sourceId, workItemId);
+    expect([
+      portfolioShapingRoute.runtime,
+      portfolioBrainstormMissionRoute.runtime,
+      portfolioBrainstormImportRoute.runtime,
+      portfolioBrainstormAcceptRoute.runtime,
+      portfolioSpecMissionRoute.runtime,
+      portfolioSpecImportRoute.runtime,
+    ]).toEqual(Array.from({ length: 6 }, () => "nodejs"));
+  });
+
+  it("maps malformed and unavailable shaping requests through established errors", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const compileSpecMission = vi.fn();
+    const compileBrainstormMission = vi.fn().mockRejectedValue(
+      new ControllerConflictError(
+        "mission_not_ready",
+        workItemId,
+        "Brainstorm is not ready.",
+      ),
+    );
+    const listShapingArtifacts = vi.fn().mockRejectedValue(
+      new PortfolioWorkItemNotFoundError(sourceId, workItemId),
+    );
+    getService.mockResolvedValue({
+      compileSpecMission,
+      compileBrainstormMission,
+      listShapingArtifacts,
+    });
+    const context = phaseUpdateContext(sourceId, workItemId);
+
+    const malformed = await compilePortfolioSpecMission(
+      shapingRequest("/spec/mission", {
+        brainstorm_acceptance_sha256: "not-a-sha",
+      }),
+      context,
+    );
+    const conflict = await compilePortfolioBrainstormMission(
+      shapingRequest("/brainstorm/mission"),
+      context,
+    );
+    const missing = await listPortfolioShaping(shapingRequest(""), context);
+
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({
+      error: { code: "mission_not_ready", message: "Brainstorm is not ready." },
+    });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({
+      error: { code: "work_item_not_found", message: "Work item not found" },
+    });
+    expect(compileSpecMission).not.toHaveBeenCalled();
   });
 
   it("maps patch and attention conflicts through the established response contract", async () => {
