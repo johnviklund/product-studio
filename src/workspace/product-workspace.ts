@@ -106,6 +106,32 @@ import {
   type ConnectedRunProcessIdentity,
   type ConnectedRunRecordV1,
 } from "../domain/connected-run";
+import {
+  brainstormResultSubmissionSchema,
+  hashShapingInput,
+  renderShapingTaskMd,
+  serializeShapingPackage,
+  shapingAcceptanceReceiptSchema,
+  shapingIdentitySchema,
+  shapingImportReceiptSchema,
+  shapingMissionPackageSchema,
+  specMissionPackageSchema,
+  specResultSubmissionSchema,
+  type ShapingAcceptanceReceipt,
+  type ShapingArtifactReadResult,
+  type ShapingArtifactWriteResult,
+  type ShapingIdentity,
+  type ShapingImportReceipt,
+  type ShapingImportReceiptWriteInput,
+  type ShapingMissionPackage,
+  type ShapingMissionPackageBuilder,
+  type ShapingPaths,
+  type ShapingReceiptWriteResult,
+  type ShapingResultSnapshot,
+  type ShapingResultSubmission,
+  type SpecMissionPackage,
+  type StoredShapingArtifact,
+} from "../domain/shaping";
 
 const FOUNDER_DIRECTORY = ".founder";
 const WORK_ITEMS_DIRECTORY = "work-items";
@@ -113,6 +139,7 @@ const GOAL_FILE = "goal.yaml";
 const STATE_FILE = "state.json";
 const RUNS_DIRECTORY = "runs";
 const MISSIONS_DIRECTORY = "missions";
+const SHAPING_DIRECTORY = "shaping";
 const RUN_EVIDENCE_DIRECTORY = "run-evidence";
 const EXECUTION_DIRECTORY = "execution";
 const EXECUTION_DEFAULTS_FILE = "defaults.json";
@@ -127,6 +154,7 @@ const TASK_MD_FILE = "TASK.md";
 const RESULT_JSON_FILE = "result.json";
 const SUBMISSION_JSON_FILE = "submission.json";
 const IMPORT_JSON_FILE = "import.json";
+const ACCEPTANCE_JSON_FILE = "acceptance.json";
 const VERIFICATION_JSON_FILE = "verification.json";
 const CONTROLLER_LOCK_FILE = ".controller.lock";
 const execFileAsync = promisify(execFile);
@@ -1817,6 +1845,252 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return this.publishMissionSnapshot(validatedIdentity, mission);
   }
 
+  async writeShapingMissionPackage(
+    identity: ShapingIdentity,
+    buildPackage: ShapingMissionPackageBuilder,
+  ): Promise<ShapingArtifactWriteResult> {
+    const validatedIdentity = shapingIdentitySchema.parse(identity);
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The source work item does not exist.",
+      );
+    }
+
+    const current = await this.readValidated(validatedIdentity.work_item_id);
+    if (
+      current === null ||
+      current.state.phase !== validatedIdentity.phase ||
+      current.state.status !== "active"
+    ) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The durable work item no longer matches the active shaping phase.",
+      );
+    }
+
+    const paths = this.shapingPaths(validatedIdentity);
+    const mission = shapingMissionPackageSchema.parse(buildPackage(paths));
+    if (
+      JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
+      mission.task_path !== paths.task_path ||
+      mission.result_contract.output_path !== paths.output_path
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "compiled shaping identity and paths must match the workspace-derived snapshot",
+      );
+    }
+    if (
+      mission.input.title !== current.goal.title ||
+      mission.input.notes !== current.goal.notes ||
+      hashShapingInput(mission.input) !== validatedIdentity.input_sha256
+    ) {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "The durable work item no longer matches the shaping mission input.",
+      );
+    }
+    if (mission.identity.phase === "spec") {
+      await this.assertSpecShapingSelection(
+        specMissionPackageSchema.parse(mission),
+      );
+    }
+
+    return this.publishShapingSnapshot(validatedIdentity, mission);
+  }
+
+  async readShapingMissionPackage(
+    identity: ShapingIdentity,
+  ): Promise<ShapingArtifactReadResult> {
+    const validatedIdentity = shapingIdentitySchema.parse(identity);
+    const snapshot = await this.readShapingPackageSnapshot(validatedIdentity);
+    return {
+      mission: snapshot.mission,
+      mission_path: snapshot.relativeMissionPath,
+    };
+  }
+
+  async readShapingResult(
+    identity: ShapingIdentity,
+  ): Promise<ShapingResultSnapshot> {
+    const validatedIdentity = shapingIdentitySchema.parse(identity);
+    const snapshot = await this.readShapingPackageSnapshot(validatedIdentity);
+    const stored = await this.readStoredShapingArtifact(snapshot);
+    if (stored.result === null) {
+      throw this.invalid(
+        join(snapshot.missionDirectory, RESULT_JSON_FILE),
+        "required file is missing",
+      );
+    }
+    return {
+      mission: snapshot.mission,
+      mission_path: snapshot.relativeMissionPath,
+      result_path: stored.result.result_path,
+      result_source: stored.result.result_source,
+    };
+  }
+
+  async writeShapingImportReceipt(
+    input: ShapingImportReceiptWriteInput,
+  ): Promise<ShapingReceiptWriteResult<ShapingImportReceipt>> {
+    const receipt = shapingImportReceiptSchema.parse(input.receipt);
+    const snapshot = await this.readShapingPackageSnapshot(receipt.identity);
+    const resultPath = join(snapshot.missionDirectory, RESULT_JSON_FILE);
+    const storedResultSource = await this.readRequiredFile(resultPath);
+    const resultContentSha256 = this.hashArtifactSource(storedResultSource);
+    if (
+      input.result_source !== storedResultSource ||
+      receipt.result_content_sha256 !== resultContentSha256 ||
+      receipt.shaping_mission_content_sha256 !==
+        snapshot.mission.content_sha256 ||
+      JSON.stringify(receipt.identity) !==
+        JSON.stringify(snapshot.mission.identity)
+    ) {
+      throw this.invalid(
+        snapshot.missionDirectory,
+        "shaping import receipt does not match the immutable mission and result bytes",
+      );
+    }
+
+    if (receipt.outcome === "applied") {
+      const result = this.parseShapingResultForMission(
+        storedResultSource,
+        resultPath,
+        snapshot.mission,
+      );
+      if (JSON.stringify(result.identity) !== JSON.stringify(receipt.identity)) {
+        throw this.invalid(
+          resultPath,
+          "applied shaping result identity does not match its import receipt",
+        );
+      }
+    }
+
+    const receiptPath = join(snapshot.missionDirectory, IMPORT_JSON_FILE);
+    const receiptSource = await this.writeImmutableShapingJson(
+      receiptPath,
+      receipt,
+      "shaping import receipt",
+    );
+    return {
+      receipt,
+      receipt_path: receiptPath,
+      receipt_content_sha256: this.hashArtifactSource(receiptSource),
+    };
+  }
+
+  async writeShapingAcceptance(
+    input: ShapingAcceptanceReceipt,
+  ): Promise<ShapingReceiptWriteResult<ShapingAcceptanceReceipt>> {
+    const receipt = shapingAcceptanceReceiptSchema.parse(input);
+    const snapshot = await this.readShapingPackageSnapshot(receipt.identity);
+    if (snapshot.mission.identity.phase !== "brainstorm") {
+      throw this.invalid(
+        snapshot.missionDirectory,
+        "only a Brainstorm result can have a shaping acceptance",
+      );
+    }
+    const resultPath = join(snapshot.missionDirectory, RESULT_JSON_FILE);
+    const resultSource = await this.readRequiredFile(resultPath);
+    const resultContentSha256 = this.hashArtifactSource(resultSource);
+    const importPath = join(snapshot.missionDirectory, IMPORT_JSON_FILE);
+    const importSource = await this.readRequiredFile(importPath);
+    const importReceipt = this.parseJson(
+      importSource,
+      importPath,
+      shapingImportReceiptSchema,
+    );
+    if (
+      importReceipt.outcome !== "applied" ||
+      JSON.stringify(importReceipt.identity) !== JSON.stringify(receipt.identity) ||
+      importReceipt.shaping_mission_content_sha256 !==
+        receipt.brainstorm_mission_content_sha256 ||
+      importReceipt.result_content_sha256 !==
+        receipt.brainstorm_result_content_sha256 ||
+      resultContentSha256 !== receipt.brainstorm_result_content_sha256 ||
+      snapshot.mission.content_sha256 !==
+        receipt.brainstorm_mission_content_sha256
+    ) {
+      throw this.invalid(
+        snapshot.missionDirectory,
+        "Brainstorm acceptance must match one applied immutable result",
+      );
+    }
+    this.parseShapingResultForMission(
+      resultSource,
+      resultPath,
+      snapshot.mission,
+    );
+
+    const acceptancePath = join(
+      snapshot.missionDirectory,
+      ACCEPTANCE_JSON_FILE,
+    );
+    const acceptanceSource = await this.writeImmutableShapingJson(
+      acceptancePath,
+      receipt,
+      "shaping acceptance receipt",
+    );
+    return {
+      receipt,
+      receipt_path: acceptancePath,
+      receipt_content_sha256: this.hashArtifactSource(acceptanceSource),
+    };
+  }
+
+  async listShapingArtifacts(
+    workItemId: string,
+  ): Promise<StoredShapingArtifact[]> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+    const workItemDirectory = join(
+      this.founderDirectory,
+      SHAPING_DIRECTORY,
+      validatedWorkItemId,
+    );
+    if (!(await this.hasSafeDirectory(workItemDirectory))) {
+      return [];
+    }
+
+    const artifacts: StoredShapingArtifact[] = [];
+    const entries = await readdir(workItemDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+      const artifactDirectory = join(workItemDirectory, entry.name);
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        throw this.invalid(
+          artifactDirectory,
+          "shaping entries must be directories, not symlinks",
+        );
+      }
+      const match = /^(brainstorm|spec)-([0-9a-f]{64})$/.exec(entry.name);
+      if (match === null) {
+        throw this.invalid(
+          artifactDirectory,
+          "shaping directory must use <phase>-<input_sha256>",
+        );
+      }
+      const identity = shapingIdentitySchema.parse({
+        phase: match[1],
+        work_item_id: validatedWorkItemId,
+        input_sha256: match[2],
+      });
+      const snapshot = await this.readShapingPackageSnapshot(identity);
+      artifacts.push(await this.readStoredShapingArtifact(snapshot));
+    }
+
+    return artifacts.sort((left, right) =>
+      left.mission.identity.phase === right.mission.identity.phase
+        ? left.mission.identity.input_sha256.localeCompare(
+            right.mission.identity.input_sha256,
+          )
+        : left.mission.identity.phase.localeCompare(
+            right.mission.identity.phase,
+          ),
+    );
+  }
+
   async readAppliedExecuteReviewSubject(
     identity: MissionIdentity<"execute">,
   ): Promise<AppliedExecuteReviewSubject> {
@@ -2968,6 +3242,411 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       throw new AggregateError(
         [originalError, cleanupError],
         "Import evidence publication failed and staging cleanup was incomplete",
+      );
+    }
+  }
+
+  private shapingPaths(identity: ShapingIdentity): ShapingPaths {
+    const relativeDirectory = posix.join(
+      FOUNDER_DIRECTORY,
+      SHAPING_DIRECTORY,
+      identity.work_item_id,
+      `${identity.phase}-${identity.input_sha256}`,
+    );
+    return {
+      task_path: posix.join(relativeDirectory, TASK_MD_FILE),
+      output_path: posix.join(relativeDirectory, RESULT_JSON_FILE),
+    };
+  }
+
+  private shapingWriteResult<TMission extends ShapingMissionPackage>(
+    mission: TMission,
+    missionDirectory: string,
+  ): ShapingArtifactWriteResult<TMission> {
+    return {
+      mission,
+      workspace_path: this.workspaceRoot,
+      task_path: join(missionDirectory, TASK_MD_FILE),
+      mission_path: join(missionDirectory, MISSION_JSON_FILE),
+    };
+  }
+
+  private async publishShapingSnapshot<
+    TMission extends ShapingMissionPackage,
+  >(
+    identity: ShapingIdentity,
+    mission: TMission,
+  ): Promise<ShapingArtifactWriteResult<TMission>> {
+    const missionSource = serializeShapingPackage(mission);
+    const taskSource = renderShapingTaskMd(mission);
+    const shapingDirectory = join(this.founderDirectory, SHAPING_DIRECTORY);
+    const workItemShapingDirectory = join(
+      shapingDirectory,
+      identity.work_item_id,
+    );
+    const missionDirectory = join(
+      workItemShapingDirectory,
+      `${identity.phase}-${identity.input_sha256}`,
+    );
+
+    await this.ensureDirectory(shapingDirectory);
+    await this.ensureDirectory(workItemShapingDirectory);
+    if (await this.hasSafeDirectory(missionDirectory)) {
+      await this.assertShapingSnapshot(
+        missionDirectory,
+        mission,
+        missionSource,
+        taskSource,
+      );
+      return this.shapingWriteResult(mission, missionDirectory);
+    }
+
+    const stagingDirectory = join(
+      workItemShapingDirectory,
+      `.${identity.phase}-${identity.input_sha256}.${randomUUID()}.shaping.tmp`,
+    );
+    await mkdir(stagingDirectory);
+    try {
+      await writeFile(join(stagingDirectory, MISSION_JSON_FILE), missionSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await writeFile(join(stagingDirectory, TASK_MD_FILE), taskSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(stagingDirectory, missionDirectory);
+    } catch (error) {
+      await this.removeShapingStagingDirectory(stagingDirectory, error);
+      if (
+        isNodeError(error) &&
+        ["EEXIST", "ENOTEMPTY"].includes(error.code ?? "") &&
+        (await this.hasSafeDirectory(missionDirectory))
+      ) {
+        await this.assertShapingSnapshot(
+          missionDirectory,
+          mission,
+          missionSource,
+          taskSource,
+        );
+        return this.shapingWriteResult(mission, missionDirectory);
+      }
+      throw error;
+    }
+
+    await this.assertShapingSnapshot(
+      missionDirectory,
+      mission,
+      missionSource,
+      taskSource,
+    );
+    return this.shapingWriteResult(mission, missionDirectory);
+  }
+
+  private async removeShapingStagingDirectory(
+    stagingDirectory: string,
+    originalError: unknown,
+  ): Promise<void> {
+    try {
+      await rm(stagingDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [originalError, cleanupError],
+        "Shaping snapshot publication failed and staging cleanup was incomplete",
+      );
+    }
+  }
+
+  private async assertShapingSnapshot(
+    missionDirectory: string,
+    mission: ShapingMissionPackage,
+    missionSource: string,
+    taskSource: string,
+  ): Promise<void> {
+    const missionPath = join(missionDirectory, MISSION_JSON_FILE);
+    const taskPath = join(missionDirectory, TASK_MD_FILE);
+    const existingMissionSource = await this.readOptionalFile(missionPath);
+    const existingTaskSource = await this.readOptionalFile(taskPath);
+    if (existingMissionSource === null || existingTaskSource === null) {
+      throw this.invalid(
+        missionDirectory,
+        "immutable shaping snapshot must contain both mission.json and TASK.md",
+      );
+    }
+    const existingMission = this.parseJson(
+      existingMissionSource,
+      missionPath,
+      shapingMissionPackageSchema,
+    );
+    if (
+      JSON.stringify(existingMission) !== JSON.stringify(mission) ||
+      existingMissionSource !== missionSource ||
+      existingTaskSource !== taskSource
+    ) {
+      throw this.invalid(
+        missionDirectory,
+        "immutable shaping snapshot differs from the compiled package",
+      );
+    }
+  }
+
+  private async readShapingPackageSnapshot(
+    identity: ShapingIdentity,
+  ): Promise<{
+    mission: ShapingMissionPackage;
+    missionDirectory: string;
+    relativeDirectory: string;
+    relativeMissionPath: string;
+  }> {
+    await this.readManifest();
+    const paths = this.shapingPaths(identity);
+    const relativeDirectory = posix.dirname(paths.task_path);
+    const shapingDirectory = join(this.founderDirectory, SHAPING_DIRECTORY);
+    const workItemShapingDirectory = join(
+      shapingDirectory,
+      identity.work_item_id,
+    );
+    const missionDirectory = join(
+      workItemShapingDirectory,
+      `${identity.phase}-${identity.input_sha256}`,
+    );
+    await this.assertDirectory(shapingDirectory);
+    await this.assertDirectory(workItemShapingDirectory);
+    await this.assertDirectory(missionDirectory);
+
+    const missionPath = join(missionDirectory, MISSION_JSON_FILE);
+    const missionSource = await this.readRequiredFile(missionPath);
+    const mission = this.parseJson(
+      missionSource,
+      missionPath,
+      shapingMissionPackageSchema,
+    );
+    if (
+      JSON.stringify(mission.identity) !== JSON.stringify(identity) ||
+      mission.task_path !== paths.task_path ||
+      mission.result_contract.output_path !== paths.output_path
+    ) {
+      throw this.invalid(
+        missionDirectory,
+        "shaping snapshot identity and paths do not match its containing directory",
+      );
+    }
+    await this.assertShapingSnapshot(
+      missionDirectory,
+      mission,
+      serializeShapingPackage(mission),
+      renderShapingTaskMd(mission),
+    );
+    return {
+      mission,
+      missionDirectory,
+      relativeDirectory,
+      relativeMissionPath: posix.join(relativeDirectory, MISSION_JSON_FILE),
+    };
+  }
+
+  private parseShapingResultForMission(
+    resultSource: string,
+    resultPath: string,
+    mission: ShapingMissionPackage,
+  ): ShapingResultSubmission {
+    const result =
+      mission.identity.phase === "brainstorm"
+        ? this.parseJson(
+            resultSource,
+            resultPath,
+            brainstormResultSubmissionSchema,
+          )
+        : this.parseJson(resultSource, resultPath, specResultSubmissionSchema);
+    const missionContentSha256 =
+      "brainstorm_mission_content_sha256" in result
+        ? result.brainstorm_mission_content_sha256
+        : result.spec_mission_content_sha256;
+    if (
+      JSON.stringify(result.identity) !== JSON.stringify(mission.identity) ||
+      missionContentSha256 !== mission.content_sha256
+    ) {
+      throw this.invalid(
+        resultPath,
+        "shaping result must match its immutable mission identity and content SHA",
+      );
+    }
+    return result;
+  }
+
+  private async writeImmutableShapingJson(
+    targetPath: string,
+    value: unknown,
+    label: string,
+  ): Promise<string> {
+    const expectedSource = `${JSON.stringify(value, null, 2)}\n`;
+    const existingSource = await this.readOptionalFile(targetPath);
+    if (existingSource !== null) {
+      if (existingSource !== expectedSource) {
+        throw this.invalid(targetPath, `immutable ${label} differs`);
+      }
+      return existingSource;
+    }
+
+    await this.writeJsonAtomically(targetPath, value);
+    const publishedSource = await this.readRequiredFile(targetPath);
+    if (publishedSource !== expectedSource) {
+      throw this.invalid(targetPath, `immutable ${label} differs after publish`);
+    }
+    return publishedSource;
+  }
+
+  private hashArtifactSource(source: string): string {
+    return createHash("sha256").update(source).digest("hex");
+  }
+
+  private async readStoredShapingArtifact(snapshot: {
+    mission: ShapingMissionPackage;
+    missionDirectory: string;
+    relativeDirectory: string;
+    relativeMissionPath: string;
+  }): Promise<StoredShapingArtifact> {
+    const resultPath = join(snapshot.missionDirectory, RESULT_JSON_FILE);
+    const resultSource = await this.readOptionalFile(resultPath);
+    const resultContentSha256 =
+      resultSource === null ? null : this.hashArtifactSource(resultSource);
+    const importPath = join(snapshot.missionDirectory, IMPORT_JSON_FILE);
+    const importSource = await this.readOptionalFile(importPath);
+    const importReceipt =
+      importSource === null
+        ? null
+        : this.parseJson(importSource, importPath, shapingImportReceiptSchema);
+    if (
+      importReceipt !== null &&
+      (resultSource === null ||
+        importReceipt.result_content_sha256 !== resultContentSha256 ||
+        importReceipt.shaping_mission_content_sha256 !==
+          snapshot.mission.content_sha256 ||
+        JSON.stringify(importReceipt.identity) !==
+          JSON.stringify(snapshot.mission.identity))
+    ) {
+      throw this.invalid(
+        importPath,
+        "shaping import receipt does not match its stored mission and result",
+      );
+    }
+    if (importReceipt?.outcome === "applied" && resultSource !== null) {
+      this.parseShapingResultForMission(
+        resultSource,
+        resultPath,
+        snapshot.mission,
+      );
+    }
+
+    const acceptancePath = join(
+      snapshot.missionDirectory,
+      ACCEPTANCE_JSON_FILE,
+    );
+    const acceptanceSource = await this.readOptionalFile(acceptancePath);
+    const acceptanceReceipt =
+      acceptanceSource === null
+        ? null
+        : this.parseJson(
+            acceptanceSource,
+            acceptancePath,
+            shapingAcceptanceReceiptSchema,
+          );
+    if (
+      acceptanceReceipt !== null &&
+      (snapshot.mission.identity.phase !== "brainstorm" ||
+        resultContentSha256 === null ||
+        importReceipt?.outcome !== "applied" ||
+        JSON.stringify(acceptanceReceipt.identity) !==
+          JSON.stringify(snapshot.mission.identity) ||
+        acceptanceReceipt.brainstorm_mission_content_sha256 !==
+          snapshot.mission.content_sha256 ||
+        acceptanceReceipt.brainstorm_result_content_sha256 !==
+          resultContentSha256)
+    ) {
+      throw this.invalid(
+        acceptancePath,
+        "shaping acceptance does not match one applied Brainstorm result",
+      );
+    }
+
+    return {
+      mission: snapshot.mission,
+      mission_path: snapshot.relativeMissionPath,
+      task_path: snapshot.mission.task_path,
+      result:
+        resultSource === null || resultContentSha256 === null
+          ? null
+          : {
+              result_path: posix.join(
+                snapshot.relativeDirectory,
+                RESULT_JSON_FILE,
+              ),
+              result_source: resultSource,
+              result_content_sha256: resultContentSha256,
+            },
+      import_receipt: importReceipt,
+      import_path:
+        importReceipt === null
+          ? null
+          : posix.join(snapshot.relativeDirectory, IMPORT_JSON_FILE),
+      acceptance:
+        acceptanceReceipt === null || acceptanceSource === null
+          ? null
+          : {
+              receipt: acceptanceReceipt,
+              acceptance_path: posix.join(
+                snapshot.relativeDirectory,
+                ACCEPTANCE_JSON_FILE,
+              ),
+              acceptance_content_sha256:
+                this.hashArtifactSource(acceptanceSource),
+            },
+    };
+  }
+
+  private async assertSpecShapingSelection(
+    mission: SpecMissionPackage,
+  ): Promise<void> {
+    const matches = (await this.listShapingArtifacts(mission.identity.work_item_id))
+      .filter(
+        (artifact) =>
+          artifact.acceptance?.acceptance_content_sha256 ===
+          mission.input.brainstorm_acceptance_sha256,
+      );
+    if (matches.length !== 1) {
+      throw this.missionNotReady(
+        mission.identity.work_item_id,
+        matches.length === 0
+          ? "The selected Brainstorm acceptance does not exist."
+          : "More than one Brainstorm acceptance matches the selected SHA.",
+      );
+    }
+    const selected = matches[0];
+    if (
+      selected.mission.identity.phase !== "brainstorm" ||
+      selected.acceptance === null ||
+      selected.import_receipt?.outcome !== "applied" ||
+      selected.result === null
+    ) {
+      throw this.missionNotReady(
+        mission.identity.work_item_id,
+        "The selected Brainstorm artifact is not accepted and applied.",
+      );
+    }
+    const result = this.parseShapingResultForMission(
+      selected.result.result_source,
+      join(this.workspaceRoot, selected.result.result_path),
+      selected.mission,
+    );
+    if (
+      result.identity.phase !== "brainstorm" ||
+      JSON.stringify(mission.input.brainstorm_acceptance) !==
+        JSON.stringify(selected.acceptance.receipt) ||
+      JSON.stringify(mission.input.brainstorm_result) !== JSON.stringify(result)
+    ) {
+      throw this.missionNotReady(
+        mission.identity.work_item_id,
+        "The Spec input does not match the selected Brainstorm acceptance.",
       );
     }
   }

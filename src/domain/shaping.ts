@@ -175,6 +175,56 @@ export type ShapingMissionPackageBuilder<
   TMission extends ShapingMissionPackage = ShapingMissionPackage,
 > = (paths: ShapingPaths) => TMission;
 
+export interface ShapingArtifactWriteResult<
+  TMission extends ShapingMissionPackage = ShapingMissionPackage,
+> {
+  mission: TMission;
+  workspace_path: string;
+  task_path: string;
+  mission_path: string;
+}
+
+export interface ShapingArtifactReadResult {
+  mission: ShapingMissionPackage;
+  mission_path: string;
+}
+
+export interface ShapingResultSnapshot extends ShapingArtifactReadResult {
+  result_path: string;
+  result_source: string;
+}
+
+export interface ShapingImportReceiptWriteInput {
+  result_source: string;
+  receipt: ShapingImportReceipt;
+}
+
+export interface ShapingReceiptWriteResult<
+  TReceipt extends ShapingImportReceipt | ShapingAcceptanceReceipt,
+> {
+  receipt: TReceipt;
+  receipt_path: string;
+  receipt_content_sha256: string;
+}
+
+export interface StoredShapingArtifact {
+  mission: ShapingMissionPackage;
+  mission_path: string;
+  task_path: string;
+  result: {
+    result_path: string;
+    result_source: string;
+    result_content_sha256: string;
+  } | null;
+  import_receipt: ShapingImportReceipt | null;
+  import_path: string | null;
+  acceptance: {
+    receipt: ShapingAcceptanceReceipt;
+    acceptance_path: string;
+    acceptance_content_sha256: string;
+  } | null;
+}
+
 const brainstormIdentitySchema: z.ZodType<
   ShapingIdentity<"brainstorm">
 > = z.strictObject({
