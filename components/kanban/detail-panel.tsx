@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import type {
+  BrainstormMissionCompilation,
   MissionCompilation,
   PatchMissionCompilation,
   PortfolioImportResult,
@@ -25,6 +26,10 @@ import type {
   PortfolioReviewImportResult,
   PortfolioRetryResult,
   ReviewMissionCompilation,
+  ShapingAcceptanceResult,
+  ShapingArtifactListing,
+  ShapingImportResult,
+  SpecMissionCompilation,
 } from "@/src/application/portfolio";
 import {
   INBOX_SOURCE_ID,
@@ -38,6 +43,11 @@ import type {
   StoredImportEvidence,
 } from "@/src/domain/result";
 import type { ConnectedRunSummary } from "@/src/domain/connected-run";
+import type {
+  BrainstormResultSubmission,
+  SpecResultSubmission,
+  StoredShapingArtifact,
+} from "@/src/domain/shaping";
 import {
   WORK_ITEM_PRIORITIES,
   WORK_ITEM_TYPES,
@@ -56,6 +66,7 @@ import {
   type BoardColumnId,
   type ConnectedExecuteProjection,
   type PatchAttentionProjection,
+  type ShapingHandoffProjection,
 } from "@/src/presentation/board";
 
 interface DetailPanelProps {
@@ -209,6 +220,26 @@ function goalContractValues(value: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+export interface GoalContractDraft {
+  purpose: string;
+  acceptanceCriteria: string;
+  nonGoals: string;
+  allowedScope: string;
+  reviewReady: string;
+}
+
+export function specProposalToGoalContractDraft(
+  proposal: SpecResultSubmission["proposal"],
+): GoalContractDraft {
+  return {
+    purpose: proposal.purpose,
+    acceptanceCriteria: goalContractLines(proposal.acceptance_criteria),
+    nonGoals: goalContractLines(proposal.non_goals),
+    allowedScope: goalContractLines(proposal.allowed_scope),
+    reviewReady: goalContractLines(proposal.review_ready),
+  };
 }
 
 function shortEvidencePath(path: string): string {
@@ -667,6 +698,492 @@ export function RunEvidenceSection({
             );
           })}
         </div>
+      ) : null}
+    </section>
+  );
+}
+
+type ShapingMutation = "compiling" | "importing" | "accepting";
+type ShapingCopyTarget = "task" | "mission" | "workspace" | "content_sha256";
+type ShapingCompilation =
+  | BrainstormMissionCompilation
+  | SpecMissionCompilation;
+
+interface ShapingSectionProps {
+  fieldId: string;
+  projection: ShapingHandoffProjection;
+  artifacts: ShapingArtifactListing["artifacts"];
+  loading: boolean;
+  error: string | null;
+  selectedAcceptanceSha256: string;
+  mutation: ShapingMutation | null;
+  compilation: ShapingCompilation | null;
+  imported: ShapingImportResult | null;
+  acceptance: ShapingAcceptanceResult | null;
+  copiedTarget: ShapingCopyTarget | null;
+  onSelectAcceptance: (acceptanceContentSha256: string) => void;
+  onCompile: () => void;
+  onImport: () => void;
+  onAccept: () => void;
+  onCopy: (target: ShapingCopyTarget, value: string) => void;
+  onUseProposal: (proposal: SpecResultSubmission["proposal"]) => void;
+}
+
+interface AcceptedBrainstormChoice {
+  artifact: StoredShapingArtifact;
+  result: BrainstormResultSubmission;
+  acceptanceContentSha256: string;
+}
+
+function isBrainstormResult(
+  result: ShapingImportResult["result"],
+): result is BrainstormResultSubmission {
+  return result?.identity.phase === "brainstorm";
+}
+
+function isSpecResult(
+  result: ShapingImportResult["result"],
+): result is SpecResultSubmission {
+  return result?.identity.phase === "spec";
+}
+
+function acceptedBrainstormChoice(
+  artifact: StoredShapingArtifact,
+): AcceptedBrainstormChoice | null {
+  if (
+    artifact.mission.identity.phase !== "brainstorm" ||
+    artifact.result === null ||
+    artifact.import_receipt?.outcome !== "applied" ||
+    artifact.acceptance === null
+  ) {
+    return null;
+  }
+
+  try {
+    const result = JSON.parse(artifact.result.result_source) as unknown;
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("identity" in result) ||
+      typeof result.identity !== "object" ||
+      result.identity === null ||
+      !("phase" in result.identity) ||
+      result.identity.phase !== "brainstorm" ||
+      !("problem_statement" in result) ||
+      typeof result.problem_statement !== "string" ||
+      !("approach" in result) ||
+      typeof result.approach !== "string" ||
+      !("non_goals" in result) ||
+      !Array.isArray(result.non_goals) ||
+      !("open_questions" in result) ||
+      !Array.isArray(result.open_questions)
+    ) {
+      return null;
+    }
+
+    return {
+      artifact,
+      result: result as BrainstormResultSubmission,
+      acceptanceContentSha256:
+        artifact.acceptance.acceptance_content_sha256,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function ShapingMissionHandoff({
+  compilation,
+  copiedTarget,
+  onCopy,
+}: {
+  compilation: ShapingCompilation;
+  copiedTarget: ShapingCopyTarget | null;
+  onCopy: ShapingSectionProps["onCopy"];
+}) {
+  const copyRows: readonly {
+    target: ShapingCopyTarget;
+    label: string;
+    value: string;
+  }[] = [
+    { target: "task", label: "TASK.md", value: compilation.task_path },
+    {
+      target: "mission",
+      label: "Mission JSON",
+      value: compilation.mission_path,
+    },
+    {
+      target: "workspace",
+      label: "Workspace",
+      value: compilation.workspace_path,
+    },
+    {
+      target: "content_sha256",
+      label: "Content SHA",
+      value: compilation.mission.content_sha256,
+    },
+  ];
+
+  return (
+    <div className="mt-4 border-l-2 border-border bg-background px-3 py-3">
+      <p className="text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+        Immutable mission handoff
+      </p>
+      <dl className="mt-3 space-y-3 text-xs">
+        {copyRows.map((row) => (
+          <div key={row.target}>
+            <dt className="text-muted-foreground">{row.label}</dt>
+            <dd className="mt-1 flex items-start justify-between gap-3">
+              <span className="min-w-0 break-all text-[11px] leading-5">
+                {row.value}
+              </span>
+              <button
+                type="button"
+                onClick={() => onCopy(row.target, row.value)}
+                aria-label={`Copy ${row.label}`}
+                className="h-7 shrink-0 rounded-md border bg-secondary px-2 text-[11px] font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              >
+                {copiedTarget === row.target ? "Copied" : "Copy"}
+              </button>
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+function ShapingStringList({
+  values,
+  emptyLabel,
+}: {
+  values: readonly string[];
+  emptyLabel: string;
+}) {
+  return values.length > 0 ? (
+    <ul className="mt-1 space-y-1 text-xs leading-5">
+      {values.map((value) => (
+        <li key={value} className="border-l-2 border-border pl-2">
+          {value}
+        </li>
+      ))}
+    </ul>
+  ) : (
+    <p className="mt-1 text-xs text-muted-foreground">{emptyLabel}</p>
+  );
+}
+
+function BrainstormEvidence({ result }: { result: BrainstormResultSubmission }) {
+  return (
+    <article className="mt-4 border bg-muted/30 px-3 py-3">
+      <p className="text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+        Imported Brainstorm evidence
+      </p>
+      <div className="mt-3 space-y-4">
+        <section>
+          <h4 className="text-[11px] font-medium text-muted-foreground">
+            Evidence · Problem statement
+          </h4>
+          <p className="mt-1 text-xs leading-5">{result.problem_statement}</p>
+        </section>
+        <section>
+          <h4 className="text-[11px] font-medium text-muted-foreground">
+            Evidence · Approach
+          </h4>
+          <p className="mt-1 text-xs leading-5">{result.approach}</p>
+        </section>
+        <section>
+          <h4 className="text-[11px] font-medium text-muted-foreground">
+            Evidence · Non-goals
+          </h4>
+          <ShapingStringList
+            values={result.non_goals}
+            emptyLabel="No non-goals proposed."
+          />
+        </section>
+        <section>
+          <h4 className="text-[11px] font-medium text-muted-foreground">
+            Evidence · Open questions
+          </h4>
+          <ShapingStringList
+            values={result.open_questions}
+            emptyLabel="No open questions proposed."
+          />
+        </section>
+      </div>
+    </article>
+  );
+}
+
+function SpecProposal({
+  result,
+  onUseProposal,
+}: {
+  result: SpecResultSubmission;
+  onUseProposal: ShapingSectionProps["onUseProposal"];
+}) {
+  const proposal = result.proposal;
+  return (
+    <article className="mt-4 border bg-muted/30 px-3 py-3">
+      <p className="text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+        Imported Spec proposal
+      </p>
+      <div className="mt-3 space-y-4">
+        <section>
+          <h4 className="text-[11px] font-medium text-muted-foreground">
+            Proposal · Purpose
+          </h4>
+          <p className="mt-1 text-xs leading-5">{proposal.purpose}</p>
+        </section>
+        {(
+          [
+            ["Acceptance criteria", proposal.acceptance_criteria],
+            ["Non-goals", proposal.non_goals],
+            ["Allowed scope", proposal.allowed_scope],
+            ["Review ready", proposal.review_ready],
+          ] as const
+        ).map(([label, values]) => (
+          <section key={label}>
+            <h4 className="text-[11px] font-medium text-muted-foreground">
+              Proposal · {label}
+            </h4>
+            <ShapingStringList
+              values={values}
+              emptyLabel={`No ${label.toLocaleLowerCase()} proposed.`}
+            />
+          </section>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={() => onUseProposal(proposal)}
+        className="mt-4 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+      >
+        Use proposal as draft
+      </button>
+      <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+        Fills the local editor only. Save remains the single durable action.
+      </p>
+    </article>
+  );
+}
+
+export function ShapingSection({
+  fieldId,
+  projection,
+  artifacts,
+  loading,
+  error,
+  selectedAcceptanceSha256,
+  mutation,
+  compilation,
+  imported,
+  acceptance,
+  copiedTarget,
+  onSelectAcceptance,
+  onCompile,
+  onImport,
+  onAccept,
+  onCopy,
+  onUseProposal,
+}: ShapingSectionProps) {
+  if (projection.mode === "hidden") {
+    return null;
+  }
+
+  const busy = mutation !== null;
+  const acceptedChoices = artifacts
+    .map(acceptedBrainstormChoice)
+    .filter((choice): choice is AcceptedBrainstormChoice => choice !== null);
+  const selectedChoice = acceptedChoices.find(
+    (choice) =>
+      choice.acceptanceContentSha256 === selectedAcceptanceSha256,
+  );
+  const staleSelection =
+    projection.phase === "spec" &&
+    selectedAcceptanceSha256.length > 0 &&
+    selectedChoice === undefined;
+  const brainstormResult = isBrainstormResult(imported?.result)
+    ? imported.result
+    : null;
+  const specResult = isSpecResult(imported?.result) ? imported.result : null;
+  const rejectedImport = imported?.receipt.outcome === "rejected";
+  const canCompileSpec =
+    projection.phase !== "spec" || selectedChoice !== undefined;
+
+  return (
+    <section
+      aria-labelledby={`${fieldId}-shaping`}
+      className="border-y py-4"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 id={`${fieldId}-shaping`} className="text-xs font-medium">
+            {projection.phase === "brainstorm"
+              ? "Brainstorm shaping"
+              : "Spec shaping"}
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {projection.phase === "brainstorm"
+              ? "Compile an external shaping brief, inspect its evidence, then explicitly accept the input you want to carry forward."
+              : "Choose an accepted Brainstorm input, compile the Spec brief, and inspect its proposal before filling the editor."}
+          </p>
+        </div>
+        <span className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+          Active
+        </span>
+      </div>
+
+      {error ? (
+        <p
+          className="mt-3 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs leading-5"
+          role="alert"
+        >
+          {error}
+        </p>
+      ) : null}
+
+      {loading ? (
+        <p className="mt-3 text-xs text-muted-foreground" role="status">
+          Loading shaping history…
+        </p>
+      ) : null}
+
+      {!loading && error === null && artifacts.length === 0 ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          No shaping artifacts yet.
+        </p>
+      ) : null}
+
+      {projection.phase === "spec" ? (
+        <fieldset className="mt-4" disabled={busy}>
+          <legend className="text-[11px] font-medium text-muted-foreground">
+            Accepted Brainstorm input
+          </legend>
+          {acceptedChoices.length === 0 ? (
+            <p className="mt-2 border-l-2 border-border bg-background px-3 py-2.5 text-xs leading-5 text-muted-foreground">
+              No accepted Brainstorm results are available. Return to Brainstorm
+              and explicitly accept one before compiling a Spec mission.
+            </p>
+          ) : (
+            <div className="mt-2 space-y-2">
+              {acceptedChoices.map((choice) => (
+                <label
+                  key={choice.acceptanceContentSha256}
+                  className="flex cursor-pointer items-start gap-2.5 border bg-background px-3 py-2.5 text-xs has-checked:border-primary"
+                >
+                  <input
+                    type="radio"
+                    name={`${fieldId}-brainstorm-acceptance`}
+                    value={choice.acceptanceContentSha256}
+                    checked={
+                      choice.acceptanceContentSha256 ===
+                      selectedAcceptanceSha256
+                    }
+                    onChange={() =>
+                      onSelectAcceptance(choice.acceptanceContentSha256)
+                    }
+                    className="mt-0.5 accent-primary"
+                  />
+                  <span className="min-w-0">
+                    <span className="block font-medium">
+                      {choice.result.problem_statement}
+                    </span>
+                    <span className="mt-1 block leading-5 text-muted-foreground">
+                      Evidence · {choice.result.approach}
+                    </span>
+                    <span className="mt-1 block break-all text-[10px] text-muted-foreground">
+                      Acceptance · {choice.acceptanceContentSha256}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+        </fieldset>
+      ) : null}
+
+      {staleSelection ? (
+        <p
+          className="mt-3 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs leading-5"
+          role="alert"
+        >
+          The selected Brainstorm acceptance is stale or unavailable. Choose an
+          accepted result from the current history.
+        </p>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button
+          type="button"
+          disabled={busy || !canCompileSpec}
+          onClick={onCompile}
+          className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {mutation === "compiling"
+            ? "Compiling…"
+            : `Compile ${projection.phase === "brainstorm" ? "Brainstorm" : "Spec"} mission`}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onImport}
+          className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {mutation === "importing" ? "Importing…" : "Import result"}
+        </button>
+      </div>
+
+      {rejectedImport ? (
+        <div
+          className="mt-4 border-l-2 border-destructive bg-destructive/10 px-3 py-3 text-xs"
+          role="alert"
+        >
+          <p className="font-medium">Imported result rejected</p>
+          <ShapingStringList
+            values={imported.receipt.reasons}
+            emptyLabel="The result did not satisfy the shaping contract."
+          />
+        </div>
+      ) : null}
+
+      {brainstormResult ? <BrainstormEvidence result={brainstormResult} /> : null}
+      {specResult ? (
+        <SpecProposal result={specResult} onUseProposal={onUseProposal} />
+      ) : null}
+
+      {projection.phase === "brainstorm" && brainstormResult ? (
+        <div className="mt-4 border-l-2 border-primary bg-background px-3 py-3">
+          <p className="text-xs font-medium">
+            {acceptance === null
+              ? "Select this imported evidence as Spec input"
+              : "Selected as Spec input"}
+          </p>
+          {acceptance ? (
+            <p className="mt-1 break-all text-[11px] leading-5 text-muted-foreground">
+              Acceptance · {acceptance.acceptance_content_sha256}
+            </p>
+          ) : (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onAccept}
+              className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "accepting"
+                ? "Selecting…"
+                : "Use Brainstorm as Spec input"}
+            </button>
+          )}
+        </div>
+      ) : null}
+
+      {compilation ? (
+        <ShapingMissionHandoff
+          compilation={compilation}
+          copiedTarget={copiedTarget}
+          onCopy={onCopy}
+        />
       ) : null}
     </section>
   );
