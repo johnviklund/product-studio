@@ -2409,12 +2409,26 @@ export function DetailPanel({
       return;
     }
     const phase = shapingHandoff.phase;
+    if (phase === "spec" && selectedAcceptanceSha256.length === 0) {
+      setShapingActionError(
+        "Choose an accepted Brainstorm input before importing the Spec result.",
+      );
+      return;
+    }
     setShapingMutation("importing");
     setShapingActionError(null);
     try {
       const response = await fetch(
         `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/${phase}/import`,
-        { method: "POST" },
+        phase === "spec"
+          ? {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                brainstorm_acceptance_sha256: selectedAcceptanceSha256,
+              }),
+            }
+          : { method: "POST" },
       );
       const body = (await response.json()) as
         | ShapingImportResult

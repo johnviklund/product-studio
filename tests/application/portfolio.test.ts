@@ -1225,6 +1225,9 @@ describe("PortfolioService", () => {
     const specImport = await service.importSpecResult(
       sourceId,
       created.goal.work_item_id,
+      {
+        brainstorm_acceptance_sha256: accepted.acceptance_content_sha256,
+      },
     );
     const completeListing = await service.listShapingArtifacts(
       sourceId,
@@ -1241,6 +1244,126 @@ describe("PortfolioService", () => {
     expect(await readFile(statePath, "utf8")).toBe(specStateBefore);
     expect(await service.list()).toEqual(specIndexBefore);
     expect(rebuildSpy).not.toHaveBeenCalled();
+    index.close();
+  });
+
+  it("imports each Spec artifact by its explicit Brainstorm acceptance", async () => {
+    const root = await createWorkspace("Explicit Spec Selection Workspace");
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const captured = await service.createCapture({
+      title: "Compare accepted Brainstorm directions",
+      capture_kind: "idea",
+      source_id: sourceId,
+    });
+    const workItemId = captured.work_item.goal.work_item_id;
+    await service.updateWorkItemPhase(sourceId, workItemId, {
+      target_phase: "brainstorm",
+    });
+
+    async function importAndAcceptBrainstorm(label: string) {
+      const mission = await service.compileBrainstormMission(
+        sourceId,
+        workItemId,
+      );
+      const result = {
+        result_schema_version: 1 as const,
+        brainstorm_mission_content_sha256: mission.mission.content_sha256,
+        identity: mission.mission.identity,
+        problem_statement: `${label} problem`,
+        approach: `${label} approach`,
+        non_goals: [`${label} non-goal`],
+        open_questions: [`${label} question`],
+      };
+      await writeFile(
+        join(dirname(mission.task_path), "result.json"),
+        `${JSON.stringify(result, null, 2)}\n`,
+        "utf8",
+      );
+      await expect(
+        service.importBrainstormResult(sourceId, workItemId),
+      ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
+      return service.acceptBrainstormResult(sourceId, workItemId);
+    }
+
+    const acceptedA = await importAndAcceptBrainstorm("Direction A");
+    await service.saveWorkItem(sourceId, workItemId, {
+      target_source_id: sourceId,
+      title: "Compare a second accepted direction",
+      type: captured.work_item.goal.type ?? null,
+      priority: captured.work_item.goal.priority ?? null,
+      tags: captured.work_item.goal.tags ?? [],
+      notes: captured.work_item.goal.notes ?? null,
+    });
+    const acceptedB = await importAndAcceptBrainstorm("Direction B");
+    await service.updateWorkItemPhase(sourceId, workItemId, {
+      target_phase: "spec",
+    });
+
+    async function compileSpecResult(
+      brainstormAcceptanceSha256: string,
+      label: string,
+    ) {
+      const mission = await service.compileSpecMission(sourceId, workItemId, {
+        brainstorm_acceptance_sha256: brainstormAcceptanceSha256,
+      });
+      const result = {
+        result_schema_version: 1 as const,
+        spec_mission_content_sha256: mission.mission.content_sha256,
+        identity: mission.mission.identity,
+        proposal: {
+          purpose: `${label} purpose`,
+          acceptance_criteria: [`${label} acceptance`],
+          non_goals: [`${label} non-goal`],
+          allowed_scope: ["src/application"],
+          review_ready: [`${label} review ready`],
+        },
+      };
+      await writeFile(
+        join(dirname(mission.task_path), "result.json"),
+        `${JSON.stringify(result, null, 2)}\n`,
+        "utf8",
+      );
+      return result;
+    }
+
+    const inputA = {
+      brainstorm_acceptance_sha256: acceptedA.acceptance_content_sha256,
+    };
+    const specA = await compileSpecResult(
+      inputA.brainstorm_acceptance_sha256,
+      "Spec A",
+    );
+    const importedA = await service.importSpecResult(
+      sourceId,
+      workItemId,
+      inputA,
+    );
+    expect(importedA).toMatchObject({
+      receipt: { outcome: "applied" },
+      result: { proposal: specA.proposal },
+    });
+
+    const inputB = {
+      brainstorm_acceptance_sha256: acceptedB.acceptance_content_sha256,
+    };
+    const specB = await compileSpecResult(
+      inputB.brainstorm_acceptance_sha256,
+      "Spec B",
+    );
+    const importedB = await service.importSpecResult(
+      sourceId,
+      workItemId,
+      inputB,
+    );
+    expect(importedB).toMatchObject({
+      receipt: { outcome: "applied" },
+      result: { proposal: specB.proposal },
+    });
+    await expect(
+      service.importSpecResult(sourceId, workItemId, inputA),
+    ).resolves.toEqual(importedA);
     index.close();
   });
 

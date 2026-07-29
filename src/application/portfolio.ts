@@ -461,8 +461,14 @@ export const compileReviewMissionInputSchema = z.strictObject({
   independence_attested: z.literal(true),
 });
 
+const shapingAcceptanceSha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+
 export const compileSpecMissionInputSchema = z.strictObject({
-  brainstorm_acceptance_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  brainstorm_acceptance_sha256: shapingAcceptanceSha256Schema,
+});
+
+export const importSpecResultInputSchema = z.strictObject({
+  brainstorm_acceptance_sha256: shapingAcceptanceSha256Schema,
 });
 
 const portfolioAttentionItemSchema: z.ZodType<PortfolioAttentionItem> =
@@ -913,13 +919,20 @@ export class PortfolioService {
   async importSpecResult(
     sourceId: string,
     workItemId: string,
+    input: { brainstorm_acceptance_sha256: string },
   ): Promise<ShapingImportResult> {
+    const validatedInput = importSpecResultInputSchema.parse(input);
     const { source, workItem } = await this.requireActiveShapingItem(
       sourceId,
       workItemId,
       "spec",
     );
-    return this.importShapingResult(source, workItem, "spec");
+    return this.importShapingResult(
+      source,
+      workItem,
+      "spec",
+      validatedInput.brainstorm_acceptance_sha256,
+    );
   }
 
   async listShapingArtifacts(
@@ -2082,6 +2095,7 @@ export class PortfolioService {
     source: ResolvedSource,
     workItem: WorkItem,
     phase: "brainstorm" | "spec",
+    brainstormAcceptanceSha256?: string,
   ): Promise<StoredShapingArtifact> {
     const artifacts = await source.workspace.listShapingArtifacts(
       workItem.goal.work_item_id,
@@ -2105,8 +2119,11 @@ export class PortfolioService {
         : artifacts.filter(
           (artifact) =>
             artifact.mission.identity.phase === "spec" &&
+              artifact.mission.input.phase === "spec" &&
               artifact.mission.input.title === goalInput.title &&
-              artifact.mission.input.notes === goalInput.notes,
+              artifact.mission.input.notes === goalInput.notes &&
+              artifact.mission.input.brainstorm_acceptance_sha256 ===
+                brainstormAcceptanceSha256,
           );
     if (matches.length !== 1) {
       throw this.missionNotReady(
@@ -2123,11 +2140,13 @@ export class PortfolioService {
     source: ResolvedSource,
     workItem: WorkItem,
     phase: "brainstorm" | "spec",
+    brainstormAcceptanceSha256?: string,
   ): Promise<ShapingImportResult> {
     const artifact = await this.currentShapingArtifact(
       source,
       workItem,
       phase,
+      brainstormAcceptanceSha256,
     );
     if (artifact.result === null) {
       throw this.missionNotReady(

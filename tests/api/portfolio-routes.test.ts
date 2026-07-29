@@ -1026,7 +1026,12 @@ describe("portfolio API routes", () => {
         }),
         context,
       ),
-      importPortfolioSpecResult(shapingRequest("/spec/import"), context),
+      importPortfolioSpecResult(
+        shapingRequest("/spec/import", {
+          brainstorm_acceptance_sha256: acceptanceSha256,
+        }),
+        context,
+      ),
     ]);
 
     expect(responses.map(({ status }) => status)).toEqual([
@@ -1042,7 +1047,9 @@ describe("portfolio API routes", () => {
     expect(compileSpecMission).toHaveBeenCalledWith(sourceId, workItemId, {
       brainstorm_acceptance_sha256: acceptanceSha256,
     });
-    expect(importSpecResult).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(importSpecResult).toHaveBeenCalledWith(sourceId, workItemId, {
+      brainstorm_acceptance_sha256: acceptanceSha256,
+    });
     expect([
       portfolioShapingRoute.runtime,
       portfolioBrainstormMissionRoute.runtime,
@@ -1057,6 +1064,14 @@ describe("portfolio API routes", () => {
     const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
     const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
     const compileSpecMission = vi.fn();
+    const unknownAcceptanceSha256 = "b".repeat(64);
+    const importSpecResult = vi.fn().mockRejectedValue(
+      new ControllerConflictError(
+        "mission_not_ready",
+        workItemId,
+        "No current spec shaping artifact exists.",
+      ),
+    );
     const compileBrainstormMission = vi.fn().mockRejectedValue(
       new ControllerConflictError(
         "mission_not_ready",
@@ -1069,6 +1084,7 @@ describe("portfolio API routes", () => {
     );
     getService.mockResolvedValue({
       compileSpecMission,
+      importSpecResult,
       compileBrainstormMission,
       listShapingArtifacts,
     });
@@ -1077,6 +1093,16 @@ describe("portfolio API routes", () => {
     const malformed = await compilePortfolioSpecMission(
       shapingRequest("/spec/mission", {
         brainstorm_acceptance_sha256: "not-a-sha",
+      }),
+      context,
+    );
+    const missingSelector = await importPortfolioSpecResult(
+      shapingRequest("/spec/import", {}),
+      context,
+    );
+    const unknownSelector = await importPortfolioSpecResult(
+      shapingRequest("/spec/import", {
+        brainstorm_acceptance_sha256: unknownAcceptanceSha256,
       }),
       context,
     );
@@ -1090,6 +1116,17 @@ describe("portfolio API routes", () => {
     expect(await malformed.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid request" },
     });
+    expect(missingSelector.status).toBe(400);
+    expect(await missingSelector.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid request" },
+    });
+    expect(unknownSelector.status).toBe(409);
+    expect(await unknownSelector.json()).toEqual({
+      error: {
+        code: "mission_not_ready",
+        message: "No current spec shaping artifact exists.",
+      },
+    });
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toEqual({
       error: { code: "mission_not_ready", message: "Brainstorm is not ready." },
@@ -1099,6 +1136,10 @@ describe("portfolio API routes", () => {
       error: { code: "work_item_not_found", message: "Work item not found" },
     });
     expect(compileSpecMission).not.toHaveBeenCalled();
+    expect(importSpecResult).toHaveBeenCalledOnce();
+    expect(importSpecResult).toHaveBeenCalledWith(sourceId, workItemId, {
+      brainstorm_acceptance_sha256: unknownAcceptanceSha256,
+    });
   });
 
   it("maps patch and attention conflicts through the established response contract", async () => {
