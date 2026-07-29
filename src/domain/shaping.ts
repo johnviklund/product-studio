@@ -550,6 +550,16 @@ export function hashShapingInput(input: ShapingInput): string {
   return hashShapingArtifact(canonicalShapingInput(parsed));
 }
 
+export function normalizeShapingGoalInput(goal: {
+  title: string;
+  notes?: string;
+}): { title: string; notes?: string } {
+  return {
+    title: goal.title.trim(),
+    ...(goal.notes === undefined ? {} : { notes: goal.notes.trim() }),
+  };
+}
+
 export function serializeShapingContent(
   mission: ShapingMissionPackage,
 ): string {

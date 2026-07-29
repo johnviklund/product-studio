@@ -1244,6 +1244,126 @@ describe("PortfolioService", () => {
     index.close();
   });
 
+  it("normalizes legal goal whitespace across the Brainstorm-to-Spec loop", async () => {
+    const root = await createWorkspace("Whitespace Shaping Workspace");
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const created = await service.createCapture({
+      title: "Normalize shaping input",
+      capture_kind: "idea",
+      source_id: sourceId,
+    });
+    const workItemId = created.work_item.goal.work_item_id;
+    const saved = await service.saveWorkItem(sourceId, workItemId, {
+      target_source_id: sourceId,
+      title: created.work_item.goal.title,
+      type: created.work_item.goal.type ?? null,
+      priority: created.work_item.goal.priority ?? null,
+      tags: created.work_item.goal.tags ?? [],
+      notes: "Some context typed in the textarea\n",
+    });
+    expect(saved.work_item.goal.notes).toBe(
+      "Some context typed in the textarea\n",
+    );
+    await service.updateWorkItemPhase(sourceId, workItemId, {
+      target_phase: "brainstorm",
+    });
+
+    const brainstormMission = await service.compileBrainstormMission(
+      sourceId,
+      workItemId,
+    );
+    const brainstormResult = {
+      result_schema_version: 1 as const,
+      brainstorm_mission_content_sha256:
+        brainstormMission.mission.content_sha256,
+      identity: brainstormMission.mission.identity,
+      problem_statement: "Legal card whitespace blocked shaping.",
+      approach: "Normalize the mission input at the service boundary.",
+      non_goals: ["Do not rewrite the saved card."],
+      open_questions: ["None."],
+    };
+    await writeFile(
+      join(dirname(brainstormMission.task_path), "result.json"),
+      `${JSON.stringify(brainstormResult, null, 2)}\n`,
+      "utf8",
+    );
+    await expect(
+      service.importBrainstormResult(sourceId, workItemId),
+    ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
+    const accepted = await service.acceptBrainstormResult(sourceId, workItemId);
+    await service.updateWorkItemPhase(sourceId, workItemId, {
+      target_phase: "spec",
+    });
+    await expect(
+      service.compileSpecMission(sourceId, workItemId, {
+        brainstorm_acceptance_sha256: accepted.acceptance_content_sha256,
+      }),
+    ).resolves.toMatchObject({ mission: { identity: { phase: "spec" } } });
+
+    const whitespaceEdit = await service.createCapture({
+      title: "Keep shaping identity stable",
+      capture_kind: "idea",
+      source_id: sourceId,
+    });
+    const whitespaceEditId = whitespaceEdit.work_item.goal.work_item_id;
+    await service.saveWorkItem(sourceId, whitespaceEditId, {
+      target_source_id: sourceId,
+      title: whitespaceEdit.work_item.goal.title,
+      type: whitespaceEdit.work_item.goal.type ?? null,
+      priority: whitespaceEdit.work_item.goal.priority ?? null,
+      tags: whitespaceEdit.work_item.goal.tags ?? [],
+      notes: "abc",
+    });
+    await service.updateWorkItemPhase(sourceId, whitespaceEditId, {
+      target_phase: "brainstorm",
+    });
+    const beforeEdit = await service.compileBrainstormMission(
+      sourceId,
+      whitespaceEditId,
+    );
+    const beforeEditResult = {
+      result_schema_version: 1 as const,
+      brainstorm_mission_content_sha256: beforeEdit.mission.content_sha256,
+      identity: beforeEdit.mission.identity,
+      problem_statement: "Whitespace-only edits fork shaping identity.",
+      approach: "Compare normalized goal input.",
+      non_goals: ["Do not mutate durable notes."],
+      open_questions: ["None."],
+    };
+    await writeFile(
+      join(dirname(beforeEdit.task_path), "result.json"),
+      `${JSON.stringify(beforeEditResult, null, 2)}\n`,
+      "utf8",
+    );
+    const afterSave = await service.saveWorkItem(sourceId, whitespaceEditId, {
+      target_source_id: sourceId,
+      title: whitespaceEdit.work_item.goal.title,
+      type: whitespaceEdit.work_item.goal.type ?? null,
+      priority: whitespaceEdit.work_item.goal.priority ?? null,
+      tags: whitespaceEdit.work_item.goal.tags ?? [],
+      notes: "abc\n",
+    });
+    expect(afterSave.work_item.goal.notes).toBe("abc\n");
+    const afterEdit = await service.compileBrainstormMission(
+      sourceId,
+      whitespaceEditId,
+    );
+    expect(afterEdit.mission.identity.input_sha256).toBe(
+      beforeEdit.mission.identity.input_sha256,
+    );
+    await expect(
+      service.importBrainstormResult(sourceId, whitespaceEditId),
+    ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
+    const artifacts = await service.listShapingArtifacts(
+      sourceId,
+      whitespaceEditId,
+    );
+    expect(artifacts.artifacts).toHaveLength(1);
+    index.close();
+  });
+
   it("fails shaping closed for Inbox, wrong phase, missing items, and unaccepted Spec input", async () => {
     const root = await createWorkspace("Shaping failure Workspace");
     const repository = new ProductWorkspace(root);

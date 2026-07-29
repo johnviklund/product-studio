@@ -99,6 +99,7 @@ import {
   compileBrainstormMission as compileBrainstormMissionPackage,
   compileSpecMission as compileSpecMissionPackage,
   hashShapingInput,
+  normalizeShapingGoalInput,
   shapingImportReceiptSchema,
   specResultSubmissionSchema,
   type BrainstormMissionPackage,
@@ -758,12 +759,10 @@ export class PortfolioService {
       workItemId,
       "brainstorm",
     );
+    const goalInput = this.shapingGoalInput(workItem);
     const shapingInput = {
       phase: "brainstorm" as const,
-      title: workItem.goal.title,
-      ...(workItem.goal.notes === undefined
-        ? {}
-        : { notes: workItem.goal.notes }),
+      ...goalInput,
     };
     const identity: ShapingIdentity<"brainstorm"> = {
       phase: "brainstorm",
@@ -888,12 +887,10 @@ export class PortfolioService {
       selected,
       workItemId,
     );
+    const goalInput = this.shapingGoalInput(workItem);
     const shapingInput = {
       phase: "spec" as const,
-      title: workItem.goal.title,
-      ...(workItem.goal.notes === undefined
-        ? {}
-        : { notes: workItem.goal.notes }),
+      ...goalInput,
       brainstorm_acceptance_sha256:
         validatedInput.brainstorm_acceptance_sha256,
       brainstorm_acceptance: selected.acceptance.receipt,
@@ -2075,6 +2072,12 @@ export class PortfolioService {
     return { source, workItem };
   }
 
+  private shapingGoalInput(
+    workItem: WorkItem,
+  ): { title: string; notes?: string } {
+    return normalizeShapingGoalInput(workItem.goal);
+  }
+
   private async currentShapingArtifact(
     source: ResolvedSource,
     workItem: WorkItem,
@@ -2083,6 +2086,7 @@ export class PortfolioService {
     const artifacts = await source.workspace.listShapingArtifacts(
       workItem.goal.work_item_id,
     );
+    const goalInput = this.shapingGoalInput(workItem);
     const matches =
       phase === "brainstorm"
         ? artifacts.filter((artifact) => {
@@ -2091,10 +2095,7 @@ export class PortfolioService {
             }
             const input = {
               phase: "brainstorm" as const,
-              title: workItem.goal.title,
-              ...(workItem.goal.notes === undefined
-                ? {}
-                : { notes: workItem.goal.notes }),
+              ...goalInput,
             };
             return (
               artifact.mission.identity.input_sha256 ===
@@ -2102,10 +2103,10 @@ export class PortfolioService {
             );
           })
         : artifacts.filter(
-            (artifact) =>
-              artifact.mission.identity.phase === "spec" &&
-              artifact.mission.input.title === workItem.goal.title &&
-              artifact.mission.input.notes === workItem.goal.notes,
+          (artifact) =>
+            artifact.mission.identity.phase === "spec" &&
+              artifact.mission.input.title === goalInput.title &&
+              artifact.mission.input.notes === goalInput.notes,
           );
     if (matches.length !== 1) {
       throw this.missionNotReady(

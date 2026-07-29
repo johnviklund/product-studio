@@ -109,6 +109,7 @@ import {
 import {
   brainstormResultSubmissionSchema,
   hashShapingInput,
+  normalizeShapingGoalInput,
   renderShapingTaskMd,
   serializeShapingPackage,
   shapingAcceptanceReceiptSchema,
@@ -1886,9 +1887,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         "compiled shaping identity and paths must match the workspace-derived snapshot",
       );
     }
+    const goalInput = normalizeShapingGoalInput(current.goal);
     if (
-      mission.input.title !== current.goal.title ||
-      mission.input.notes !== current.goal.notes ||
+      mission.input.title !== goalInput.title ||
+      mission.input.notes !== goalInput.notes ||
       hashShapingInput(mission.input) !== validatedIdentity.input_sha256
     ) {
       throw this.missionNotReady(
