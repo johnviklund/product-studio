@@ -23,7 +23,7 @@ describe("workflow transition policy", () => {
 
   it("preserves the existing board phase matrix exactly", () => {
     const expected = {
-      idea: ["spec"],
+      idea: ["brainstorm", "spec"],
       brainstorm: ["spec"],
       spec: ["brainstorm", "plan"],
       plan: ["spec", "execute"],
@@ -44,6 +44,11 @@ describe("workflow transition policy", () => {
         );
       }
     }
+  });
+
+  it("opens only the explicit idea-to-brainstorm on-ramp", () => {
+    expect(validatePhaseTransition("idea", "brainstorm")).toEqual({ ok: true });
+    expect(ALLOWED_PHASE_TRANSITIONS.idea).toEqual(["brainstorm", "spec"]);
   });
 
   it("allows only review-to-patch and patch-to-review patch edges", () => {

@@ -1116,6 +1116,481 @@ describe("PortfolioService", () => {
     restartedIndex.close();
   });
 
+  it("runs the full manual Brainstorm-to-Spec shaping loop without mutating indexed work-item state", async () => {
+    const root = await createWorkspace("Shaping Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Shape an immutable mission loop",
+      type: "Feature",
+    });
+    const index = new SQLitePortfolioIndex(":memory:");
+    const { service } = await createService(index);
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    await service.updateWorkItemPhase(sourceId, created.goal.work_item_id, {
+      target_phase: "brainstorm",
+    });
+
+    const workItemDirectory = join(
+      root,
+      ".founder",
+      "work-items",
+      created.goal.work_item_id,
+    );
+    const goalPath = join(workItemDirectory, "goal.yaml");
+    const statePath = join(workItemDirectory, "state.json");
+    const rebuildSpy = vi.spyOn(index, "rebuild");
+    rebuildSpy.mockClear();
+    const brainstormGoalBefore = await readFile(goalPath, "utf8");
+    const brainstormStateBefore = await readFile(statePath, "utf8");
+    const brainstormIndexBefore = await service.list();
+
+    const brainstormMission = await service.compileBrainstormMission(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const brainstormResult = {
+      result_schema_version: 1 as const,
+      brainstorm_mission_content_sha256:
+        brainstormMission.mission.content_sha256,
+      identity: brainstormMission.mission.identity,
+      problem_statement: "Shaping has no durable manual handoff.",
+      approach: "Use immutable phase-specific artifacts.",
+      non_goals: ["Do not change Execute missions."],
+      open_questions: ["How should Plan shaping work later?"],
+    };
+    await writeFile(
+      join(dirname(brainstormMission.task_path), "result.json"),
+      `${JSON.stringify(brainstormResult, null, 2)}\n`,
+      "utf8",
+    );
+    const brainstormImport = await service.importBrainstormResult(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const accepted = await service.acceptBrainstormResult(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const brainstormListing = await service.listShapingArtifacts(
+      sourceId,
+      created.goal.work_item_id,
+    );
+
+    expect(brainstormImport).toMatchObject({
+      source_id: sourceId,
+      receipt: { outcome: "applied" },
+      result: { problem_statement: brainstormResult.problem_statement },
+    });
+    expect(brainstormListing.artifacts).toHaveLength(1);
+    expect(await readFile(goalPath, "utf8")).toBe(brainstormGoalBefore);
+    expect(await readFile(statePath, "utf8")).toBe(brainstormStateBefore);
+    expect(await service.list()).toEqual(brainstormIndexBefore);
+    expect(rebuildSpy).not.toHaveBeenCalled();
+
+    await service.updateWorkItemPhase(sourceId, created.goal.work_item_id, {
+      target_phase: "spec",
+    });
+    rebuildSpy.mockClear();
+    const specGoalBefore = await readFile(goalPath, "utf8");
+    const specStateBefore = await readFile(statePath, "utf8");
+    const specIndexBefore = await service.list();
+    const specMission = await service.compileSpecMission(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        brainstorm_acceptance_sha256: accepted.acceptance_content_sha256,
+      },
+    );
+    const specResult = {
+      result_schema_version: 1 as const,
+      spec_mission_content_sha256: specMission.mission.content_sha256,
+      identity: specMission.mission.identity,
+      proposal: {
+        purpose: "Make manual shaping durable.",
+        acceptance_criteria: ["Brainstorm and Spec imports are immutable."],
+        non_goals: ["Do not launch a connected agent."],
+        allowed_scope: ["src/domain", "src/application"],
+        review_ready: ["Deterministic checks pass."],
+      },
+    };
+    await writeFile(
+      join(dirname(specMission.task_path), "result.json"),
+      `${JSON.stringify(specResult, null, 2)}\n`,
+      "utf8",
+    );
+    const specImport = await service.importSpecResult(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        brainstorm_acceptance_sha256: accepted.acceptance_content_sha256,
+      },
+    );
+    const completeListing = await service.listShapingArtifacts(
+      sourceId,
+      created.goal.work_item_id,
+    );
+
+    expect(specImport).toMatchObject({
+      source_id: sourceId,
+      receipt: { outcome: "applied" },
+      result: { proposal: specResult.proposal },
+    });
+    expect(completeListing.artifacts).toHaveLength(2);
+    expect(await readFile(goalPath, "utf8")).toBe(specGoalBefore);
+    expect(await readFile(statePath, "utf8")).toBe(specStateBefore);
+    expect(await service.list()).toEqual(specIndexBefore);
+    expect(rebuildSpy).not.toHaveBeenCalled();
+    index.close();
+  });
+
+  it("imports each Spec artifact by its explicit Brainstorm acceptance", async () => {
+    const root = await createWorkspace("Explicit Spec Selection Workspace");
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const captured = await service.createCapture({
+      title: "Compare accepted Brainstorm directions",
+      capture_kind: "idea",
+      source_id: sourceId,
+    });
+    const workItemId = captured.work_item.goal.work_item_id;
+    await service.updateWorkItemPhase(sourceId, workItemId, {
+      target_phase: "brainstorm",
+    });
+
+    async function importAndAcceptBrainstorm(label: string) {
+      const mission = await service.compileBrainstormMission(
+        sourceId,
+        workItemId,
+      );
+      const result = {
+        result_schema_version: 1 as const,
+        brainstorm_mission_content_sha256: mission.mission.content_sha256,
+        identity: mission.mission.identity,
+        problem_statement: `${label} problem`,
+        approach: `${label} approach`,
+        non_goals: [`${label} non-goal`],
+        open_questions: [`${label} question`],
+      };
+      await writeFile(
+        join(dirname(mission.task_path), "result.json"),
+        `${JSON.stringify(result, null, 2)}\n`,
+        "utf8",
+      );
+      await expect(
+        service.importBrainstormResult(sourceId, workItemId),
+      ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
+      return service.acceptBrainstormResult(sourceId, workItemId);
+    }
+
+    const acceptedA = await importAndAcceptBrainstorm("Direction A");
+    await service.saveWorkItem(sourceId, workItemId, {
+      target_source_id: sourceId,
+      title: "Compare a second accepted direction",
+      type: captured.work_item.goal.type ?? null,
+      priority: captured.work_item.goal.priority ?? null,
+      tags: captured.work_item.goal.tags ?? [],
+      notes: captured.work_item.goal.notes ?? null,
+    });
+    const acceptedB = await importAndAcceptBrainstorm("Direction B");
+    await service.updateWorkItemPhase(sourceId, workItemId, {
+      target_phase: "spec",
+    });
+
+    async function compileSpecResult(
+      brainstormAcceptanceSha256: string,
+      label: string,
+    ) {
+      const mission = await service.compileSpecMission(sourceId, workItemId, {
+        brainstorm_acceptance_sha256: brainstormAcceptanceSha256,
+      });
+      const result = {
+        result_schema_version: 1 as const,
+        spec_mission_content_sha256: mission.mission.content_sha256,
+        identity: mission.mission.identity,
+        proposal: {
+          purpose: `${label} purpose`,
+          acceptance_criteria: [`${label} acceptance`],
+          non_goals: [`${label} non-goal`],
+          allowed_scope: ["src/application"],
+          review_ready: [`${label} review ready`],
+        },
+      };
+      await writeFile(
+        join(dirname(mission.task_path), "result.json"),
+        `${JSON.stringify(result, null, 2)}\n`,
+        "utf8",
+      );
+      return result;
+    }
+
+    const inputA = {
+      brainstorm_acceptance_sha256: acceptedA.acceptance_content_sha256,
+    };
+    const specA = await compileSpecResult(
+      inputA.brainstorm_acceptance_sha256,
+      "Spec A",
+    );
+    const importedA = await service.importSpecResult(
+      sourceId,
+      workItemId,
+      inputA,
+    );
+    expect(importedA).toMatchObject({
+      receipt: { outcome: "applied" },
+      result: { proposal: specA.proposal },
+    });
+
+    const inputB = {
+      brainstorm_acceptance_sha256: acceptedB.acceptance_content_sha256,
+    };
+    const specB = await compileSpecResult(
+      inputB.brainstorm_acceptance_sha256,
+      "Spec B",
+    );
+    const importedB = await service.importSpecResult(
+      sourceId,
+      workItemId,
+      inputB,
+    );
+    expect(importedB).toMatchObject({
+      receipt: { outcome: "applied" },
+      result: { proposal: specB.proposal },
+    });
+    await expect(
+      service.importSpecResult(sourceId, workItemId, inputA),
+    ).resolves.toEqual(importedA);
+    index.close();
+  });
+
+  it("normalizes legal goal whitespace across the Brainstorm-to-Spec loop", async () => {
+    const root = await createWorkspace("Whitespace Shaping Workspace");
+    const { index, service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const created = await service.createCapture({
+      title: "Normalize shaping input",
+      capture_kind: "idea",
+      source_id: sourceId,
+    });
+    const workItemId = created.work_item.goal.work_item_id;
+    const saved = await service.saveWorkItem(sourceId, workItemId, {
+      target_source_id: sourceId,
+      title: created.work_item.goal.title,
+      type: created.work_item.goal.type ?? null,
+      priority: created.work_item.goal.priority ?? null,
+      tags: created.work_item.goal.tags ?? [],
+      notes: "Some context typed in the textarea\n",
+    });
+    expect(saved.work_item.goal.notes).toBe(
+      "Some context typed in the textarea\n",
+    );
+    await service.updateWorkItemPhase(sourceId, workItemId, {
+      target_phase: "brainstorm",
+    });
+
+    const brainstormMission = await service.compileBrainstormMission(
+      sourceId,
+      workItemId,
+    );
+    const brainstormResult = {
+      result_schema_version: 1 as const,
+      brainstorm_mission_content_sha256:
+        brainstormMission.mission.content_sha256,
+      identity: brainstormMission.mission.identity,
+      problem_statement: "Legal card whitespace blocked shaping.",
+      approach: "Normalize the mission input at the service boundary.",
+      non_goals: ["Do not rewrite the saved card."],
+      open_questions: ["None."],
+    };
+    await writeFile(
+      join(dirname(brainstormMission.task_path), "result.json"),
+      `${JSON.stringify(brainstormResult, null, 2)}\n`,
+      "utf8",
+    );
+    await expect(
+      service.importBrainstormResult(sourceId, workItemId),
+    ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
+    const accepted = await service.acceptBrainstormResult(sourceId, workItemId);
+    await service.updateWorkItemPhase(sourceId, workItemId, {
+      target_phase: "spec",
+    });
+    await expect(
+      service.compileSpecMission(sourceId, workItemId, {
+        brainstorm_acceptance_sha256: accepted.acceptance_content_sha256,
+      }),
+    ).resolves.toMatchObject({ mission: { identity: { phase: "spec" } } });
+
+    const whitespaceEdit = await service.createCapture({
+      title: "Keep shaping identity stable",
+      capture_kind: "idea",
+      source_id: sourceId,
+    });
+    const whitespaceEditId = whitespaceEdit.work_item.goal.work_item_id;
+    await service.saveWorkItem(sourceId, whitespaceEditId, {
+      target_source_id: sourceId,
+      title: whitespaceEdit.work_item.goal.title,
+      type: whitespaceEdit.work_item.goal.type ?? null,
+      priority: whitespaceEdit.work_item.goal.priority ?? null,
+      tags: whitespaceEdit.work_item.goal.tags ?? [],
+      notes: "abc",
+    });
+    await service.updateWorkItemPhase(sourceId, whitespaceEditId, {
+      target_phase: "brainstorm",
+    });
+    const beforeEdit = await service.compileBrainstormMission(
+      sourceId,
+      whitespaceEditId,
+    );
+    const beforeEditResult = {
+      result_schema_version: 1 as const,
+      brainstorm_mission_content_sha256: beforeEdit.mission.content_sha256,
+      identity: beforeEdit.mission.identity,
+      problem_statement: "Whitespace-only edits fork shaping identity.",
+      approach: "Compare normalized goal input.",
+      non_goals: ["Do not mutate durable notes."],
+      open_questions: ["None."],
+    };
+    await writeFile(
+      join(dirname(beforeEdit.task_path), "result.json"),
+      `${JSON.stringify(beforeEditResult, null, 2)}\n`,
+      "utf8",
+    );
+    const afterSave = await service.saveWorkItem(sourceId, whitespaceEditId, {
+      target_source_id: sourceId,
+      title: whitespaceEdit.work_item.goal.title,
+      type: whitespaceEdit.work_item.goal.type ?? null,
+      priority: whitespaceEdit.work_item.goal.priority ?? null,
+      tags: whitespaceEdit.work_item.goal.tags ?? [],
+      notes: "abc\n",
+    });
+    expect(afterSave.work_item.goal.notes).toBe("abc\n");
+    const afterEdit = await service.compileBrainstormMission(
+      sourceId,
+      whitespaceEditId,
+    );
+    expect(afterEdit.mission.identity.input_sha256).toBe(
+      beforeEdit.mission.identity.input_sha256,
+    );
+    await expect(
+      service.importBrainstormResult(sourceId, whitespaceEditId),
+    ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
+    const artifacts = await service.listShapingArtifacts(
+      sourceId,
+      whitespaceEditId,
+    );
+    expect(artifacts.artifacts).toHaveLength(1);
+    index.close();
+  });
+
+  it("fails shaping closed for Inbox, wrong phase, missing items, and unaccepted Spec input", async () => {
+    const root = await createWorkspace("Shaping failure Workspace");
+    const repository = new ProductWorkspace(root);
+    const created = await repository.create({
+      title: "Reject invalid shaping",
+      type: "Feature",
+    });
+    const { service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+
+    await expect(
+      service.compileBrainstormMission(sourceId, created.goal.work_item_id),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      service.compileBrainstormMission(
+        sourceId,
+        "wi_123e4567-e89b-12d3-a456-426614174000",
+      ),
+    ).rejects.toBeInstanceOf(PortfolioWorkItemNotFoundError);
+
+    const inbox = await service.createCapture({
+      title: "Inbox shaping must stay hidden",
+      capture_kind: "idea",
+    });
+    await service.updateWorkItemPhase(
+      INBOX_SOURCE_ID,
+      inbox.work_item.goal.work_item_id,
+      { target_phase: "brainstorm" },
+    );
+    await expect(
+      service.compileBrainstormMission(
+        INBOX_SOURCE_ID,
+        inbox.work_item.goal.work_item_id,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+
+    const rejectedItem = await service.createCapture({
+      title: "Reject malformed Brainstorm output",
+      capture_kind: "idea",
+      source_id: sourceId,
+    });
+    await service.updateWorkItemPhase(
+      sourceId,
+      rejectedItem.work_item.goal.work_item_id,
+      { target_phase: "brainstorm" },
+    );
+    const rejectedMission = await service.compileBrainstormMission(
+      sourceId,
+      rejectedItem.work_item.goal.work_item_id,
+    );
+    await writeFile(
+      join(dirname(rejectedMission.task_path), "result.json"),
+      "{invalid",
+      "utf8",
+    );
+    const rejectedImport = await service.importBrainstormResult(
+      sourceId,
+      rejectedItem.work_item.goal.work_item_id,
+    );
+    expect(rejectedImport).toMatchObject({ receipt: { outcome: "rejected" } });
+    await expect(
+      service.acceptBrainstormResult(
+        sourceId,
+        rejectedItem.work_item.goal.work_item_id,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    const rejectedListing = await service.listShapingArtifacts(
+      sourceId,
+      rejectedItem.work_item.goal.work_item_id,
+    );
+    const rejectedImportPath = rejectedListing.artifacts[0]?.import_path;
+    if (rejectedImportPath === null || rejectedImportPath === undefined) {
+      throw new Error("Expected rejected import receipt path");
+    }
+    const rejectedReceiptSha256 = hashResultContent(
+      await readFile(join(root, rejectedImportPath), "utf8"),
+    );
+    await service.updateWorkItemPhase(
+      sourceId,
+      rejectedItem.work_item.goal.work_item_id,
+      { target_phase: "spec" },
+    );
+    await expect(
+      service.compileSpecMission(
+        sourceId,
+        rejectedItem.work_item.goal.work_item_id,
+        { brainstorm_acceptance_sha256: rejectedReceiptSha256 },
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+
+    await service.updateWorkItemPhase(sourceId, created.goal.work_item_id, {
+      target_phase: "spec",
+    });
+    await expect(
+      service.compileSpecMission(sourceId, created.goal.work_item_id, {
+        brainstorm_acceptance_sha256: "a".repeat(64),
+      }),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      service.importBrainstormResult(sourceId, created.goal.work_item_id),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+  });
+
   it("launches one connected run, imports its completed result, and never spawns a duplicate", async () => {
     const root = await createWorkspace("Connected Execute Workspace");
     const repository = new ProductWorkspace(root, {

@@ -5,6 +5,31 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-07-28 · Brainstorm and Spec shaping missions (roadmap 3.4 slice 1) · Copilot/Codex mixed
+- Cut a separate, immutable shaping contract (`src/domain/shaping.ts`, `shaping_schema_version: 1`,
+  identity `(phase, work_item_id, input_sha256)`) rather than widening `MissionPhase` — Execute's
+  governed tuple doesn't apply to Brainstorm/Spec. Added compile/import/accept for both phases, one
+  provider-neutral `renderShapingTaskMd`, an `open_questions` field on `BrainstormResultSubmission`,
+  and durable artifacts under `.founder/shaping/<work_item_id>/<phase>-<input_sha256>/`
+  (deliberately unprojected — no SQLite table indexes them).
+- Wired an explicit `Start brainstorm` on-ramp (assigned, active `idea` → `brainstorm`), the shaping
+  section into the detail panel's capture-mode surface for `brainstorm`/`spec` items, and `Use
+  proposal as draft` (labelled, no-network adoption of a compiled proposal into a draft field).
+- Verified: lint, typecheck, 392 tests, and production build pass. Phase 4 review (cross-vendor)
+  found one **P1** in cycle 1: `notesSchema` permits untrimmed notes while the shaping contract's
+  `nonEmptyTrimmedStringSchema` forbids them, so a card whose notes end in a newline — the default
+  result of typing in the textarea — made compile/import/accept throw a raw `ZodError` mapped to a
+  generic `400`. Fixed (commit `56d589b`) by trimming at the service boundary; two P2s (a stray
+  staging-dir crash in artifact listing, a Spec-import selector naming a field that doesn't exist)
+  fixed in the same cycle. Re-review at HEAD `be08779` clean.
+- DESIGN.md's "keep the capture panel narrow" boundary was amended (founder decision) to carve out
+  the shaping handoff for an active `brainstorm`/`spec` item; activity feed, reviewer findings, and
+  result approval stay governed-only.
+- Commits: `d94ed51`..`be08779`
+- Review: clean @ `be08779`
+- Why: let the founder shape an idea into a governed Spec through Brainstorm/Spec missions without
+  copying prompts or result files by hand, per ROADMAP 3.4 Slice 1.
+
 ## 2026-07-26 · Transport-neutral connected execution and run provenance (roadmap 3.3) · Copilot/Codex mixed
 - Cut capability envelope v1 (exact-match, fail-closed command/URL evaluator; workspace writes
   unconditionally in-scope; narrowing + order-insensitive digest) and folded it into mission

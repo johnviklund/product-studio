@@ -20,6 +20,10 @@ delivery phases.
   review, 2026-07-25, P3, disposition: defer).
 - **Boundary:** Needs a new result-contract field for an agent to report required clarification.
   Scope narrowly when picked up.
+  *Pointer updated 2026-07-28 (ROADMAP 3.4 Slice 1): `BrainstormResultSubmission` (`src/domain/shaping.ts`)
+  now carries an `open_questions` field, confined to the shaping contract and not wired to any
+  attention production (spec's non-goals excluded that). This is a candidate producer shape, not a
+  fix — the item stays open.*
 
 ## Small UI Changes
 
@@ -39,7 +43,10 @@ delivery phases.
   and the free-text tags input untouched — this item still applies as written. Pointer updated
   2026-07-26 (ROADMAP 3.3): the connected-run surface added ~500 lines to `detail-panel.tsx` but
   did not touch `tagsFromInput` or the free-text tags input (spec explicitly scoped tag-chip work
-  out) — this item still applies as written.*
+  out) — this item still applies as written. Pointer updated 2026-07-28 (ROADMAP 3.4 Slice 1): the
+  shaping section adds to `components/kanban/detail-panel.tsx`'s capture mode but deliberately
+  leaves `tagsFromInput` and the free-text tags input untouched (spec's non-goals scoped
+  card-metadata editing out of the slice) — this item still applies as written.*
 
 ## Open Questions
 

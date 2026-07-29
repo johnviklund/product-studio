@@ -1,4 +1,7 @@
 import {
+  createHash,
+} from "node:crypto";
+import {
   mkdtemp,
   mkdir,
   readFile,
@@ -34,6 +37,14 @@ import {
   serializeExternalResult,
   type ImportEvidenceEnvelope,
 } from "../src/domain/result";
+import {
+  compileBrainstormMission,
+  compileSpecMission,
+  hashShapingInput,
+  type BrainstormResultSubmission,
+  type ShapingAcceptanceReceipt,
+  type ShapingIdentity,
+} from "../src/domain/shaping";
 import {
   InvalidWorkspaceError,
   type ActiveRun,
@@ -176,6 +187,68 @@ async function writeContractedWorkItem(
     )}\n`,
     "utf8",
   );
+}
+
+async function writeShapingReadyWorkItem(
+  root: string,
+  workItemId: string,
+  phase: "brainstorm" | "spec" = "brainstorm",
+): Promise<WorkItem> {
+  const directory = join(root, ".founder", "work-items", workItemId);
+  const goal = {
+    schema_version: 2 as const,
+    work_item_id: workItemId,
+    title: `Shape item ${workItemId}`,
+    type: "Feature" as const,
+    notes: "Keep shaping artifacts immutable.",
+  };
+  const state = {
+    schema_version: 2 as const,
+    work_item_id: workItemId,
+    phase,
+    status: "active" as const,
+    updated_at: "2026-07-29T00:00:00.000Z",
+  };
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "goal.yaml"), stringify(goal), "utf8");
+  await writeFile(
+    join(directory, "state.json"),
+    `${JSON.stringify(state, null, 2)}\n`,
+    "utf8",
+  );
+  return { goal, state };
+}
+
+async function writeBrainstormShapingArtifact(
+  root: string,
+  workItemId: string,
+) {
+  const item = await writeShapingReadyWorkItem(root, workItemId);
+  const input = {
+    phase: "brainstorm" as const,
+    title: item.goal.title,
+    notes: item.goal.notes,
+  };
+  const identity: ShapingIdentity<"brainstorm"> = {
+    phase: "brainstorm",
+    work_item_id: workItemId,
+    input_sha256: hashShapingInput(input),
+  };
+  const workspace = new ProductWorkspace(root);
+  const artifact = await workspace.writeShapingMissionPackage(
+    identity,
+    (paths) =>
+      compileBrainstormMission({
+        work_item_id: workItemId,
+        shaping_input: input,
+        paths,
+      }),
+  );
+  return { artifact, workspace };
+}
+
+function hashSource(source: string): string {
+  return createHash("sha256").update(source).digest("hex");
 }
 
 async function writeMissionReadyWorkItem(
@@ -836,6 +909,374 @@ describe("ProductWorkspace", () => {
         )
       ).sort(),
     ).toEqual(["TASK.md", "mission.json"]);
+  });
+
+  it("publishes, imports, accepts, and selects immutable shaping artifacts without Git", async () => {
+    const root = await createWorkspace();
+    const item = await writeShapingReadyWorkItem(root, firstId);
+    let gitHeadReads = 0;
+    const workspace = new ProductWorkspace(root, {
+      git: {
+        ...testGit,
+        async readHeadCommit() {
+          gitHeadReads += 1;
+          throw new Error("Git HEAD is unavailable");
+        },
+      },
+    });
+    const brainstormInput = {
+      phase: "brainstorm" as const,
+      title: item.goal.title,
+      notes: item.goal.notes,
+    };
+    const brainstormIdentity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(brainstormInput),
+    };
+    const buildBrainstorm = (paths: Parameters<typeof compileBrainstormMission>[0]["paths"]) =>
+      compileBrainstormMission({
+        work_item_id: firstId,
+        shaping_input: brainstormInput,
+        paths,
+      });
+
+    const first = await workspace.writeShapingMissionPackage(
+      brainstormIdentity,
+      buildBrainstorm,
+    );
+    const missionSource = await readFile(first.mission_path, "utf8");
+    const taskSource = await readFile(first.task_path, "utf8");
+    const replay = await workspace.writeShapingMissionPackage(
+      brainstormIdentity,
+      buildBrainstorm,
+    );
+    expect(replay).toEqual(first);
+    expect(await readFile(replay.mission_path, "utf8")).toBe(missionSource);
+    expect(await readFile(replay.task_path, "utf8")).toBe(taskSource);
+
+    const brainstormResult: BrainstormResultSubmission = {
+      result_schema_version: 1,
+      brainstorm_mission_content_sha256: first.mission.content_sha256,
+      identity: brainstormIdentity,
+      problem_statement: "Shaping lacks a durable artifact loop.",
+      approach: "Publish a content-addressed shaping snapshot.",
+      non_goals: ["Do not widen Execute missions."],
+      open_questions: ["How should Plan shaping work later?"],
+    };
+    const resultSource = `${JSON.stringify(brainstormResult, null, 2)}\n`;
+    await writeFile(
+      join(dirname(first.task_path), "result.json"),
+      resultSource,
+      "utf8",
+    );
+    const importReceipt = {
+      shaping_schema_version: 1 as const,
+      identity: brainstormIdentity,
+      shaping_mission_content_sha256: first.mission.content_sha256,
+      result_content_sha256: hashSource(resultSource),
+      outcome: "applied" as const,
+      imported_at: "2026-07-29T00:01:00.000Z",
+      reasons: [],
+    };
+    const imported = await workspace.writeShapingImportReceipt({
+      result_source: resultSource,
+      receipt: importReceipt,
+    });
+    expect(
+      await workspace.writeShapingImportReceipt({
+        result_source: resultSource,
+        receipt: importReceipt,
+      }),
+    ).toEqual(imported);
+
+    const acceptance: ShapingAcceptanceReceipt = {
+      shaping_schema_version: 1,
+      identity: brainstormIdentity,
+      brainstorm_mission_content_sha256: first.mission.content_sha256,
+      brainstorm_result_content_sha256: hashSource(resultSource),
+      accepted_at: "2026-07-29T00:02:00.000Z",
+    };
+    const accepted = await workspace.writeShapingAcceptance(acceptance);
+
+    const specItem = {
+      ...item,
+      state: {
+        ...item.state,
+        phase: "spec" as const,
+        updated_at: "2026-07-29T00:03:00.000Z",
+      },
+    };
+    await writeFile(
+      join(root, ".founder", "work-items", firstId, "state.json"),
+      `${JSON.stringify(specItem.state, null, 2)}\n`,
+      "utf8",
+    );
+    const specInput = {
+      phase: "spec" as const,
+      title: specItem.goal.title,
+      notes: specItem.goal.notes,
+      brainstorm_acceptance_sha256: accepted.receipt_content_sha256,
+      brainstorm_acceptance: acceptance,
+      brainstorm_result: brainstormResult,
+    };
+    const specIdentity: ShapingIdentity<"spec"> = {
+      phase: "spec",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(specInput),
+    };
+    const spec = await workspace.writeShapingMissionPackage(
+      specIdentity,
+      (paths) =>
+        compileSpecMission({
+          work_item_id: firstId,
+          shaping_input: specInput,
+          paths,
+        }),
+    );
+
+    expect(spec.mission.input).toMatchObject({
+      brainstorm_acceptance_sha256: accepted.receipt_content_sha256,
+    });
+    expect(await workspace.listShapingArtifacts(firstId)).toHaveLength(2);
+    expect(await workspace.readShapingMissionPackage(specIdentity)).toEqual({
+      mission: spec.mission,
+      mission_path: spec.mission_path.slice(root.length + 1),
+    });
+    expect(gitHeadReads).toBe(0);
+  });
+
+  it("ignores unrelated files when listing shaping artifacts", async () => {
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    const expected = await workspace.listShapingArtifacts(firstId);
+    await writeFile(
+      join(dirname(dirname(artifact.task_path)), ".DS_Store"),
+      "",
+      "utf8",
+    );
+
+    expect(await workspace.listShapingArtifacts(firstId)).toEqual(expected);
+  });
+
+  it("ignores valid leftover shaping staging directories", async () => {
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    const expected = await workspace.listShapingArtifacts(firstId);
+    await mkdir(
+      join(
+        dirname(dirname(artifact.task_path)),
+        `.brainstorm-${"b".repeat(64)}.${firstRunId}.shaping.tmp`,
+      ),
+    );
+
+    expect(await workspace.listShapingArtifacts(firstId)).toEqual(expected);
+  });
+
+  it("rejects near-miss shaping directory names", async () => {
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    await mkdir(join(dirname(dirname(artifact.task_path)), "brainstorm-abc"));
+
+    await expect(workspace.listShapingArtifacts(firstId)).rejects.toMatchObject({
+      kind: "invalid_workspace",
+    });
+  });
+
+  it("rejects symlinked exact shaping artifact names", async () => {
+    const root = await createWorkspace();
+    const outsideRoot = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    await symlink(
+      outsideRoot,
+      join(
+        dirname(dirname(artifact.task_path)),
+        `brainstorm-${"b".repeat(64)}`,
+      ),
+      "dir",
+    );
+
+    await expect(workspace.listShapingArtifacts(firstId)).rejects.toMatchObject({
+      kind: "invalid_workspace",
+    });
+  });
+
+  it("fails closed on stale, divergent, unsafe, and symlinked shaping state", async () => {
+    const staleRoot = await createWorkspace();
+    const staleItem = await writeShapingReadyWorkItem(staleRoot, firstId);
+    const staleInput = {
+      phase: "brainstorm" as const,
+      title: staleItem.goal.title,
+      notes: staleItem.goal.notes,
+    };
+    const staleIdentity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(staleInput),
+    };
+    await writeFile(
+      join(staleRoot, ".founder", "work-items", firstId, "goal.yaml"),
+      stringify({ ...staleItem.goal, title: "Changed after compile" }),
+      "utf8",
+    );
+    await expect(
+      new ProductWorkspace(staleRoot).writeShapingMissionPackage(
+        staleIdentity,
+        (paths) =>
+          compileBrainstormMission({
+            work_item_id: firstId,
+            shaping_input: staleInput,
+            paths,
+          }),
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      new ProductWorkspace(staleRoot).writeShapingMissionPackage(
+        { ...staleIdentity, work_item_id: "../escape" },
+        () => {
+          throw new Error("builder must not run");
+        },
+      ),
+    ).rejects.toBeInstanceOf(Error);
+
+    const divergentRoot = await createWorkspace();
+    const divergentItem = await writeShapingReadyWorkItem(divergentRoot, firstId);
+    const divergentInput = {
+      phase: "brainstorm" as const,
+      title: divergentItem.goal.title,
+      notes: divergentItem.goal.notes,
+    };
+    const divergentIdentity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(divergentInput),
+    };
+    const divergentWorkspace = new ProductWorkspace(divergentRoot);
+    const artifact = await divergentWorkspace.writeShapingMissionPackage(
+      divergentIdentity,
+      (paths) =>
+        compileBrainstormMission({
+          work_item_id: firstId,
+          shaping_input: divergentInput,
+          paths,
+        }),
+    );
+    const result: BrainstormResultSubmission = {
+      result_schema_version: 1,
+      brainstorm_mission_content_sha256: artifact.mission.content_sha256,
+      identity: divergentIdentity,
+      problem_statement: "A problem.",
+      approach: "An approach.",
+      non_goals: ["A non-goal."],
+      open_questions: ["A question?"],
+    };
+    const resultSource = `${JSON.stringify(result, null, 2)}\n`;
+    await writeFile(
+      join(dirname(artifact.task_path), "result.json"),
+      resultSource,
+      "utf8",
+    );
+    const receipt = {
+      shaping_schema_version: 1 as const,
+      identity: divergentIdentity,
+      shaping_mission_content_sha256: artifact.mission.content_sha256,
+      result_content_sha256: hashSource(resultSource),
+      outcome: "applied" as const,
+      imported_at: "2026-07-29T00:01:00.000Z",
+      reasons: [],
+    };
+    await divergentWorkspace.writeShapingImportReceipt({
+      result_source: resultSource,
+      receipt,
+    });
+    await writeFile(
+      join(dirname(artifact.task_path), "result.json"),
+      `${resultSource} `,
+      "utf8",
+    );
+    await expect(
+      divergentWorkspace.readShapingResult(divergentIdentity),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    await expect(
+      divergentWorkspace.writeShapingImportReceipt({
+        result_source: resultSource,
+        receipt,
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    await writeFile(
+      join(dirname(artifact.task_path), "result.json"),
+      resultSource,
+      "utf8",
+    );
+    await writeFile(
+      join(dirname(artifact.task_path), "import.json"),
+      `${JSON.stringify({ ...receipt, imported_at: "2026-07-29T00:02:00.000Z" }, null, 2)}\n`,
+      "utf8",
+    );
+    await expect(
+      divergentWorkspace.writeShapingImportReceipt({
+        result_source: resultSource,
+        receipt,
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    await writeFile(artifact.mission_path, "{}\n", "utf8");
+    await expect(
+      divergentWorkspace.writeShapingMissionPackage(
+        divergentIdentity,
+        (paths) =>
+          compileBrainstormMission({
+            work_item_id: firstId,
+            shaping_input: divergentInput,
+            paths,
+          }),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    const symlinkRoot = await createWorkspace();
+    const outsideRoot = await createWorkspace();
+    const symlinkItem = await writeShapingReadyWorkItem(symlinkRoot, firstId);
+    await symlink(
+      outsideRoot,
+      join(symlinkRoot, ".founder", "shaping"),
+      "dir",
+    );
+    const symlinkInput = {
+      phase: "brainstorm" as const,
+      title: symlinkItem.goal.title,
+      notes: symlinkItem.goal.notes,
+    };
+    const symlinkIdentity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(symlinkInput),
+    };
+    await expect(
+      new ProductWorkspace(symlinkRoot).writeShapingMissionPackage(
+        symlinkIdentity,
+        (paths) =>
+          compileBrainstormMission({
+            work_item_id: firstId,
+            shaping_input: symlinkInput,
+            paths,
+          }),
+      ),
+    ).rejects.toMatchObject({
+      kind: "invalid_workspace",
+      artifactPath: ".founder/shaping",
+    });
+    expect(await readdir(outsideRoot)).toEqual([".founder"]);
   });
 
   it("reads the mission result and publishes immutable regular-file evidence", async () => {

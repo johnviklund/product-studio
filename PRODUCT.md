@@ -93,7 +93,10 @@ must match state `goal_version`, `input_revision`, and `attempt`. Controller run
 per-item leases and strict durable manifests; incompatible or partial combinations fail closed.
 SQLite schema v6 is a rebuildable projection of those files, including purpose, non-goals,
 patch-cycle state, and attention, not
-a migration authority.
+a migration authority. A further immutable artifact family exists at
+`.founder/shaping/<work_item_id>/<phase>-<input_sha256>/` (`TASK.md`, `mission.json`,
+`result.json`, `import.json`, and the acceptance receipt) for the Brainstorm and Spec shaping
+phases; these are deliberately unprojected — no SQLite table indexes them.
 
 ## 8. Core documents
 
@@ -112,6 +115,14 @@ The following remain unresolved and must be decided with implementation evidence
 - The first two proof repositories for provider-neutral manual handoff.
 - Canonical mission and result-submission schemas, including which agent-specific renderers
   add real value.
+  - **Decided (2026-07-28, ROADMAP 3.4 Slice 1, commits `d94ed51`–`be08779`):** the Brainstorm and
+    Spec shaping phases get their **own** contract (`src/domain/shaping.ts`,
+    `shaping_schema_version: 1`, identity `(phase, work_item_id, input_sha256)`) rather than
+    widening `MissionPhase` — Execute's identity requires a governed goal version, input revision,
+    and attempt that a Brainstorm or Spec item legitimately does not have, so `MISSION_PHASES`
+    stays `["execute","review","patch"]`. Renderers: exactly one provider-neutral
+    `renderShapingTaskMd`, no agent-specific renderers. The Execute/Review/Patch half of this
+    decision — which agent-specific renderers, if any, add real value there — remains open.
 - The first approved non-MCP local transport and reference adapter. Whether it uses a CLI or
   another approved local protocol is an implementation decision and must not alter the user
   workflow.

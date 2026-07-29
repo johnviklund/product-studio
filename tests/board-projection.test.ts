@@ -18,6 +18,8 @@ import {
   reviewHandoffForItem,
   revealBoardItem,
   resolveBoardDrop,
+  shapingHandoffForItem,
+  startBrainstormActionForItem,
   targetPhaseForColumn,
   validatePhaseTransition,
 } from "../src/presentation/board";
@@ -60,6 +62,7 @@ describe("board projection", () => {
 
   it("allows adjacent forward and backward moves only", () => {
     expect(validatePhaseTransition("idea", "spec")).toEqual({ ok: true });
+    expect(validatePhaseTransition("idea", "brainstorm")).toEqual({ ok: true });
     expect(validatePhaseTransition("spec", "brainstorm")).toEqual({ ok: true });
     expect(validatePhaseTransition("test", "ship")).toEqual({ ok: true });
     expect(validatePhaseTransition("learn", "ship")).toEqual({ ok: true });
@@ -119,6 +122,105 @@ describe("board projection", () => {
         },
       }),
     ).toBe("governed");
+  });
+
+  it("projects shaping independently from contracts and panel mode", () => {
+    const brainstorm = {
+      source_id: "ws_product",
+      work_item: {
+        goal: {
+          capture: {
+            kind: "idea" as const,
+            original_title: "Shape this idea",
+            captured_at: "2026-07-29T00:00:00.000Z",
+          },
+        },
+        state: {
+          phase: "brainstorm" as const,
+          status: "active" as const,
+        },
+      },
+    };
+
+    expect(detailPanelModeForItem(brainstorm)).toBe("capture");
+    expect(shapingHandoffForItem(brainstorm)).toEqual({
+      mode: "active",
+      phase: "brainstorm",
+      required_input: "none",
+      can_compile: true,
+      can_import: true,
+    });
+    expect(
+      shapingHandoffForItem({
+        ...brainstorm,
+        work_item: {
+          ...brainstorm.work_item,
+          state: { phase: "spec", status: "active" },
+        },
+      }),
+    ).toEqual({
+      mode: "active",
+      phase: "spec",
+      required_input: "brainstorm_acceptance_sha256",
+      can_compile: true,
+      can_import: true,
+    });
+  });
+
+  it.each(["idea", "plan", "execute"] as const)(
+    "hides shaping for the %s phase",
+    (phase) => {
+      expect(
+        shapingHandoffForItem({
+          source_id: "ws_product",
+          work_item: { state: { phase, status: "active" } },
+        }),
+      ).toMatchObject({ mode: "hidden", required_input: null });
+    },
+  );
+
+  it("hides unavailable shaping and exposes only the explicit on-ramp", () => {
+    const brainstorm = {
+      source_id: "ws_product",
+      work_item: {
+        state: {
+          phase: "brainstorm" as const,
+          status: "active" as const,
+        },
+      },
+    };
+    expect(
+      shapingHandoffForItem({ ...brainstorm, source_id: "inbox" }),
+    ).toMatchObject({ mode: "hidden" });
+    expect(
+      shapingHandoffForItem({
+        ...brainstorm,
+        work_item: {
+          state: { phase: "brainstorm", status: "paused" },
+        },
+      }),
+    ).toMatchObject({ mode: "hidden" });
+    expect(
+      shapingHandoffForItem({
+        ...brainstorm,
+        work_item: {
+          state: { phase: "spec", status: "blocked" },
+        },
+      }),
+    ).toMatchObject({ mode: "hidden" });
+
+    const idea = {
+      source_id: "ws_product",
+      work_item: {
+        state: { phase: "idea" as const, status: "active" as const },
+      },
+    };
+    expect(startBrainstormActionForItem(idea)).toEqual({
+      target_column_id: "todo",
+      target_phase: "brainstorm",
+      label: "Start brainstorm",
+    });
+    expect(startBrainstormActionForItem({ ...idea, source_id: "inbox" })).toBeNull();
   });
 
   it("derives active, repair, and hidden mission handoff states", () => {

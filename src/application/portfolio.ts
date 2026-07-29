@@ -94,6 +94,24 @@ import {
   isCapabilityEnvelopeNarrowing,
   type CapabilityEnvelopeV1,
 } from "../domain/capability-envelope";
+import {
+  brainstormResultSubmissionSchema,
+  compileBrainstormMission as compileBrainstormMissionPackage,
+  compileSpecMission as compileSpecMissionPackage,
+  hashShapingInput,
+  normalizeShapingGoalInput,
+  shapingImportReceiptSchema,
+  specResultSubmissionSchema,
+  type BrainstormMissionPackage,
+  type BrainstormResultSubmission,
+  type ShapingAcceptanceReceipt,
+  type ShapingArtifactWriteResult,
+  type ShapingIdentity,
+  type ShapingImportReceipt,
+  type ShapingResultSubmission,
+  type SpecMissionPackage,
+  type StoredShapingArtifact,
+} from "../domain/shaping";
 import type {
   AcpClientAdapter,
   AcpEventSink,
@@ -134,6 +152,12 @@ type WorkspaceGateway = Pick<
   | "writeMissionPackage"
   | "readMissionPackage"
   | "readMissionResult"
+  | "writeShapingMissionPackage"
+  | "readShapingMissionPackage"
+  | "readShapingResult"
+  | "writeShapingImportReceipt"
+  | "writeShapingAcceptance"
+  | "listShapingArtifacts"
   | "createConnectedRun"
   | "readConnectedRun"
   | "listConnectedRuns"
@@ -268,6 +292,31 @@ export type ReviewMissionCompilation =
   MissionArtifactWriteResult<ReviewMissionPackage>;
 export type PatchMissionCompilation =
   MissionArtifactWriteResult<PatchMissionPackage>;
+export type BrainstormMissionCompilation =
+  ShapingArtifactWriteResult<BrainstormMissionPackage>;
+export type SpecMissionCompilation =
+  ShapingArtifactWriteResult<SpecMissionPackage>;
+
+export interface ShapingImportResult {
+  source_id: string;
+  work_item_id: string;
+  receipt: ShapingImportReceipt;
+  result?: ShapingResultSubmission;
+}
+
+export interface ShapingAcceptanceResult {
+  source_id: string;
+  work_item_id: string;
+  acceptance: ShapingAcceptanceReceipt;
+  acceptance_path: string;
+  acceptance_content_sha256: string;
+}
+
+export interface ShapingArtifactListing {
+  source_id: string;
+  work_item_id: string;
+  artifacts: StoredShapingArtifact[];
+}
 
 export interface PortfolioImportResult extends PortfolioWorkItem {
   evidence: ImportEvidenceSummary;
@@ -410,6 +459,16 @@ function errorMessage(error: unknown): string {
 
 export const compileReviewMissionInputSchema = z.strictObject({
   independence_attested: z.literal(true),
+});
+
+const shapingAcceptanceSha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+
+export const compileSpecMissionInputSchema = z.strictObject({
+  brainstorm_acceptance_sha256: shapingAcceptanceSha256Schema,
+});
+
+export const importSpecResultInputSchema = z.strictObject({
+  brainstorm_acceptance_sha256: shapingAcceptanceSha256Schema,
 });
 
 const portfolioAttentionItemSchema: z.ZodType<PortfolioAttentionItem> =
@@ -695,6 +754,200 @@ export class PortfolioService {
     return source.workspace.writeMissionPackage(identity, (paths) =>
       compileMissionPackage(workItem, executeManifest, paths),
     ) as Promise<MissionCompilation>;
+  }
+
+  async compileBrainstormMission(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<BrainstormMissionCompilation> {
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      "brainstorm",
+    );
+    const goalInput = this.shapingGoalInput(workItem);
+    const shapingInput = {
+      phase: "brainstorm" as const,
+      ...goalInput,
+    };
+    const identity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: workItemId,
+      input_sha256: hashShapingInput(shapingInput),
+    };
+    return source.workspace.writeShapingMissionPackage(identity, (paths) =>
+      compileBrainstormMissionPackage({
+        work_item_id: workItemId,
+        shaping_input: shapingInput,
+        paths,
+      }),
+    ) as Promise<BrainstormMissionCompilation>;
+  }
+
+  async importBrainstormResult(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<ShapingImportResult> {
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      "brainstorm",
+    );
+    return this.importShapingResult(source, workItem, "brainstorm");
+  }
+
+  async acceptBrainstormResult(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<ShapingAcceptanceResult> {
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      "brainstorm",
+    );
+    const artifact = await this.currentShapingArtifact(
+      source,
+      workItem,
+      "brainstorm",
+    );
+    if (
+      artifact.result === null ||
+      artifact.import_receipt?.outcome !== "applied"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Brainstorm acceptance requires one applied imported result.",
+      );
+    }
+    if (artifact.acceptance !== null) {
+      return {
+        source_id: source.source_id,
+        work_item_id: workItemId,
+        acceptance: artifact.acceptance.receipt,
+        acceptance_path: artifact.acceptance.acceptance_path,
+        acceptance_content_sha256:
+          artifact.acceptance.acceptance_content_sha256,
+      };
+    }
+
+    const acceptance: ShapingAcceptanceReceipt = {
+      shaping_schema_version: 1,
+      identity: {
+        phase: "brainstorm",
+        work_item_id: artifact.mission.identity.work_item_id,
+        input_sha256: artifact.mission.identity.input_sha256,
+      },
+      brainstorm_mission_content_sha256: artifact.mission.content_sha256,
+      brainstorm_result_content_sha256:
+        artifact.result.result_content_sha256,
+      accepted_at: new Date().toISOString(),
+    };
+    const stored = await source.workspace.writeShapingAcceptance(acceptance);
+    return {
+      source_id: source.source_id,
+      work_item_id: workItemId,
+      acceptance: stored.receipt,
+      acceptance_path: stored.receipt_path,
+      acceptance_content_sha256: stored.receipt_content_sha256,
+    };
+  }
+
+  async compileSpecMission(
+    sourceId: string,
+    workItemId: string,
+    input: { brainstorm_acceptance_sha256: string },
+  ): Promise<SpecMissionCompilation> {
+    const validatedInput = compileSpecMissionInputSchema.parse(input);
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      "spec",
+    );
+    const matches = (await source.workspace.listShapingArtifacts(workItemId))
+      .filter(
+        (artifact) =>
+          artifact.acceptance?.acceptance_content_sha256 ===
+          validatedInput.brainstorm_acceptance_sha256,
+      );
+    if (matches.length !== 1) {
+      throw this.missionNotReady(
+        workItemId,
+        matches.length === 0
+          ? "The selected Brainstorm acceptance does not exist."
+          : "More than one Brainstorm acceptance matches the selected SHA.",
+      );
+    }
+    const selected = matches[0];
+    if (
+      selected.mission.identity.phase !== "brainstorm" ||
+      selected.acceptance === null ||
+      selected.result === null ||
+      selected.import_receipt?.outcome !== "applied"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Spec compilation requires one applied and accepted Brainstorm result.",
+      );
+    }
+    const brainstormResult = this.parseAppliedBrainstormResult(
+      selected,
+      workItemId,
+    );
+    const goalInput = this.shapingGoalInput(workItem);
+    const shapingInput = {
+      phase: "spec" as const,
+      ...goalInput,
+      brainstorm_acceptance_sha256:
+        validatedInput.brainstorm_acceptance_sha256,
+      brainstorm_acceptance: selected.acceptance.receipt,
+      brainstorm_result: brainstormResult,
+    };
+    const identity: ShapingIdentity<"spec"> = {
+      phase: "spec",
+      work_item_id: workItemId,
+      input_sha256: hashShapingInput(shapingInput),
+    };
+    return source.workspace.writeShapingMissionPackage(identity, (paths) =>
+      compileSpecMissionPackage({
+        work_item_id: workItemId,
+        shaping_input: shapingInput,
+        paths,
+      }),
+    ) as Promise<SpecMissionCompilation>;
+  }
+
+  async importSpecResult(
+    sourceId: string,
+    workItemId: string,
+    input: { brainstorm_acceptance_sha256: string },
+  ): Promise<ShapingImportResult> {
+    const validatedInput = importSpecResultInputSchema.parse(input);
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      "spec",
+    );
+    return this.importShapingResult(
+      source,
+      workItem,
+      "spec",
+      validatedInput.brainstorm_acceptance_sha256,
+    );
+  }
+
+  async listShapingArtifacts(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<ShapingArtifactListing> {
+    const { source } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+    );
+    return {
+      source_id: source.source_id,
+      work_item_id: workItemId,
+      artifacts: await source.workspace.listShapingArtifacts(workItemId),
+    };
   }
 
   async launchConnectedExecute(
@@ -1802,6 +2055,233 @@ export class PortfolioService {
       project: source.project,
       work_item: workItem,
     };
+  }
+
+  private async requireActiveShapingItem(
+    sourceId: string,
+    workItemId: string,
+    phase?: "brainstorm" | "spec",
+  ): Promise<{ source: ResolvedSource; workItem: WorkItem }> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const shapingPhase =
+      workItem.state.phase === "brainstorm" || workItem.state.phase === "spec";
+    if (
+      source.source_id === INBOX_SOURCE_ID ||
+      workItem.state.status !== "active" ||
+      !shapingPhase ||
+      (phase !== undefined && workItem.state.phase !== phase)
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        phase === undefined
+          ? "Shaping operations require an assigned item in active Brainstorm or Spec."
+          : `Shaping operations require an assigned item in active ${phase}.`,
+      );
+    }
+    return { source, workItem };
+  }
+
+  private shapingGoalInput(
+    workItem: WorkItem,
+  ): { title: string; notes?: string } {
+    return normalizeShapingGoalInput(workItem.goal);
+  }
+
+  private async currentShapingArtifact(
+    source: ResolvedSource,
+    workItem: WorkItem,
+    phase: "brainstorm" | "spec",
+    brainstormAcceptanceSha256?: string,
+  ): Promise<StoredShapingArtifact> {
+    const artifacts = await source.workspace.listShapingArtifacts(
+      workItem.goal.work_item_id,
+    );
+    const goalInput = this.shapingGoalInput(workItem);
+    const matches =
+      phase === "brainstorm"
+        ? artifacts.filter((artifact) => {
+            if (artifact.mission.identity.phase !== "brainstorm") {
+              return false;
+            }
+            const input = {
+              phase: "brainstorm" as const,
+              ...goalInput,
+            };
+            return (
+              artifact.mission.identity.input_sha256 ===
+              hashShapingInput(input)
+            );
+          })
+        : artifacts.filter(
+          (artifact) =>
+            artifact.mission.identity.phase === "spec" &&
+              artifact.mission.input.phase === "spec" &&
+              artifact.mission.input.title === goalInput.title &&
+              artifact.mission.input.notes === goalInput.notes &&
+              artifact.mission.input.brainstorm_acceptance_sha256 ===
+                brainstormAcceptanceSha256,
+          );
+    if (matches.length !== 1) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        matches.length === 0
+          ? `No current ${phase} shaping artifact exists.`
+          : `More than one current ${phase} shaping artifact exists; select one exact mission before importing.`,
+      );
+    }
+    return matches[0];
+  }
+
+  private async importShapingResult(
+    source: ResolvedSource,
+    workItem: WorkItem,
+    phase: "brainstorm" | "spec",
+    brainstormAcceptanceSha256?: string,
+  ): Promise<ShapingImportResult> {
+    const artifact = await this.currentShapingArtifact(
+      source,
+      workItem,
+      phase,
+      brainstormAcceptanceSha256,
+    );
+    if (artifact.result === null) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Shaping import requires result.json for the current mission.",
+      );
+    }
+    if (artifact.import_receipt !== null) {
+      const replayResult =
+        artifact.import_receipt.outcome === "applied"
+          ? this.parseAppliedShapingResult(
+              artifact,
+              workItem.goal.work_item_id,
+              phase,
+            )
+          : undefined;
+      return {
+        source_id: source.source_id,
+        work_item_id: workItem.goal.work_item_id,
+        receipt: artifact.import_receipt,
+        ...(replayResult === undefined ? {} : { result: replayResult }),
+      };
+    }
+
+    let parsedJson: unknown;
+    let result: ShapingResultSubmission | undefined;
+    let reasons: string[] = [];
+    try {
+      parsedJson = JSON.parse(artifact.result.result_source) as unknown;
+      const parsed =
+        phase === "brainstorm"
+          ? brainstormResultSubmissionSchema.safeParse(parsedJson)
+          : specResultSubmissionSchema.safeParse(parsedJson);
+      if (parsed.success) {
+        result = parsed.data;
+      } else {
+        reasons = this.boundedShapingReasons(parsed.error);
+      }
+    } catch {
+      reasons = ["result.json is not valid JSON."];
+    }
+    if (result !== undefined) {
+      const missionContentSha256 =
+        "brainstorm_mission_content_sha256" in result
+          ? result.brainstorm_mission_content_sha256
+          : result.spec_mission_content_sha256;
+      if (
+        JSON.stringify(result.identity) !==
+          JSON.stringify(artifact.mission.identity) ||
+        missionContentSha256 !== artifact.mission.content_sha256
+      ) {
+        reasons = [
+          "The shaping result does not match the current mission identity and content SHA.",
+        ];
+        result = undefined;
+      }
+    }
+
+    const receipt = shapingImportReceiptSchema.parse({
+      shaping_schema_version: 1,
+      identity: artifact.mission.identity,
+      shaping_mission_content_sha256: artifact.mission.content_sha256,
+      result_content_sha256: artifact.result.result_content_sha256,
+      outcome: result === undefined ? "rejected" : "applied",
+      imported_at: new Date().toISOString(),
+      reasons,
+    });
+    const stored = await source.workspace.writeShapingImportReceipt({
+      result_source: artifact.result.result_source,
+      receipt,
+    });
+    return {
+      source_id: source.source_id,
+      work_item_id: workItem.goal.work_item_id,
+      receipt: stored.receipt,
+      ...(result === undefined ? {} : { result }),
+    };
+  }
+
+  private parseAppliedShapingResult(
+    artifact: StoredShapingArtifact,
+    workItemId: string,
+    phase: "brainstorm" | "spec",
+  ): ShapingResultSubmission {
+    if (artifact.result === null) {
+      throw this.missionNotReady(
+        workItemId,
+        "Applied shaping evidence is missing result.json.",
+      );
+    }
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(artifact.result.result_source) as unknown;
+    } catch {
+      throw this.missionNotReady(
+        workItemId,
+        "Applied shaping result is not valid JSON.",
+      );
+    }
+    const parsed =
+      phase === "brainstorm"
+        ? brainstormResultSubmissionSchema.safeParse(parsedJson)
+        : specResultSubmissionSchema.safeParse(parsedJson);
+    if (!parsed.success) {
+      throw this.missionNotReady(
+        workItemId,
+        "Applied shaping result no longer satisfies its structural contract.",
+      );
+    }
+    return parsed.data;
+  }
+
+  private parseAppliedBrainstormResult(
+    artifact: StoredShapingArtifact,
+    workItemId: string,
+  ): BrainstormResultSubmission {
+    const result = this.parseAppliedShapingResult(
+      artifact,
+      workItemId,
+      "brainstorm",
+    );
+    if (!("brainstorm_mission_content_sha256" in result)) {
+      throw this.missionNotReady(
+        workItemId,
+        "Selected acceptance must reference a Brainstorm result.",
+      );
+    }
+    return result;
+  }
+
+  private boundedShapingReasons(error: z.ZodError): string[] {
+    return error.issues.slice(0, 20).map(({ path, message }) =>
+      (path.length > 0 ? `${path.map(String).join(".")}: ${message}` : message)
+        .slice(0, 500),
+    );
   }
 
   private async readAppliedReviewResult(

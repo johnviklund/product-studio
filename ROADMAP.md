@@ -224,10 +224,14 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 
 - **Goal:** Let the founder drive one governed feature from initial shaping through approved
   implementation using different LLM models for different workflow steps.
-- **Primary scope:** Extend the portable mission, connected-run, structured-result, deterministic
-  verification, and approval contracts across the agent-driven Brainstorm, Spec, Plan, Execute,
-  and independent Review or Patch steps. The controller continues to expose one next action and
-  exact human gates; agents cannot approve their own output or mark work completed.
+- **Primary scope:** Extend the portable-mission *pattern* — content-addressed immutable task,
+  structured result, and explicit human acceptance — across the agent-driven Brainstorm, Spec,
+  Plan, Execute, and independent Review or Patch steps. Brainstorm and Spec shaping use a
+  **separate** shaping contract where Execute's governed tuple and capability envelope do not
+  apply; Execute, Review, and Patch continue to use the existing mission, connected-run,
+  structured-result, deterministic verification, and approval contracts. The controller continues
+  to expose one next action and exact human gates; agents cannot approve their own output or mark
+  work completed.
 - **Version-one experience:** The founder can start the next eligible step, choose its model when
   needed, see a truthful bounded state such as queued, working, blocked, failed, or ready for
   review, and approve or reject the exact result through the existing detail panel and attention
@@ -237,6 +241,10 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
   streams, broad feedback routing, and automatic learning or model routing remain later
   milestones.
 - **Dependencies:** 2.1–2.5 and 3.1–3.3.
+- **Status:** In progress — Slice 1 delivered, commits `d94ed51`–`be08779` (Brainstorm and Spec
+  shaping missions: compile, import, and accept for both phases, on-ramp from an assigned `idea`
+  via `Start brainstorm`). Remaining: connected launch, per-step model selection, Plan mission, and
+  a two-model end-to-end run.
 - **Completion signal:** A real feature completes the version-one cycle without manual prompt or
   result assembly, uses at least two distinct recorded LLM model identities across its
   agent-driven steps, preserves every required human gate, and leaves reproducible mission, result,
