@@ -434,7 +434,9 @@ The create panel slides in from the right at 390px. It uses this progressive ord
 5. Optional priority, default `Normal`.
 6. Optional link or file.
 7. Optional context.
-8. Optional `Help me shape this` setting.
+8. `Start brainstorm` — an explicit action on an assigned, active `idea` that performs the
+   `idea → brainstorm` transition on save and immediately surfaces the shaping handoff (see
+   "Work-item detail panel" below).
 9. Sticky footer actions: `Save to Inbox` and `Save & explore`.
 
 Only the main thought is required. Never ask for model, harness, repository, branch, effort, workflow, budget, or acceptance criteria during initial capture.
@@ -459,7 +461,14 @@ Overview prioritizes:
 6. Reply or request-changes composer.
 7. Sticky contextual actions.
 
-For review-ready work, the footer uses primary `Approve result` and secondary `Send comments`. Approval binds to the exact result being displayed. If the result changes, invalidate the prior approval and make that visible.
+This ordering describes Execute/Review-phase items. For a `brainstorm` or `spec` item, the panel
+leads with the shaping handoff (compile, import, accept) in place of items 3–5; a captured item's
+narrow panel (below) leads with the same handoff once it has an active `brainstorm`/`spec` item.
+
+For review-ready work, the footer uses primary `Approve result` and secondary `Send comments`.
+Approval binds to the exact result being displayed — including a shaping acceptance receipt, which
+pins the result SHA the same way. If the result changes, invalidate the prior approval and make
+that visible.
 
 `Edit details` exposes project, priority, type, goal, or scope without replacing the entire panel. Editing must preserve the original capture and activity history.
 
@@ -467,7 +476,7 @@ Activity uses the shared semantic history rather than reconstructing a separate 
 with a human-readable outcome and timestamp, retain resolved decisions and superseded results, and
 link to exact evidence when available. Raw tool and provider detail remains collapsed.
 
-For a captured idea/todo, keep refinement in a narrow structural side panel: show the immutable original thought, kind, and captured-at timestamp read-only above the editable metadata (project, type, tags, notes). Do not let this panel accrete activity feed, review, or approval surfaces — those stay part of the full work-item detail panel once a capture has been promoted into a governed work item.
+For a captured idea/todo, keep refinement in a narrow structural side panel: show the immutable original thought, kind, and captured-at timestamp read-only above the editable metadata (project, type, tags, notes). This panel may additionally carry the shaping handoff (compile, import, accept) for an item with an active `brainstorm` or `spec` item — accepting a Brainstorm or Spec artifact there is an input selection, not result approval. Do not let this panel accrete an activity feed, reviewer findings, or **result** approval surfaces — those stay part of the full work-item detail panel once a capture has been promoted into a governed work item.
 
 ### Agent update
 
@@ -488,6 +497,11 @@ never raw terminal output, protocol/token streams, or diagnostic internals. Laun
 synchronous in-flight guard for rapid-click feedback, but the durable per-item launch guard
 remains the sole authority that prevents a duplicate run.
 
+An imported shaping result (a compiled mission's proposal, brought in via `Use proposal as draft`)
+is neither live nor connected — it is a proposal, not current card state. Label it visibly as a
+proposal and never render it as an agent-update block; adopting it into a draft field fires no
+network request.
+
 ### Reviewer finding
 
 A finding contains severity, concise title, evidence summary, and affected acceptance criterion when available. Use:
@@ -500,7 +514,7 @@ The reviewer does not directly edit the work. Findings feed the reply/patch loop
 
 ### Buttons
 
-- Primary buttons use `primary` with white text and are reserved for the most important action in the current panel or gate.
+- Primary buttons use `primary` with white text and are reserved for the most important action in the current panel or gate. In a governed panel with `Save` already primary, shaping actions (compile, import, accept) use secondary or tertiary styling — never a second primary.
 - Secondary buttons use raised dark surfaces and a quiet border.
 - Tertiary actions are text or icon buttons with no filled container until hover.
 - Destructive actions use danger only after intent is clear and usually require confirmation.
