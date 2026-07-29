@@ -169,6 +169,10 @@ const CONNECTED_RUN_STAGING_DIRECTORY_PATTERN = new RegExp(
   `^\\.${UUID_PATTERN}\\.${UUID_PATTERN}\\.staging$`,
   "i",
 );
+const SHAPING_STAGING_DIRECTORY_PATTERN = new RegExp(
+  `^\\.(brainstorm|spec)-[0-9a-f]{64}\\.${UUID_PATTERN}\\.shaping\\.tmp$`,
+  "i",
+);
 const SHA256_SCHEMA = z.string().regex(/^[0-9a-f]{64}$/);
 const FAIL_CLOSED_EXECUTION_DEFAULTS: ExecutionDefaultsV1 = {
   schema_version: 1,
@@ -2058,26 +2062,40 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const entries = await readdir(workItemDirectory, { withFileTypes: true });
     for (const entry of entries) {
       const artifactDirectory = join(workItemDirectory, entry.name);
-      if (!entry.isDirectory() || entry.isSymbolicLink()) {
-        throw this.invalid(
-          artifactDirectory,
-          "shaping entries must be directories, not symlinks",
-        );
+      if (SHAPING_STAGING_DIRECTORY_PATTERN.test(entry.name)) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) {
+          throw this.invalid(
+            artifactDirectory,
+            "shaping staging entry must be a regular directory",
+          );
+        }
+        continue;
       }
       const match = /^(brainstorm|spec)-([0-9a-f]{64})$/.exec(entry.name);
-      if (match === null) {
+      if (match !== null) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) {
+          throw this.invalid(
+            artifactDirectory,
+            "shaping entries must be directories, not symlinks",
+          );
+        }
+        const identity = shapingIdentitySchema.parse({
+          phase: match[1],
+          work_item_id: validatedWorkItemId,
+          input_sha256: match[2],
+        });
+        const snapshot = await this.readShapingPackageSnapshot(identity);
+        artifacts.push(await this.readStoredShapingArtifact(snapshot));
+        continue;
+      }
+      if (/^\.?(brainstorm|spec)-/.test(entry.name)) {
         throw this.invalid(
           artifactDirectory,
           "shaping directory must use <phase>-<input_sha256>",
         );
       }
-      const identity = shapingIdentitySchema.parse({
-        phase: match[1],
-        work_item_id: validatedWorkItemId,
-        input_sha256: match[2],
-      });
-      const snapshot = await this.readShapingPackageSnapshot(identity);
-      artifacts.push(await this.readStoredShapingArtifact(snapshot));
+
+      // This founder-browsable directory can contain harmless OS/editor files.
     }
 
     return artifacts.sort((left, right) =>
@@ -3301,10 +3319,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       return this.shapingWriteResult(mission, missionDirectory);
     }
 
-    const stagingDirectory = join(
-      workItemShapingDirectory,
-      `.${identity.phase}-${identity.input_sha256}.${randomUUID()}.shaping.tmp`,
-    );
+    const stagingName =
+      `.${identity.phase}-${identity.input_sha256}.${randomUUID()}.shaping.tmp`;
+    if (!SHAPING_STAGING_DIRECTORY_PATTERN.test(stagingName)) {
+      throw new Error("Generated shaping staging directory name is invalid.");
+    }
+    const stagingDirectory = join(workItemShapingDirectory, stagingName);
     await mkdir(stagingDirectory);
     try {
       await writeFile(join(stagingDirectory, MISSION_JSON_FILE), missionSource, {

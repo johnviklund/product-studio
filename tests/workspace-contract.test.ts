@@ -219,6 +219,34 @@ async function writeShapingReadyWorkItem(
   return { goal, state };
 }
 
+async function writeBrainstormShapingArtifact(
+  root: string,
+  workItemId: string,
+) {
+  const item = await writeShapingReadyWorkItem(root, workItemId);
+  const input = {
+    phase: "brainstorm" as const,
+    title: item.goal.title,
+    notes: item.goal.notes,
+  };
+  const identity: ShapingIdentity<"brainstorm"> = {
+    phase: "brainstorm",
+    work_item_id: workItemId,
+    input_sha256: hashShapingInput(input),
+  };
+  const workspace = new ProductWorkspace(root);
+  const artifact = await workspace.writeShapingMissionPackage(
+    identity,
+    (paths) =>
+      compileBrainstormMission({
+        work_item_id: workItemId,
+        shaping_input: input,
+        paths,
+      }),
+  );
+  return { artifact, workspace };
+}
+
 function hashSource(source: string): string {
   return createHash("sha256").update(source).digest("hex");
 }
@@ -1016,6 +1044,73 @@ describe("ProductWorkspace", () => {
       mission_path: spec.mission_path.slice(root.length + 1),
     });
     expect(gitHeadReads).toBe(0);
+  });
+
+  it("ignores unrelated files when listing shaping artifacts", async () => {
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    const expected = await workspace.listShapingArtifacts(firstId);
+    await writeFile(
+      join(dirname(dirname(artifact.task_path)), ".DS_Store"),
+      "",
+      "utf8",
+    );
+
+    expect(await workspace.listShapingArtifacts(firstId)).toEqual(expected);
+  });
+
+  it("ignores valid leftover shaping staging directories", async () => {
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    const expected = await workspace.listShapingArtifacts(firstId);
+    await mkdir(
+      join(
+        dirname(dirname(artifact.task_path)),
+        `.brainstorm-${"b".repeat(64)}.${firstRunId}.shaping.tmp`,
+      ),
+    );
+
+    expect(await workspace.listShapingArtifacts(firstId)).toEqual(expected);
+  });
+
+  it("rejects near-miss shaping directory names", async () => {
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    await mkdir(join(dirname(dirname(artifact.task_path)), "brainstorm-abc"));
+
+    await expect(workspace.listShapingArtifacts(firstId)).rejects.toMatchObject({
+      kind: "invalid_workspace",
+    });
+  });
+
+  it("rejects symlinked exact shaping artifact names", async () => {
+    const root = await createWorkspace();
+    const outsideRoot = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    await symlink(
+      outsideRoot,
+      join(
+        dirname(dirname(artifact.task_path)),
+        `brainstorm-${"b".repeat(64)}`,
+      ),
+      "dir",
+    );
+
+    await expect(workspace.listShapingArtifacts(firstId)).rejects.toMatchObject({
+      kind: "invalid_workspace",
+    });
   });
 
   it("fails closed on stale, divergent, unsafe, and symlinked shaping state", async () => {
