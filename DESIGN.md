@@ -476,7 +476,55 @@ Activity uses the shared semantic history rather than reconstructing a separate 
 with a human-readable outcome and timestamp, retain resolved decisions and superseded results, and
 link to exact evidence when available. Raw tool and provider detail remains collapsed.
 
-For a captured idea/todo, keep refinement in a narrow structural side panel: show the immutable original thought, kind, and captured-at timestamp read-only above the editable metadata (project, type, tags, notes). This panel may additionally carry the shaping handoff (compile, import, accept) for an item with an active `brainstorm` or `spec` item — accepting a Brainstorm or Spec artifact there is an input selection, not result approval. Do not let this panel accrete an activity feed, reviewer findings, or **result** approval surfaces — those stay part of the full work-item detail panel once a capture has been promoted into a governed work item.
+For a captured idea/todo, keep refinement in a narrow structural side panel: show the immutable original thought, kind, and captured-at timestamp read-only above the editable metadata (project, type, tags, notes). This panel may additionally carry the guided shaping handoff for an item in any of the three eligible phases: `brainstorm`, `spec`, or `plan`. Give a ready Brainstorm result a first-class selection action: selecting that result is an input selection, not result approval, while a ready Spec result has its own explicit approval action. Keep compile, external `TASK.md` execution, and result import in the collapsed recovery path. Do not let this panel accrete an activity feed or reviewer findings — those stay part of the full work-item detail panel once a capture has been promoted into a governed work item.
+
+#### Connected shaping and Spec approval (ROADMAP 3.4 Slice 2)
+
+![Directional mockup of the guided shaping handoff](docs/design/roadmap-3.4-slice-2-guided-handoff.png)
+
+This mockup is directional and non-normative. The written lifecycle, state, authorization, and
+artifact contracts remain authoritative; never infer duplicate or missing card states from the
+image.
+
+The normal shaping path should feel like one guided continuation rather than a sequence of artifact
+operations:
+
+1. Every founder action asks the controller to advance the item; it does not mutate lifecycle state
+   directly in the browser. The controller commits the action first, releases its lease, and only
+   then idempotently launches the connected Brainstorm, Spec, or Plan mission. If that launch fails
+   after the commit, the decision stands and the surface shows the truthful new phase with the
+   appropriate `Start` or `Retry` recovery action.
+2. While an agent works, show only truthful bounded states — queued, working, blocked, failed, or
+   ready — with a concise latest update. Do not invent percentages or expose raw logs and token
+   streams.
+3. A mission revision carries one applied result. When that result is ready, replace the operational
+   handoff controls with a decision surface for that result rather than a candidate comparison. Lead
+   with the phase's concise summary, governed decision fields, unresolved questions where supplied,
+   and compact provenance. Keep the full metadata editor, duplicated goal-contract fields,
+   model/runtime details, evidence, and recovery controls outside the default decision surface.
+4. Keep the decision footer persistent and name the five founder actions directly: `Start
+   Brainstorm`, `Use result & run Spec`, `Approve & run Plan`, `Request changes & rerun`, and
+   `Replan with updated contract`. `Start Brainstorm` is the only route from Idea into Brainstorm;
+   its connected action includes the Brainstorm model and advances and launches in one action, while
+   `Start Brainstorm without a model` is its manual recovery variant. `Request changes & rerun`
+   requires feedback and uses a current-seat model. Put the next-seat model picker on the current
+   decision surface and show every prior seat's requested and effective model, rendering an
+   unobserved model as the literal `unknown`. Recommend and preselect an unused model ahead of a
+   saved preference that was already used; warn about reuse without blocking it. The terminal state
+   here is `Plan result ready`: Execute approval is not part of this slice. The generic
+   `idea → spec`, `spec → brainstorm`, and `plan → spec` arrows are closed in favour of `Request
+   changes`.
+5. If the Spec result changes or is replaced, invalidate the prior approval and return the item to
+   an explicit decision state. An agent cannot approve its own result or advance through a human
+   gate.
+6. Keep compile, external `TASK.md` execution, the manual ingress path and recovery task, result
+   import, and similar artifact controls under a collapsed `Advanced recovery` disclosure. They
+   remain fully supported and truthful, but they are not the normal founder journey once connected
+   launch is available.
+
+At a 1440×1024 viewport, the proposal summary, acceptance criteria, unresolved questions, compact
+provenance, and both decision actions should be understandable and reachable without scrolling.
+Long evidence and recovery detail may continue below a disclosure.
 
 ### Agent update
 
