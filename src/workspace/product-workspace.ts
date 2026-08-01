@@ -113,14 +113,18 @@ import {
   planResultSubmissionSchema,
   renderShapingTaskMd,
   serializeShapingPackage,
+  shapingAppliedMarkerSchema,
+  shapingDecisionReceiptSchema,
   shapingIdentitySchema,
   shapingImportReceiptSchema,
   shapingMissionPackageSchema,
-  shapingSelectionReceiptSchema,
+  SHAPING_PHASES,
   specMissionPackageSchema,
   specResultSubmissionSchema,
   type ShapingArtifactReadResult,
+  type ShapingAppliedMarkerV1,
   type ShapingArtifactWriteResult,
+  type ShapingDecisionReceipt,
   type ShapingIdentity,
   type ShapingImportReceipt,
   type ShapingImportReceiptWriteInput,
@@ -130,10 +134,15 @@ import {
   type ShapingReceiptWriteResult,
   type ShapingResultSnapshot,
   type ShapingResultSubmission,
-  type ShapingSelectionReceipt,
+  type ShapingPhase,
   type SpecMissionPackage,
   type StoredShapingArtifact,
 } from "../domain/shaping";
+import {
+  deriveManualShapingProductionId,
+  shapingProductionReceiptSchema,
+  type ShapingProductionReceipt,
+} from "../domain/shaping-run";
 
 const FOUNDER_DIRECTORY = ".founder";
 const WORK_ITEMS_DIRECTORY = "work-items";
@@ -142,6 +151,7 @@ const STATE_FILE = "state.json";
 const RUNS_DIRECTORY = "runs";
 const MISSIONS_DIRECTORY = "missions";
 const SHAPING_DIRECTORY = "shaping";
+const SHAPING_INGRESS_DIRECTORY = "shaping-ingress";
 const RUN_EVIDENCE_DIRECTORY = "run-evidence";
 const EXECUTION_DIRECTORY = "execution";
 const EXECUTION_DEFAULTS_FILE = "defaults.json";
@@ -156,7 +166,10 @@ const TASK_MD_FILE = "TASK.md";
 const RESULT_JSON_FILE = "result.json";
 const SUBMISSION_JSON_FILE = "submission.json";
 const IMPORT_JSON_FILE = "import.json";
-const ACCEPTANCE_JSON_FILE = "acceptance.json";
+const PRODUCTION_JSON_FILE = "production.json";
+const APPLIED_JSON_FILE = "applied.json";
+const APPLIED_DIRECTORY = "applied";
+const DECISION_JSON_FILE = "decision.json";
 const VERIFICATION_JSON_FILE = "verification.json";
 const CONTROLLER_LOCK_FILE = ".controller.lock";
 const execFileAsync = promisify(execFile);
@@ -172,9 +185,22 @@ const CONNECTED_RUN_STAGING_DIRECTORY_PATTERN = new RegExp(
   "i",
 );
 const SHAPING_STAGING_DIRECTORY_PATTERN = new RegExp(
-  `^\\.(brainstorm|spec)-[0-9a-f]{64}\\.${UUID_PATTERN}\\.shaping\\.tmp$`,
+  `^\\.(brainstorm|spec|plan)-[0-9a-f]{64}\\.${UUID_PATTERN}\\.shaping\\.tmp$`,
   "i",
 );
+
+interface StoredAppliedShapingBundle {
+  resultPath: string;
+  resultSource: string;
+  resultContentSha256: string;
+  importPath: string;
+  importReceipt: ShapingImportReceipt;
+  productionPath: string;
+  productionReceipt: ShapingProductionReceipt;
+  markerPath: string;
+  marker: ShapingAppliedMarkerV1;
+}
+
 const SHA256_SCHEMA = z.string().regex(/^[0-9a-f]{64}$/);
 const FAIL_CLOSED_EXECUTION_DEFAULTS: ExecutionDefaultsV1 = {
   schema_version: 1,
@@ -1920,14 +1946,26 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   async readShapingResult(
     identity: ShapingIdentity,
   ): Promise<ShapingResultSnapshot> {
+    const applied = await this.readAppliedShapingResult(identity);
+    if (applied === null) {
+      const validatedIdentity = shapingIdentitySchema.parse(identity);
+      const snapshot = await this.readShapingPackageSnapshot(validatedIdentity);
+      throw this.invalid(
+        join(snapshot.missionDirectory, APPLIED_DIRECTORY),
+        "required applied shaping result is missing",
+      );
+    }
+    return applied;
+  }
+
+  async readAppliedShapingResult(
+    identity: ShapingIdentity,
+  ): Promise<ShapingResultSnapshot | null> {
     const validatedIdentity = shapingIdentitySchema.parse(identity);
     const snapshot = await this.readShapingPackageSnapshot(validatedIdentity);
     const stored = await this.readStoredShapingArtifact(snapshot);
     if (stored.result === null) {
-      throw this.invalid(
-        join(snapshot.missionDirectory, RESULT_JSON_FILE),
-        "required file is missing",
-      );
+      return null;
     }
     return {
       mission: snapshot.mission,
@@ -1986,63 +2024,128 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     };
   }
 
-  async writeShapingAcceptance(
-    input: ShapingSelectionReceipt,
-  ): Promise<ShapingReceiptWriteResult<ShapingSelectionReceipt>> {
-    const receipt = shapingSelectionReceiptSchema.parse(input);
+  async writeShapingDecisionReceipt<
+    TReceipt extends ShapingDecisionReceipt,
+  >(
+    input: TReceipt,
+  ): Promise<ShapingReceiptWriteResult<TReceipt>> {
+    const receipt = shapingDecisionReceiptSchema.parse(input) as TReceipt;
     const snapshot = await this.readShapingPackageSnapshot(receipt.identity);
-    if (snapshot.mission.identity.phase !== "brainstorm") {
-      throw this.invalid(
-        snapshot.missionDirectory,
-        "only a Brainstorm result can have a shaping acceptance",
-      );
-    }
-    const resultPath = join(snapshot.missionDirectory, RESULT_JSON_FILE);
-    const resultSource = await this.readRequiredFile(resultPath);
-    const resultContentSha256 = this.hashArtifactSource(resultSource);
-    const importPath = join(snapshot.missionDirectory, IMPORT_JSON_FILE);
-    const importSource = await this.readRequiredFile(importPath);
-    const importReceipt = this.parseJson(
-      importSource,
-      importPath,
-      shapingImportReceiptSchema,
-    );
+    const isSelection = "selected_at" in receipt;
     if (
-      importReceipt.outcome !== "applied" ||
-      JSON.stringify(importReceipt.identity) !== JSON.stringify(receipt.identity) ||
-      importReceipt.shaping_mission_content_sha256 !==
-        receipt.mission_content_sha256 ||
-      importReceipt.result_content_sha256 !==
-        receipt.result_content_sha256 ||
-      resultContentSha256 !== receipt.result_content_sha256 ||
-      snapshot.mission.content_sha256 !==
-        receipt.mission_content_sha256
+      (isSelection && snapshot.mission.identity.phase !== "brainstorm") ||
+      (!isSelection && snapshot.mission.identity.phase !== "spec")
     ) {
       throw this.invalid(
         snapshot.missionDirectory,
-        "Brainstorm acceptance must match one applied immutable result",
+        "shaping decision receipt phase must match its immutable mission",
+      );
+    }
+    const stored = await this.readStoredShapingArtifact(snapshot);
+    if (
+      stored.result === null ||
+      stored.import_receipt?.outcome !== "applied" ||
+      JSON.stringify(receipt.identity) !==
+        JSON.stringify(snapshot.mission.identity) ||
+      receipt.mission_content_sha256 !== snapshot.mission.content_sha256 ||
+      receipt.result_content_sha256 !==
+        stored.result.result_content_sha256
+    ) {
+      throw this.invalid(
+        snapshot.missionDirectory,
+        "shaping decision must match one applied immutable result of its own phase",
       );
     }
     this.parseShapingResultForMission(
-      resultSource,
-      resultPath,
+      stored.result.result_source,
+      join(this.workspaceRoot, stored.result.result_path),
       snapshot.mission,
     );
 
-    const acceptancePath = join(
+    const decisionPath = join(
       snapshot.missionDirectory,
-      ACCEPTANCE_JSON_FILE,
+      DECISION_JSON_FILE,
     );
-    const acceptanceSource = await this.writeImmutableShapingJson(
-      acceptancePath,
+    const decisionSource = await this.writeImmutableShapingJson(
+      decisionPath,
       receipt,
-      "shaping acceptance receipt",
+      "shaping decision receipt",
     );
     return {
       receipt,
-      receipt_path: acceptancePath,
-      receipt_content_sha256: this.hashArtifactSource(acceptanceSource),
+      receipt_path: decisionPath,
+      receipt_content_sha256: this.hashArtifactSource(decisionSource),
     };
+  }
+
+  async resolveCurrentMissionRevision(
+    workItemId: string,
+    phase: ShapingPhase,
+  ): Promise<StoredShapingArtifact | null> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedPhase = z.enum(SHAPING_PHASES).parse(phase);
+    const artifacts = (await this.listShapingArtifacts(validatedWorkItemId))
+      .filter((artifact) => artifact.mission.identity.phase === validatedPhase);
+    if (artifacts.length === 0) {
+      return null;
+    }
+
+    const byInputSha256 = new Map(
+      artifacts.map((artifact) => [
+        artifact.mission.identity.input_sha256,
+        artifact,
+      ]),
+    );
+    const superseded = new Set<string>();
+    for (const artifact of artifacts) {
+      const revision = artifact.mission.input.revision;
+      if (revision === undefined) {
+        continue;
+      }
+      const predecessor = byInputSha256.get(
+        revision.supersedes_input_sha256,
+      );
+      if (predecessor === undefined) {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedWorkItemId,
+          `Shaping revision ${artifact.mission.identity.input_sha256} names missing predecessor ${revision.supersedes_input_sha256}.`,
+        );
+      }
+      const predecessorOrdinal = predecessor.mission.input.revision?.ordinal ?? 0;
+      if (revision.ordinal !== predecessorOrdinal + 1) {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedWorkItemId,
+          `Shaping revision ${artifact.mission.identity.input_sha256} has noncontiguous ordinal ${revision.ordinal}.`,
+        );
+      }
+      if (
+        predecessor.result === null ||
+        predecessor.result.result_content_sha256 !==
+          revision.superseded_result_sha256
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedWorkItemId,
+          `Shaping revision ${artifact.mission.identity.input_sha256} does not match its predecessor's applied result.`,
+        );
+      }
+      superseded.add(revision.supersedes_input_sha256);
+    }
+
+    const tips = artifacts.filter(
+      (artifact) =>
+        !superseded.has(artifact.mission.identity.input_sha256),
+    );
+    if (tips.length !== 1) {
+      throw new ControllerConflictError(
+        "repair_required",
+        validatedWorkItemId,
+        `Shaping revision chain for ${validatedPhase} must have exactly one tip; found ${tips.length}.`,
+      );
+    }
+    return tips[0];
   }
 
   async listShapingArtifacts(
@@ -2072,7 +2175,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         }
         continue;
       }
-      const match = /^(brainstorm|spec)-([0-9a-f]{64})$/.exec(entry.name);
+      const match = /^(brainstorm|spec|plan)-([0-9a-f]{64})$/.exec(entry.name);
       if (match !== null) {
         if (!entry.isDirectory() || entry.isSymbolicLink()) {
           throw this.invalid(
@@ -2089,7 +2192,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         artifacts.push(await this.readStoredShapingArtifact(snapshot));
         continue;
       }
-      if (/^\.?(brainstorm|spec)-/.test(entry.name)) {
+      if (/^\.?(brainstorm|spec|plan)-/.test(entry.name)) {
         throw this.invalid(
           artifactDirectory,
           "shaping directory must use <phase>-<input_sha256>",
@@ -3310,6 +3413,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
     await this.ensureDirectory(shapingDirectory);
     await this.ensureDirectory(workItemShapingDirectory);
+    await this.ensureShapingIngressFamilyRoot();
     if (await this.hasSafeDirectory(missionDirectory)) {
       await this.assertShapingSnapshot(
         missionDirectory,
@@ -3364,6 +3468,37 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return this.shapingWriteResult(mission, missionDirectory);
   }
 
+  private async ensureShapingIngressFamilyRoot(): Promise<void> {
+    const ingressDirectory = join(
+      this.founderDirectory,
+      SHAPING_INGRESS_DIRECTORY,
+    );
+    const gitignorePath = join(ingressDirectory, ".gitignore");
+    const expectedSource = "*\n";
+
+    await this.ensureDirectory(ingressDirectory);
+    let existingSource = await this.readOptionalFile(gitignorePath);
+    if (existingSource === null) {
+      try {
+        await writeFile(gitignorePath, expectedSource, {
+          encoding: "utf8",
+          flag: "wx",
+        });
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "EEXIST") {
+          throw error;
+        }
+      }
+      existingSource = await this.readRequiredFile(gitignorePath);
+    }
+    if (existingSource !== expectedSource) {
+      throw this.invalid(
+        gitignorePath,
+        "shaping ingress .gitignore must contain exactly *",
+      );
+    }
+  }
+
   private async removeShapingStagingDirectory(
     stagingDirectory: string,
     originalError: unknown,
@@ -3394,10 +3529,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         "immutable shaping snapshot must contain both mission.json and TASK.md",
       );
     }
-    const existingMission = this.parseJson(
+    const existingMission = this.parseShapingMissionSource(
       existingMissionSource,
       missionPath,
-      shapingMissionPackageSchema,
+      missionDirectory,
     );
     if (
       JSON.stringify(existingMission) !== JSON.stringify(mission) ||
@@ -3437,10 +3572,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
     const missionPath = join(missionDirectory, MISSION_JSON_FILE);
     const missionSource = await this.readRequiredFile(missionPath);
-    const mission = this.parseJson(
+    const mission = this.parseShapingMissionSource(
       missionSource,
       missionPath,
-      shapingMissionPackageSchema,
+      missionDirectory,
     );
     if (JSON.stringify(mission.identity) !== JSON.stringify(identity)) {
       throw this.invalid(
@@ -3460,6 +3595,27 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       relativeDirectory,
       relativeMissionPath: posix.join(relativeDirectory, MISSION_JSON_FILE),
     };
+  }
+
+  private parseShapingMissionSource(
+    source: string,
+    missionPath: string,
+    missionDirectory: string,
+  ): ShapingMissionPackage {
+    const value = this.parseJsonValue(source, missionPath);
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      "shaping_schema_version" in value &&
+      value.shaping_schema_version === 1
+    ) {
+      throw this.invalid(
+        missionDirectory,
+        "shaping artifact schema version 1 is unsupported; archive or reset this exact directory before continuing with shaping schema version 2",
+      );
+    }
+    return this.parseValue(value, missionPath, shapingMissionPackageSchema);
   }
 
   private parseShapingResultForMission(
@@ -3521,106 +3677,223 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return createHash("sha256").update(source).digest("hex");
   }
 
+  private async readAppliedShapingBundle(snapshot: {
+    mission: ShapingMissionPackage;
+    missionDirectory: string;
+  }): Promise<StoredAppliedShapingBundle | null> {
+    const appliedDirectory = join(
+      snapshot.missionDirectory,
+      APPLIED_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(appliedDirectory))) {
+      return null;
+    }
+
+    try {
+      const markerPath = join(appliedDirectory, APPLIED_JSON_FILE);
+      const markerSource = await this.readRequiredFile(markerPath);
+      const marker = this.parseJson(
+        markerSource,
+        markerPath,
+        shapingAppliedMarkerSchema,
+      );
+      const resultPath = join(appliedDirectory, RESULT_JSON_FILE);
+      const importPath = join(appliedDirectory, IMPORT_JSON_FILE);
+      const productionPath = join(appliedDirectory, PRODUCTION_JSON_FILE);
+      const resultSource = await this.readRequiredFile(resultPath);
+      const importSource = await this.readRequiredFile(importPath);
+      const productionSource = await this.readRequiredFile(productionPath);
+      const componentSources = {
+        result: resultSource,
+        import: importSource,
+        production: productionSource,
+      };
+
+      for (const component of ["result", "import", "production"] as const) {
+        const source = componentSources[component];
+        if (
+          marker.component_sha256[component] !==
+            this.hashArtifactSource(source) ||
+          marker.component_bytes[component] !== Buffer.byteLength(source)
+        ) {
+          throw new ControllerConflictError(
+            "repair_required",
+            snapshot.mission.identity.work_item_id,
+            `Applied shaping bundle component ${component}.json does not match applied.json.`,
+          );
+        }
+      }
+
+      const resultContentSha256 = this.hashArtifactSource(resultSource);
+      if (
+        marker.mission_content_sha256 !== snapshot.mission.content_sha256 ||
+        marker.result_content_sha256 !== resultContentSha256
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          snapshot.mission.identity.work_item_id,
+          "Applied shaping bundle marker does not match its immutable mission and result.",
+        );
+      }
+
+      const importReceipt = this.parseJson(
+        importSource,
+        importPath,
+        shapingImportReceiptSchema,
+      );
+      if (
+        importReceipt.outcome !== "applied" ||
+        importReceipt.result_content_sha256 !== resultContentSha256 ||
+        importReceipt.shaping_mission_content_sha256 !==
+          snapshot.mission.content_sha256 ||
+        JSON.stringify(importReceipt.identity) !==
+          JSON.stringify(snapshot.mission.identity)
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          snapshot.mission.identity.work_item_id,
+          "Applied shaping import receipt does not match its immutable mission and result.",
+        );
+      }
+
+      const productionReceipt = this.parseJson(
+        productionSource,
+        productionPath,
+        shapingProductionReceiptSchema,
+      );
+      if (
+        productionReceipt.result_content_sha256 !== resultContentSha256 ||
+        (productionReceipt.origin === "manual_import" &&
+          productionReceipt.production_id !==
+            deriveManualShapingProductionId(
+              snapshot.mission.content_sha256,
+              resultContentSha256,
+            ))
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          snapshot.mission.identity.work_item_id,
+          "Applied shaping production receipt does not match its immutable mission and result.",
+        );
+      }
+
+      this.parseShapingResultForMission(
+        resultSource,
+        resultPath,
+        snapshot.mission,
+      );
+      return {
+        resultPath,
+        resultSource,
+        resultContentSha256,
+        importPath,
+        importReceipt,
+        productionPath,
+        productionReceipt,
+        markerPath,
+        marker,
+      };
+    } catch (error) {
+      if (
+        error instanceof ControllerConflictError &&
+        error.kind === "repair_required"
+      ) {
+        throw error;
+      }
+      throw new ControllerConflictError(
+        "repair_required",
+        snapshot.mission.identity.work_item_id,
+        `Applied shaping bundle at ${relative(
+          this.workspaceRoot,
+          appliedDirectory,
+        )} needs repair: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   private async readStoredShapingArtifact(snapshot: {
     mission: ShapingMissionPackage;
     missionDirectory: string;
     relativeDirectory: string;
     relativeMissionPath: string;
   }): Promise<StoredShapingArtifact> {
-    const resultPath = join(snapshot.missionDirectory, RESULT_JSON_FILE);
-    const resultSource = await this.readOptionalFile(resultPath);
-    const resultContentSha256 =
-      resultSource === null ? null : this.hashArtifactSource(resultSource);
-    const importPath = join(snapshot.missionDirectory, IMPORT_JSON_FILE);
-    const importSource = await this.readOptionalFile(importPath);
-    const importReceipt =
-      importSource === null
+    const applied = await this.readAppliedShapingBundle(snapshot);
+    const decisionPath = join(snapshot.missionDirectory, DECISION_JSON_FILE);
+    const decisionSource = await this.readOptionalFile(decisionPath);
+    const decisionReceipt =
+      decisionSource === null
         ? null
-        : this.parseJson(importSource, importPath, shapingImportReceiptSchema);
+        : this.parseJson(
+            decisionSource,
+            decisionPath,
+            shapingDecisionReceiptSchema,
+          );
     if (
-      importReceipt !== null &&
-      (resultSource === null ||
-        importReceipt.result_content_sha256 !== resultContentSha256 ||
-        importReceipt.shaping_mission_content_sha256 !==
+      decisionReceipt !== null &&
+      (applied === null ||
+        (("selected_at" in decisionReceipt) !==
+          (snapshot.mission.identity.phase === "brainstorm")) ||
+        snapshot.mission.identity.phase === "plan" ||
+        JSON.stringify(decisionReceipt.identity) !==
+          JSON.stringify(snapshot.mission.identity) ||
+        decisionReceipt.mission_content_sha256 !==
           snapshot.mission.content_sha256 ||
-        JSON.stringify(importReceipt.identity) !==
-          JSON.stringify(snapshot.mission.identity))
+        decisionReceipt.result_content_sha256 !==
+          applied.resultContentSha256)
     ) {
-      throw this.invalid(
-        importPath,
-        "shaping import receipt does not match its stored mission and result",
-      );
-    }
-    if (importReceipt?.outcome === "applied" && resultSource !== null) {
-      this.parseShapingResultForMission(
-        resultSource,
-        resultPath,
-        snapshot.mission,
+      throw new ControllerConflictError(
+        "repair_required",
+        snapshot.mission.identity.work_item_id,
+        "Shaping decision does not match one applied result of its own phase.",
       );
     }
 
-    const acceptancePath = join(
-      snapshot.missionDirectory,
-      ACCEPTANCE_JSON_FILE,
+    const relativeAppliedDirectory = posix.join(
+      snapshot.relativeDirectory,
+      APPLIED_DIRECTORY,
     );
-    const acceptanceSource = await this.readOptionalFile(acceptancePath);
-    const acceptanceReceipt =
-      acceptanceSource === null
-        ? null
-        : this.parseJson(
-            acceptanceSource,
-            acceptancePath,
-            shapingSelectionReceiptSchema,
-          );
-    if (
-      acceptanceReceipt !== null &&
-      (snapshot.mission.identity.phase !== "brainstorm" ||
-        resultContentSha256 === null ||
-        importReceipt?.outcome !== "applied" ||
-        JSON.stringify(acceptanceReceipt.identity) !==
-          JSON.stringify(snapshot.mission.identity) ||
-        acceptanceReceipt.mission_content_sha256 !==
-          snapshot.mission.content_sha256 ||
-        acceptanceReceipt.result_content_sha256 !==
-          resultContentSha256)
-    ) {
-      throw this.invalid(
-        acceptancePath,
-        "shaping acceptance does not match one applied Brainstorm result",
-      );
-    }
 
     return {
       mission: snapshot.mission,
       mission_path: snapshot.relativeMissionPath,
       task_path: posix.join(snapshot.relativeDirectory, TASK_MD_FILE),
       result:
-        resultSource === null || resultContentSha256 === null
+        applied === null
           ? null
           : {
               result_path: posix.join(
-                snapshot.relativeDirectory,
+                relativeAppliedDirectory,
                 RESULT_JSON_FILE,
               ),
-              result_source: resultSource,
-              result_content_sha256: resultContentSha256,
+              result_source: applied.resultSource,
+              result_content_sha256: applied.resultContentSha256,
             },
-      import_receipt: importReceipt,
+      import_receipt: applied?.importReceipt ?? null,
       import_path:
-        importReceipt === null
+        applied === null
           ? null
-          : posix.join(snapshot.relativeDirectory, IMPORT_JSON_FILE),
-      acceptance:
-        acceptanceReceipt === null || acceptanceSource === null
+          : posix.join(relativeAppliedDirectory, IMPORT_JSON_FILE),
+      production_receipt: applied?.productionReceipt ?? null,
+      production_path:
+        applied === null
+          ? null
+          : posix.join(relativeAppliedDirectory, PRODUCTION_JSON_FILE),
+      applied_marker: applied?.marker ?? null,
+      applied_marker_path:
+        applied === null
+          ? null
+          : posix.join(relativeAppliedDirectory, APPLIED_JSON_FILE),
+      decision:
+        decisionReceipt === null || decisionSource === null
           ? null
           : {
-              receipt: acceptanceReceipt,
-              acceptance_path: posix.join(
+              receipt: decisionReceipt,
+              decision_path: posix.join(
                 snapshot.relativeDirectory,
-                ACCEPTANCE_JSON_FILE,
+                DECISION_JSON_FILE,
               ),
-              acceptance_content_sha256:
-                this.hashArtifactSource(acceptanceSource),
+              decision_content_sha256:
+                this.hashArtifactSource(decisionSource),
             },
     };
   }
@@ -3631,7 +3904,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const matches = (await this.listShapingArtifacts(mission.identity.work_item_id))
       .filter(
         (artifact) =>
-          artifact.acceptance?.acceptance_content_sha256 ===
+          artifact.decision?.decision_content_sha256 ===
           mission.input.brainstorm_selection_sha256,
       );
     if (matches.length !== 1) {
@@ -3645,7 +3918,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const selected = matches[0];
     if (
       selected.mission.identity.phase !== "brainstorm" ||
-      selected.acceptance === null ||
+      selected.decision === null ||
+      !("selected_at" in selected.decision.receipt) ||
       selected.import_receipt?.outcome !== "applied" ||
       selected.result === null
     ) {
@@ -3659,10 +3933,19 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       join(this.workspaceRoot, selected.result.result_path),
       selected.mission,
     );
+    const selection = {
+      shaping_schema_version:
+        selected.decision.receipt.shaping_schema_version,
+      identity: selected.decision.receipt.identity,
+      mission_content_sha256:
+        selected.decision.receipt.mission_content_sha256,
+      result_content_sha256:
+        selected.decision.receipt.result_content_sha256,
+    };
     if (
       result.identity.phase !== "brainstorm" ||
       JSON.stringify(mission.input.brainstorm_selection) !==
-        JSON.stringify(selected.acceptance.receipt) ||
+        JSON.stringify(selection) ||
       JSON.stringify(mission.input.brainstorm_result) !== JSON.stringify(result)
     ) {
       throw this.missionNotReady(

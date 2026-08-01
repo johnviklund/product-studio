@@ -13,6 +13,7 @@ import {
   type WorkItemStatus,
 } from "./work-item";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
+import type { ShapingProductionReceipt } from "./shaping-run";
 
 export const SHAPING_SCHEMA_VERSION = 2 as const;
 export const SHAPING_PHASES = ["brainstorm", "spec", "plan"] as const;
@@ -351,10 +352,14 @@ export interface StoredShapingArtifact {
   } | null;
   import_receipt: ShapingImportReceipt | null;
   import_path: string | null;
-  acceptance: {
-    receipt: ShapingSelectionReceipt;
-    acceptance_path: string;
-    acceptance_content_sha256: string;
+  production_receipt: ShapingProductionReceipt | null;
+  production_path: string | null;
+  applied_marker: ShapingAppliedMarkerV1 | null;
+  applied_marker_path: string | null;
+  decision: {
+    receipt: ShapingDecisionReceipt;
+    decision_path: string;
+    decision_content_sha256: string;
   } | null;
 }
 

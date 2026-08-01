@@ -39,12 +39,19 @@ import {
 } from "../src/domain/result";
 import {
   compileBrainstormMission,
+  compilePlanMission,
   compileSpecMission,
   hashShapingInput,
   type BrainstormResultSubmission,
+  type PlanResultSubmission,
+  type ShapingArtifactWriteResult,
   type ShapingIdentity,
+  type ShapingMissionPackage,
   type ShapingSelectionReceipt,
+  type SpecApprovalReceipt,
+  type SpecResultSubmission,
 } from "../src/domain/shaping";
+import { deriveManualShapingProductionId } from "../src/domain/shaping-run";
 import {
   InvalidWorkspaceError,
   type ActiveRun,
@@ -249,6 +256,87 @@ async function writeBrainstormShapingArtifact(
 
 function hashSource(source: string): string {
   return createHash("sha256").update(source).digest("hex");
+}
+
+async function writeAppliedShapingBundle(
+  artifact: ShapingArtifactWriteResult<ShapingMissionPackage>,
+  result:
+    | BrainstormResultSubmission
+    | SpecResultSubmission
+    | PlanResultSubmission,
+) {
+  const appliedDirectory = join(dirname(artifact.mission_path), "applied");
+  const resultSource = `${JSON.stringify(result, null, 2)}\n`;
+  const resultContentSha256 = hashSource(resultSource);
+  const importReceipt = {
+    shaping_schema_version: 2 as const,
+    identity: artifact.mission.identity,
+    shaping_mission_content_sha256: artifact.mission.content_sha256,
+    result_content_sha256: resultContentSha256,
+    outcome: "applied" as const,
+    first_published_at: "2026-08-01T12:00:00.000Z",
+    reasons: [],
+  };
+  const productionReceipt = {
+    schema_version: 1 as const,
+    production_id: deriveManualShapingProductionId(
+      artifact.mission.content_sha256,
+      resultContentSha256,
+    ),
+    origin: "manual_import" as const,
+    shaping_run_id: null,
+    produced_at: "2026-08-01T12:00:01.000Z",
+    requested_model: { value: null, assurance: "unknown" as const },
+    effective_model: {
+      assurance: "unknown" as const,
+      model_id: null,
+      deployment_id: null,
+      observed_event_sha256: null,
+    },
+    ingress_path: `.founder/shaping-ingress/${artifact.mission.identity.work_item_id}/${artifact.mission.identity.phase}-${artifact.mission.identity.input_sha256}/result.json`,
+    result_content_sha256: resultContentSha256,
+  };
+  const importSource = `${JSON.stringify(importReceipt, null, 2)}\n`;
+  const productionSource = `${JSON.stringify(productionReceipt, null, 2)}\n`;
+  const appliedMarker = {
+    schema_version: 1 as const,
+    mission_content_sha256: artifact.mission.content_sha256,
+    result_content_sha256: resultContentSha256,
+    component_sha256: {
+      result: hashSource(resultSource),
+      import: hashSource(importSource),
+      production: hashSource(productionSource),
+    },
+    component_bytes: {
+      result: Buffer.byteLength(resultSource),
+      import: Buffer.byteLength(importSource),
+      production: Buffer.byteLength(productionSource),
+    },
+    committed_at: "2026-08-01T12:00:02.000Z",
+  };
+
+  await mkdir(appliedDirectory);
+  await writeFile(join(appliedDirectory, "result.json"), resultSource, "utf8");
+  await writeFile(join(appliedDirectory, "import.json"), importSource, "utf8");
+  await writeFile(
+    join(appliedDirectory, "production.json"),
+    productionSource,
+    "utf8",
+  );
+  await writeFile(
+    join(appliedDirectory, "applied.json"),
+    `${JSON.stringify(appliedMarker, null, 2)}\n`,
+    "utf8",
+  );
+
+  return {
+    appliedDirectory,
+    resultSource,
+    resultContentSha256,
+    importReceipt,
+    productionReceipt,
+    appliedMarker,
+  };
 }
 
 async function writeMissionReadyWorkItem(
@@ -911,7 +999,7 @@ describe("ProductWorkspace", () => {
     ).toEqual(["TASK.md", "mission.json"]);
   });
 
-  it("publishes, imports, accepts, and selects immutable shaping artifacts without Git", async () => {
+  it("publishes byte-identical v2 Brainstorm, Spec, and Plan missions without Git", async () => {
     const root = await createWorkspace();
     const item = await writeShapingReadyWorkItem(root, firstId);
     let gitHeadReads = 0;
@@ -954,6 +1042,15 @@ describe("ProductWorkspace", () => {
     expect(replay).toEqual(first);
     expect(await readFile(replay.mission_path, "utf8")).toBe(missionSource);
     expect(await readFile(replay.task_path, "utf8")).toBe(taskSource);
+    expect(
+      await readFile(
+        join(root, ".founder", "shaping-ingress", ".gitignore"),
+        "utf8",
+      ),
+    ).toBe("*\n");
+    await expect(
+      workspace.readAppliedShapingResult(brainstormIdentity),
+    ).resolves.toBeNull();
 
     const brainstormResult: BrainstormResultSubmission = {
       result_schema_version: 1,
@@ -964,40 +1061,31 @@ describe("ProductWorkspace", () => {
       non_goals: ["Do not widen Execute missions."],
       open_questions: ["How should Plan shaping work later?"],
     };
-    const resultSource = `${JSON.stringify(brainstormResult, null, 2)}\n`;
-    await writeFile(
-      join(dirname(first.task_path), "result.json"),
-      resultSource,
-      "utf8",
+    const appliedBrainstorm = await writeAppliedShapingBundle(
+      first,
+      brainstormResult,
     );
-    const importReceipt = {
-      shaping_schema_version: 2 as const,
-      identity: brainstormIdentity,
-      shaping_mission_content_sha256: first.mission.content_sha256,
-      result_content_sha256: hashSource(resultSource),
-      outcome: "applied" as const,
-      first_published_at: "2026-07-29T00:01:00.000Z",
-      reasons: [],
-    };
-    const imported = await workspace.writeShapingImportReceipt({
-      result_source: resultSource,
-      receipt: importReceipt,
+    await expect(
+      workspace.readAppliedShapingResult(brainstormIdentity),
+    ).resolves.toMatchObject({
+      result_path: `.founder/shaping/${firstId}/brainstorm-${brainstormIdentity.input_sha256}/applied/result.json`,
+      result_source: appliedBrainstorm.resultSource,
     });
-    expect(
-      await workspace.writeShapingImportReceipt({
-        result_source: resultSource,
-        receipt: importReceipt,
-      }),
-    ).toEqual(imported);
 
     const acceptance: ShapingSelectionReceipt = {
       shaping_schema_version: 2,
       identity: brainstormIdentity,
       mission_content_sha256: first.mission.content_sha256,
-      result_content_sha256: hashSource(resultSource),
+      result_content_sha256: appliedBrainstorm.resultContentSha256,
       selected_at: "2026-07-29T00:02:00.000Z",
     };
-    const accepted = await workspace.writeShapingAcceptance(acceptance);
+    const accepted = await workspace.writeShapingDecisionReceipt(acceptance);
+    expect(
+      await workspace.writeShapingDecisionReceipt(acceptance),
+    ).toEqual(accepted);
+    expect(accepted.receipt_path).toBe(
+      join(dirname(first.mission_path), "decision.json"),
+    );
 
     const specItem = {
       ...item,
@@ -1034,16 +1122,316 @@ describe("ProductWorkspace", () => {
           paths,
         }),
     );
+    const specResult: SpecResultSubmission = {
+      result_schema_version: 1,
+      spec_mission_content_sha256: spec.mission.content_sha256,
+      identity: specIdentity,
+      proposal: {
+        purpose: "Deliver a guided shaping handoff.",
+        acceptance_criteria: ["All three shaping phases publish."],
+        non_goals: ["Do not authorize Execute."],
+        allowed_scope: ["src/workspace"],
+        review_ready: ["The workspace contract test passes."],
+      },
+    };
+    const appliedSpec = await writeAppliedShapingBundle(spec, specResult);
+    const goalContractSha256 = "9".repeat(64);
+    const specApproval: SpecApprovalReceipt = {
+      shaping_schema_version: 2,
+      identity: specIdentity,
+      mission_content_sha256: spec.mission.content_sha256,
+      result_content_sha256: appliedSpec.resultContentSha256,
+      goal_contract_sha256: goalContractSha256,
+      approved_at: "2026-07-29T00:04:00.000Z",
+    };
+    await expect(
+      workspace.writeShapingDecisionReceipt({
+        ...specApproval,
+        result_content_sha256: appliedBrainstorm.resultContentSha256,
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    const approved = await workspace.writeShapingDecisionReceipt(
+      specApproval,
+    );
+
+    const planState = {
+      ...specItem.state,
+      phase: "plan" as const,
+      updated_at: "2026-07-29T00:05:00.000Z",
+    };
+    await writeFile(
+      join(root, ".founder", "work-items", firstId, "state.json"),
+      `${JSON.stringify(planState, null, 2)}\n`,
+      "utf8",
+    );
+    const planInput = {
+      phase: "plan" as const,
+      title: specItem.goal.title,
+      notes: specItem.goal.notes,
+      spec_approval_sha256: approved.receipt_content_sha256,
+      spec_approval: specApproval,
+      spec_result: specResult,
+      repository_base_commit: "a".repeat(40),
+      goal_contract_sha256: goalContractSha256,
+      goal_version: 1,
+    };
+    const planIdentity: ShapingIdentity<"plan"> = {
+      phase: "plan",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(planInput),
+    };
+    const plan = await workspace.writeShapingMissionPackage(
+      planIdentity,
+      (paths) =>
+        compilePlanMission({
+          work_item_id: firstId,
+          shaping_input: planInput,
+          paths,
+        }),
+    );
+    const planMissionSource = await readFile(plan.mission_path, "utf8");
+    const planTaskSource = await readFile(plan.task_path, "utf8");
+    expect(
+      await workspace.writeShapingMissionPackage(planIdentity, (paths) =>
+        compilePlanMission({
+          work_item_id: firstId,
+          shaping_input: planInput,
+          paths,
+        }),
+      ),
+    ).toEqual(plan);
+    expect(await readFile(plan.mission_path, "utf8")).toBe(
+      planMissionSource,
+    );
+    expect(await readFile(plan.task_path, "utf8")).toBe(planTaskSource);
+    const planResult: PlanResultSubmission = {
+      result_schema_version: 1,
+      plan_mission_content_sha256: plan.mission.content_sha256,
+      identity: planIdentity,
+      summary: "Implement the bounded shaping handoff.",
+      checklist: [
+        {
+          id: "step-1",
+          step: "Publish the shaping family.",
+          verification_check: "Run the workspace contract test.",
+        },
+      ],
+      relevant_skills: [],
+      product_doc_impacts: [],
+      todo_impacts: [],
+      open_questions: [],
+    };
+    await writeAppliedShapingBundle(plan, planResult);
 
     expect(spec.mission.input).toMatchObject({
       brainstorm_selection_sha256: accepted.receipt_content_sha256,
     });
-    expect(await workspace.listShapingArtifacts(firstId)).toHaveLength(2);
+    expect(
+      (await workspace.listShapingArtifacts(firstId)).map(
+        (artifact) => artifact.mission.identity.phase,
+      ),
+    ).toEqual(["brainstorm", "plan", "spec"]);
     expect(await workspace.readShapingMissionPackage(specIdentity)).toEqual({
       mission: spec.mission,
       mission_path: spec.mission_path.slice(root.length + 1),
     });
     expect(gitHeadReads).toBe(0);
+  });
+
+  it("resolves one- and two-link revision chains from structural supersession", async () => {
+    const root = await createWorkspace();
+    const item = await writeShapingReadyWorkItem(root, firstId);
+    const workspace = new ProductWorkspace(root);
+    const originalInput = {
+      phase: "brainstorm" as const,
+      title: item.goal.title,
+      notes: item.goal.notes,
+    };
+    const originalIdentity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(originalInput),
+    };
+    const original = await workspace.writeShapingMissionPackage(
+      originalIdentity,
+      (paths) =>
+        compileBrainstormMission({
+          work_item_id: firstId,
+          shaping_input: originalInput,
+          paths,
+        }),
+    );
+    const originalApplied = await writeAppliedShapingBundle(original, {
+      result_schema_version: 1,
+      brainstorm_mission_content_sha256: original.mission.content_sha256,
+      identity: originalIdentity,
+      problem_statement: "The original mission needs refinement.",
+      approach: "Revise it with explicit feedback.",
+      non_goals: ["Do not mutate the original."],
+      open_questions: ["Which verification should the revision name?"],
+    });
+
+    const revisionOneInput = {
+      ...originalInput,
+      revision: {
+        ordinal: 1,
+        supersedes_input_sha256: originalIdentity.input_sha256,
+        superseded_result_sha256: originalApplied.resultContentSha256,
+        feedback: "Make the approach more concrete.",
+      },
+    };
+    const revisionOneIdentity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(revisionOneInput),
+    };
+    const revisionOne = await workspace.writeShapingMissionPackage(
+      revisionOneIdentity,
+      (paths) =>
+        compileBrainstormMission({
+          work_item_id: firstId,
+          shaping_input: revisionOneInput,
+          paths,
+        }),
+    );
+    const revisionOneApplied = await writeAppliedShapingBundle(revisionOne, {
+      result_schema_version: 1,
+      brainstorm_mission_content_sha256: revisionOne.mission.content_sha256,
+      identity: revisionOneIdentity,
+      problem_statement: "The revised mission is concrete.",
+      approach: "Keep the structural chain explicit.",
+      non_goals: ["Do not use timestamps for ordering."],
+      open_questions: ["Which final verification should the next revision name?"],
+    });
+    await expect(
+      workspace.resolveCurrentMissionRevision(firstId, "brainstorm"),
+    ).resolves.toMatchObject({ mission: { identity: revisionOneIdentity } });
+
+    const revisionTwoInput = {
+      ...originalInput,
+      revision: {
+        ordinal: 2,
+        supersedes_input_sha256: revisionOneIdentity.input_sha256,
+        superseded_result_sha256: revisionOneApplied.resultContentSha256,
+        feedback: "Name the final verification explicitly.",
+      },
+    };
+    const revisionTwoIdentity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(revisionTwoInput),
+    };
+    await workspace.writeShapingMissionPackage(
+      revisionTwoIdentity,
+      (paths) =>
+        compileBrainstormMission({
+          work_item_id: firstId,
+          shaping_input: revisionTwoInput,
+          paths,
+        }),
+    );
+    await expect(
+      workspace.resolveCurrentMissionRevision(firstId, "brainstorm"),
+    ).resolves.toMatchObject({ mission: { identity: revisionTwoIdentity } });
+  });
+
+  it("fails repair-required when a revision names no prior mission", async () => {
+    const root = await createWorkspace();
+    const item = await writeShapingReadyWorkItem(root, firstId);
+    const workspace = new ProductWorkspace(root);
+    const input = {
+      phase: "brainstorm" as const,
+      title: item.goal.title,
+      notes: item.goal.notes,
+      revision: {
+        ordinal: 1,
+        supersedes_input_sha256: "7".repeat(64),
+        superseded_result_sha256: "8".repeat(64),
+        feedback: "This predecessor does not exist.",
+      },
+    };
+    const identity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(input),
+    };
+    await workspace.writeShapingMissionPackage(identity, (paths) =>
+      compileBrainstormMission({
+        work_item_id: firstId,
+        shaping_input: input,
+        paths,
+      }),
+    );
+
+    await expect(
+      workspace.resolveCurrentMissionRevision(firstId, "brainstorm"),
+    ).rejects.toMatchObject({
+      kind: "repair_required",
+      reason: expect.stringContaining("missing predecessor"),
+    });
+  });
+
+  it("recognizes no result without applied.json and fails repair-required on component drift", async () => {
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    await expect(
+      workspace.readAppliedShapingResult(artifact.mission.identity),
+    ).resolves.toBeNull();
+
+    const applied = await writeAppliedShapingBundle(artifact, {
+      result_schema_version: 1,
+      brainstorm_mission_content_sha256: artifact.mission.content_sha256,
+      identity: artifact.mission.identity,
+      problem_statement: "The marker binds every component.",
+      approach: "Reject any mismatched sibling.",
+      non_goals: [],
+      open_questions: [],
+    });
+    await writeFile(
+      join(applied.appliedDirectory, "applied.json"),
+      `${JSON.stringify(
+        {
+          ...applied.appliedMarker,
+          component_sha256: {
+            ...applied.appliedMarker.component_sha256,
+            production: "0".repeat(64),
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    await expect(
+      workspace.readAppliedShapingResult(artifact.mission.identity),
+    ).rejects.toMatchObject({
+      kind: "repair_required",
+      reason: expect.stringContaining("production.json"),
+    });
+  });
+
+  it("rejects v1 shaping artifacts with the exact directory and archive-or-reset remedy", async () => {
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    const artifactDirectory = dirname(artifact.mission_path);
+    await writeFile(
+      artifact.mission_path,
+      '{"shaping_schema_version":1}\n',
+      "utf8",
+    );
+
+    await expect(workspace.listShapingArtifacts(firstId)).rejects.toMatchObject({
+      kind: "invalid_workspace",
+      artifactPath: artifactDirectory.slice(root.length + 1),
+      reason: expect.stringMatching(/schema version 1.*archive or reset/u),
+    });
   });
 
   it("ignores unrelated files when listing shaping artifacts", async () => {
@@ -1182,33 +1570,17 @@ describe("ProductWorkspace", () => {
       non_goals: ["A non-goal."],
       open_questions: ["A question?"],
     };
-    const resultSource = `${JSON.stringify(result, null, 2)}\n`;
+    const applied = await writeAppliedShapingBundle(artifact, result);
+    const resultSource = applied.resultSource;
+    const receipt = applied.importReceipt;
     await writeFile(
-      join(dirname(artifact.task_path), "result.json"),
-      resultSource,
-      "utf8",
-    );
-    const receipt = {
-      shaping_schema_version: 2 as const,
-      identity: divergentIdentity,
-      shaping_mission_content_sha256: artifact.mission.content_sha256,
-      result_content_sha256: hashSource(resultSource),
-      outcome: "applied" as const,
-      first_published_at: "2026-07-29T00:01:00.000Z",
-      reasons: [],
-    };
-    await divergentWorkspace.writeShapingImportReceipt({
-      result_source: resultSource,
-      receipt,
-    });
-    await writeFile(
-      join(dirname(artifact.task_path), "result.json"),
+      join(applied.appliedDirectory, "result.json"),
       `${resultSource} `,
       "utf8",
     );
     await expect(
       divergentWorkspace.readShapingResult(divergentIdentity),
-    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    ).rejects.toMatchObject({ kind: "repair_required" });
     await expect(
       divergentWorkspace.writeShapingImportReceipt({
         result_source: resultSource,
@@ -1216,21 +1588,18 @@ describe("ProductWorkspace", () => {
       }),
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
     await writeFile(
-      join(dirname(artifact.task_path), "result.json"),
+      join(applied.appliedDirectory, "result.json"),
       resultSource,
       "utf8",
     );
     await writeFile(
-      join(dirname(artifact.task_path), "import.json"),
+      join(applied.appliedDirectory, "import.json"),
       `${JSON.stringify({ ...receipt, first_published_at: "2026-07-29T00:02:00.000Z" }, null, 2)}\n`,
       "utf8",
     );
     await expect(
-      divergentWorkspace.writeShapingImportReceipt({
-        result_source: resultSource,
-        receipt,
-      }),
-    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+      divergentWorkspace.readShapingResult(divergentIdentity),
+    ).rejects.toMatchObject({ kind: "repair_required" });
     await writeFile(artifact.mission_path, "{}\n", "utf8");
     await expect(
       divergentWorkspace.writeShapingMissionPackage(
