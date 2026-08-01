@@ -110,15 +110,15 @@ import {
   brainstormResultSubmissionSchema,
   hashShapingInput,
   normalizeShapingGoalInput,
+  planResultSubmissionSchema,
   renderShapingTaskMd,
   serializeShapingPackage,
-  shapingAcceptanceReceiptSchema,
   shapingIdentitySchema,
   shapingImportReceiptSchema,
   shapingMissionPackageSchema,
+  shapingSelectionReceiptSchema,
   specMissionPackageSchema,
   specResultSubmissionSchema,
-  type ShapingAcceptanceReceipt,
   type ShapingArtifactReadResult,
   type ShapingArtifactWriteResult,
   type ShapingIdentity,
@@ -130,6 +130,7 @@ import {
   type ShapingReceiptWriteResult,
   type ShapingResultSnapshot,
   type ShapingResultSubmission,
+  type ShapingSelectionReceipt,
   type SpecMissionPackage,
   type StoredShapingArtifact,
 } from "../domain/shaping";
@@ -1878,13 +1879,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const paths = this.shapingPaths(validatedIdentity);
     const mission = shapingMissionPackageSchema.parse(buildPackage(paths));
     if (
-      JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
-      mission.task_path !== paths.task_path ||
-      mission.result_contract.output_path !== paths.output_path
+      JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity)
     ) {
       throw this.invalid(
         this.founderDirectory,
-        "compiled shaping identity and paths must match the workspace-derived snapshot",
+        "compiled shaping identity must match the workspace-derived snapshot",
       );
     }
     const goalInput = normalizeShapingGoalInput(current.goal);
@@ -1988,9 +1987,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   async writeShapingAcceptance(
-    input: ShapingAcceptanceReceipt,
-  ): Promise<ShapingReceiptWriteResult<ShapingAcceptanceReceipt>> {
-    const receipt = shapingAcceptanceReceiptSchema.parse(input);
+    input: ShapingSelectionReceipt,
+  ): Promise<ShapingReceiptWriteResult<ShapingSelectionReceipt>> {
+    const receipt = shapingSelectionReceiptSchema.parse(input);
     const snapshot = await this.readShapingPackageSnapshot(receipt.identity);
     if (snapshot.mission.identity.phase !== "brainstorm") {
       throw this.invalid(
@@ -2012,12 +2011,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       importReceipt.outcome !== "applied" ||
       JSON.stringify(importReceipt.identity) !== JSON.stringify(receipt.identity) ||
       importReceipt.shaping_mission_content_sha256 !==
-        receipt.brainstorm_mission_content_sha256 ||
+        receipt.mission_content_sha256 ||
       importReceipt.result_content_sha256 !==
-        receipt.brainstorm_result_content_sha256 ||
-      resultContentSha256 !== receipt.brainstorm_result_content_sha256 ||
+        receipt.result_content_sha256 ||
+      resultContentSha256 !== receipt.result_content_sha256 ||
       snapshot.mission.content_sha256 !==
-        receipt.brainstorm_mission_content_sha256
+        receipt.mission_content_sha256
     ) {
       throw this.invalid(
         snapshot.missionDirectory,
@@ -3443,14 +3442,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       missionPath,
       shapingMissionPackageSchema,
     );
-    if (
-      JSON.stringify(mission.identity) !== JSON.stringify(identity) ||
-      mission.task_path !== paths.task_path ||
-      mission.result_contract.output_path !== paths.output_path
-    ) {
+    if (JSON.stringify(mission.identity) !== JSON.stringify(identity)) {
       throw this.invalid(
         missionDirectory,
-        "shaping snapshot identity and paths do not match its containing directory",
+        "shaping snapshot identity does not match its containing directory",
       );
     }
     await this.assertShapingSnapshot(
@@ -3479,11 +3474,15 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
             resultPath,
             brainstormResultSubmissionSchema,
           )
-        : this.parseJson(resultSource, resultPath, specResultSubmissionSchema);
+        : mission.identity.phase === "spec"
+          ? this.parseJson(resultSource, resultPath, specResultSubmissionSchema)
+          : this.parseJson(resultSource, resultPath, planResultSubmissionSchema);
     const missionContentSha256 =
       "brainstorm_mission_content_sha256" in result
         ? result.brainstorm_mission_content_sha256
-        : result.spec_mission_content_sha256;
+        : "spec_mission_content_sha256" in result
+          ? result.spec_mission_content_sha256
+          : result.plan_mission_content_sha256;
     if (
       JSON.stringify(result.identity) !== JSON.stringify(mission.identity) ||
       missionContentSha256 !== mission.content_sha256
@@ -3571,7 +3570,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         : this.parseJson(
             acceptanceSource,
             acceptancePath,
-            shapingAcceptanceReceiptSchema,
+            shapingSelectionReceiptSchema,
           );
     if (
       acceptanceReceipt !== null &&
@@ -3580,9 +3579,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         importReceipt?.outcome !== "applied" ||
         JSON.stringify(acceptanceReceipt.identity) !==
           JSON.stringify(snapshot.mission.identity) ||
-        acceptanceReceipt.brainstorm_mission_content_sha256 !==
+        acceptanceReceipt.mission_content_sha256 !==
           snapshot.mission.content_sha256 ||
-        acceptanceReceipt.brainstorm_result_content_sha256 !==
+        acceptanceReceipt.result_content_sha256 !==
           resultContentSha256)
     ) {
       throw this.invalid(
@@ -3594,7 +3593,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return {
       mission: snapshot.mission,
       mission_path: snapshot.relativeMissionPath,
-      task_path: snapshot.mission.task_path,
+      task_path: posix.join(snapshot.relativeDirectory, TASK_MD_FILE),
       result:
         resultSource === null || resultContentSha256 === null
           ? null
@@ -3633,7 +3632,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       .filter(
         (artifact) =>
           artifact.acceptance?.acceptance_content_sha256 ===
-          mission.input.brainstorm_acceptance_sha256,
+          mission.input.brainstorm_selection_sha256,
       );
     if (matches.length !== 1) {
       throw this.missionNotReady(
@@ -3662,7 +3661,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     );
     if (
       result.identity.phase !== "brainstorm" ||
-      JSON.stringify(mission.input.brainstorm_acceptance) !==
+      JSON.stringify(mission.input.brainstorm_selection) !==
         JSON.stringify(selected.acceptance.receipt) ||
       JSON.stringify(mission.input.brainstorm_result) !== JSON.stringify(result)
     ) {

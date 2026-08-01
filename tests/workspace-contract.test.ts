@@ -42,8 +42,8 @@ import {
   compileSpecMission,
   hashShapingInput,
   type BrainstormResultSubmission,
-  type ShapingAcceptanceReceipt,
   type ShapingIdentity,
+  type ShapingSelectionReceipt,
 } from "../src/domain/shaping";
 import {
   InvalidWorkspaceError,
@@ -971,12 +971,12 @@ describe("ProductWorkspace", () => {
       "utf8",
     );
     const importReceipt = {
-      shaping_schema_version: 1 as const,
+      shaping_schema_version: 2 as const,
       identity: brainstormIdentity,
       shaping_mission_content_sha256: first.mission.content_sha256,
       result_content_sha256: hashSource(resultSource),
       outcome: "applied" as const,
-      imported_at: "2026-07-29T00:01:00.000Z",
+      first_published_at: "2026-07-29T00:01:00.000Z",
       reasons: [],
     };
     const imported = await workspace.writeShapingImportReceipt({
@@ -990,12 +990,12 @@ describe("ProductWorkspace", () => {
       }),
     ).toEqual(imported);
 
-    const acceptance: ShapingAcceptanceReceipt = {
-      shaping_schema_version: 1,
+    const acceptance: ShapingSelectionReceipt = {
+      shaping_schema_version: 2,
       identity: brainstormIdentity,
-      brainstorm_mission_content_sha256: first.mission.content_sha256,
-      brainstorm_result_content_sha256: hashSource(resultSource),
-      accepted_at: "2026-07-29T00:02:00.000Z",
+      mission_content_sha256: first.mission.content_sha256,
+      result_content_sha256: hashSource(resultSource),
+      selected_at: "2026-07-29T00:02:00.000Z",
     };
     const accepted = await workspace.writeShapingAcceptance(acceptance);
 
@@ -1016,8 +1016,8 @@ describe("ProductWorkspace", () => {
       phase: "spec" as const,
       title: specItem.goal.title,
       notes: specItem.goal.notes,
-      brainstorm_acceptance_sha256: accepted.receipt_content_sha256,
-      brainstorm_acceptance: acceptance,
+      brainstorm_selection_sha256: accepted.receipt_content_sha256,
+      brainstorm_selection: acceptance,
       brainstorm_result: brainstormResult,
     };
     const specIdentity: ShapingIdentity<"spec"> = {
@@ -1036,7 +1036,7 @@ describe("ProductWorkspace", () => {
     );
 
     expect(spec.mission.input).toMatchObject({
-      brainstorm_acceptance_sha256: accepted.receipt_content_sha256,
+      brainstorm_selection_sha256: accepted.receipt_content_sha256,
     });
     expect(await workspace.listShapingArtifacts(firstId)).toHaveLength(2);
     expect(await workspace.readShapingMissionPackage(specIdentity)).toEqual({
@@ -1189,12 +1189,12 @@ describe("ProductWorkspace", () => {
       "utf8",
     );
     const receipt = {
-      shaping_schema_version: 1 as const,
+      shaping_schema_version: 2 as const,
       identity: divergentIdentity,
       shaping_mission_content_sha256: artifact.mission.content_sha256,
       result_content_sha256: hashSource(resultSource),
       outcome: "applied" as const,
-      imported_at: "2026-07-29T00:01:00.000Z",
+      first_published_at: "2026-07-29T00:01:00.000Z",
       reasons: [],
     };
     await divergentWorkspace.writeShapingImportReceipt({
@@ -1222,7 +1222,7 @@ describe("ProductWorkspace", () => {
     );
     await writeFile(
       join(dirname(artifact.task_path), "import.json"),
-      `${JSON.stringify({ ...receipt, imported_at: "2026-07-29T00:02:00.000Z" }, null, 2)}\n`,
+      `${JSON.stringify({ ...receipt, first_published_at: "2026-07-29T00:02:00.000Z" }, null, 2)}\n`,
       "utf8",
     );
     await expect(

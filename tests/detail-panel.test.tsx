@@ -79,8 +79,11 @@ const brainstormIdentity = {
   work_item_id: workItemId,
   input_sha256: "1".repeat(64),
 };
+const brainstormDirectory = `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}`;
+const brainstormTaskPath = `${brainstormDirectory}/TASK.md`;
+const brainstormResultPath = `${brainstormDirectory}/result.json`;
 const brainstormMission: BrainstormMissionPackage = {
-  shaping_schema_version: 1,
+  shaping_schema_version: 2,
   identity: brainstormIdentity,
   input: {
     phase: "brainstorm",
@@ -88,7 +91,7 @@ const brainstormMission: BrainstormMissionPackage = {
   },
   result_contract: {
     schema_version: 1,
-    output_path: `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}/result.json`,
+    result_file: "result.json",
     result_schema_version: 1,
     required_fields: [
       "result_schema_version",
@@ -100,7 +103,6 @@ const brainstormMission: BrainstormMissionPackage = {
       "open_questions",
     ],
   },
-  task_path: `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}/TASK.md`,
   content_sha256: missionContentSha256,
 };
 const brainstormResult: BrainstormResultSubmission = {
@@ -115,19 +117,19 @@ const brainstormResult: BrainstormResultSubmission = {
 const brainstormCompilation: BrainstormMissionCompilation = {
   mission: brainstormMission,
   workspace_path: "/workspace/product-studio",
-  task_path: brainstormMission.task_path,
+  task_path: brainstormTaskPath,
   mission_path: `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}/mission.json`,
 };
 const brainstormImport: ShapingImportResult = {
   source_id: "source-1",
   work_item_id: workItemId,
   receipt: {
-    shaping_schema_version: 1,
+    shaping_schema_version: 2,
     identity: brainstormIdentity,
     shaping_mission_content_sha256: missionContentSha256,
     result_content_sha256: resultContentSha256,
     outcome: "applied",
-    imported_at: "2026-07-29T10:00:00.000Z",
+    first_published_at: "2026-07-29T10:00:00.000Z",
     reasons: [],
   },
   result: brainstormResult,
@@ -137,11 +139,11 @@ const brainstormAcceptance: ShapingAcceptanceResult = {
   source_id: "source-1",
   work_item_id: workItemId,
   acceptance: {
-    shaping_schema_version: 1,
+    shaping_schema_version: 2,
     identity: brainstormIdentity,
-    brainstorm_mission_content_sha256: missionContentSha256,
-    brainstorm_result_content_sha256: resultContentSha256,
-    accepted_at: "2026-07-29T10:01:00.000Z",
+    mission_content_sha256: missionContentSha256,
+    result_content_sha256: resultContentSha256,
+    selected_at: "2026-07-29T10:01:00.000Z",
   },
   acceptance_path: `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}/acceptance.json`,
   acceptance_content_sha256: acceptanceContentSha256,
@@ -151,7 +153,7 @@ const acceptedBrainstormArtifact: StoredShapingArtifact = {
   mission_path: brainstormCompilation.mission_path,
   task_path: brainstormCompilation.task_path,
   result: {
-    result_path: brainstormMission.result_contract.output_path,
+    result_path: brainstormResultPath,
     result_source: `${JSON.stringify(brainstormResult, null, 2)}\n`,
     result_content_sha256: resultContentSha256,
   },
@@ -168,19 +170,21 @@ const specIdentity = {
   work_item_id: workItemId,
   input_sha256: "4".repeat(64),
 };
+const specDirectory = `.founder/shaping/${workItemId}/spec-${"4".repeat(64)}`;
+const specTaskPath = `${specDirectory}/TASK.md`;
 const specMission: SpecMissionPackage = {
-  shaping_schema_version: 1,
+  shaping_schema_version: 2,
   identity: specIdentity,
   input: {
     phase: "spec",
     title: brainstormMission.input.title,
-    brainstorm_acceptance_sha256: acceptanceContentSha256,
-    brainstorm_acceptance: brainstormAcceptance.acceptance,
+    brainstorm_selection_sha256: acceptanceContentSha256,
+    brainstorm_selection: brainstormAcceptance.acceptance,
     brainstorm_result: brainstormResult,
   },
   result_contract: {
     schema_version: 1,
-    output_path: `.founder/shaping/${workItemId}/spec-${"4".repeat(64)}/result.json`,
+    result_file: "result.json",
     result_schema_version: 1,
     required_fields: [
       "result_schema_version",
@@ -189,13 +193,12 @@ const specMission: SpecMissionPackage = {
       "proposal",
     ],
   },
-  task_path: `.founder/shaping/${workItemId}/spec-${"4".repeat(64)}/TASK.md`,
   content_sha256: "5".repeat(64),
 };
 const specCompilation: SpecMissionCompilation = {
   mission: specMission,
   workspace_path: "/workspace/product-studio",
-  task_path: specMission.task_path,
+  task_path: specTaskPath,
   mission_path: `.founder/shaping/${workItemId}/spec-${"4".repeat(64)}/mission.json`,
 };
 const specResult: SpecResultSubmission = {
@@ -214,12 +217,12 @@ const specImport: ShapingImportResult = {
   source_id: "source-1",
   work_item_id: workItemId,
   receipt: {
-    shaping_schema_version: 1,
+    shaping_schema_version: 2,
     identity: specIdentity,
     shaping_mission_content_sha256: specMission.content_sha256,
     result_content_sha256: "6".repeat(64),
     outcome: "applied",
-    imported_at: "2026-07-29T10:02:00.000Z",
+    first_published_at: "2026-07-29T10:02:00.000Z",
     reasons: [],
   },
   result: specResult,

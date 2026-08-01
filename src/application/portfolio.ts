@@ -104,12 +104,13 @@ import {
   specResultSubmissionSchema,
   type BrainstormMissionPackage,
   type BrainstormResultSubmission,
-  type ShapingAcceptanceReceipt,
   type ShapingArtifactWriteResult,
   type ShapingIdentity,
   type ShapingImportReceipt,
   type ShapingResultSubmission,
+  type ShapingSelectionReceipt,
   type SpecMissionPackage,
+  type SpecResultSubmission,
   type StoredShapingArtifact,
 } from "../domain/shaping";
 import type {
@@ -307,7 +308,7 @@ export interface ShapingImportResult {
 export interface ShapingAcceptanceResult {
   source_id: string;
   work_item_id: string;
-  acceptance: ShapingAcceptanceReceipt;
+  acceptance: ShapingSelectionReceipt;
   acceptance_path: string;
   acceptance_content_sha256: string;
 }
@@ -830,17 +831,16 @@ export class PortfolioService {
       };
     }
 
-    const acceptance: ShapingAcceptanceReceipt = {
-      shaping_schema_version: 1,
+    const acceptance: ShapingSelectionReceipt = {
+      shaping_schema_version: 2,
       identity: {
         phase: "brainstorm",
         work_item_id: artifact.mission.identity.work_item_id,
         input_sha256: artifact.mission.identity.input_sha256,
       },
-      brainstorm_mission_content_sha256: artifact.mission.content_sha256,
-      brainstorm_result_content_sha256:
-        artifact.result.result_content_sha256,
-      accepted_at: new Date().toISOString(),
+      mission_content_sha256: artifact.mission.content_sha256,
+      result_content_sha256: artifact.result.result_content_sha256,
+      selected_at: new Date().toISOString(),
     };
     const stored = await source.workspace.writeShapingAcceptance(acceptance);
     return {
@@ -897,9 +897,9 @@ export class PortfolioService {
     const shapingInput = {
       phase: "spec" as const,
       ...goalInput,
-      brainstorm_acceptance_sha256:
+      brainstorm_selection_sha256:
         validatedInput.brainstorm_acceptance_sha256,
-      brainstorm_acceptance: selected.acceptance.receipt,
+      brainstorm_selection: selected.acceptance.receipt,
       brainstorm_result: brainstormResult,
     };
     const identity: ShapingIdentity<"spec"> = {
@@ -2122,7 +2122,7 @@ export class PortfolioService {
               artifact.mission.input.phase === "spec" &&
               artifact.mission.input.title === goalInput.title &&
               artifact.mission.input.notes === goalInput.notes &&
-              artifact.mission.input.brainstorm_acceptance_sha256 ===
+              artifact.mission.input.brainstorm_selection_sha256 ===
                 brainstormAcceptanceSha256,
           );
     if (matches.length !== 1) {
@@ -2172,7 +2172,10 @@ export class PortfolioService {
     }
 
     let parsedJson: unknown;
-    let result: ShapingResultSubmission | undefined;
+    let result:
+      | BrainstormResultSubmission
+      | SpecResultSubmission
+      | undefined;
     let reasons: string[] = [];
     try {
       parsedJson = JSON.parse(artifact.result.result_source) as unknown;
@@ -2206,12 +2209,12 @@ export class PortfolioService {
     }
 
     const receipt = shapingImportReceiptSchema.parse({
-      shaping_schema_version: 1,
+      shaping_schema_version: 2,
       identity: artifact.mission.identity,
       shaping_mission_content_sha256: artifact.mission.content_sha256,
       result_content_sha256: artifact.result.result_content_sha256,
       outcome: result === undefined ? "rejected" : "applied",
-      imported_at: new Date().toISOString(),
+      first_published_at: new Date().toISOString(),
       reasons,
     });
     const stored = await source.workspace.writeShapingImportReceipt({
