@@ -1,19 +1,21 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
-  createHash,
-} from "node:crypto";
-import {
+  appendFile,
   mkdtemp,
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse, stringify } from "yaml";
 
 import {
@@ -41,7 +43,9 @@ import {
   compileBrainstormMission,
   compilePlanMission,
   compileSpecMission,
+  hashShapingIngressInstruction,
   hashShapingInput,
+  SHAPING_INGRESS_MAX_BYTES,
   type BrainstormResultSubmission,
   type PlanResultSubmission,
   type ShapingArtifactWriteResult,
@@ -61,6 +65,8 @@ import {
 } from "../src/domain/work-item";
 import type { GitVerificationAdapter } from "../src/domain/verification";
 import { ProductWorkspace } from "../src/workspace/product-workspace";
+
+const execFileAsync = promisify(execFile);
 
 const createdRoots: string[] = [];
 const firstId = "wi_123e4567-e89b-12d3-a456-426614174000";
@@ -257,6 +263,58 @@ async function writeBrainstormShapingArtifact(
 function hashSource(source: string): string {
   return createHash("sha256").update(source).digest("hex");
 }
+
+function brainstormResultFor(
+  artifact: ShapingArtifactWriteResult<ShapingMissionPackage>,
+  problemStatement = "Publish the exact bounded ingress bytes.",
+): BrainstormResultSubmission {
+  if (artifact.mission.identity.phase !== "brainstorm") {
+    throw new Error("Expected a Brainstorm shaping artifact");
+  }
+  return {
+    result_schema_version: 1,
+    brainstorm_mission_content_sha256: artifact.mission.content_sha256,
+    identity: artifact.mission.identity,
+    problem_statement: problemStatement,
+    approach: "Validate once and publish one atomic bundle.",
+    non_goals: ["Do not write into the immutable mission root."],
+    open_questions: ["Which controller step consumes this result next?"],
+  };
+}
+
+async function writeManualShapingIngress(
+  root: string,
+  workspace: ProductWorkspace,
+  artifact: ShapingArtifactWriteResult<ShapingMissionPackage>,
+  resultSource: string,
+) {
+  const instruction = await workspace.writeShapingIngressInstruction({
+    origin: "manual_import",
+    shaping_run_id: null,
+    mission: artifact.mission,
+  });
+  const ingressPath = join(
+    root,
+    ...instruction.instruction.ingress_path.split("/"),
+  );
+  await writeFile(ingressPath, resultSource, "utf8");
+  return { ...instruction, ingressPath };
+}
+
+const connectedShapingProduction = {
+  origin: "connected_run" as const,
+  shaping_run_id: firstRunId,
+  requested_model: {
+    value: "model-a",
+    assurance: "user_declared" as const,
+  },
+  effective_model: {
+    assurance: "adapter_attested" as const,
+    model_id: "model-a",
+    deployment_id: null,
+    observed_event_sha256: "a".repeat(64),
+  },
+};
 
 async function writeAppliedShapingBundle(
   artifact: ShapingArtifactWriteResult<ShapingMissionPackage>,
@@ -537,7 +595,60 @@ class FailingControllerWorkspace extends ProductWorkspace {
   }
 }
 
+class MutatingShapingIngressWorkspace extends ProductWorkspace {
+  constructor(
+    root: string,
+    private readonly mutateAfterOpen: (ingressPath: string) => Promise<void>,
+  ) {
+    super(root);
+  }
+
+  protected override async afterShapingIngressOpened(
+    ingressPath: string,
+  ): Promise<void> {
+    await this.mutateAfterOpen(ingressPath);
+  }
+}
+
+type ShapingPublicationFailureBoundary =
+  | "instruction"
+  | "result"
+  | "import"
+  | "production"
+  | "applied"
+  | "renamed";
+
+class FailingShapingPublicationWorkspace extends ProductWorkspace {
+  constructor(
+    root: string,
+    private readonly boundary: ShapingPublicationFailureBoundary,
+  ) {
+    super(root);
+  }
+
+  protected override async afterShapingIngressInstructionWritten(): Promise<void> {
+    if (this.boundary === "instruction") {
+      throw new Error("injected failure after instruction write");
+    }
+  }
+
+  protected override async afterShapingAppliedComponentWritten(
+    component: "result" | "import" | "production" | "applied",
+  ): Promise<void> {
+    if (this.boundary === component) {
+      throw new Error(`injected failure after ${component} write`);
+    }
+  }
+
+  protected override async afterShapingAppliedBundleRenamed(): Promise<void> {
+    if (this.boundary === "renamed") {
+      throw new Error("injected failure after applied bundle rename");
+    }
+  }
+}
+
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -1432,6 +1543,398 @@ describe("ProductWorkspace", () => {
       artifactPath: artifactDirectory.slice(root.length + 1),
       reason: expect.stringMatching(/schema version 1.*archive or reset/u),
     });
+  });
+
+  it("writes hash-bound ingress instructions read-first and replays stored bytes under an advanced clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T13:00:00.000Z"));
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+
+    const first = await workspace.writeShapingIngressInstruction({
+      origin: "manual_import",
+      shaping_run_id: null,
+      mission: artifact.mission,
+    });
+    vi.setSystemTime(new Date("2026-08-01T14:00:00.000Z"));
+    const replay = await workspace.writeShapingIngressInstruction({
+      origin: "manual_import",
+      shaping_run_id: null,
+      mission: artifact.mission,
+    });
+
+    expect(replay).toEqual(first);
+    expect(replay.instruction.created_at).toBe("2026-08-01T13:00:00.000Z");
+    expect(await readFile(first.instruction_path, "utf8")).toBe(
+      first.instruction_source,
+    );
+
+    const tamperedInstruction = {
+      ...first.instruction,
+      task_path: ".founder/other/TASK.md",
+    };
+    tamperedInstruction.instruction_sha256 =
+      hashShapingIngressInstruction(tamperedInstruction);
+    await writeFile(
+      first.instruction_path,
+      `${JSON.stringify(tamperedInstruction, null, 2)}\n`,
+      "utf8",
+    );
+    await expect(
+      workspace.writeShapingIngressInstruction({
+        origin: "manual_import",
+        shaping_run_id: null,
+        mission: artifact.mission,
+      }),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+
+    const failureRoot = await createWorkspace();
+    const { artifact: failureArtifact } =
+      await writeBrainstormShapingArtifact(failureRoot, firstId);
+    const failing = new FailingShapingPublicationWorkspace(
+      failureRoot,
+      "instruction",
+    );
+    await expect(
+      failing.writeShapingIngressInstruction({
+        origin: "manual_import",
+        shaping_run_id: null,
+        mission: failureArtifact.mission,
+      }),
+    ).rejects.toThrow("injected failure after instruction write");
+    vi.setSystemTime(new Date("2026-08-01T15:00:00.000Z"));
+    const recovered = await new ProductWorkspace(
+      failureRoot,
+    ).writeShapingIngressInstruction({
+      origin: "manual_import",
+      shaping_run_id: null,
+      mission: failureArtifact.mission,
+    });
+    expect(recovered.instruction.created_at).toBe(
+      "2026-08-01T14:00:00.000Z",
+    );
+  });
+
+  it("rejects symlinks, a FIFO, a directory, empty bytes, and oversize ingress without publication", async () => {
+    const cases = ["symlink", "fifo", "directory", "empty", "oversize"] as const;
+    for (const kind of cases) {
+      const root = await createWorkspace();
+      const { artifact, workspace } = await writeBrainstormShapingArtifact(
+        root,
+        firstId,
+      );
+      const written = await workspace.writeShapingIngressInstruction({
+        origin: "manual_import",
+        shaping_run_id: null,
+        mission: artifact.mission,
+      });
+      const ingressPath = join(
+        root,
+        ...written.instruction.ingress_path.split("/"),
+      );
+      if (kind === "symlink") {
+        const target = join(root, "symlink-target.json");
+        await writeFile(
+          target,
+          `${JSON.stringify(brainstormResultFor(artifact))}\n`,
+          "utf8",
+        );
+        await symlink(target, ingressPath);
+      } else if (kind === "fifo") {
+        await execFileAsync("mkfifo", [ingressPath]);
+      } else if (kind === "directory") {
+        await mkdir(ingressPath);
+      } else if (kind === "empty") {
+        await writeFile(ingressPath, "", "utf8");
+      } else {
+        await writeFile(
+          ingressPath,
+          Buffer.alloc(SHAPING_INGRESS_MAX_BYTES + 1, 0x20),
+        );
+      }
+
+      await expect(
+        workspace.publishAppliedShapingResult(
+          written.instruction,
+          artifact.mission,
+          { origin: "manual_import", shaping_run_id: null },
+        ),
+      ).rejects.toMatchObject({ kind: "mission_not_ready" });
+      await expect(
+        workspace.readAppliedShapingResult(artifact.mission.identity),
+      ).resolves.toBeNull();
+    }
+
+    const parentRoot = await createWorkspace();
+    const { artifact: parentArtifact } =
+      await writeBrainstormShapingArtifact(parentRoot, firstId);
+    const runDirectory = join(
+      parentRoot,
+      ".founder",
+      "shaping-runs",
+      firstId,
+      firstRunId,
+    );
+    await mkdir(runDirectory, { recursive: true });
+    const parentWorkspace = new ProductWorkspace(parentRoot);
+    const connectedInstruction =
+      await parentWorkspace.writeShapingIngressInstruction({
+        origin: "connected_run",
+        shaping_run_id: firstRunId,
+        mission: parentArtifact.mission,
+      });
+    const ingressDirectory = dirname(
+      join(
+        parentRoot,
+        ...connectedInstruction.instruction.ingress_path.split("/"),
+      ),
+    );
+    const realIngressDirectory = `${ingressDirectory}.real`;
+    await rename(ingressDirectory, realIngressDirectory);
+    await writeFile(
+      join(realIngressDirectory, "result.json"),
+      `${JSON.stringify(brainstormResultFor(parentArtifact))}\n`,
+      "utf8",
+    );
+    await symlink(realIngressDirectory, ingressDirectory, "dir");
+
+    await expect(
+      parentWorkspace.publishAppliedShapingResult(
+        connectedInstruction.instruction,
+        parentArtifact.mission,
+        connectedShapingProduction,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      parentWorkspace.readAppliedShapingResult(
+        parentArtifact.mission.identity,
+      ),
+    ).resolves.toBeNull();
+  });
+
+  it("bounds a growing descriptor and publishes the originally opened file after a path swap", async () => {
+    const growthRoot = await createWorkspace();
+    const { artifact: growthArtifact } =
+      await writeBrainstormShapingArtifact(growthRoot, firstId);
+    let grew = false;
+    const growthWorkspace = new MutatingShapingIngressWorkspace(
+      growthRoot,
+      async (ingressPath) => {
+        if (!grew) {
+          grew = true;
+          await appendFile(
+            ingressPath,
+            Buffer.alloc(SHAPING_INGRESS_MAX_BYTES + 1, 0x20),
+          );
+        }
+      },
+    );
+    const growthSource = `${JSON.stringify(brainstormResultFor(growthArtifact))}\n`;
+    const growthInstruction = await writeManualShapingIngress(
+      growthRoot,
+      growthWorkspace,
+      growthArtifact,
+      growthSource,
+    );
+    await expect(
+      growthWorkspace.publishAppliedShapingResult(
+        growthInstruction.instruction,
+        growthArtifact.mission,
+        { origin: "manual_import", shaping_run_id: null },
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      growthWorkspace.readAppliedShapingResult(growthArtifact.mission.identity),
+    ).resolves.toBeNull();
+
+    const swapRoot = await createWorkspace();
+    const { artifact: swapArtifact } =
+      await writeBrainstormShapingArtifact(swapRoot, firstId);
+    const originalSource = `  ${JSON.stringify(
+      brainstormResultFor(swapArtifact, "The opened inode must win."),
+    )}\n`;
+    const replacementSource = `${JSON.stringify(
+      brainstormResultFor(swapArtifact, "The replacement path must not win."),
+    )}\n`;
+    let swapped = false;
+    const swapWorkspace = new MutatingShapingIngressWorkspace(
+      swapRoot,
+      async (ingressPath) => {
+        if (!swapped) {
+          swapped = true;
+          await rename(ingressPath, `${ingressPath}.opened`);
+          await writeFile(ingressPath, replacementSource, "utf8");
+        }
+      },
+    );
+    const swapInstruction = await writeManualShapingIngress(
+      swapRoot,
+      swapWorkspace,
+      swapArtifact,
+      originalSource,
+    );
+    const published = await swapWorkspace.publishAppliedShapingResult(
+      swapInstruction.instruction,
+      swapArtifact.mission,
+      { origin: "manual_import", shaping_run_id: null },
+    );
+    expect(published.result_source).toBe(originalSource);
+    expect(
+      await readFile(
+        join(dirname(swapArtifact.mission_path), "applied", "result.json"),
+        "utf8",
+      ),
+    ).toBe(originalSource);
+    expect(await readFile(swapInstruction.ingressPath, "utf8")).toBe(
+      replacementSource,
+    );
+  });
+
+  it("publishes one exact atomic bundle, replays it verbatim, and refuses a differing result", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T16:00:00.000Z"));
+    const root = await createWorkspace();
+    const { artifact, workspace } = await writeBrainstormShapingArtifact(
+      root,
+      firstId,
+    );
+    const resultSource = `\n${JSON.stringify(
+      brainstormResultFor(artifact),
+      null,
+      2,
+    )}\n`;
+    const written = await writeManualShapingIngress(
+      root,
+      workspace,
+      artifact,
+      resultSource,
+    );
+    const staleStagingName =
+      `.${artifact.mission.identity.phase}-${artifact.mission.identity.input_sha256}.${firstRunId}.applied.staging`;
+    const staleStagingPath = join(
+      dirname(dirname(artifact.mission_path)),
+      staleStagingName,
+    );
+    await mkdir(staleStagingPath);
+    await writeFile(join(staleStagingPath, "partial"), "stale", "utf8");
+
+    const first = await workspace.publishAppliedShapingResult(
+      written.instruction,
+      artifact.mission,
+      { origin: "manual_import", shaping_run_id: null },
+    );
+    expect(
+      await readFile(
+        join(dirname(artifact.mission_path), "applied", "result.json"),
+        "utf8",
+      ),
+    ).toBe(resultSource);
+    expect(await readdir(dirname(dirname(artifact.mission_path)))).not.toContain(
+      staleStagingName,
+    );
+
+    vi.setSystemTime(new Date("2026-08-01T17:00:00.000Z"));
+    const replay = await workspace.publishAppliedShapingResult(
+      written.instruction,
+      artifact.mission,
+      { origin: "manual_import", shaping_run_id: null },
+    );
+    expect(replay).toEqual(first);
+    expect(replay.import_receipt.first_published_at).toBe(
+      "2026-08-01T16:00:00.000Z",
+    );
+    expect(replay.production_receipt.produced_at).toBe(
+      "2026-08-01T16:00:00.000Z",
+    );
+    expect(replay.applied_marker.committed_at).toBe(
+      "2026-08-01T16:00:00.000Z",
+    );
+
+    const differingSource = `${JSON.stringify(
+      brainstormResultFor(artifact, "A conflicting result."),
+      null,
+      2,
+    )}\n`;
+    await writeFile(written.ingressPath, differingSource, "utf8");
+    await expect(
+      workspace.publishAppliedShapingResult(
+        written.instruction,
+        artifact.mission,
+        { origin: "manual_import", shaping_run_id: null },
+      ),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    expect(
+      await readFile(
+        join(dirname(artifact.mission_path), "applied", "result.json"),
+        "utf8",
+      ),
+    ).toBe(resultSource);
+  });
+
+  it("recovers byte-identically after every staged component and the atomic rename", async () => {
+    vi.useFakeTimers();
+    const boundaries = [
+      "result",
+      "import",
+      "production",
+      "applied",
+      "renamed",
+    ] as const;
+    for (const [index, boundary] of boundaries.entries()) {
+      vi.setSystemTime(new Date(`2026-08-0${index + 1}T10:00:00.000Z`));
+      const root = await createWorkspace();
+      const { artifact } = await writeBrainstormShapingArtifact(root, firstId);
+      const failing = new FailingShapingPublicationWorkspace(root, boundary);
+      const resultSource = `${JSON.stringify(
+        brainstormResultFor(artifact),
+        null,
+        2,
+      )}\n`;
+      const written = await writeManualShapingIngress(
+        root,
+        failing,
+        artifact,
+        resultSource,
+      );
+
+      await expect(
+        failing.publishAppliedShapingResult(
+          written.instruction,
+          artifact.mission,
+          { origin: "manual_import", shaping_run_id: null },
+        ),
+      ).rejects.toThrow(`injected failure after ${
+        boundary === "renamed" ? "applied bundle rename" : `${boundary} write`
+      }`);
+
+      const workspace = new ProductWorkspace(root);
+      const afterFailure = await workspace.readAppliedShapingResult(
+        artifact.mission.identity,
+      );
+      expect(afterFailure === null).toBe(boundary !== "renamed");
+      vi.setSystemTime(new Date(`2026-08-0${index + 1}T11:00:00.000Z`));
+      const recovered = await workspace.publishAppliedShapingResult(
+        written.instruction,
+        artifact.mission,
+        { origin: "manual_import", shaping_run_id: null },
+      );
+      vi.setSystemTime(new Date(`2026-08-0${index + 1}T12:00:00.000Z`));
+      const replay = await workspace.publishAppliedShapingResult(
+        written.instruction,
+        artifact.mission,
+        { origin: "manual_import", shaping_run_id: null },
+      );
+      expect(replay).toEqual(recovered);
+      expect(replay.result_source).toBe(resultSource);
+      expect(
+        (await readdir(dirname(dirname(artifact.mission_path)))).filter(
+          (name) => name.endsWith(".applied.staging"),
+        ),
+      ).toEqual([]);
+    }
   });
 
   it("ignores unrelated files when listing shaping artifacts", async () => {

@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import {
   appendFile,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -12,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, posix, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify, TextDecoder } from "node:util";
 
 import { parse, stringify } from "yaml";
 import { z, type ZodType } from "zod";
@@ -108,6 +110,7 @@ import {
 } from "../domain/connected-run";
 import {
   brainstormResultSubmissionSchema,
+  hashShapingIngressInstruction,
   hashShapingInput,
   normalizeShapingGoalInput,
   planResultSubmissionSchema,
@@ -117,7 +120,9 @@ import {
   shapingDecisionReceiptSchema,
   shapingIdentitySchema,
   shapingImportReceiptSchema,
+  shapingIngressInstructionSchema,
   shapingMissionPackageSchema,
+  SHAPING_INGRESS_MAX_BYTES,
   SHAPING_PHASES,
   specMissionPackageSchema,
   specResultSubmissionSchema,
@@ -128,6 +133,7 @@ import {
   type ShapingIdentity,
   type ShapingImportReceipt,
   type ShapingImportReceiptWriteInput,
+  type ShapingIngressInstructionV1,
   type ShapingMissionPackage,
   type ShapingMissionPackageBuilder,
   type ShapingPaths,
@@ -141,6 +147,7 @@ import {
 import {
   deriveManualShapingProductionId,
   shapingProductionReceiptSchema,
+  type ConnectedShapingProductionReceipt,
   type ShapingProductionReceipt,
 } from "../domain/shaping-run";
 
@@ -151,6 +158,7 @@ const STATE_FILE = "state.json";
 const RUNS_DIRECTORY = "runs";
 const MISSIONS_DIRECTORY = "missions";
 const SHAPING_DIRECTORY = "shaping";
+const SHAPING_RUNS_DIRECTORY = "shaping-runs";
 const SHAPING_INGRESS_DIRECTORY = "shaping-ingress";
 const RUN_EVIDENCE_DIRECTORY = "run-evidence";
 const EXECUTION_DIRECTORY = "execution";
@@ -170,6 +178,7 @@ const PRODUCTION_JSON_FILE = "production.json";
 const APPLIED_JSON_FILE = "applied.json";
 const APPLIED_DIRECTORY = "applied";
 const DECISION_JSON_FILE = "decision.json";
+const INSTRUCTION_JSON_FILE = "instruction.json";
 const VERIFICATION_JSON_FILE = "verification.json";
 const CONTROLLER_LOCK_FILE = ".controller.lock";
 const execFileAsync = promisify(execFile);
@@ -185,7 +194,7 @@ const CONNECTED_RUN_STAGING_DIRECTORY_PATTERN = new RegExp(
   "i",
 );
 const SHAPING_STAGING_DIRECTORY_PATTERN = new RegExp(
-  `^\\.(brainstorm|spec|plan)-[0-9a-f]{64}\\.${UUID_PATTERN}\\.shaping\\.tmp$`,
+  `^\\.(brainstorm|spec|plan)-[0-9a-f]{64}\\.${UUID_PATTERN}\\.(?:shaping\\.tmp|applied\\.staging)$`,
   "i",
 );
 
@@ -194,10 +203,13 @@ interface StoredAppliedShapingBundle {
   resultSource: string;
   resultContentSha256: string;
   importPath: string;
+  importSource: string;
   importReceipt: ShapingImportReceipt;
   productionPath: string;
+  productionSource: string;
   productionReceipt: ShapingProductionReceipt;
   markerPath: string;
+  markerSource: string;
   marker: ShapingAppliedMarkerV1;
 }
 
@@ -745,6 +757,46 @@ export interface ProductWorkspaceOptions {
 }
 
 export type ConnectedProcessProbe = (pid: number) => Promise<boolean>;
+
+export type ShapingIngressInstructionWriteInput =
+  | {
+      origin: "connected_run";
+      shaping_run_id: string;
+      mission: ShapingMissionPackage;
+    }
+  | {
+      origin: "manual_import";
+      shaping_run_id: null;
+      mission: ShapingMissionPackage;
+    };
+
+export interface ShapingIngressInstructionWriteResult {
+  instruction: ShapingIngressInstructionV1;
+  instruction_path: string;
+  instruction_source: string;
+}
+
+export type ShapingProductionInput =
+  | Pick<
+      ConnectedShapingProductionReceipt,
+      "origin" | "shaping_run_id" | "requested_model" | "effective_model"
+    >
+  | {
+      origin: "manual_import";
+      shaping_run_id: null;
+    };
+
+export interface AppliedShapingBundleWriteResult {
+  applied_path: string;
+  result_source: string;
+  result_content_sha256: string;
+  import_receipt: ShapingImportReceipt;
+  import_source: string;
+  production_receipt: ShapingProductionReceipt;
+  production_source: string;
+  applied_marker: ShapingAppliedMarkerV1;
+  applied_source: string;
+}
 
 export interface ConnectedRunCreateResult {
   record: ConnectedRunRecordV1;
@@ -1975,6 +2027,398 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     };
   }
 
+  async writeShapingIngressInstruction(
+    input: ShapingIngressInstructionWriteInput,
+  ): Promise<ShapingIngressInstructionWriteResult> {
+    const mission = shapingMissionPackageSchema.parse(input.mission);
+    const snapshot = await this.readShapingPackageSnapshot(mission.identity);
+    if (JSON.stringify(snapshot.mission) !== JSON.stringify(mission)) {
+      throw this.invalid(
+        snapshot.missionDirectory,
+        "shaping ingress instruction must reference the stored immutable mission",
+      );
+    }
+
+    const shapingRunId =
+      input.origin === "connected_run"
+        ? controllerRunIdSchema.parse(input.shaping_run_id)
+        : null;
+    const paths = this.shapingInstructionPaths({
+      origin: input.origin,
+      shaping_run_id: shapingRunId,
+      identity: mission.identity,
+    });
+    const instructionWithoutTimestamp = {
+      schema_version: 1 as const,
+      origin: input.origin,
+      shaping_run_id: shapingRunId,
+      work_item_id: mission.identity.work_item_id,
+      phase: mission.identity.phase,
+      mission_input_sha256: mission.identity.input_sha256,
+      mission_content_sha256: mission.content_sha256,
+      task_path: snapshot.relativeDirectory
+        ? posix.join(snapshot.relativeDirectory, TASK_MD_FILE)
+        : TASK_MD_FILE,
+      mission_path: snapshot.relativeMissionPath,
+      ingress_path: paths.relativeIngressPath,
+      result_schema_version: mission.result_contract.result_schema_version,
+      required_fields: mission.result_contract.required_fields,
+      max_result_bytes: SHAPING_INGRESS_MAX_BYTES,
+    };
+    const instructionSha256 = hashShapingIngressInstruction({
+      ...instructionWithoutTimestamp,
+      created_at: "1970-01-01T00:00:00.000Z",
+    });
+
+    const replay = await this.readMatchingShapingInstruction(
+      paths.instructionPath,
+      instructionSha256,
+      mission.identity.work_item_id,
+    );
+    if (replay !== null) {
+      if (input.origin === "manual_import") {
+        await this.assertShapingIngressFamilyRoot();
+      }
+      return replay;
+    }
+
+    await this.prepareShapingInstructionDirectory(
+      input.origin,
+      paths.instructionDirectory,
+      paths.ingressDirectory,
+      mission.identity.work_item_id,
+      shapingRunId,
+    );
+
+    const instruction = shapingIngressInstructionSchema.parse({
+      ...instructionWithoutTimestamp,
+      created_at: new Date().toISOString(),
+      instruction_sha256: instructionSha256,
+    });
+    const instructionSource = `${JSON.stringify(instruction, null, 2)}\n`;
+    try {
+      await writeFile(paths.instructionPath, instructionSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await this.afterShapingIngressInstructionWritten(
+        paths.instructionPath,
+      );
+      return {
+        instruction,
+        instruction_path: paths.instructionPath,
+        instruction_source: instructionSource,
+      };
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        const racedReplay = await this.readMatchingShapingInstruction(
+          paths.instructionPath,
+          instructionSha256,
+          mission.identity.work_item_id,
+        );
+        if (racedReplay !== null) {
+          return racedReplay;
+        }
+      }
+      throw error;
+    }
+  }
+
+  async readShapingIngressBytes(
+    instruction: ShapingIngressInstructionV1,
+  ): Promise<Buffer> {
+    const durableInstruction = await this.readDurableShapingInstruction(
+      instruction,
+    );
+    const ingressPath = join(
+      this.workspaceRoot,
+      ...durableInstruction.ingress_path.split("/"),
+    );
+
+    try {
+      await this.assertSafeShapingIngressParent(
+        durableInstruction.ingress_path,
+      );
+    } catch (error) {
+      if (
+        error instanceof ControllerConflictError &&
+        error.kind === "mission_not_ready"
+      ) {
+        throw error;
+      }
+      throw this.missionNotReady(
+        durableInstruction.work_item_id,
+        `Shaping ingress ${durableInstruction.ingress_path} is unreadable: ${errorMessage(error)}`,
+      );
+    }
+
+    let handle;
+    try {
+      handle = await open(
+        ingressPath,
+        fsConstants.O_RDONLY |
+          fsConstants.O_NOFOLLOW |
+          fsConstants.O_NONBLOCK,
+      );
+    } catch (error) {
+      throw this.missionNotReady(
+        durableInstruction.work_item_id,
+        `Shaping ingress ${durableInstruction.ingress_path} is unreadable: ${errorMessage(error)}`,
+      );
+    }
+
+    try {
+      const stats = await handle.stat();
+      if (!stats.isFile()) {
+        throw this.missionNotReady(
+          durableInstruction.work_item_id,
+          `Shaping ingress ${durableInstruction.ingress_path} must be a regular file.`,
+        );
+      }
+      if (stats.size === 0) {
+        throw this.missionNotReady(
+          durableInstruction.work_item_id,
+          `Shaping ingress ${durableInstruction.ingress_path} must not be empty.`,
+        );
+      }
+
+      await this.afterShapingIngressOpened(ingressPath);
+      const bytes = Buffer.alloc(SHAPING_INGRESS_MAX_BYTES + 1);
+      let byteLength = 0;
+      while (byteLength < bytes.length) {
+        const { bytesRead } = await handle.read(
+          bytes,
+          byteLength,
+          bytes.length - byteLength,
+          null,
+        );
+        if (bytesRead === 0) {
+          break;
+        }
+        byteLength += bytesRead;
+      }
+      if (byteLength === SHAPING_INGRESS_MAX_BYTES + 1) {
+        throw this.missionNotReady(
+          durableInstruction.work_item_id,
+          `Shaping ingress ${durableInstruction.ingress_path} exceeds ${SHAPING_INGRESS_MAX_BYTES} bytes.`,
+        );
+      }
+      return Buffer.from(bytes.subarray(0, byteLength));
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async publishAppliedShapingResult(
+    instruction: ShapingIngressInstructionV1,
+    missionInput: ShapingMissionPackage,
+    production: ShapingProductionInput,
+  ): Promise<AppliedShapingBundleWriteResult> {
+    const mission = shapingMissionPackageSchema.parse(missionInput);
+    const snapshot = await this.readShapingPackageSnapshot(mission.identity);
+    if (JSON.stringify(snapshot.mission) !== JSON.stringify(mission)) {
+      throw this.invalid(
+        snapshot.missionDirectory,
+        "applied shaping publication must reference the stored immutable mission",
+      );
+    }
+    const durableInstruction = await this.readDurableShapingInstruction(
+      instruction,
+    );
+    this.assertShapingInstructionMatchesMission(
+      durableInstruction,
+      snapshot,
+    );
+    if (
+      durableInstruction.origin !== production.origin ||
+      durableInstruction.shaping_run_id !== production.shaping_run_id
+    ) {
+      throw this.invalid(
+        durableInstruction.ingress_path,
+        "shaping production origin must match the durable ingress instruction",
+      );
+    }
+
+    const existing = await this.readAppliedShapingBundle(snapshot);
+    const resultBytes = await this.readShapingIngressBytes(
+      durableInstruction,
+    );
+    let resultSource: string;
+    try {
+      resultSource = new TextDecoder("utf-8", { fatal: true }).decode(
+        resultBytes,
+      );
+    } catch (error) {
+      throw this.invalid(
+        durableInstruction.ingress_path,
+        `shaping result must be valid UTF-8: ${errorMessage(error)}`,
+      );
+    }
+    this.parseShapingResultForMission(
+      resultSource,
+      join(this.workspaceRoot, durableInstruction.ingress_path),
+      mission,
+    );
+    const resultContentSha256 = this.hashArtifactSource(resultBytes);
+    const importIdentity = {
+      shaping_schema_version: 2 as const,
+      identity: mission.identity,
+      shaping_mission_content_sha256: mission.content_sha256,
+      result_content_sha256: resultContentSha256,
+      outcome: "applied" as const,
+      reasons: [],
+    };
+    const productionIdentity =
+      production.origin === "connected_run"
+        ? {
+            schema_version: 1 as const,
+            production_id: production.shaping_run_id,
+            origin: production.origin,
+            shaping_run_id: production.shaping_run_id,
+            requested_model: production.requested_model,
+            effective_model: production.effective_model,
+            ingress_path: durableInstruction.ingress_path,
+            result_content_sha256: resultContentSha256,
+          }
+        : {
+            schema_version: 1 as const,
+            production_id: deriveManualShapingProductionId(
+              mission.content_sha256,
+              resultContentSha256,
+            ),
+            origin: production.origin,
+            shaping_run_id: null,
+            requested_model: {
+              value: null,
+              assurance: "unknown" as const,
+            },
+            effective_model: {
+              assurance: "unknown" as const,
+              model_id: null,
+              deployment_id: null,
+              observed_event_sha256: null,
+            },
+            ingress_path: durableInstruction.ingress_path,
+            result_content_sha256: resultContentSha256,
+          };
+
+    if (existing !== null) {
+      return this.assertAppliedShapingReplay(
+        existing,
+        mission,
+        resultSource,
+        importIdentity,
+        productionIdentity,
+      );
+    }
+
+    await this.removeStaleAppliedShapingStagingDirectories(snapshot);
+    const firstPublishedAt = new Date().toISOString();
+    const importReceipt = shapingImportReceiptSchema.parse({
+      ...importIdentity,
+      first_published_at: firstPublishedAt,
+    });
+    const productionReceipt = shapingProductionReceiptSchema.parse({
+      ...productionIdentity,
+      produced_at: firstPublishedAt,
+    });
+    const importSource = `${JSON.stringify(importReceipt, null, 2)}\n`;
+    const productionSource = `${JSON.stringify(productionReceipt, null, 2)}\n`;
+    const marker = shapingAppliedMarkerSchema.parse({
+      schema_version: 1,
+      mission_content_sha256: mission.content_sha256,
+      result_content_sha256: resultContentSha256,
+      component_sha256: {
+        result: resultContentSha256,
+        import: this.hashArtifactSource(importSource),
+        production: this.hashArtifactSource(productionSource),
+      },
+      component_bytes: {
+        result: resultBytes.byteLength,
+        import: Buffer.byteLength(importSource),
+        production: Buffer.byteLength(productionSource),
+      },
+      committed_at: firstPublishedAt,
+    });
+    const markerSource = `${JSON.stringify(marker, null, 2)}\n`;
+    const stagingName =
+      `.${mission.identity.phase}-${mission.identity.input_sha256}.${randomUUID()}.applied.staging`;
+    if (!SHAPING_STAGING_DIRECTORY_PATTERN.test(stagingName)) {
+      throw new Error("Generated applied shaping staging directory name is invalid.");
+    }
+    const stagingDirectory = join(
+      snapshot.missionDirectory,
+      "..",
+      stagingName,
+    );
+    const appliedDirectory = join(
+      snapshot.missionDirectory,
+      APPLIED_DIRECTORY,
+    );
+    await mkdir(stagingDirectory);
+    try {
+      await writeFile(join(stagingDirectory, RESULT_JSON_FILE), resultBytes, {
+        flag: "wx",
+      });
+      await this.afterShapingAppliedComponentWritten("result");
+      await writeFile(join(stagingDirectory, IMPORT_JSON_FILE), importSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await this.afterShapingAppliedComponentWritten("import");
+      await writeFile(
+        join(stagingDirectory, PRODUCTION_JSON_FILE),
+        productionSource,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await this.afterShapingAppliedComponentWritten("production");
+      await writeFile(join(stagingDirectory, APPLIED_JSON_FILE), markerSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await this.afterShapingAppliedComponentWritten("applied");
+      await rename(stagingDirectory, appliedDirectory);
+      await this.afterShapingAppliedBundleRenamed();
+    } catch (error) {
+      await this.removeAppliedShapingStagingDirectory(
+        stagingDirectory,
+        error,
+      );
+      if (
+        isNodeError(error) &&
+        ["EEXIST", "ENOTEMPTY"].includes(error.code ?? "")
+      ) {
+        const raced = await this.readAppliedShapingBundle(snapshot);
+        if (raced !== null) {
+          return this.assertAppliedShapingReplay(
+            raced,
+            mission,
+            resultSource,
+            importIdentity,
+            productionIdentity,
+          );
+        }
+      }
+      throw error;
+    }
+
+    const published = await this.readAppliedShapingBundle(snapshot);
+    if (published === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        mission.identity.work_item_id,
+        "Applied shaping bundle rename completed without a readable bundle.",
+      );
+    }
+    return this.assertAppliedShapingReplay(
+      published,
+      mission,
+      resultSource,
+      importIdentity,
+      productionIdentity,
+    );
+  }
+
   async writeShapingImportReceipt(
     input: ShapingImportReceiptWriteInput,
   ): Promise<ShapingReceiptWriteResult<ShapingImportReceipt>> {
@@ -3062,6 +3506,28 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return;
   }
 
+  protected async afterShapingIngressInstructionWritten(
+    _instructionPath: string,
+  ): Promise<void> {
+    return;
+  }
+
+  protected async afterShapingIngressOpened(
+    _ingressPath: string,
+  ): Promise<void> {
+    return;
+  }
+
+  protected async afterShapingAppliedComponentWritten(
+    _component: "result" | "import" | "production" | "applied",
+  ): Promise<void> {
+    return;
+  }
+
+  protected async afterShapingAppliedBundleRenamed(): Promise<void> {
+    return;
+  }
+
   private async readControllerRunManifests(
     workItemId: string,
   ): Promise<ControllerRunManifest[]> {
@@ -3499,6 +3965,385 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
   }
 
+  private async assertShapingIngressFamilyRoot(): Promise<void> {
+    const ingressDirectory = join(
+      this.founderDirectory,
+      SHAPING_INGRESS_DIRECTORY,
+    );
+    const gitignorePath = join(ingressDirectory, ".gitignore");
+    await this.assertDirectory(ingressDirectory);
+    if ((await this.readRequiredFile(gitignorePath)) !== "*\n") {
+      throw this.invalid(
+        gitignorePath,
+        "shaping ingress .gitignore must contain exactly *",
+      );
+    }
+  }
+
+  private shapingInstructionPaths(input: {
+    origin: "connected_run" | "manual_import";
+    shaping_run_id: string | null;
+    identity: ShapingIdentity;
+  }): {
+    instructionDirectory: string;
+    instructionPath: string;
+    ingressDirectory: string;
+    ingressPath: string;
+    relativeInstructionPath: string;
+    relativeIngressPath: string;
+  } {
+    const relativeInstructionDirectory =
+      input.origin === "connected_run"
+        ? posix.join(
+            FOUNDER_DIRECTORY,
+            SHAPING_RUNS_DIRECTORY,
+            input.identity.work_item_id,
+            controllerRunIdSchema.parse(input.shaping_run_id),
+          )
+        : posix.join(
+            FOUNDER_DIRECTORY,
+            SHAPING_INGRESS_DIRECTORY,
+            input.identity.work_item_id,
+            `${input.identity.phase}-${input.identity.input_sha256}`,
+          );
+    const relativeIngressDirectory =
+      input.origin === "connected_run"
+        ? posix.join(relativeInstructionDirectory, "ingress")
+        : relativeInstructionDirectory;
+    const relativeInstructionPath = posix.join(
+      relativeInstructionDirectory,
+      INSTRUCTION_JSON_FILE,
+    );
+    const relativeIngressPath = posix.join(
+      relativeIngressDirectory,
+      RESULT_JSON_FILE,
+    );
+    const instructionDirectory = join(
+      this.workspaceRoot,
+      ...relativeInstructionDirectory.split("/"),
+    );
+    const ingressDirectory = join(
+      this.workspaceRoot,
+      ...relativeIngressDirectory.split("/"),
+    );
+    return {
+      instructionDirectory,
+      instructionPath: join(instructionDirectory, INSTRUCTION_JSON_FILE),
+      ingressDirectory,
+      ingressPath: join(ingressDirectory, RESULT_JSON_FILE),
+      relativeInstructionPath,
+      relativeIngressPath,
+    };
+  }
+
+  private async prepareShapingInstructionDirectory(
+    origin: "connected_run" | "manual_import",
+    instructionDirectory: string,
+    ingressDirectory: string,
+    workItemId: string,
+    shapingRunId: string | null,
+  ): Promise<void> {
+    if (origin === "manual_import") {
+      await this.ensureShapingIngressFamilyRoot();
+      await this.ensureDirectory(
+        join(
+          this.founderDirectory,
+          SHAPING_INGRESS_DIRECTORY,
+          workItemId,
+        ),
+      );
+      await this.ensureDirectory(instructionDirectory);
+      return;
+    }
+
+    if (shapingRunId === null) {
+      throw new Error("Connected shaping instructions require a run id.");
+    }
+    await this.assertDirectory(
+      join(this.founderDirectory, SHAPING_RUNS_DIRECTORY),
+    );
+    await this.assertDirectory(
+      join(this.founderDirectory, SHAPING_RUNS_DIRECTORY, workItemId),
+    );
+    await this.assertDirectory(instructionDirectory);
+    await this.ensureDirectory(ingressDirectory);
+  }
+
+  private async readMatchingShapingInstruction(
+    instructionPath: string,
+    expectedInstructionSha256: string,
+    workItemId: string,
+  ): Promise<ShapingIngressInstructionWriteResult | null> {
+    let source: string | null;
+    try {
+      const instructionDirectory = relative(
+        this.workspaceRoot,
+        join(instructionPath, ".."),
+      )
+        .split(sep)
+        .join("/");
+      if (
+        !(await this.hasSafeWorkspaceDirectoryComponents(
+          instructionDirectory,
+        ))
+      ) {
+        return null;
+      }
+      source = await this.readOptionalFile(instructionPath);
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Shaping ingress instruction at ${relative(
+          this.workspaceRoot,
+          instructionPath,
+        )} needs repair: ${errorMessage(error)}`,
+      );
+    }
+    if (source === null) {
+      return null;
+    }
+
+    let instruction: ShapingIngressInstructionV1;
+    try {
+      instruction = this.parseJson(
+        source,
+        instructionPath,
+        shapingIngressInstructionSchema,
+      );
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Shaping ingress instruction at ${relative(
+          this.workspaceRoot,
+          instructionPath,
+        )} needs repair: ${errorMessage(error)}`,
+      );
+    }
+    if (instruction.instruction_sha256 !== expectedInstructionSha256) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Stored shaping ingress instruction differs from the requested immutable instruction.",
+      );
+    }
+    return {
+      instruction,
+      instruction_path: instructionPath,
+      instruction_source: source,
+    };
+  }
+
+  private async readDurableShapingInstruction(
+    input: ShapingIngressInstructionV1,
+  ): Promise<ShapingIngressInstructionV1> {
+    let instruction: ShapingIngressInstructionV1;
+    try {
+      instruction = shapingIngressInstructionSchema.parse(input);
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        input.work_item_id,
+        `Shaping ingress instruction is invalid: ${errorMessage(error)}`,
+      );
+    }
+    const paths = this.shapingInstructionPaths({
+      origin: instruction.origin,
+      shaping_run_id: instruction.shaping_run_id,
+      identity: {
+        phase: instruction.phase,
+        work_item_id: instruction.work_item_id,
+        input_sha256: instruction.mission_input_sha256,
+      },
+    });
+    if (instruction.ingress_path !== paths.relativeIngressPath) {
+      throw new ControllerConflictError(
+        "repair_required",
+        instruction.work_item_id,
+        "Shaping ingress instruction does not name its deterministic ingress path.",
+      );
+    }
+    try {
+      await this.assertSafeWorkspaceDirectoryComponents(
+        posix.dirname(paths.relativeInstructionPath),
+      );
+      const source = await this.readRequiredFile(paths.instructionPath);
+      const stored = this.parseJson(
+        source,
+        paths.instructionPath,
+        shapingIngressInstructionSchema,
+      );
+      if (JSON.stringify(stored) !== JSON.stringify(instruction)) {
+        throw new Error("provided instruction differs from durable instruction");
+      }
+      return stored;
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        instruction.work_item_id,
+        `Shaping ingress instruction at ${paths.relativeInstructionPath} needs repair: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  private assertShapingInstructionMatchesMission(
+    instruction: ShapingIngressInstructionV1,
+    snapshot: {
+      mission: ShapingMissionPackage;
+      relativeDirectory: string;
+      relativeMissionPath: string;
+    },
+  ): void {
+    const mission = snapshot.mission;
+    if (
+      instruction.work_item_id !== mission.identity.work_item_id ||
+      instruction.phase !== mission.identity.phase ||
+      instruction.mission_input_sha256 !== mission.identity.input_sha256 ||
+      instruction.mission_content_sha256 !== mission.content_sha256 ||
+      instruction.task_path !==
+        posix.join(snapshot.relativeDirectory, TASK_MD_FILE) ||
+      instruction.mission_path !== snapshot.relativeMissionPath ||
+      instruction.result_schema_version !==
+        mission.result_contract.result_schema_version ||
+      JSON.stringify(instruction.required_fields) !==
+        JSON.stringify(mission.result_contract.required_fields) ||
+      instruction.max_result_bytes !== SHAPING_INGRESS_MAX_BYTES
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        mission.identity.work_item_id,
+        "Shaping ingress instruction does not match its immutable mission.",
+      );
+    }
+  }
+
+  private async assertSafeWorkspaceDirectoryComponents(
+    relativeDirectory: string,
+  ): Promise<void> {
+    if (!(await this.hasSafeWorkspaceDirectoryComponents(relativeDirectory))) {
+      throw this.invalid(
+        join(this.workspaceRoot, ...relativeDirectory.split("/")),
+        "required directory is missing",
+      );
+    }
+  }
+
+  private async hasSafeWorkspaceDirectoryComponents(
+    relativeDirectory: string,
+  ): Promise<boolean> {
+    let current = this.workspaceRoot;
+    for (const component of relativeDirectory.split("/")) {
+      current = join(current, component);
+      if (!(await this.hasSafeDirectory(current))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async assertSafeShapingIngressParent(
+    relativeIngressPath: string,
+  ): Promise<void> {
+    await this.assertSafeWorkspaceDirectoryComponents(
+      posix.dirname(relativeIngressPath),
+    );
+  }
+
+  private async removeStaleAppliedShapingStagingDirectories(snapshot: {
+    mission: ShapingMissionPackage;
+    missionDirectory: string;
+  }): Promise<void> {
+    const parentDirectory = join(snapshot.missionDirectory, "..");
+    const prefix = `.${snapshot.mission.identity.phase}-${snapshot.mission.identity.input_sha256}.`;
+    const entries = await readdir(parentDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (
+        !entry.name.startsWith(prefix) ||
+        !entry.name.endsWith(".applied.staging")
+      ) {
+        continue;
+      }
+      if (
+        !SHAPING_STAGING_DIRECTORY_PATTERN.test(entry.name) ||
+        !entry.isDirectory() ||
+        entry.isSymbolicLink()
+      ) {
+        throw this.invalid(
+          join(parentDirectory, entry.name),
+          "applied shaping staging entry must be a regular directory",
+        );
+      }
+      await rm(join(parentDirectory, entry.name), {
+        recursive: true,
+        force: true,
+      });
+    }
+  }
+
+  private async removeAppliedShapingStagingDirectory(
+    stagingDirectory: string,
+    originalError: unknown,
+  ): Promise<void> {
+    try {
+      await rm(stagingDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [originalError, cleanupError],
+        "Applied shaping publication failed and staging cleanup was incomplete",
+      );
+    }
+  }
+
+  private assertAppliedShapingReplay(
+    stored: StoredAppliedShapingBundle,
+    mission: ShapingMissionPackage,
+    expectedResultSource: string,
+    expectedImportIdentity: object,
+    expectedProductionIdentity: object,
+  ): AppliedShapingBundleWriteResult {
+    const { first_published_at: _firstPublishedAt, ...storedImportIdentity } =
+      stored.importReceipt;
+    const { produced_at: _producedAt, ...storedProductionIdentity } =
+      stored.productionReceipt;
+    if (stored.resultSource !== expectedResultSource) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        mission.identity.work_item_id,
+        "This shaping mission revision already has a different applied result.",
+      );
+    }
+    if (
+      !isDeepStrictEqual(storedImportIdentity, expectedImportIdentity) ||
+      !isDeepStrictEqual(
+        storedProductionIdentity,
+        expectedProductionIdentity,
+      )
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        mission.identity.work_item_id,
+        "This shaping mission revision already has different import or production evidence.",
+      );
+    }
+    return {
+      applied_path: relative(
+        this.workspaceRoot,
+        join(stored.markerPath, ".."),
+      )
+        .split(sep)
+        .join("/"),
+      result_source: stored.resultSource,
+      result_content_sha256: stored.resultContentSha256,
+      import_receipt: stored.importReceipt,
+      import_source: stored.importSource,
+      production_receipt: stored.productionReceipt,
+      production_source: stored.productionSource,
+      applied_marker: stored.marker,
+      applied_source: stored.markerSource,
+    };
+  }
+
   private async removeShapingStagingDirectory(
     stagingDirectory: string,
     originalError: unknown,
@@ -3673,7 +4518,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return publishedSource;
   }
 
-  private hashArtifactSource(source: string): string {
+  private hashArtifactSource(source: string | Buffer): string {
     return createHash("sha256").update(source).digest("hex");
   }
 
@@ -3787,10 +4632,13 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         resultSource,
         resultContentSha256,
         importPath,
+        importSource,
         importReceipt,
         productionPath,
+        productionSource,
         productionReceipt,
         markerPath,
+        markerSource,
         marker,
       };
     } catch (error) {
