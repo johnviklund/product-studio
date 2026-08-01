@@ -4,9 +4,11 @@ import { z } from "zod";
 
 import {
   controllerRunIdSchema,
+  goalContractSchema,
   WORK_ITEM_PHASES,
   WORK_ITEM_STATUSES,
   workItemIdSchema,
+  type GoalContract,
   type WorkItemPhase,
   type WorkItemStatus,
 } from "./work-item";
@@ -143,17 +145,19 @@ export interface BrainstormResultSubmission {
   open_questions: string[];
 }
 
+export interface SpecProposal {
+  purpose: string;
+  acceptance_criteria: string[];
+  non_goals: string[];
+  allowed_scope: string[];
+  review_ready: string[];
+}
+
 export interface SpecResultSubmission {
   result_schema_version: 1;
   spec_mission_content_sha256: string;
   identity: ShapingIdentity<"spec">;
-  proposal: {
-    purpose: string;
-    acceptance_criteria: string[];
-    non_goals: string[];
-    allowed_scope: string[];
-    review_ready: string[];
-  };
+  proposal: SpecProposal;
 }
 
 export interface PlanChecklistEntry {
@@ -475,18 +479,20 @@ export const brainstormResultSubmissionSchema: z.ZodType<BrainstormResultSubmiss
     open_questions: uniqueStringListSchema("open_questions"),
   });
 
+const specProposalSchema: z.ZodType<SpecProposal> = z.strictObject({
+  purpose: nonEmptyTrimmedStringSchema,
+  acceptance_criteria: uniqueStringListSchema("acceptance_criteria"),
+  non_goals: uniqueStringListSchema("non_goals"),
+  allowed_scope: allowedScopeSchema,
+  review_ready: uniqueStringListSchema("review_ready"),
+});
+
 export const specResultSubmissionSchema: z.ZodType<SpecResultSubmission> =
   z.strictObject({
     result_schema_version: z.literal(1),
     spec_mission_content_sha256: sha256Schema,
     identity: specIdentitySchema,
-    proposal: z.strictObject({
-      purpose: nonEmptyTrimmedStringSchema,
-      acceptance_criteria: uniqueStringListSchema("acceptance_criteria"),
-      non_goals: uniqueStringListSchema("non_goals"),
-      allowed_scope: allowedScopeSchema,
-      review_ready: uniqueStringListSchema("review_ready"),
-    }),
+    proposal: specProposalSchema,
   });
 
 const planChecklistEntrySchema: z.ZodType<PlanChecklistEntry> = z.strictObject({
@@ -1145,6 +1151,35 @@ export function hashGoalInput(goal: { title: string; notes?: string }): string {
     .update("\0")
     .update(normalizeGoalText(parsed.notes ?? ""))
     .digest("hex");
+}
+
+export function goalContractFromSpecProposal(
+  proposal: SpecProposal,
+  goalVersion: number,
+): GoalContract {
+  const validated = specProposalSchema.parse(proposal);
+  return goalContractSchema.parse({
+    schema_version: 1,
+    goal_version: goalVersion,
+    purpose: validated.purpose,
+    acceptance_criteria: validated.acceptance_criteria,
+    non_goals: validated.non_goals,
+    allowed_scope: validated.allowed_scope,
+    review_ready: validated.review_ready,
+  });
+}
+
+export function hashGoalContract(contract: GoalContract): string {
+  const validated = goalContractSchema.parse(contract);
+  return hashShapingArtifact({
+    schema_version: validated.schema_version,
+    goal_version: validated.goal_version,
+    purpose: validated.purpose,
+    acceptance_criteria: validated.acceptance_criteria,
+    non_goals: validated.non_goals,
+    allowed_scope: validated.allowed_scope,
+    review_ready: validated.review_ready,
+  });
 }
 
 export function normalizeShapingGoalInput(goal: {

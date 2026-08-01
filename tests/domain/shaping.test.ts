@@ -10,6 +10,8 @@ import {
   compileBrainstormMission,
   compilePlanMission,
   compileSpecMission,
+  goalContractFromSpecProposal,
+  hashGoalContract,
   hashGoalInput,
   hashShapingDecisionReceipt,
   hashShapingDecisionState,
@@ -39,6 +41,11 @@ import {
   type SpecResultSubmission,
   type SpecShapingInput,
 } from "../../src/domain/shaping";
+import {
+  goalContractSchema,
+  saveWorkItemInputSchema,
+  type GoalContract,
+} from "../../src/domain/work-item";
 
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
 const alternateWorkItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
@@ -98,12 +105,17 @@ const specResult: SpecResultSubmission = {
   },
 };
 
+const approvedGoalContract = goalContractFromSpecProposal(
+  specResult.proposal,
+  1,
+);
+
 const approval: SpecApprovalReceipt = {
   shaping_schema_version: SHAPING_SCHEMA_VERSION,
   identity: specMission.identity,
   mission_content_sha256: specMission.content_sha256,
   result_content_sha256: "d".repeat(64),
-  goal_contract_sha256: "e".repeat(64),
+  goal_contract_sha256: hashGoalContract(approvedGoalContract),
   approved_at: "2026-08-01T12:01:00.000Z",
 };
 
@@ -444,6 +456,47 @@ describe("shaping decision hashes", () => {
     expect(hashGoalInput({ title: "Cafe\nplan", notes: "Changed" })).not.toBe(
       canonical,
     );
+  });
+
+  it("maps a Spec proposal to the exact canonical goal contract", () => {
+    const contract = goalContractFromSpecProposal(specResult.proposal, 1);
+    const replay = goalContractFromSpecProposal(specResult.proposal, 1);
+    expect(JSON.stringify(replay)).toBe(JSON.stringify(contract));
+    expect(goalContractSchema.parse(contract)).toEqual(contract);
+    expect(contract).toEqual({
+      schema_version: 1,
+      goal_version: 1,
+      purpose: specResult.proposal.purpose,
+      acceptance_criteria: specResult.proposal.acceptance_criteria,
+      non_goals: specResult.proposal.non_goals,
+      allowed_scope: specResult.proposal.allowed_scope,
+      review_ready: specResult.proposal.review_ready,
+    });
+
+    const reordered: GoalContract = {
+      review_ready: contract.review_ready,
+      allowed_scope: contract.allowed_scope,
+      non_goals: contract.non_goals,
+      acceptance_criteria: contract.acceptance_criteria,
+      purpose: contract.purpose,
+      goal_version: contract.goal_version,
+      schema_version: contract.schema_version,
+    };
+    expect(hashGoalContract(reordered)).toBe(hashGoalContract(contract));
+
+    const saveInput = saveWorkItemInputSchema.parse({
+      target_source_id: "ws_00000000-0000-4000-8000-000000000000",
+      title: brainstormInput.title,
+      type: "Feature",
+      priority: "normal",
+      tags: [],
+      notes: brainstormInput.notes,
+      goal_contract: specResult.proposal,
+    });
+    expect(
+      goalContractFromSpecProposal(saveInput.goal_contract!, 1),
+    ).toEqual(contract);
+    expect(contract.goal_version).toBe(1);
   });
 });
 
