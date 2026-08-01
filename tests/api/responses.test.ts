@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { errorResponse } from "../../app/api/responses";
+import { UntrustedRequestOriginError } from "../../src/application/request-origin";
 import {
   InvalidWorkItemTransitionError,
   PortfolioWorkItemNotFoundError,
@@ -9,6 +10,23 @@ import {
 import { ControllerConflictError } from "../../src/domain/work-item";
 
 describe("portfolio API error responses", () => {
+  it("maps untrusted request origins to a stable 403", async () => {
+    const response = errorResponse(
+      new UntrustedRequestOriginError(
+        "Request Origin and Host must exactly match PRODUCT_STUDIO_APP_ORIGIN.",
+      ),
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "untrusted_request_origin",
+        message:
+          "Request Origin and Host must exactly match PRODUCT_STUDIO_APP_ORIGIN.",
+      },
+    });
+  });
+
   it("maps unknown sources to a stable non-leaking 404", async () => {
     const response = errorResponse(
       new UnknownPortfolioSourceError("private-source-path"),

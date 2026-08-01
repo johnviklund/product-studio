@@ -2,8 +2,11 @@ import { z } from "zod";
 
 import { getPortfolioService } from "../../../../../../../../../src/application/portfolio-service";
 import { controllerRunIdSchema } from "../../../../../../../../../src/domain/work-item";
+import {
+  CONNECTED_REQUEST_MAX_BYTES,
+  readCappedJsonRequest,
+} from "../../../../../../../request-body";
 import { errorResponse } from "../../../../../../../responses";
-import { parseConnectedRequest } from "../request";
 
 export const runtime = "nodejs";
 
@@ -25,7 +28,11 @@ export async function POST(
   context: RouteContext,
 ): Promise<Response> {
   try {
-    const input = await parseConnectedRequest(request, permissionRequestSchema);
+    const input = await readCappedJsonRequest(
+      request,
+      permissionRequestSchema,
+      CONNECTED_REQUEST_MAX_BYTES,
+    );
     const { sourceId, workItemId } = await context.params;
     const service = await getPortfolioService();
     const decided = await service.decideConnectedPermission(

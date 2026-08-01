@@ -1,5 +1,6 @@
 import { ZodError } from "zod";
 
+import { UntrustedRequestOriginError } from "../../src/application/request-origin";
 import {
   DuplicateWorkspaceError,
   InvalidWorkItemTransitionError,
@@ -109,6 +110,18 @@ export function errorResponse(error: unknown): Response {
         },
       },
       { status: 409 },
+    );
+  }
+
+  if (error instanceof UntrustedRequestOriginError) {
+    return Response.json(
+      {
+        error: {
+          code: error.kind,
+          message: error.reason,
+        },
+      },
+      { status: 403 },
     );
   }
 
