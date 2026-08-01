@@ -307,6 +307,36 @@ describe("connected-run domain", () => {
     const summary = summarizeConnectedRun(record);
 
     expect(connectedRunSummarySchema.parse(summary)).toEqual(summary);
+    expect(summary).toEqual({
+      schema_version: 1,
+      connected_run_id: connectedRunId,
+      mission: {
+        identity: record.mission.identity,
+        content_sha256: missionSha256,
+        source_commit: sourceCommit,
+      },
+      governed_tuple: record.governed_tuple,
+      provenance: {
+        role: record.provenance.role,
+        seat: record.provenance.seat,
+        requested_model: record.provenance.requested_model,
+        effective_model: record.provenance.effective_model,
+        effort: record.provenance.effort,
+        harness: record.provenance.harness,
+        adapter_profile: record.provenance.adapter_profile,
+      },
+      capability_envelope_sha256: envelopeSha256,
+      acp_protocol_version: record.acp.protocol_version,
+      lifecycle: {
+        status: "running",
+        started_at: record.lifecycle.started_at,
+        updated_at: record.lifecycle.updated_at,
+        completed_at: null,
+        terminal_outcome: null,
+        partial: false,
+      },
+      diagnostics: { count: 1, truncated: false },
+    });
     expect(summary).toMatchObject({
       connected_run_id: connectedRunId,
       capability_envelope_sha256: envelopeSha256,

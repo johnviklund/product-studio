@@ -228,7 +228,7 @@ const gitCommitSchema = z.string().regex(/^[0-9a-f]{40}$/);
 const positiveSafeIntegerSchema = z.number().int().positive().safe();
 const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().safe();
 
-function provenanceValueSchema<T>(
+export function provenanceValueSchema<T>(
   valueSchema: z.ZodType<T>,
 ): z.ZodType<ProvenanceValue<T>> {
   return z.union([
@@ -250,13 +250,13 @@ const executeMissionIdentitySchema: z.ZodType<MissionIdentity<"execute">> =
     "connected runs require an execute mission identity",
   );
 
-const connectedRuntimeIdentitySchema: z.ZodType<ConnectedRuntimeIdentity> =
+export const connectedRuntimeIdentitySchema: z.ZodType<ConnectedRuntimeIdentity> =
   z.strictObject({
     id: exactNonEmptyStringSchema,
     version: exactNonEmptyStringSchema,
   });
 
-const sanitizedAdapterProfileIdentitySchema: z.ZodType<SanitizedAdapterProfileIdentity> =
+export const sanitizedAdapterProfileIdentitySchema: z.ZodType<SanitizedAdapterProfileIdentity> =
   z.strictObject({
     adapter_id: exactNonEmptyStringSchema,
     adapter_version: exactNonEmptyStringSchema,
@@ -330,7 +330,7 @@ export const connectedRunProcessIdentitySchema: z.ZodType<ConnectedRunProcessIde
     started_at: z.iso.datetime(),
   });
 
-const connectedRunTerminalSchema: z.ZodType<ConnectedRunTerminal> =
+export const connectedRunTerminalSchema: z.ZodType<ConnectedRunTerminal> =
   z.strictObject({
     outcome: z.enum(CONNECTED_RUN_TERMINAL_OUTCOMES),
     partial: z.boolean(),
@@ -413,7 +413,7 @@ export const connectedRunDiagnosticSchema: z.ZodType<ConnectedRunDiagnostic> =
     message: z.string().trim().min(1).max(500),
   });
 
-const connectedRunDiagnosticsSchema: z.ZodType<ConnectedRunDiagnostics> =
+export const connectedRunDiagnosticsSchema: z.ZodType<ConnectedRunDiagnostics> =
   z.strictObject({
     entries: z.array(connectedRunDiagnosticSchema).max(20),
     truncated: z.boolean(),
