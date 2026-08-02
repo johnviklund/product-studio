@@ -108,6 +108,7 @@ import {
 import {
   connectedRunProcessIdentitySchema,
   connectedRunRecordV1Schema,
+  connectedRunTerminalSchema,
   type ConnectedRunProtocolIdentity,
   type ConnectedRunTerminal,
   type ConnectedRunProcessIdentity,
@@ -156,8 +157,11 @@ import {
 } from "../domain/shaping";
 import {
   deriveManualShapingProductionId,
+  shapingRunLaunchFingerprint,
+  shapingRunRecordV1Schema,
   shapingProductionReceiptSchema,
   type ConnectedShapingProductionReceipt,
+  type ShapingRunRecordV1,
   type ShapingProductionReceipt,
 } from "../domain/shaping-run";
 
@@ -169,6 +173,11 @@ const RUNS_DIRECTORY = "runs";
 const MISSIONS_DIRECTORY = "missions";
 const SHAPING_DIRECTORY = "shaping";
 const SHAPING_RUNS_DIRECTORY = "shaping-runs";
+const SHAPING_RUN_FILE = "run.json";
+const SHAPING_RUN_EVENTS_FILE = "events.ndjson";
+const SHAPING_RUN_PROCESS_FILE = "process.json";
+const SHAPING_RUN_LAUNCH_GUARD_FILE = ".launch-guard.json";
+const SHAPING_RUN_EVENTS_LOCK_FILE = ".events.lock";
 const SHAPING_INGRESS_DIRECTORY = "shaping-ingress";
 const SHAPING_DECISIONS_DIRECTORY = "shaping-decisions";
 const RUN_EVIDENCE_DIRECTORY = "run-evidence";
@@ -202,6 +211,10 @@ const STAGING_DIRECTORY_PATTERN = new RegExp(
 );
 const CONNECTED_RUN_STAGING_DIRECTORY_PATTERN = new RegExp(
   `^\\.${UUID_PATTERN}\\.${UUID_PATTERN}\\.staging$`,
+  "i",
+);
+const SHAPING_RUN_STAGING_DIRECTORY_PATTERN = new RegExp(
+  `^\\.${UUID_PATTERN}\\.${UUID_PATTERN}\\.shaping-run\\.staging$`,
   "i",
 );
 const SHAPING_STAGING_DIRECTORY_PATTERN = new RegExp(
@@ -267,6 +280,80 @@ const connectedRunLaunchGuardSchema = z
   });
 
 type ConnectedRunLaunchGuard = z.infer<typeof connectedRunLaunchGuardSchema>;
+
+const shapingRunLaunchGuardSchema = z
+  .strictObject({
+    schema_version: z.literal(1),
+    work_item_id: workItemIdSchema,
+    shaping_run_id: controllerRunIdSchema,
+    launch_fingerprint: SHA256_SCHEMA,
+    record: shapingRunRecordV1Schema,
+    instruction: shapingIngressInstructionSchema,
+    created_at: z.iso.datetime(),
+  })
+  .superRefine((guard, context) => {
+    const requestedModel = guard.record.provenance.requested_model.value;
+    if (guard.record.shaping_run_id !== guard.shaping_run_id) {
+      context.addIssue({
+        code: "custom",
+        message: "record shaping_run_id must match launch guard",
+        path: ["record", "shaping_run_id"],
+        input: guard.record.shaping_run_id,
+      });
+    }
+    if (guard.record.mission.work_item_id !== guard.work_item_id) {
+      context.addIssue({
+        code: "custom",
+        message: "record work_item_id must match launch guard",
+        path: ["record", "mission", "work_item_id"],
+        input: guard.record.mission.work_item_id,
+      });
+    }
+    if (requestedModel === null) {
+      context.addIssue({
+        code: "custom",
+        message: "connected shaping launches require a requested model",
+        path: ["record", "provenance", "requested_model"],
+        input: guard.record.provenance.requested_model,
+      });
+    } else if (
+      guard.launch_fingerprint !==
+      shapingRunLaunchFingerprint(
+        guard.record.mission.content_sha256,
+        requestedModel,
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "launch_fingerprint must hash the shaping launch identity",
+        path: ["launch_fingerprint"],
+        input: guard.launch_fingerprint,
+      });
+    }
+    if (
+      guard.instruction.origin !== "connected_run" ||
+      guard.instruction.shaping_run_id !== guard.shaping_run_id ||
+      guard.instruction.work_item_id !== guard.work_item_id ||
+      guard.instruction.phase !== guard.record.mission.phase ||
+      guard.instruction.mission_input_sha256 !==
+        guard.record.mission.input_sha256 ||
+      guard.instruction.mission_content_sha256 !==
+        guard.record.mission.content_sha256 ||
+      guard.instruction.ingress_path !==
+        guard.record.write_policy.ingress_path ||
+      guard.instruction.instruction_sha256 !==
+        guard.record.write_policy.instruction_sha256
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "instruction must match the guarded shaping run",
+        path: ["instruction"],
+        input: guard.instruction,
+      });
+    }
+  });
+
+type ShapingRunLaunchGuard = z.infer<typeof shapingRunLaunchGuardSchema>;
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
@@ -454,9 +541,12 @@ function timestampAtOrAfter(...timestamps: string[]): string {
   return [now, ...timestamps].sort().at(-1) ?? now;
 }
 
-async function defaultConnectedProcessProbe(pid: number): Promise<boolean> {
+async function defaultConnectedProcessProbe(
+  pid: number,
+  signal: 0,
+): Promise<boolean> {
   try {
-    process.kill(pid, 0);
+    process.kill(pid, signal);
     return true;
   } catch (error) {
     if (isNodeError(error) && error.code === "ESRCH") {
@@ -767,7 +857,10 @@ export interface ProductWorkspaceOptions {
   connectedProcessProbe?: ConnectedProcessProbe;
 }
 
-export type ConnectedProcessProbe = (pid: number) => Promise<boolean>;
+export type ConnectedProcessProbe = (
+  pid: number,
+  signal: 0,
+) => Promise<boolean>;
 
 export type ShapingIngressInstructionWriteInput =
   | {
@@ -815,6 +908,24 @@ export interface ConnectedRunCreateResult {
 }
 
 export interface ConnectedRunEventAppendResult {
+  appended: boolean;
+  limit_reached: boolean;
+  event_count: number;
+  event_bytes: number;
+}
+
+export interface ShapingRunCreateInput {
+  record: Omit<ShapingRunRecordV1, "write_policy">;
+  mission: ShapingMissionPackage;
+}
+
+export interface ShapingRunCreateResult {
+  record: ShapingRunRecordV1;
+  instruction: ShapingIngressInstructionV1;
+  created: boolean;
+}
+
+export interface ShapingRunEventAppendResult {
   appended: boolean;
   limit_reached: boolean;
   event_count: number;
@@ -1286,6 +1397,436 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       }
       reconciled.push(
         ...(await this.reconcileConnectedRunItem(itemEntry.name, itemPath)),
+      );
+    }
+    return reconciled;
+  }
+
+  async createShapingRun(
+    input: ShapingRunCreateInput,
+  ): Promise<ShapingRunCreateResult> {
+    const mission = shapingMissionPackageSchema.parse(input.mission);
+    const shapingRunId = controllerRunIdSchema.parse(
+      input.record.shaping_run_id,
+    );
+    const workItemId = workItemIdSchema.parse(
+      input.record.mission.work_item_id,
+    );
+
+    await this.readManifest();
+    if (
+      !(await this.hasSafeWorkItemsDirectory()) ||
+      (await this.readValidated(workItemId)) === null
+    ) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Work item ${workItemId} was not found.`,
+      );
+    }
+
+    const snapshot = await this.readShapingPackageSnapshot(mission.identity);
+    if (JSON.stringify(snapshot.mission) !== JSON.stringify(mission)) {
+      throw this.invalid(
+        snapshot.missionDirectory,
+        "shaping run must reference the stored immutable mission",
+      );
+    }
+    const instruction = this.buildShapingIngressInstruction(
+      "connected_run",
+      shapingRunId,
+      snapshot,
+      input.record.lifecycle.started_at,
+    );
+    const record = shapingRunRecordV1Schema.parse({
+      ...input.record,
+      shaping_run_id: shapingRunId,
+      write_policy: this.shapingRunWritePolicy(instruction),
+    });
+    this.assertShapingRunMissionMatchesPackage(record, mission);
+    if (
+      record.lifecycle.status !== "starting" ||
+      record.process !== null
+    ) {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        workItemId,
+        "A new shaping run must be starting without a process identity.",
+      );
+    }
+    const requestedModel = record.provenance.requested_model.value;
+    if (requestedModel === null) {
+      throw new ControllerConflictError(
+        "mission_not_ready",
+        workItemId,
+        "A connected shaping run requires a requested model.",
+      );
+    }
+    if ((await this.readAppliedShapingBundle(snapshot)) !== null) {
+      throw this.missionNotReady(
+        workItemId,
+        "This shaping mission revision already has an applied result.",
+      );
+    }
+
+    const itemDirectory = await this.ensureShapingRunItemDirectory(
+      workItemId,
+    );
+    const existingNonterminalRuns = (
+      await this.readShapingRunsFromItemDirectory(workItemId, itemDirectory)
+    ).filter((existing) => existing.lifecycle.status !== "terminal");
+    if (existingNonterminalRuns.length > 1) {
+      throw this.invalid(
+        itemDirectory,
+        "only one nonterminal shaping run may exist per work item",
+      );
+    }
+    const launchFingerprint = shapingRunLaunchFingerprint(
+      record.mission.content_sha256,
+      requestedModel,
+    );
+    const existingNonterminalRun = existingNonterminalRuns[0];
+    if (existingNonterminalRun !== undefined) {
+      if (
+        this.shapingRunFingerprint(existingNonterminalRun) ===
+        launchFingerprint
+      ) {
+        return {
+          record: existingNonterminalRun,
+          instruction: await this.readShapingRunInstructionForRecord(
+            existingNonterminalRun,
+          ),
+          created: false,
+        };
+      }
+      throw new ControllerConflictError(
+        "lease_held",
+        workItemId,
+        "A different shaping run is already active for this work item.",
+      );
+    }
+
+    const guard = shapingRunLaunchGuardSchema.parse({
+      schema_version: 1,
+      work_item_id: workItemId,
+      shaping_run_id: shapingRunId,
+      launch_fingerprint: launchFingerprint,
+      record,
+      instruction,
+      created_at: instruction.created_at,
+    });
+    const guardPath = join(
+      itemDirectory,
+      SHAPING_RUN_LAUNCH_GUARD_FILE,
+    );
+    try {
+      await writeFile(guardPath, `${JSON.stringify(guard, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        return this.resolveExistingShapingRunLaunch(record);
+      }
+      throw error;
+    }
+
+    try {
+      await this.publishShapingRunDirectory(record, instruction);
+      return { record, instruction, created: true };
+    } catch (error) {
+      try {
+        await this.releaseShapingRunGuard(guard);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Shaping run creation failed and its launch guard could not be released",
+        );
+      }
+      throw error;
+    }
+  }
+
+  async readShapingRun(
+    workItemId: string,
+    shapingRunId: string,
+  ): Promise<ShapingRunRecordV1 | null> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
+    await this.readManifest();
+    const shapingRunsDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(shapingRunsDirectory))) {
+      return null;
+    }
+    const itemDirectory = join(
+      shapingRunsDirectory,
+      validatedWorkItemId,
+    );
+    if (!(await this.hasSafeDirectory(itemDirectory))) {
+      return null;
+    }
+    return this.readShapingRunFromDirectory(
+      validatedWorkItemId,
+      validatedRunId,
+      itemDirectory,
+    );
+  }
+
+  async listShapingRuns(workItemId: string): Promise<ShapingRunRecordV1[]> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+    const shapingRunsDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(shapingRunsDirectory))) {
+      return [];
+    }
+    const itemDirectory = join(
+      shapingRunsDirectory,
+      validatedWorkItemId,
+    );
+    if (!(await this.hasSafeDirectory(itemDirectory))) {
+      return [];
+    }
+    return this.readShapingRunsFromItemDirectory(
+      validatedWorkItemId,
+      itemDirectory,
+    );
+  }
+
+  async readShapingRunInstruction(
+    workItemId: string,
+    shapingRunId: string,
+  ): Promise<ShapingIngressInstructionV1> {
+    const record = await this.requireShapingRun(
+      workItemIdSchema.parse(workItemId),
+      controllerRunIdSchema.parse(shapingRunId),
+    );
+    return this.readShapingRunInstructionForRecord(record);
+  }
+
+  async startShapingRun(
+    workItemId: string,
+    shapingRunId: string,
+    processIdentity: ConnectedRunProcessIdentity,
+  ): Promise<ShapingRunRecordV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
+    const validatedProcess = connectedRunProcessIdentitySchema.parse(
+      processIdentity,
+    );
+    const record = await this.requireShapingRun(
+      validatedWorkItemId,
+      validatedRunId,
+    );
+    if (record.lifecycle.status === "terminal") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "A terminal shaping run cannot acquire a process identity.",
+      );
+    }
+    await this.readShapingRunInstructionForRecord(record);
+
+    const paths = this.shapingRunPaths(validatedWorkItemId, validatedRunId);
+    const storedProcess = await this.readShapingRunProcess(paths.process);
+    if (
+      storedProcess !== null &&
+      JSON.stringify(storedProcess) !== JSON.stringify(validatedProcess)
+    ) {
+      throw this.invalid(
+        paths.process,
+        "shaping process identity is immutable once recorded",
+      );
+    }
+    const updated = shapingRunRecordV1Schema.parse({
+      ...record,
+      lifecycle: {
+        ...record.lifecycle,
+        status: "running",
+        updated_at: timestampAtOrAfter(
+          record.lifecycle.updated_at,
+          validatedProcess.started_at,
+        ),
+      },
+      process: validatedProcess,
+    });
+    if (record.lifecycle.status === "running") {
+      if (
+        JSON.stringify(record.process) !== JSON.stringify(updated.process)
+      ) {
+        throw this.invalid(
+          paths.run,
+          "running shaping process identity is immutable",
+        );
+      }
+      return record;
+    }
+
+    await this.writeJsonAtomically(paths.process, validatedProcess);
+    await this.writeJsonAtomically(paths.run, updated);
+    return updated;
+  }
+
+  async completeShapingRun(
+    workItemId: string,
+    shapingRunId: string,
+    terminal: ConnectedRunTerminal,
+  ): Promise<ShapingRunRecordV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
+    const validatedTerminal = connectedRunTerminalSchema.parse(terminal);
+    const record = await this.requireShapingRun(
+      validatedWorkItemId,
+      validatedRunId,
+    );
+    if (record.lifecycle.status === "terminal") {
+      if (
+        JSON.stringify(record.lifecycle.terminal) !==
+        JSON.stringify(validatedTerminal)
+      ) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          validatedWorkItemId,
+          "A terminal shaping run cannot be completed with a different outcome.",
+        );
+      }
+      return record;
+    }
+
+    if (validatedTerminal.outcome === "completed") {
+      const snapshot = await this.readShapingPackageSnapshot({
+        phase: record.mission.phase,
+        work_item_id: record.mission.work_item_id,
+        input_sha256: record.mission.input_sha256,
+      });
+      this.assertShapingRunMissionMatchesPackage(record, snapshot.mission);
+      try {
+        const instruction = await this.readShapingRunInstructionForRecord(
+          record,
+        );
+        await this.publishAppliedShapingResult(
+          instruction,
+          snapshot.mission,
+          {
+            origin: "connected_run",
+            shaping_run_id: record.shaping_run_id,
+            requested_model: record.provenance.requested_model,
+            effective_model: record.provenance.effective_model,
+          },
+        );
+      } catch (error) {
+        const applied = await this.readAppliedShapingBundle(snapshot);
+        if (applied !== null) {
+          throw error;
+        }
+        if (this.isShapingOutputRejection(error)) {
+          await this.failShapingRunAfterRejectedOutput(record, error);
+        }
+        throw error;
+      }
+    }
+
+    return this.terminalizeShapingRun(record, validatedTerminal);
+  }
+
+  async appendShapingRunEvent(
+    workItemId: string,
+    shapingRunId: string,
+    event: unknown,
+  ): Promise<ShapingRunEventAppendResult> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
+    const paths = this.shapingRunPaths(validatedWorkItemId, validatedRunId);
+    const eventLockPath = join(paths.directory, SHAPING_RUN_EVENTS_LOCK_FILE);
+    try {
+      await writeFile(eventLockPath, `${validatedRunId}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        throw new ControllerConflictError(
+          "lease_held",
+          validatedWorkItemId,
+          "Another event append is already in progress for this shaping run.",
+        );
+      }
+      throw error;
+    }
+
+    try {
+      const record = await this.requireShapingRun(
+        validatedWorkItemId,
+        validatedRunId,
+      );
+      if (record.lifecycle.status === "terminal") {
+        throw new ControllerConflictError(
+          "invalid_transition",
+          validatedWorkItemId,
+          "A terminal shaping run cannot accept new events.",
+        );
+      }
+      const stats = await this.readShapingRunEventStats(paths.events);
+      const maxStringBytes = Math.min(
+        record.limits.max_output_bytes,
+        record.limits.max_event_bytes,
+      );
+      const sanitized = sanitizeConnectedRunEvent(event, maxStringBytes);
+      const line = `${JSON.stringify(sanitized)}\n`;
+      const lineBytes = Buffer.byteLength(line, "utf8");
+      const limitReached =
+        stats.event_count + 1 > record.limits.max_event_count ||
+        stats.event_bytes + lineBytes > record.limits.max_event_bytes;
+      if (limitReached) {
+        return { appended: false, limit_reached: true, ...stats };
+      }
+      await appendFile(paths.events, line, "utf8");
+      return {
+        appended: true,
+        limit_reached: false,
+        event_count: stats.event_count + 1,
+        event_bytes: stats.event_bytes + lineBytes,
+      };
+    } finally {
+      await this.unlinkIfPresent(eventLockPath);
+    }
+  }
+
+  async reconcileShapingRuns(): Promise<ShapingRunRecordV1[]> {
+    await this.readManifest();
+    const shapingRunsDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(shapingRunsDirectory))) {
+      return [];
+    }
+
+    const reconciled: ShapingRunRecordV1[] = [];
+    const itemEntries = await readdir(shapingRunsDirectory, {
+      withFileTypes: true,
+    });
+    for (const itemEntry of itemEntries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      const itemPath = join(shapingRunsDirectory, itemEntry.name);
+      if (
+        !itemEntry.isDirectory() ||
+        itemEntry.isSymbolicLink() ||
+        !workItemIdSchema.safeParse(itemEntry.name).success
+      ) {
+        throw this.invalid(
+          itemPath,
+          "shaping-runs entries must be regular work-item directories",
+        );
+      }
+      reconciled.push(
+        ...(await this.reconcileShapingRunItem(itemEntry.name, itemPath)),
       );
     }
     return reconciled;
@@ -2159,31 +2700,16 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       shaping_run_id: shapingRunId,
       identity: mission.identity,
     });
-    const instructionWithoutTimestamp = {
-      schema_version: 1 as const,
-      origin: input.origin,
-      shaping_run_id: shapingRunId,
-      work_item_id: mission.identity.work_item_id,
-      phase: mission.identity.phase,
-      mission_input_sha256: mission.identity.input_sha256,
-      mission_content_sha256: mission.content_sha256,
-      task_path: snapshot.relativeDirectory
-        ? posix.join(snapshot.relativeDirectory, TASK_MD_FILE)
-        : TASK_MD_FILE,
-      mission_path: snapshot.relativeMissionPath,
-      ingress_path: paths.relativeIngressPath,
-      result_schema_version: mission.result_contract.result_schema_version,
-      required_fields: mission.result_contract.required_fields,
-      max_result_bytes: SHAPING_INGRESS_MAX_BYTES,
-    };
-    const instructionSha256 = hashShapingIngressInstruction({
-      ...instructionWithoutTimestamp,
-      created_at: "1970-01-01T00:00:00.000Z",
-    });
+    const instructionIdentity = this.buildShapingIngressInstruction(
+      input.origin,
+      shapingRunId,
+      snapshot,
+      "1970-01-01T00:00:00.000Z",
+    );
 
     const replay = await this.readMatchingShapingInstruction(
       paths.instructionPath,
-      instructionSha256,
+      instructionIdentity.instruction_sha256,
       mission.identity.work_item_id,
     );
     if (replay !== null) {
@@ -2201,11 +2727,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       shapingRunId,
     );
 
-    const instruction = shapingIngressInstructionSchema.parse({
-      ...instructionWithoutTimestamp,
-      created_at: new Date().toISOString(),
-      instruction_sha256: instructionSha256,
-    });
+    const instruction = this.buildShapingIngressInstruction(
+      input.origin,
+      shapingRunId,
+      snapshot,
+      new Date().toISOString(),
+    );
     const instructionSource = `${JSON.stringify(instruction, null, 2)}\n`;
     try {
       await writeFile(paths.instructionPath, instructionSource, {
@@ -2224,7 +2751,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       if (isNodeError(error) && error.code === "EEXIST") {
         const racedReplay = await this.readMatchingShapingInstruction(
           paths.instructionPath,
-          instructionSha256,
+          instruction.instruction_sha256,
           mission.identity.work_item_id,
         );
         if (racedReplay !== null) {
@@ -4581,6 +5108,84 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
   }
 
+  private buildShapingIngressInstruction(
+    origin: "connected_run" | "manual_import",
+    shapingRunId: string | null,
+    snapshot: {
+      mission: ShapingMissionPackage;
+      relativeDirectory: string;
+      relativeMissionPath: string;
+    },
+    createdAt: string,
+  ): ShapingIngressInstructionV1 {
+    const paths = this.shapingInstructionPaths({
+      origin,
+      shaping_run_id: shapingRunId,
+      identity: snapshot.mission.identity,
+    });
+    const instructionWithoutHash = {
+      schema_version: 1 as const,
+      origin,
+      shaping_run_id: shapingRunId,
+      work_item_id: snapshot.mission.identity.work_item_id,
+      phase: snapshot.mission.identity.phase,
+      mission_input_sha256: snapshot.mission.identity.input_sha256,
+      mission_content_sha256: snapshot.mission.content_sha256,
+      task_path: snapshot.relativeDirectory
+        ? posix.join(snapshot.relativeDirectory, TASK_MD_FILE)
+        : TASK_MD_FILE,
+      mission_path: snapshot.relativeMissionPath,
+      ingress_path: paths.relativeIngressPath,
+      result_schema_version:
+        snapshot.mission.result_contract.result_schema_version,
+      required_fields: snapshot.mission.result_contract.required_fields,
+      max_result_bytes: SHAPING_INGRESS_MAX_BYTES,
+      created_at: createdAt,
+    };
+    return shapingIngressInstructionSchema.parse({
+      ...instructionWithoutHash,
+      instruction_sha256:
+        hashShapingIngressInstruction(instructionWithoutHash),
+    });
+  }
+
+  private shapingRunWritePolicy(
+    instruction: ShapingIngressInstructionV1,
+  ): ShapingRunRecordV1["write_policy"] {
+    return {
+      kind: "single_ingress_file",
+      ingress_path: instruction.ingress_path,
+      instruction_sha256: instruction.instruction_sha256,
+      commands: "forbidden",
+      urls: "forbidden",
+      mcp: "forbidden",
+      credentials: "forbidden",
+      outside_workspace_writes: "forbidden",
+      reads: "workspace_and_repository_unrestricted",
+      execution_mode: "permission_mediated_local",
+      result_assurance: "result_scope_validation",
+      containment_assurance: "not_independently_enforced",
+      machine_authority: "launching_user",
+    };
+  }
+
+  private assertShapingRunMissionMatchesPackage(
+    record: ShapingRunRecordV1,
+    mission: ShapingMissionPackage,
+  ): void {
+    if (
+      record.mission.phase !== mission.identity.phase ||
+      record.mission.work_item_id !== mission.identity.work_item_id ||
+      record.mission.input_sha256 !== mission.identity.input_sha256 ||
+      record.mission.content_sha256 !== mission.content_sha256
+    ) {
+      throw this.invalid(
+        this.founderDirectory,
+        "shaping run mission reference must match the immutable mission package",
+      );
+    }
+  }
+
   private shapingInstructionPaths(input: {
     origin: "connected_run" | "manual_import";
     shaping_run_id: string | null;
@@ -6473,6 +7078,644 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
   }
 
+  private async ensureShapingRunItemDirectory(
+    workItemId: string,
+  ): Promise<string> {
+    const shapingRunsDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+    );
+    await this.ensureDirectory(shapingRunsDirectory);
+    const itemDirectory = join(shapingRunsDirectory, workItemId);
+    await this.ensureDirectory(itemDirectory);
+    return itemDirectory;
+  }
+
+  private shapingRunPaths(workItemId: string, shapingRunId: string) {
+    const directory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+      workItemId,
+      shapingRunId,
+    );
+    return {
+      directory,
+      run: join(directory, SHAPING_RUN_FILE),
+      events: join(directory, SHAPING_RUN_EVENTS_FILE),
+      process: join(directory, SHAPING_RUN_PROCESS_FILE),
+      instruction: join(directory, INSTRUCTION_JSON_FILE),
+      ingress: join(directory, "ingress"),
+    };
+  }
+
+  private async publishShapingRunDirectory(
+    record: ShapingRunRecordV1,
+    instruction: ShapingIngressInstructionV1,
+  ): Promise<void> {
+    const validated = shapingRunRecordV1Schema.parse(record);
+    const validatedInstruction = shapingIngressInstructionSchema.parse(
+      instruction,
+    );
+    const workItemId = validated.mission.work_item_id;
+    const itemDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+      workItemId,
+    );
+    await this.assertDirectory(itemDirectory);
+    if (
+      validatedInstruction.origin !== "connected_run" ||
+      validatedInstruction.shaping_run_id !== validated.shaping_run_id ||
+      validatedInstruction.work_item_id !== workItemId ||
+      validatedInstruction.phase !== validated.mission.phase ||
+      validatedInstruction.mission_input_sha256 !==
+        validated.mission.input_sha256 ||
+      validatedInstruction.mission_content_sha256 !==
+        validated.mission.content_sha256 ||
+      validatedInstruction.ingress_path !==
+        validated.write_policy.ingress_path ||
+      validatedInstruction.instruction_sha256 !==
+        validated.write_policy.instruction_sha256
+    ) {
+      throw this.invalid(
+        itemDirectory,
+        "shaping run instruction must match its immutable record",
+      );
+    }
+
+    const paths = this.shapingRunPaths(
+      workItemId,
+      validated.shaping_run_id,
+    );
+    const stagingName =
+      `.${validated.shaping_run_id}.${randomUUID()}.shaping-run.staging`;
+    if (!SHAPING_RUN_STAGING_DIRECTORY_PATTERN.test(stagingName)) {
+      throw this.invalid(itemDirectory, "invalid shaping-run staging name");
+    }
+    const stagingDirectory = join(itemDirectory, stagingName);
+    await mkdir(stagingDirectory);
+    try {
+      await writeFile(
+        join(stagingDirectory, SHAPING_RUN_FILE),
+        `${JSON.stringify(validated, null, 2)}\n`,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await writeFile(
+        join(stagingDirectory, SHAPING_RUN_EVENTS_FILE),
+        "",
+        { encoding: "utf8", flag: "wx" },
+      );
+      await writeFile(
+        join(stagingDirectory, SHAPING_RUN_PROCESS_FILE),
+        `${JSON.stringify(validated.process, null, 2)}\n`,
+        { encoding: "utf8", flag: "wx" },
+      );
+      const stagingInstructionPath = join(
+        stagingDirectory,
+        INSTRUCTION_JSON_FILE,
+      );
+      await writeFile(
+        stagingInstructionPath,
+        `${JSON.stringify(validatedInstruction, null, 2)}\n`,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await mkdir(join(stagingDirectory, "ingress"));
+      await this.afterShapingIngressInstructionWritten(
+        stagingInstructionPath,
+      );
+      await rename(stagingDirectory, paths.directory);
+    } catch (error) {
+      try {
+        await rm(stagingDirectory, { recursive: true, force: true });
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Shaping run publication failed and its staging directory could not be removed",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async resolveExistingShapingRunLaunch(
+    candidate: ShapingRunRecordV1,
+  ): Promise<ShapingRunCreateResult> {
+    const workItemId = candidate.mission.work_item_id;
+    const snapshot = await this.readShapingPackageSnapshot({
+      phase: candidate.mission.phase,
+      work_item_id: workItemId,
+      input_sha256: candidate.mission.input_sha256,
+    });
+    if ((await this.readAppliedShapingBundle(snapshot)) !== null) {
+      throw this.missionNotReady(
+        workItemId,
+        "This shaping mission revision already has an applied result.",
+      );
+    }
+    const itemDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+      workItemId,
+    );
+    const guard = await this.readShapingRunGuard(itemDirectory);
+    if (guard === null) {
+      const { write_policy: _writePolicy, ...record } = candidate;
+      return this.createShapingRun({ record, mission: snapshot.mission });
+    }
+
+    const existing = await this.readShapingRunFromDirectory(
+      workItemId,
+      guard.shaping_run_id,
+      itemDirectory,
+    );
+    if (existing?.lifecycle.status === "terminal") {
+      await this.releaseShapingRunGuard(guard);
+      const { write_policy: _writePolicy, ...record } = candidate;
+      return this.createShapingRun({ record, mission: snapshot.mission });
+    }
+    if (
+      guard.launch_fingerprint !== this.shapingRunFingerprint(candidate)
+    ) {
+      throw new ControllerConflictError(
+        "lease_held",
+        workItemId,
+        "A different shaping run launch already holds the item guard.",
+      );
+    }
+    return {
+      record: existing ?? guard.record,
+      instruction:
+        existing === null
+          ? guard.instruction
+          : await this.readShapingRunInstructionForRecord(existing),
+      created: false,
+    };
+  }
+
+  private async readShapingRunGuard(
+    itemDirectory: string,
+  ): Promise<ShapingRunLaunchGuard | null> {
+    const guardPath = join(
+      itemDirectory,
+      SHAPING_RUN_LAUNCH_GUARD_FILE,
+    );
+    const source = await this.readOptionalFile(guardPath);
+    if (source === null) {
+      return null;
+    }
+    return this.parseJson(
+      source,
+      guardPath,
+      shapingRunLaunchGuardSchema,
+    );
+  }
+
+  private async releaseShapingRunGuard(
+    expected: ShapingRunLaunchGuard,
+  ): Promise<void> {
+    const itemDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+      expected.work_item_id,
+    );
+    const current = await this.readShapingRunGuard(itemDirectory);
+    if (
+      current !== null &&
+      current.shaping_run_id === expected.shaping_run_id &&
+      current.launch_fingerprint === expected.launch_fingerprint
+    ) {
+      await this.unlinkIfPresent(
+        join(itemDirectory, SHAPING_RUN_LAUNCH_GUARD_FILE),
+      );
+    }
+  }
+
+  private async releaseShapingRunGuardForRecord(
+    record: ShapingRunRecordV1,
+  ): Promise<void> {
+    const itemDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+      record.mission.work_item_id,
+    );
+    const guard = await this.readShapingRunGuard(itemDirectory);
+    if (
+      guard !== null &&
+      guard.shaping_run_id === record.shaping_run_id &&
+      guard.launch_fingerprint === this.shapingRunFingerprint(record)
+    ) {
+      await this.releaseShapingRunGuard(guard);
+    }
+  }
+
+  private async readShapingRunFromDirectory(
+    workItemId: string,
+    shapingRunId: string,
+    itemDirectory: string,
+  ): Promise<ShapingRunRecordV1 | null> {
+    const paths = this.shapingRunPaths(workItemId, shapingRunId);
+    if (!(await this.hasSafeDirectory(paths.directory))) {
+      return null;
+    }
+    if (resolve(paths.directory) !== resolve(itemDirectory, shapingRunId)) {
+      throw this.invalid(paths.directory, "shaping-run path escaped its item");
+    }
+    const runSource = await this.readRequiredFile(paths.run);
+    const record = this.parseJson(
+      runSource,
+      paths.run,
+      shapingRunRecordV1Schema,
+    );
+    if (record.shaping_run_id !== shapingRunId) {
+      throw this.invalid(
+        paths.run,
+        `shaping_run_id must equal containing directory name ${shapingRunId}`,
+      );
+    }
+    if (record.mission.work_item_id !== workItemId) {
+      throw this.invalid(
+        paths.run,
+        `work_item_id must equal containing directory name ${workItemId}`,
+      );
+    }
+
+    await this.readShapingRunInstructionForRecord(record);
+    const storedProcess = await this.readShapingRunProcess(paths.process);
+    if (
+      record.process !== null &&
+      (storedProcess === null ||
+        JSON.stringify(record.process) !== JSON.stringify(storedProcess))
+    ) {
+      throw this.invalid(
+        paths.process,
+        "process.json must match the shaping run process identity",
+      );
+    }
+    const eventStats = await this.readShapingRunEventStats(paths.events);
+    if (
+      eventStats.event_count > record.limits.max_event_count ||
+      eventStats.event_bytes > record.limits.max_event_bytes
+    ) {
+      throw this.invalid(
+        paths.events,
+        "stored events exceed the immutable shaping-run limits",
+      );
+    }
+    return record;
+  }
+
+  private async readShapingRunsFromItemDirectory(
+    workItemId: string,
+    itemDirectory: string,
+  ): Promise<ShapingRunRecordV1[]> {
+    const records: ShapingRunRecordV1[] = [];
+    const entries = await readdir(itemDirectory, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      if (entry.name === SHAPING_RUN_LAUNCH_GUARD_FILE) {
+        if (!entry.isFile() || entry.isSymbolicLink()) {
+          throw this.invalid(
+            join(itemDirectory, entry.name),
+            "shaping launch guard must be a regular file",
+          );
+        }
+        continue;
+      }
+      if (SHAPING_RUN_STAGING_DIRECTORY_PATTERN.test(entry.name)) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) {
+          throw this.invalid(
+            join(itemDirectory, entry.name),
+            "shaping-run staging entry must be a regular directory",
+          );
+        }
+        continue;
+      }
+      const runIdResult = controllerRunIdSchema.safeParse(entry.name);
+      if (
+        !runIdResult.success ||
+        !entry.isDirectory() ||
+        entry.isSymbolicLink()
+      ) {
+        throw this.invalid(
+          join(itemDirectory, entry.name),
+          "shaping-run entries must be UUID-named regular directories",
+        );
+      }
+      const record = await this.readShapingRunFromDirectory(
+        workItemId,
+        runIdResult.data,
+        itemDirectory,
+      );
+      if (record === null) {
+        throw this.invalid(
+          join(itemDirectory, entry.name),
+          "shaping-run directory disappeared during read",
+        );
+      }
+      records.push(record);
+    }
+    return records;
+  }
+
+  private async readShapingRunProcess(
+    processPath: string,
+  ): Promise<ConnectedRunProcessIdentity | null> {
+    const source = await this.readRequiredFile(processPath);
+    return this.parseJson(
+      source,
+      processPath,
+      connectedRunProcessIdentitySchema.nullable(),
+    );
+  }
+
+  private async readShapingRunEventStats(
+    eventsPath: string,
+  ): Promise<{ event_count: number; event_bytes: number }> {
+    const source = await this.readRequiredFile(eventsPath);
+    if (source.length > 0 && !source.endsWith("\n")) {
+      throw this.invalid(eventsPath, "events.ndjson must end with a newline");
+    }
+    const lines = source.length === 0 ? [] : source.slice(0, -1).split("\n");
+    for (const line of lines) {
+      this.parseJsonValue(line, eventsPath);
+    }
+    return {
+      event_count: lines.length,
+      event_bytes: Buffer.byteLength(source, "utf8"),
+    };
+  }
+
+  private async readShapingRunInstructionForRecord(
+    record: ShapingRunRecordV1,
+  ): Promise<ShapingIngressInstructionV1> {
+    const paths = this.shapingRunPaths(
+      record.mission.work_item_id,
+      record.shaping_run_id,
+    );
+    await this.assertDirectory(paths.ingress);
+    const source = await this.readRequiredFile(paths.instruction);
+    const instruction = this.parseJson(
+      source,
+      paths.instruction,
+      shapingIngressInstructionSchema,
+    );
+    const durable = await this.readDurableShapingInstruction(instruction);
+    if (
+      durable.origin !== "connected_run" ||
+      durable.shaping_run_id !== record.shaping_run_id ||
+      durable.work_item_id !== record.mission.work_item_id ||
+      durable.phase !== record.mission.phase ||
+      durable.mission_input_sha256 !== record.mission.input_sha256 ||
+      durable.mission_content_sha256 !== record.mission.content_sha256 ||
+      durable.ingress_path !== record.write_policy.ingress_path ||
+      durable.instruction_sha256 !==
+        record.write_policy.instruction_sha256
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        record.mission.work_item_id,
+        "Shaping run instruction does not match its immutable run record.",
+      );
+    }
+    const snapshot = await this.readShapingPackageSnapshot({
+      phase: record.mission.phase,
+      work_item_id: record.mission.work_item_id,
+      input_sha256: record.mission.input_sha256,
+    });
+    this.assertShapingInstructionMatchesMission(durable, snapshot);
+    return durable;
+  }
+
+  private async requireShapingRun(
+    workItemId: string,
+    shapingRunId: string,
+  ): Promise<ShapingRunRecordV1> {
+    const record = await this.readShapingRun(workItemId, shapingRunId);
+    if (record === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Shaping run ${shapingRunId} was not found.`,
+      );
+    }
+    return record;
+  }
+
+  private shapingRunFingerprint(record: ShapingRunRecordV1): string {
+    const requestedModel = record.provenance.requested_model.value;
+    if (requestedModel === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        record.mission.work_item_id,
+        `Shaping run ${record.shaping_run_id} has no requested model.`,
+      );
+    }
+    return shapingRunLaunchFingerprint(
+      record.mission.content_sha256,
+      requestedModel,
+    );
+  }
+
+  private interruptedShapingRun(
+    record: ShapingRunRecordV1,
+    reason: string,
+  ): ShapingRunRecordV1 {
+    const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
+    return shapingRunRecordV1Schema.parse({
+      ...record,
+      lifecycle: {
+        status: "terminal",
+        started_at: record.lifecycle.started_at,
+        updated_at: completedAt,
+        completed_at: completedAt,
+        terminal: {
+          outcome: "interrupted",
+          partial: true,
+          reason,
+        },
+      },
+    });
+  }
+
+  private async terminalizeShapingRun(
+    record: ShapingRunRecordV1,
+    terminal: ConnectedRunTerminal,
+  ): Promise<ShapingRunRecordV1> {
+    const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
+    const updated = shapingRunRecordV1Schema.parse({
+      ...record,
+      lifecycle: {
+        status: "terminal",
+        started_at: record.lifecycle.started_at,
+        updated_at: completedAt,
+        completed_at: completedAt,
+        terminal,
+      },
+    });
+    const paths = this.shapingRunPaths(
+      record.mission.work_item_id,
+      record.shaping_run_id,
+    );
+    await this.writeJsonAtomically(paths.run, updated);
+    await this.releaseShapingRunGuardForRecord(updated);
+    return updated;
+  }
+
+  private isShapingOutputRejection(error: unknown): boolean {
+    return (
+      error instanceof InvalidWorkspaceError ||
+      (error instanceof ControllerConflictError &&
+        ["mission_not_ready", "repair_required"].includes(error.kind))
+    );
+  }
+
+  private async failShapingRunAfterRejectedOutput(
+    record: ShapingRunRecordV1,
+    error: unknown,
+  ): Promise<ShapingRunRecordV1> {
+    const observedAt = timestampAtOrAfter(record.lifecycle.updated_at);
+    const message =
+      truncateUtf8(errorMessage(error), 500) || "Shaping output was rejected.";
+    const entries = [...record.diagnostics.entries];
+    let truncated = record.diagnostics.truncated;
+    if (entries.length < 20) {
+      entries.push({
+        observed_at: observedAt,
+        code: "invalid_shaping_output",
+        message,
+      });
+    } else {
+      truncated = true;
+    }
+    const reason =
+      truncateUtf8(`Shaping output was rejected: ${message}`, 200) ||
+      "Shaping output was rejected.";
+    return this.terminalizeShapingRun(
+      shapingRunRecordV1Schema.parse({
+        ...record,
+        diagnostics: { entries, truncated },
+      }),
+      { outcome: "failed", partial: true, reason },
+    );
+  }
+
+  private async reconcileShapingRunItem(
+    workItemId: string,
+    itemDirectory: string,
+  ): Promise<ShapingRunRecordV1[]> {
+    const guard = await this.readShapingRunGuard(itemDirectory);
+    if (guard !== null) {
+      const guardedRecord = await this.readShapingRunFromDirectory(
+        workItemId,
+        guard.shaping_run_id,
+        itemDirectory,
+      );
+      if (guardedRecord === null) {
+        const interrupted = this.interruptedShapingRun(
+          guard.record,
+          "The launch was interrupted before its shaping-run directory was published.",
+        );
+        await this.publishShapingRunDirectory(
+          interrupted,
+          guard.instruction,
+        );
+        await this.releaseShapingRunGuard(guard);
+      }
+    }
+
+    const records = await this.readShapingRunsFromItemDirectory(
+      workItemId,
+      itemDirectory,
+    );
+    if (
+      records.filter((record) => record.lifecycle.status !== "terminal")
+        .length > 1
+    ) {
+      throw this.invalid(
+        itemDirectory,
+        "only one nonterminal shaping run may exist per work item",
+      );
+    }
+
+    const reconciled: ShapingRunRecordV1[] = [];
+    for (const storedRecord of records) {
+      if (storedRecord.lifecycle.status === "terminal") {
+        await this.releaseShapingRunGuardForRecord(storedRecord);
+        reconciled.push(storedRecord);
+        continue;
+      }
+
+      const snapshot = await this.readShapingPackageSnapshot({
+        phase: storedRecord.mission.phase,
+        work_item_id: storedRecord.mission.work_item_id,
+        input_sha256: storedRecord.mission.input_sha256,
+      });
+      const applied = await this.readAppliedShapingBundle(snapshot);
+      if (applied !== null) {
+        if (
+          applied.productionReceipt.origin !== "connected_run" ||
+          applied.productionReceipt.shaping_run_id !==
+            storedRecord.shaping_run_id
+        ) {
+          throw new ControllerConflictError(
+            "repair_required",
+            workItemId,
+            "Applied shaping production does not name the active shaping run.",
+          );
+        }
+        reconciled.push(
+          await this.terminalizeShapingRun(storedRecord, {
+            outcome: "completed",
+            partial: false,
+            reason: null,
+          }),
+        );
+        continue;
+      }
+
+      const paths = this.shapingRunPaths(
+        workItemId,
+        storedRecord.shaping_run_id,
+      );
+      const storedProcess = await this.readShapingRunProcess(paths.process);
+      let record = storedRecord;
+      if (storedProcess !== null && record.process === null) {
+        record = shapingRunRecordV1Schema.parse({
+          ...record,
+          lifecycle: {
+            ...record.lifecycle,
+            status: "running",
+            updated_at: timestampAtOrAfter(
+              record.lifecycle.updated_at,
+              storedProcess.started_at,
+            ),
+          },
+          process: storedProcess,
+        });
+        await this.writeJsonAtomically(paths.run, record);
+      }
+
+      const processIsAlive =
+        storedProcess !== null &&
+        (await this.connectedProcessProbe(storedProcess.pid, 0));
+      if (processIsAlive) {
+        reconciled.push(record);
+        continue;
+      }
+      const interrupted = this.interruptedShapingRun(
+        record,
+        storedProcess === null
+          ? "The shaping run had no recoverable process identity."
+          : "The shaping agent process was not running during recovery.",
+      );
+      await this.writeJsonAtomically(paths.run, interrupted);
+      await this.releaseShapingRunGuardForRecord(interrupted);
+      reconciled.push(interrupted);
+    }
+    return reconciled;
+  }
+
   private async ensureConnectedRunItemDirectory(
     workItemId: string,
   ): Promise<string> {
@@ -6893,7 +8136,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
       const processIsAlive =
         storedProcess !== null &&
-        (await this.connectedProcessProbe(storedProcess.pid));
+        (await this.connectedProcessProbe(storedProcess.pid, 0));
       if (processIsAlive) {
         reconciled.push(record);
         continue;
