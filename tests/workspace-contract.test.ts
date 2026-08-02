@@ -9,6 +9,7 @@ import {
   rename,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -43,13 +44,18 @@ import {
   compileBrainstormMission,
   compilePlanMission,
   compileSpecMission,
+  deriveShapingDecisionId,
+  hashGoalContract,
+  hashGoalInput,
   hashShapingIngressInstruction,
   hashShapingInput,
+  serializeShapingPackage,
   SHAPING_INGRESS_MAX_BYTES,
   type BrainstormResultSubmission,
   type PlanResultSubmission,
   type ShapingArtifactWriteResult,
   type ShapingIdentity,
+  type ShapingDecisionManifestV1,
   type ShapingMissionPackage,
   type ShapingSelectionReceipt,
   type SpecApprovalReceipt,
@@ -61,6 +67,7 @@ import {
   type ActiveRun,
   type ControllerMutationInput,
   type ControllerRunManifest,
+  type ShapingDecisionIntentDraft,
   type WorkItem,
 } from "../src/domain/work-item";
 import type { GitVerificationAdapter } from "../src/domain/verification";
@@ -205,7 +212,7 @@ async function writeContractedWorkItem(
 async function writeShapingReadyWorkItem(
   root: string,
   workItemId: string,
-  phase: "brainstorm" | "spec" = "brainstorm",
+  phase: "idea" | "brainstorm" | "spec" | "plan" = "brainstorm",
 ): Promise<WorkItem> {
   const directory = join(root, ".founder", "work-items", workItemId);
   const goal = {
@@ -315,6 +322,118 @@ const connectedShapingProduction = {
     observed_event_sha256: "a".repeat(64),
   },
 };
+
+async function prepareStartShapingDecision(
+  root: string,
+  workspace: ProductWorkspace,
+  options: { contracted?: boolean } = {},
+) {
+  let item: WorkItem;
+  if (options.contracted === true) {
+    await writeContractedWorkItem(root, firstId);
+    const stored = await workspace.read(firstId);
+    if (stored === null) {
+      throw new Error("Expected contracted shaping work item");
+    }
+    item = stored;
+  } else {
+    item = await writeShapingReadyWorkItem(root, firstId, "idea");
+  }
+  const shapingInput = {
+    phase: "brainstorm" as const,
+    title: item.goal.title,
+    notes: item.goal.notes,
+  };
+  const identity: ShapingIdentity<"brainstorm"> = {
+    phase: "brainstorm",
+    work_item_id: firstId,
+    input_sha256: hashShapingInput(shapingInput),
+  };
+  const directory = `.founder/shaping/${firstId}/brainstorm-${identity.input_sha256}`;
+  const mission = compileBrainstormMission({
+    work_item_id: firstId,
+    shaping_input: shapingInput,
+    paths: {
+      task_path: `${directory}/TASK.md`,
+      output_path: `${directory}/result.json`,
+    },
+  });
+  const missionBytes = serializeShapingPackage(mission);
+  const nextState = {
+    ...item.state,
+    phase: "brainstorm" as const,
+    updated_at: "2026-08-02T10:01:00.000Z",
+  };
+  const draft: ShapingDecisionIntentDraft = {
+    schema_version: 1,
+    work_item_id: firstId,
+    operation: "start_brainstorm",
+    launch_mode: "manual",
+    phase_from: "idea",
+    phase_to: "brainstorm",
+    goal_input_sha256: hashGoalInput({
+      title: item.goal.title,
+      notes: item.goal.notes,
+    }),
+    mission_content_sha256: null,
+    result_content_sha256: null,
+    feedback_sha256: null,
+    expected_shaping_state_sha256: "b".repeat(64),
+    next_requested_model: null,
+    next_mission_content_sha256: mission.content_sha256,
+    next_mission_input_sha256: identity.input_sha256,
+    plan_repository_base_commit: null,
+    plan_goal_contract_sha256: null,
+    plan_goal_version: null,
+    launch_fingerprint: null,
+    decision_receipt_bytes: null,
+    next_mission_package_bytes: missionBytes,
+  };
+  const run = activeRun(
+    firstRunId,
+    `${firstId}:shaping:start-brainstorm`,
+  );
+  const lease = await workspace.acquireControllerLease(firstId, run);
+  if (lease === null) {
+    throw new Error("Expected shaping decision lease");
+  }
+  const writtenIntent = await workspace.writeShapingDecisionIntent(lease, {
+    intent: draft,
+    state: nextState,
+  });
+  const manifest: ShapingDecisionManifestV1 = {
+    schema_version: 1,
+    decision_id: writtenIntent.intent.decision_id,
+    work_item_id: firstId,
+    operation: draft.operation,
+    phase_from: draft.phase_from,
+    phase_to: draft.phase_to,
+    mission_content_sha256: draft.mission_content_sha256,
+    result_content_sha256: draft.result_content_sha256,
+    feedback_sha256: draft.feedback_sha256,
+    expected_shaping_state_sha256:
+      draft.expected_shaping_state_sha256,
+    next_mission_content_sha256: draft.next_mission_content_sha256,
+    goal_sha256: writtenIntent.intent.next_goal_sha256,
+    state_sha256: writtenIntent.intent.next_state_sha256,
+    goal_version: null,
+    input_revision: null,
+    started_at: "2026-08-02T10:00:00.000Z",
+    outcome: "pending",
+  };
+  return {
+    item,
+    identity,
+    mission,
+    missionBytes,
+    nextState,
+    draft,
+    run,
+    lease,
+    writtenIntent,
+    manifest,
+  };
+}
 
 async function writeAppliedShapingBundle(
   artifact: ShapingArtifactWriteResult<ShapingMissionPackage>,
@@ -592,6 +711,24 @@ function controllerMutation(
 class FailingControllerWorkspace extends ProductWorkspace {
   protected override async afterControllerGoalReplaced(): Promise<void> {
     throw new Error("injected controller state write failure");
+  }
+}
+
+class FailingRetainedLeaseRepairWorkspace extends ProductWorkspace {
+  protected override async afterRetainedControllerStateCleared(): Promise<void> {
+    throw new Error("injected retained-lease repair failure");
+  }
+}
+
+class FailingPendingShapingDecisionWorkspace extends ProductWorkspace {
+  protected override async afterShapingDecisionPendingManifestWritten(): Promise<void> {
+    throw new Error("injected failure before shaping decision rename");
+  }
+}
+
+class FailingAppliedManifestWorkspace extends ProductWorkspace {
+  protected override async afterShapingDecisionStateReplaced(): Promise<void> {
+    throw new Error("injected failure before applied decision manifest");
   }
 }
 
@@ -913,6 +1050,877 @@ describe("ProductWorkspace", () => {
     expect(
       await readdir(join(root, ".founder", "work-items", firstId)),
     ).not.toContain(".controller.lock");
+  });
+
+  it("repairs retained controller representations explicitly and fail-closed", async () => {
+    const root = await createWorkspace();
+    await writeContractedWorkItem(root, firstId);
+    const workspace = new ProductWorkspace(root);
+    const retained = activeRun();
+    await workspace.acquireControllerLease(firstId, retained);
+    const itemDirectory = join(root, ".founder", "work-items", firstId);
+    const lockPath = join(itemDirectory, ".controller.lock");
+
+    await expect(
+      workspace.acquireControllerLease(
+        firstId,
+        activeRun(secondRunId, `${firstId}:plan:1:1:0`),
+      ),
+    ).rejects.toMatchObject({
+      kind: "repair_required",
+      reason: expect.stringMatching(
+        new RegExp(
+          `${firstId}.*${retained.run_id}.*${retained.acquired_at}.*repairRetainedControllerLease`,
+        ),
+      ),
+    });
+
+    await unlink(lockPath);
+    await expect(
+      workspace.acquireControllerLease(
+        firstId,
+        activeRun(secondRunId, `${firstId}:plan:1:1:0`),
+      ),
+    ).rejects.toMatchObject({
+      kind: "repair_required",
+      reason: expect.stringMatching(
+        new RegExp(
+          `${firstId}.*${retained.run_id}.*${retained.acquired_at}.*repairRetainedControllerLease`,
+        ),
+      ),
+    });
+    await expect(readFile(lockPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+
+    await expect(
+      workspace.repairRetainedControllerLease(firstId, {
+        acknowledged_run_id: secondRunId,
+      }),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    expect((await workspace.read(firstId))?.state.active_run).toEqual(retained);
+    expect(
+      await workspace.repairRetainedControllerLease(firstId, {
+        acknowledged_run_id: retained.run_id,
+      }),
+    ).toMatchObject({ repaired: true, retained_run: retained });
+    expect((await workspace.read(firstId))?.state).not.toHaveProperty(
+      "active_run",
+    );
+    expect(
+      await workspace.repairRetainedControllerLease(firstId, {
+        acknowledged_run_id: retained.run_id,
+      }),
+    ).toEqual({
+      repaired: false,
+      reason: "nothing_retained",
+      retained_run: null,
+    });
+
+    const mismatchRoot = await createWorkspace();
+    await writeContractedWorkItem(mismatchRoot, firstId);
+    const mismatchWorkspace = new ProductWorkspace(mismatchRoot);
+    await mismatchWorkspace.acquireControllerLease(firstId, retained);
+    const mismatchStatePath = join(
+      mismatchRoot,
+      ".founder",
+      "work-items",
+      firstId,
+      "state.json",
+    );
+    const mismatchedState = JSON.parse(
+      await readFile(mismatchStatePath, "utf8"),
+    );
+    const otherRun = activeRun(
+      secondRunId,
+      `${firstId}:shaping:other`,
+    );
+    await writeFile(
+      mismatchStatePath,
+      `${JSON.stringify(
+        { ...mismatchedState, active_run: otherRun },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await expect(
+      mismatchWorkspace.repairRetainedControllerLease(firstId, {
+        acknowledged_run_id: retained.run_id,
+      }),
+    ).rejects.toMatchObject({
+      kind: "repair_required",
+      reason: expect.stringMatching(
+        new RegExp(`${retained.run_id}.*${otherRun.run_id}`),
+      ),
+    });
+    expect(await readFile(join(dirname(mismatchStatePath), ".controller.lock"), "utf8"))
+      .toContain(retained.run_id);
+    expect(JSON.parse(await readFile(mismatchStatePath, "utf8")).active_run)
+      .toEqual(otherRun);
+
+    const interruptedRoot = await createWorkspace();
+    await writeContractedWorkItem(interruptedRoot, firstId);
+    const interrupted = new FailingRetainedLeaseRepairWorkspace(
+      interruptedRoot,
+    );
+    await interrupted.acquireControllerLease(firstId, retained);
+    const interruptedDirectory = join(
+      interruptedRoot,
+      ".founder",
+      "work-items",
+      firstId,
+    );
+    const decisionsDirectory = join(
+      interruptedDirectory,
+      "shaping-decisions",
+    );
+    const pendingPath = join(decisionsDirectory, `${"c".repeat(64)}.json`);
+    await mkdir(decisionsDirectory);
+    await writeFile(pendingPath, "pending bytes stay exact\n", "utf8");
+    const pendingBefore = await readFile(pendingPath, "utf8");
+    await expect(
+      interrupted.repairRetainedControllerLease(firstId, {
+        acknowledged_run_id: retained.run_id,
+      }),
+    ).rejects.toThrow("injected retained-lease repair failure");
+    expect((await interrupted.read(firstId))?.state).not.toHaveProperty(
+      "active_run",
+    );
+    expect(
+      await readFile(join(interruptedDirectory, ".controller.lock"), "utf8"),
+    ).toContain(retained.run_id);
+    expect(
+      await new ProductWorkspace(
+        interruptedRoot,
+      ).repairRetainedControllerLease(firstId, {
+        acknowledged_run_id: retained.run_id,
+      }),
+    ).toMatchObject({ repaired: true });
+    expect(await readFile(pendingPath, "utf8")).toBe(pendingBefore);
+
+    const precontractRoot = await createWorkspace();
+    await writeShapingReadyWorkItem(precontractRoot, firstId, "idea");
+    const precontractWorkspace = new ProductWorkspace(precontractRoot);
+    await precontractWorkspace.acquireControllerLease(firstId, retained);
+    expect(
+      (await precontractWorkspace.read(firstId))?.state.active_run,
+    ).toBeUndefined();
+    expect(
+      await precontractWorkspace.repairRetainedControllerLease(firstId, {
+        acknowledged_run_id: retained.run_id,
+      }),
+    ).toMatchObject({ repaired: true });
+
+    const replayRoot = await createWorkspace();
+    const interruptedDecision = new FailingPendingShapingDecisionWorkspace(
+      replayRoot,
+    );
+    const prepared = await prepareStartShapingDecision(
+      replayRoot,
+      interruptedDecision,
+      { contracted: true },
+    );
+    await expect(
+      interruptedDecision.commitShapingDecision(prepared.lease, {
+        state: prepared.nextState,
+        manifest: prepared.manifest,
+      }),
+    ).rejects.toThrow("before shaping decision rename");
+    await expect(
+      new ProductWorkspace(replayRoot).acquireControllerLease(
+        firstId,
+        activeRun(secondRunId, `${firstId}:shaping:replay`),
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+
+    const replayWorkspace = new ProductWorkspace(replayRoot);
+    await expect(
+      replayWorkspace.repairRetainedControllerLease(firstId, {
+        acknowledged_run_id: prepared.run.run_id,
+      }),
+    ).resolves.toMatchObject({ repaired: true });
+    const replayLease = await replayWorkspace.acquireControllerLease(
+      firstId,
+      prepared.run,
+    );
+    if (replayLease === null) {
+      throw new Error("Expected repaired shaping decision lease");
+    }
+    const reconciled = await replayWorkspace.reconcileShapingDecisionCommit(
+      replayLease,
+      prepared.writtenIntent.intent.decision_id,
+    );
+    expect(reconciled).toMatchObject({
+      work_item: { state: { phase: "brainstorm" } },
+      manifest: { outcome: "applied" },
+    });
+    expect(
+      (
+        await readdir(
+          join(
+            replayRoot,
+            ".founder",
+            "work-items",
+            firstId,
+            "shaping-decisions",
+          ),
+        )
+      ).filter((entry) => entry.endsWith(".json") && !entry.endsWith(".intent.json")),
+    ).toHaveLength(1);
+    await replayWorkspace.releaseControllerLease(replayLease);
+  });
+
+  it("captures exact shaping intent pairs, publishes under the lease, and commits pre-contract state", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T10:00:00.000Z"));
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const prepared = await prepareStartShapingDecision(root, workspace);
+
+    expect(prepared.writtenIntent.intent.decision_id).toBe(
+      deriveShapingDecisionId({
+        operation: prepared.draft.operation,
+        work_item_id: prepared.draft.work_item_id,
+        goal_input_sha256: prepared.draft.goal_input_sha256,
+        mission_content_sha256: prepared.draft.mission_content_sha256,
+        result_content_sha256: prepared.draft.result_content_sha256,
+        feedback_sha256: prepared.draft.feedback_sha256,
+        expected_shaping_state_sha256:
+          prepared.draft.expected_shaping_state_sha256,
+      }),
+    );
+    expect(prepared.writtenIntent.intent.next_goal_bytes).toBe(
+      prepared.writtenIntent.intent.previous_goal_bytes,
+    );
+    expect(prepared.writtenIntent.intent.next_goal_sha256).toBe(
+      prepared.writtenIntent.intent.previous_goal_sha256,
+    );
+    expect(prepared.writtenIntent.intent.next_state_bytes).not.toBe(
+      prepared.writtenIntent.intent.previous_state_bytes,
+    );
+
+    vi.setSystemTime(new Date("2026-08-02T11:00:00.000Z"));
+    expect(
+      await workspace.writeShapingDecisionIntent(prepared.lease, {
+        intent: prepared.draft,
+        state: prepared.nextState,
+      }),
+    ).toEqual(prepared.writtenIntent);
+    expect(prepared.writtenIntent.intent.created_at).toBe(
+      "2026-08-02T10:00:00.000Z",
+    );
+
+    await expect(
+      workspace.writeShapingMissionPackage(prepared.identity, () =>
+        prepared.mission,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      workspace.publishLeasedShapingMission(
+        prepared.lease,
+        prepared.identity,
+        `${prepared.missionBytes} `,
+        { decision_id: prepared.writtenIntent.intent.decision_id },
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+    const published = await workspace.publishLeasedShapingMission(
+      prepared.lease,
+      prepared.identity,
+      prepared.missionBytes,
+      { decision_id: prepared.writtenIntent.intent.decision_id },
+    );
+    expect(published.mission).toEqual(prepared.mission);
+
+    const committed = await workspace.commitShapingDecision(
+      prepared.lease,
+      {
+        state: prepared.nextState,
+        manifest: prepared.manifest,
+      },
+    );
+    expect(committed.work_item.goal).not.toHaveProperty("goal_contract");
+    expect(committed.work_item.state.phase).toBe("brainstorm");
+    expect(committed.manifest).toMatchObject({
+      outcome: "applied",
+      goal_sha256: prepared.writtenIntent.intent.next_goal_sha256,
+      goal_version: null,
+      input_revision: null,
+    });
+    await workspace.releaseControllerLease(prepared.lease);
+
+    vi.setSystemTime(new Date("2026-08-02T12:00:00.000Z"));
+    const replayLease = await workspace.acquireControllerLease(
+      firstId,
+      prepared.run,
+    );
+    if (replayLease === null) {
+      throw new Error("Expected shaping decision replay lease");
+    }
+    const replay = await workspace.commitShapingDecision(replayLease, {
+      state: prepared.nextState,
+      manifest: {
+        ...prepared.manifest,
+        started_at: "2026-08-02T12:00:00.000Z",
+      },
+    });
+    expect(replay).toEqual(committed);
+    await workspace.releaseControllerLease(replayLease);
+
+    const conflictingLease = await workspace.acquireControllerLease(
+      firstId,
+      prepared.run,
+    );
+    if (conflictingLease === null) {
+      throw new Error("Expected conflicting shaping decision lease");
+    }
+    await expect(
+      workspace.commitShapingDecision(conflictingLease, {
+        state: prepared.nextState,
+        manifest: {
+          ...prepared.manifest,
+          feedback_sha256: "d".repeat(64),
+        },
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    await workspace.releaseControllerLease(conflictingLease);
+
+    const missingIntentRoot = await createWorkspace();
+    const missingIntentWorkspace = new ProductWorkspace(missingIntentRoot);
+    const missing = await prepareStartShapingDecision(
+      missingIntentRoot,
+      missingIntentWorkspace,
+    );
+    await unlink(missing.writtenIntent.intent_path);
+    await expect(
+      missingIntentWorkspace.publishLeasedShapingMission(
+        missing.lease,
+        missing.identity,
+        missing.missionBytes,
+        { decision_id: missing.writtenIntent.intent.decision_id },
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+
+    const noOwnershipRoot = await createWorkspace();
+    const noOwnershipWorkspace = new ProductWorkspace(noOwnershipRoot);
+    const noOwnership = await prepareStartShapingDecision(
+      noOwnershipRoot,
+      noOwnershipWorkspace,
+    );
+    await unlink(
+      join(
+        noOwnershipRoot,
+        ".founder",
+        "work-items",
+        firstId,
+        ".controller.lock",
+      ),
+    );
+    await expect(
+      noOwnershipWorkspace.publishLeasedShapingMission(
+        noOwnership.lease,
+        noOwnership.identity,
+        noOwnership.missionBytes,
+        { decision_id: noOwnership.writtenIntent.intent.decision_id },
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+
+    const specRoot = await createWorkspace();
+    const specItem = await writeShapingReadyWorkItem(
+      specRoot,
+      firstId,
+      "brainstorm",
+    );
+    const specWorkspace = new ProductWorkspace(specRoot);
+    const brainstormInput = {
+      phase: "brainstorm" as const,
+      title: specItem.goal.title,
+      notes: specItem.goal.notes,
+    };
+    const brainstormIdentity: ShapingIdentity<"brainstorm"> = {
+      phase: "brainstorm",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(brainstormInput),
+    };
+    const brainstormArtifact = await specWorkspace.writeShapingMissionPackage(
+      brainstormIdentity,
+      (paths) =>
+        compileBrainstormMission({
+          work_item_id: firstId,
+          shaping_input: brainstormInput,
+          paths,
+        }),
+    );
+    const brainstormResult = brainstormResultFor(brainstormArtifact);
+    const appliedBrainstorm = await writeAppliedShapingBundle(
+      brainstormArtifact,
+      brainstormResult,
+    );
+    const selection: ShapingSelectionReceipt = {
+      shaping_schema_version: 2,
+      identity: brainstormIdentity,
+      mission_content_sha256: brainstormArtifact.mission.content_sha256,
+      result_content_sha256: appliedBrainstorm.resultContentSha256,
+      selected_at: "2026-08-02T12:10:00.000Z",
+    };
+    const accepted = await specWorkspace.writeShapingDecisionReceipt(
+      selection,
+    );
+    const specInput = {
+      phase: "spec" as const,
+      title: specItem.goal.title,
+      notes: specItem.goal.notes,
+      brainstorm_selection_sha256: accepted.receipt_content_sha256,
+      brainstorm_selection: selection,
+      brainstorm_result: brainstormResult,
+    };
+    const specIdentity: ShapingIdentity<"spec"> = {
+      phase: "spec",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(specInput),
+    };
+    const specDirectory = `.founder/shaping/${firstId}/spec-${specIdentity.input_sha256}`;
+    const specMission = compileSpecMission({
+      work_item_id: firstId,
+      shaping_input: specInput,
+      paths: {
+        task_path: `${specDirectory}/TASK.md`,
+        output_path: `${specDirectory}/result.json`,
+      },
+    });
+    const specMissionBytes = serializeShapingPackage(specMission);
+    const specRun = activeRun(
+      firstRunId,
+      `${firstId}:shaping:use-brainstorm-result`,
+    );
+    const specLease = await specWorkspace.acquireControllerLease(
+      firstId,
+      specRun,
+    );
+    if (specLease === null) {
+      throw new Error("Expected leased Spec publication");
+    }
+    const specState = {
+      ...specItem.state,
+      phase: "spec" as const,
+      updated_at: "2026-08-02T12:11:00.000Z",
+    };
+    const specIntent = await specWorkspace.writeShapingDecisionIntent(
+      specLease,
+      {
+        intent: {
+          schema_version: 1,
+          work_item_id: firstId,
+          operation: "use_brainstorm_result",
+          launch_mode: "manual",
+          phase_from: "brainstorm",
+          phase_to: "spec",
+          goal_input_sha256: hashGoalInput({
+            title: specItem.goal.title,
+            notes: specItem.goal.notes,
+          }),
+          mission_content_sha256:
+            brainstormArtifact.mission.content_sha256,
+          result_content_sha256: appliedBrainstorm.resultContentSha256,
+          feedback_sha256: null,
+          expected_shaping_state_sha256: "e".repeat(64),
+          next_requested_model: null,
+          next_mission_content_sha256: specMission.content_sha256,
+          next_mission_input_sha256: specIdentity.input_sha256,
+          plan_repository_base_commit: null,
+          plan_goal_contract_sha256: null,
+          plan_goal_version: null,
+          launch_fingerprint: null,
+          decision_receipt_bytes: await readFile(
+            accepted.receipt_path,
+            "utf8",
+          ),
+          next_mission_package_bytes: specMissionBytes,
+        },
+        state: specState,
+      },
+    );
+    await expect(
+      specWorkspace.publishLeasedShapingMission(
+        specLease,
+        specIdentity,
+        specMissionBytes,
+        { decision_id: specIntent.intent.decision_id },
+      ),
+    ).resolves.toMatchObject({
+      mission: { identity: { phase: "spec" } },
+    });
+    expect((await specWorkspace.read(firstId))?.state.phase).toBe(
+      "brainstorm",
+    );
+
+    const driftRoot = await createWorkspace();
+    const driftWorkspace = new ProductWorkspace(driftRoot);
+    const drift = await prepareStartShapingDecision(
+      driftRoot,
+      driftWorkspace,
+    );
+    await unlink(drift.writtenIntent.intent_path);
+    const driftStatePath = join(
+      driftRoot,
+      ".founder",
+      "work-items",
+      firstId,
+      "state.json",
+    );
+    const driftState = JSON.parse(await readFile(driftStatePath, "utf8"));
+    await writeFile(
+      driftStatePath,
+      `${JSON.stringify(
+        { ...driftState, updated_at: "2026-08-02T12:20:00.000Z" },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await expect(
+      driftWorkspace.writeShapingDecisionIntent(drift.lease, {
+        intent: drift.draft,
+        state: drift.nextState,
+      }),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+    await expect(
+      readFile(drift.writtenIntent.intent_path, "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("captures all decision operations and makes approve_spec the only goal-changing commit", async () => {
+    const stateOnlyOperations = [
+      "start_brainstorm",
+      "use_brainstorm_result",
+      "request_changes",
+      "replan_with_updated_contract",
+    ] as const;
+    for (const operation of stateOnlyOperations) {
+      const root = await createWorkspace();
+      const workspace = new ProductWorkspace(root);
+      const prepared = await prepareStartShapingDecision(root, workspace);
+      const written =
+        operation === "start_brainstorm"
+          ? prepared.writtenIntent
+          : await workspace.writeShapingDecisionIntent(prepared.lease, {
+              intent: { ...prepared.draft, operation },
+              state: prepared.nextState,
+            });
+      expect(written.intent.operation).toBe(operation);
+      expect(written.intent.next_goal_bytes).toBe(
+        written.intent.previous_goal_bytes,
+      );
+      expect(written.intent.next_goal_sha256).toBe(
+        written.intent.previous_goal_sha256,
+      );
+      expect(written.intent.next_state_bytes).not.toBe(
+        written.intent.previous_state_bytes,
+      );
+    }
+
+    const root = await createWorkspace();
+    const item = await writeShapingReadyWorkItem(root, firstId, "spec");
+    const workspace = new ProductWorkspace(root);
+    const specIdentity: ShapingIdentity<"spec"> = {
+      phase: "spec",
+      work_item_id: firstId,
+      input_sha256: "1".repeat(64),
+    };
+    const specResult: SpecResultSubmission = {
+      result_schema_version: 1,
+      spec_mission_content_sha256: "2".repeat(64),
+      identity: specIdentity,
+      proposal: {
+        purpose: "Commit the first real governed contract.",
+        acceptance_criteria: ["The approval commit reaches Plan."],
+        non_goals: ["Do not create a placeholder contract."],
+        allowed_scope: ["src/workspace"],
+        review_ready: ["The workspace contract test passes."],
+      },
+    };
+    const goalContract = {
+      schema_version: 1 as const,
+      goal_version: 1,
+      ...specResult.proposal,
+    };
+    const goalContractSha256 = hashGoalContract(goalContract);
+    const approval: SpecApprovalReceipt = {
+      shaping_schema_version: 2,
+      identity: specIdentity,
+      mission_content_sha256: specResult.spec_mission_content_sha256,
+      result_content_sha256: "3".repeat(64),
+      goal_contract_sha256: goalContractSha256,
+      approved_at: "2026-08-02T13:00:00.000Z",
+    };
+    const planInput = {
+      phase: "plan" as const,
+      title: item.goal.title,
+      notes: item.goal.notes,
+      spec_approval_sha256: "4".repeat(64),
+      spec_approval: approval,
+      spec_result: specResult,
+      repository_base_commit: "a".repeat(40),
+      goal_contract_sha256: goalContractSha256,
+      goal_version: 1,
+    };
+    const planIdentity: ShapingIdentity<"plan"> = {
+      phase: "plan",
+      work_item_id: firstId,
+      input_sha256: hashShapingInput(planInput),
+    };
+    const planDirectory = `.founder/shaping/${firstId}/plan-${planIdentity.input_sha256}`;
+    const planMission = compilePlanMission({
+      work_item_id: firstId,
+      shaping_input: planInput,
+      paths: {
+        task_path: `${planDirectory}/TASK.md`,
+        output_path: `${planDirectory}/result.json`,
+      },
+    });
+    const nextGoal = { ...item.goal, goal_contract: goalContract };
+    const nextState = {
+      ...item.state,
+      phase: "plan" as const,
+      updated_at: "2026-08-02T13:01:00.000Z",
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      patch_cycle: 0,
+    };
+    const draft: ShapingDecisionIntentDraft = {
+      schema_version: 1,
+      work_item_id: firstId,
+      operation: "approve_spec",
+      launch_mode: "manual",
+      phase_from: "spec",
+      phase_to: "plan",
+      goal_input_sha256: hashGoalInput({
+        title: item.goal.title,
+        notes: item.goal.notes,
+      }),
+      mission_content_sha256: approval.mission_content_sha256,
+      result_content_sha256: approval.result_content_sha256,
+      feedback_sha256: null,
+      expected_shaping_state_sha256: "5".repeat(64),
+      next_requested_model: null,
+      next_mission_content_sha256: planMission.content_sha256,
+      next_mission_input_sha256: planIdentity.input_sha256,
+      plan_repository_base_commit: planInput.repository_base_commit,
+      plan_goal_contract_sha256: goalContractSha256,
+      plan_goal_version: 1,
+      launch_fingerprint: null,
+      decision_receipt_bytes: `${JSON.stringify(approval)}\n`,
+      next_mission_package_bytes: serializeShapingPackage(planMission),
+    };
+    const run = activeRun(
+      firstRunId,
+      `${firstId}:shaping:approve-spec`,
+    );
+    const lease = await workspace.acquireControllerLease(firstId, run);
+    if (lease === null) {
+      throw new Error("Expected approve_spec lease");
+    }
+    const written = await workspace.writeShapingDecisionIntent(lease, {
+      intent: draft,
+      goal: nextGoal,
+      state: nextState,
+    });
+    expect(written.intent.next_goal_bytes).not.toBe(
+      written.intent.previous_goal_bytes,
+    );
+    const manifest: ShapingDecisionManifestV1 = {
+      schema_version: 1,
+      decision_id: written.intent.decision_id,
+      work_item_id: firstId,
+      operation: "approve_spec",
+      phase_from: "spec",
+      phase_to: "plan",
+      mission_content_sha256: approval.mission_content_sha256,
+      result_content_sha256: approval.result_content_sha256,
+      feedback_sha256: null,
+      expected_shaping_state_sha256:
+        draft.expected_shaping_state_sha256,
+      next_mission_content_sha256: planMission.content_sha256,
+      goal_sha256: written.intent.next_goal_sha256,
+      state_sha256: written.intent.next_state_sha256,
+      goal_version: 1,
+      input_revision: 1,
+      started_at: "2026-08-02T13:00:00.000Z",
+      outcome: "pending",
+    };
+    await expect(
+      workspace.commitShapingDecision(lease, {
+        goal: nextGoal,
+        state: nextState,
+        manifest: { ...manifest, goal_version: 2 },
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    const committed = await workspace.commitShapingDecision(lease, {
+      goal: nextGoal,
+      state: nextState,
+      manifest,
+    });
+    expect(committed.work_item.goal.goal_contract).toEqual(goalContract);
+    expect(committed.work_item.state).toMatchObject({
+      phase: "plan",
+      goal_version: 1,
+      input_revision: 1,
+    });
+    expect(committed.manifest.goal_sha256).toBe(
+      written.intent.next_goal_sha256,
+    );
+
+    const invalidRoot = await createWorkspace();
+    const invalidWorkspace = new ProductWorkspace(invalidRoot);
+    const invalid = await prepareStartShapingDecision(
+      invalidRoot,
+      invalidWorkspace,
+    );
+    await expect(
+      invalidWorkspace.commitShapingDecision(invalid.lease, {
+        state: invalid.nextState,
+        manifest: {
+          ...invalid.manifest,
+          goal_version: 1,
+          input_revision: 1,
+        },
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+  });
+
+  it("reconciles every shaping decision crash boundary from durable byte pairs", async () => {
+    const crashWorkspaces = [
+      {
+        label: "before_goal",
+        create: (root: string) =>
+          new FailingPendingShapingDecisionWorkspace(root),
+      },
+      {
+        label: "mixed_pair",
+        create: (root: string) => new FailingControllerWorkspace(root),
+      },
+      {
+        label: "after_both",
+        create: (root: string) => new FailingAppliedManifestWorkspace(root),
+      },
+    ] as const;
+    for (const crash of crashWorkspaces) {
+      const root = await createWorkspace();
+      const failing = crash.create(root);
+      const prepared = await prepareStartShapingDecision(root, failing);
+      await expect(
+        failing.commitShapingDecision(prepared.lease, {
+          state: prepared.nextState,
+          manifest: prepared.manifest,
+        }),
+      ).rejects.toThrow();
+      const pending = await failing.readShapingDecisionManifest(
+        firstId,
+        prepared.writtenIntent.intent.decision_id,
+      );
+      expect(pending?.outcome).toBe("pending");
+
+      const reconciled = await new ProductWorkspace(
+        root,
+      ).reconcileShapingDecisionCommit(
+        prepared.lease,
+        prepared.writtenIntent.intent.decision_id,
+      );
+      expect(reconciled).toMatchObject({
+        work_item: { state: { phase: "brainstorm" } },
+        manifest: { outcome: "applied" },
+      });
+      expect(
+        await readFile(
+          join(root, ".founder", "work-items", firstId, "goal.yaml"),
+          "utf8",
+        ),
+      ).toBe(prepared.writtenIntent.intent.next_goal_bytes);
+      expect(
+        await readFile(
+          join(root, ".founder", "work-items", firstId, "state.json"),
+          "utf8",
+        ),
+      ).toBe(prepared.writtenIntent.intent.next_state_bytes);
+    }
+
+    const unknownRoot = await createWorkspace();
+    const unknownFailing = new FailingPendingShapingDecisionWorkspace(
+      unknownRoot,
+    );
+    const unknown = await prepareStartShapingDecision(
+      unknownRoot,
+      unknownFailing,
+    );
+    await expect(
+      unknownFailing.commitShapingDecision(unknown.lease, {
+        state: unknown.nextState,
+        manifest: unknown.manifest,
+      }),
+    ).rejects.toThrow("before shaping decision rename");
+    const unknownState = {
+      ...unknown.item.state,
+      updated_at: "2026-08-02T19:00:00.000Z",
+    };
+    await writeFile(
+      join(
+        unknownRoot,
+        ".founder",
+        "work-items",
+        firstId,
+        "state.json",
+      ),
+      `${JSON.stringify(unknownState, null, 2)}\n`,
+      "utf8",
+    );
+    await expect(
+      new ProductWorkspace(unknownRoot).reconcileShapingDecisionCommit(
+        unknown.lease,
+        unknown.writtenIntent.intent.decision_id,
+      ),
+    ).rejects.toMatchObject({
+      kind: "repair_required",
+      reason: expect.stringMatching(/Durable.*goal.*next.*previous.*state.*next.*previous/u),
+    });
+
+    const competingRoot = await createWorkspace();
+    const competingFailing = new FailingPendingShapingDecisionWorkspace(
+      competingRoot,
+    );
+    const competing = await prepareStartShapingDecision(
+      competingRoot,
+      competingFailing,
+    );
+    await expect(
+      competingFailing.commitShapingDecision(competing.lease, {
+        state: competing.nextState,
+        manifest: competing.manifest,
+      }),
+    ).rejects.toThrow();
+    const otherIntent = await competingFailing.writeShapingDecisionIntent(
+      competing.lease,
+      {
+        intent: { ...competing.draft, operation: "request_changes" },
+        state: competing.nextState,
+      },
+    );
+    const otherManifest: ShapingDecisionManifestV1 = {
+      ...competing.manifest,
+      decision_id: otherIntent.intent.decision_id,
+      operation: "request_changes",
+    };
+    await expect(
+      competingFailing.commitShapingDecision(competing.lease, {
+        state: competing.nextState,
+        manifest: otherManifest,
+      }),
+    ).rejects.toMatchObject({
+      kind: "repair_required",
+      reason: expect.stringContaining(
+        competing.writtenIntent.intent.decision_id,
+      ),
+    });
   });
 
   it("persists an applied manifest and returns it on idempotent replay", async () => {

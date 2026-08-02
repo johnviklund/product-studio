@@ -429,6 +429,43 @@ export interface ShapingDecisionIntentV1 {
   created_at: string;
 }
 
+export type ShapingDecisionManifestOutcome =
+  | "pending"
+  | "applied"
+  | "failed";
+
+export interface ShapingDecisionManifestV1 {
+  schema_version: 1;
+  decision_id: string;
+  work_item_id: string;
+  operation: ShapingDecisionOperation;
+  phase_from: "idea" | ShapingPhase;
+  phase_to: ShapingPhase;
+  mission_content_sha256: string | null;
+  result_content_sha256: string | null;
+  feedback_sha256: string | null;
+  expected_shaping_state_sha256: string;
+  next_mission_content_sha256: string;
+  goal_sha256: string;
+  state_sha256: string;
+  goal_version: number | null;
+  input_revision: number | null;
+  started_at: string;
+  completed_at?: string;
+  outcome: ShapingDecisionManifestOutcome;
+}
+
+export type ShapingDecisionIdInput = Pick<
+  ShapingDecisionIntentV1,
+  | "operation"
+  | "work_item_id"
+  | "goal_input_sha256"
+  | "mission_content_sha256"
+  | "result_content_sha256"
+  | "feedback_sha256"
+  | "expected_shaping_state_sha256"
+>;
+
 export interface ShapingAppliedMarkerV1 {
   schema_version: 1;
   mission_content_sha256: string;
@@ -928,6 +965,53 @@ export const shapingDecisionIntentSchema: z.ZodType<ShapingDecisionIntentV1> =
       }
     });
 
+export const shapingDecisionManifestSchema: z.ZodType<ShapingDecisionManifestV1> =
+  z
+    .strictObject({
+      schema_version: z.literal(1),
+      decision_id: sha256Schema,
+      work_item_id: workItemIdSchema,
+      operation: z.enum(SHAPING_DECISION_OPERATIONS),
+      phase_from: z.enum(["idea", ...SHAPING_PHASES]),
+      phase_to: z.enum(SHAPING_PHASES),
+      mission_content_sha256: sha256Schema.nullable(),
+      result_content_sha256: sha256Schema.nullable(),
+      feedback_sha256: sha256Schema.nullable(),
+      expected_shaping_state_sha256: sha256Schema,
+      next_mission_content_sha256: sha256Schema,
+      goal_sha256: sha256Schema,
+      state_sha256: sha256Schema,
+      goal_version: positiveSafeIntegerSchema.nullable(),
+      input_revision: positiveSafeIntegerSchema.nullable(),
+      started_at: z.iso.datetime(),
+      completed_at: z.iso.datetime().optional(),
+      outcome: z.enum(["pending", "applied", "failed"]),
+    })
+    .superRefine((manifest, context) => {
+      const terminal = manifest.outcome !== "pending";
+      if (terminal !== (manifest.completed_at !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "terminal shaping decision manifests require completed_at and pending manifests forbid it",
+          path: ["completed_at"],
+          input: manifest.completed_at,
+        });
+      }
+      if (
+        (manifest.goal_version === null) !==
+        (manifest.input_revision === null)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "goal_version and input_revision must either both be null or both be present",
+          path: ["goal_version"],
+          input: manifest.goal_version,
+        });
+      }
+    });
+
 export const shapingAppliedMarkerSchema: z.ZodType<ShapingAppliedMarkerV1> =
   z
     .strictObject({
@@ -1212,6 +1296,32 @@ export function hashShapingDecisionState(state: ShapingDecisionState): string {
     applied_result_content_sha256: parsed.applied_result_content_sha256,
     decision_receipt_sha256: parsed.decision_receipt_sha256,
     active_shaping_run_id: parsed.active_shaping_run_id,
+  });
+}
+
+export function deriveShapingDecisionId(
+  input: ShapingDecisionIdInput,
+): string {
+  const parsed = z
+    .strictObject({
+      operation: z.enum(SHAPING_DECISION_OPERATIONS),
+      work_item_id: workItemIdSchema,
+      goal_input_sha256: sha256Schema,
+      mission_content_sha256: sha256Schema.nullable(),
+      result_content_sha256: sha256Schema.nullable(),
+      feedback_sha256: sha256Schema.nullable(),
+      expected_shaping_state_sha256: sha256Schema,
+    })
+    .parse(input);
+  return hashShapingArtifact({
+    expected_shaping_state_sha256:
+      parsed.expected_shaping_state_sha256,
+    feedback_sha256: parsed.feedback_sha256,
+    goal_input_sha256: parsed.goal_input_sha256,
+    mission_content_sha256: parsed.mission_content_sha256,
+    operation: parsed.operation,
+    result_content_sha256: parsed.result_content_sha256,
+    work_item_id: parsed.work_item_id,
   });
 }
 

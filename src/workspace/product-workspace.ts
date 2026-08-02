@@ -46,6 +46,11 @@ import {
   type WorkItem,
   type WorkItemGoal,
   type ReviewWorkItemRepository,
+  type RetainedControllerLeaseRepairResult,
+  type ShapingDecisionCommitInput,
+  type ShapingDecisionCommitResult,
+  type ShapingDecisionIntentCaptureInput,
+  type ShapingDecisionIntentWriteResult,
   type WorkItemState,
   type UpdateWorkItemPhaseInput,
   type VerificationCommand,
@@ -110,6 +115,7 @@ import {
 } from "../domain/connected-run";
 import {
   brainstormResultSubmissionSchema,
+  deriveShapingDecisionId,
   hashShapingIngressInstruction,
   hashShapingInput,
   normalizeShapingGoalInput,
@@ -118,6 +124,8 @@ import {
   serializeShapingPackage,
   shapingAppliedMarkerSchema,
   shapingDecisionReceiptSchema,
+  shapingDecisionIntentSchema,
+  shapingDecisionManifestSchema,
   shapingIdentitySchema,
   shapingImportReceiptSchema,
   shapingIngressInstructionSchema,
@@ -130,6 +138,8 @@ import {
   type ShapingAppliedMarkerV1,
   type ShapingArtifactWriteResult,
   type ShapingDecisionReceipt,
+  type ShapingDecisionIntentV1,
+  type ShapingDecisionManifestV1,
   type ShapingIdentity,
   type ShapingImportReceipt,
   type ShapingImportReceiptWriteInput,
@@ -160,6 +170,7 @@ const MISSIONS_DIRECTORY = "missions";
 const SHAPING_DIRECTORY = "shaping";
 const SHAPING_RUNS_DIRECTORY = "shaping-runs";
 const SHAPING_INGRESS_DIRECTORY = "shaping-ingress";
+const SHAPING_DECISIONS_DIRECTORY = "shaping-decisions";
 const RUN_EVIDENCE_DIRECTORY = "run-evidence";
 const EXECUTION_DIRECTORY = "execution";
 const EXECUTION_DEFAULTS_FILE = "defaults.json";
@@ -1682,10 +1693,19 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         return null;
       }
       if (isNodeError(error) && error.code === "EEXIST") {
+        const retainedSource = await this.readRequiredFile(lockPath);
+        const retainedRun = this.parseJson(
+          retainedSource,
+          lockPath,
+          activeRunSchema,
+        );
         throw new ControllerConflictError(
           "repair_required",
           validatedId,
-          "A controller lock already exists; retained locks require manual repair.",
+          `Controller lock ${relative(
+            this.workspaceRoot,
+            lockPath,
+          )} for work item ${validatedId} retains run ${retainedRun.run_id} acquired at ${retainedRun.acquired_at}; use repairRetainedControllerLease after confirming that run is no longer executing.`,
         );
       }
       throw error;
@@ -1698,10 +1718,14 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         return null;
       }
       if (current.state.active_run !== undefined) {
+        const retainedRun = current.state.active_run;
         throw new ControllerConflictError(
           "repair_required",
           validatedId,
-          "Controller state already contains active_run without an available lock.",
+          `Controller state for work item ${validatedId} retains run ${retainedRun.run_id} acquired at ${retainedRun.acquired_at} while lock ${relative(
+            this.workspaceRoot,
+            lockPath,
+          )} was unavailable; use repairRetainedControllerLease after confirming that run is no longer executing.`,
         );
       }
 
@@ -1725,6 +1749,93 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       }
       throw error;
     }
+  }
+
+  async repairRetainedControllerLease(
+    workItemId: string,
+    input: { acknowledged_run_id: string },
+  ): Promise<RetainedControllerLeaseRepairResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const acknowledgedRunId = controllerRunIdSchema.parse(
+      input.acknowledged_run_id,
+    );
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} does not exist.`,
+      );
+    }
+
+    const current = await this.readValidated(validatedId);
+    if (current === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} does not exist.`,
+      );
+    }
+    const lockPath = join(
+      this.workItemsDirectory,
+      validatedId,
+      CONTROLLER_LOCK_FILE,
+    );
+    const lockSource = await this.readOptionalFile(lockPath);
+    const lockRun =
+      lockSource === null
+        ? null
+        : this.parseJson(lockSource, lockPath, activeRunSchema);
+    const stateRun = current.state.active_run ?? null;
+
+    if (lockRun === null && stateRun === null) {
+      return {
+        repaired: false,
+        reason: "nothing_retained",
+        retained_run: null,
+      };
+    }
+    if (
+      lockRun !== null &&
+      stateRun !== null &&
+      !this.activeRunsMatch(lockRun, stateRun)
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        validatedId,
+        `Controller lock retains run ${lockRun.run_id} while state.active_run retains ${stateRun.run_id}; both were left intact.`,
+      );
+    }
+
+    const retainedRun = lockRun ?? stateRun;
+    if (retainedRun === null) {
+      throw new Error("Retained controller repair lost both run records.");
+    }
+    if (retainedRun.run_id !== acknowledgedRunId) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        validatedId,
+        `Acknowledged run ${acknowledgedRunId} does not match retained run ${retainedRun.run_id}.`,
+      );
+    }
+
+    if (stateRun !== null) {
+      const releasedState = { ...current.state };
+      delete releasedState.active_run;
+      await this.replaceStateAtomically(
+        validatedId,
+        workItemStateSchema.parse(releasedState),
+      );
+      await this.afterRetainedControllerStateCleared();
+    }
+    if (lockRun !== null) {
+      await unlink(lockPath);
+    }
+    return {
+      repaired: true,
+      reason: "repaired",
+      retained_run: retainedRun,
+    };
   }
 
   async readControllerRunManifest(
@@ -3330,6 +3441,484 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return this.evidenceSummary(evidence);
   }
 
+  async readShapingDecisionIntent(
+    workItemId: string,
+    decisionId: string,
+  ): Promise<ShapingDecisionIntentV1 | null> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedDecisionId = SHA256_SCHEMA.parse(decisionId);
+    const paths = this.shapingDecisionPaths(
+      validatedWorkItemId,
+      validatedDecisionId,
+    );
+    const source = await this.readOptionalFile(paths.intent);
+    if (source === null) {
+      return null;
+    }
+    const intent = this.parseJson(
+      source,
+      paths.intent,
+      shapingDecisionIntentSchema,
+    );
+    this.validateStoredShapingDecisionIntent(intent);
+    return intent;
+  }
+
+  async writeShapingDecisionIntent(
+    lease: ControllerLease,
+    input: ShapingDecisionIntentCaptureInput,
+  ): Promise<ShapingDecisionIntentWriteResult> {
+    const validatedLease = this.validateControllerLease(lease);
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+    const nextGoal = workItemGoalSchema.parse(
+      input.goal ?? validatedLease.work_item.goal,
+    );
+    const nextState = workItemStateSchema.parse(input.state);
+    if (
+      input.intent.work_item_id !== workItemId ||
+      nextGoal.work_item_id !== workItemId ||
+      nextState.work_item_id !== workItemId ||
+      nextState.active_run !== undefined
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Shaping decision intent must preserve work-item identity and commit state without active_run.",
+      );
+    }
+
+    const decisionId = deriveShapingDecisionId({
+      operation: input.intent.operation,
+      work_item_id: input.intent.work_item_id,
+      goal_input_sha256: input.intent.goal_input_sha256,
+      mission_content_sha256: input.intent.mission_content_sha256,
+      result_content_sha256: input.intent.result_content_sha256,
+      feedback_sha256: input.intent.feedback_sha256,
+      expected_shaping_state_sha256:
+        input.intent.expected_shaping_state_sha256,
+    });
+    const nextGoalBytes = stringify(nextGoal);
+    const nextStateBytes = `${JSON.stringify(nextState, null, 2)}\n`;
+    await this.assertControllerLeaseOwnership(validatedLease);
+    const replay = await this.readMatchingShapingDecisionIntent(
+      workItemId,
+      decisionId,
+      input.intent,
+      nextGoalBytes,
+      nextStateBytes,
+    );
+    if (replay !== null) {
+      return replay;
+    }
+
+    const current = await this.readValidated(workItemId);
+    if (current === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Work item ${workItemId} disappeared while its controller lease was held.`,
+      );
+    }
+    if (!this.matchesLeasedItem(current, validatedLease)) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Durable goal/state changed after shaping decision preconditions were validated.",
+      );
+    }
+
+    const workItemDirectory = join(this.workItemsDirectory, workItemId);
+    const goalPath = join(workItemDirectory, GOAL_FILE);
+    const statePath = join(workItemDirectory, STATE_FILE);
+    const previousGoalBytes = await this.readRequiredFile(goalPath);
+    const previousStateBytes = await this.readRequiredFile(statePath);
+    const expectedGoalBytes = stringify(validatedLease.work_item.goal);
+    const expectedStateBytes = `${JSON.stringify(
+      validatedLease.work_item.goal.goal_contract === undefined
+        ? validatedLease.work_item.state
+        : {
+            ...validatedLease.work_item.state,
+            active_run: validatedLease.active_run,
+          },
+      null,
+      2,
+    )}\n`;
+    if (
+      previousGoalBytes !== expectedGoalBytes ||
+      previousStateBytes !== expectedStateBytes
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Durable goal/state bytes changed between lease validation and shaping intent capture.",
+      );
+    }
+
+    const goalChanged = nextGoalBytes !== previousGoalBytes;
+    if (
+      goalChanged !== (input.intent.operation === "approve_spec") ||
+      nextStateBytes === previousStateBytes
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Only approve_spec may change goal bytes and every shaping decision must change state bytes.",
+      );
+    }
+    this.assertIntentMissionBytes(input.intent, workItemId);
+
+    const intent = shapingDecisionIntentSchema.parse({
+      ...input.intent,
+      decision_id: decisionId,
+      previous_goal_bytes: previousGoalBytes,
+      previous_goal_sha256: this.hashArtifactSource(previousGoalBytes),
+      previous_state_bytes: previousStateBytes,
+      previous_state_sha256: this.hashArtifactSource(previousStateBytes),
+      next_goal_bytes: nextGoalBytes,
+      next_goal_sha256: this.hashArtifactSource(nextGoalBytes),
+      next_state_bytes: nextStateBytes,
+      next_state_sha256: this.hashArtifactSource(nextStateBytes),
+      created_at: new Date().toISOString(),
+    });
+    const paths = this.shapingDecisionPaths(workItemId, decisionId);
+    await this.ensureDirectory(paths.directory);
+    const source = `${JSON.stringify(intent, null, 2)}\n`;
+    try {
+      await writeFile(paths.intent, source, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      return {
+        intent,
+        intent_path: paths.intent,
+        intent_source: source,
+      };
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        const raced = await this.readMatchingShapingDecisionIntent(
+          workItemId,
+          decisionId,
+          input.intent,
+          nextGoalBytes,
+          nextStateBytes,
+        );
+        if (raced !== null) {
+          return raced;
+        }
+      }
+      throw error;
+    }
+  }
+
+  async publishLeasedShapingMission(
+    lease: ControllerLease,
+    identityInput: ShapingIdentity,
+    missionBytes: string,
+    input: { decision_id: string },
+  ): Promise<ShapingArtifactWriteResult> {
+    const validatedLease = this.validateControllerLease(lease);
+    const identity = shapingIdentitySchema.parse(identityInput);
+    const decisionId = SHA256_SCHEMA.parse(input.decision_id);
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+    if (identity.work_item_id !== workItemId) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Leased shaping mission cannot change work_item_id.",
+      );
+    }
+    await this.assertControllerLeaseOwnership(validatedLease);
+    const current = await this.readValidated(workItemId);
+    if (current === null || !this.matchesLeasedItem(current, validatedLease)) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Durable goal/state changed after the shaping mission lease was acquired.",
+      );
+    }
+
+    const intent = await this.readRequiredShapingDecisionIntent(
+      workItemId,
+      decisionId,
+    );
+    const mission = this.parseJson(
+      missionBytes,
+      this.shapingDecisionPaths(workItemId, decisionId).intent,
+      shapingMissionPackageSchema,
+    );
+    if (
+      serializeShapingPackage(mission) !== missionBytes ||
+      JSON.stringify(mission.identity) !== JSON.stringify(identity) ||
+      intent.next_mission_package_bytes !== missionBytes ||
+      intent.next_mission_content_sha256 !== mission.content_sha256 ||
+      intent.next_mission_input_sha256 !== identity.input_sha256 ||
+      intent.phase_to !== identity.phase ||
+      current.state.phase !== intent.phase_from ||
+      (identity.phase !== current.state.phase &&
+        identity.phase !== intent.phase_to)
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Leased shaping mission does not match the pending decision intent.",
+      );
+    }
+    const existingManifest = await this.readShapingDecisionManifest(
+      workItemId,
+      decisionId,
+    );
+    if (existingManifest?.outcome === "failed") {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "A failed shaping decision cannot publish its next mission.",
+      );
+    }
+
+    const goalInput = normalizeShapingGoalInput(current.goal);
+    if (
+      mission.input.title !== goalInput.title ||
+      mission.input.notes !== goalInput.notes ||
+      hashShapingInput(mission.input) !== identity.input_sha256
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "The durable work item no longer matches the leased shaping mission input.",
+      );
+    }
+    if (mission.identity.phase === "spec") {
+      await this.assertSpecShapingSelection(
+        specMissionPackageSchema.parse(mission),
+      );
+    }
+    return this.publishShapingSnapshot(identity, mission);
+  }
+
+  async commitShapingDecision(
+    lease: ControllerLease,
+    input: ShapingDecisionCommitInput,
+  ): Promise<ShapingDecisionCommitResult> {
+    const validatedLease = this.validateControllerLease(lease);
+    const manifest = shapingDecisionManifestSchema.parse(input.manifest);
+    const nextGoal = workItemGoalSchema.parse(
+      input.goal ?? validatedLease.work_item.goal,
+    );
+    const nextState = workItemStateSchema.parse(input.state);
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+    await this.assertControllerLeaseOwnership(validatedLease);
+
+    const pending = await this.findPendingShapingDecisionManifest(workItemId);
+    if (pending !== null && pending.decision_id !== manifest.decision_id) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Pending shaping decision ${pending.decision_id} must be reconciled before ${manifest.decision_id}.`,
+      );
+    }
+    const existing = await this.readShapingDecisionManifest(
+      workItemId,
+      manifest.decision_id,
+    );
+    if (existing !== null) {
+      if (
+        existing.outcome === "applied" &&
+        this.shapingDecisionManifestIdentityMatches(existing, manifest)
+      ) {
+        const current = await this.readValidated(workItemId);
+        if (current === null) {
+          throw new ControllerConflictError(
+            "work_item_not_found",
+            workItemId,
+            `Work item ${workItemId} disappeared after its shaping decision committed.`,
+          );
+        }
+        return {
+          work_item: this.withoutActiveRun(current),
+          manifest: existing,
+        };
+      }
+      if (
+        existing.outcome === "pending" &&
+        this.shapingDecisionManifestIdentityMatches(existing, manifest)
+      ) {
+        return this.reconcileShapingDecisionCommit(
+          validatedLease,
+          manifest.decision_id,
+        );
+      }
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        `Decision ${manifest.decision_id} already has a non-matching durable manifest.`,
+      );
+    }
+
+    this.validateShapingDecisionCommit(
+      validatedLease,
+      nextGoal,
+      nextState,
+      input.goal !== undefined,
+      manifest,
+    );
+
+    const current = await this.readValidated(workItemId);
+    if (current === null || !this.matchesLeasedItem(current, validatedLease)) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Durable goal/state changed after the shaping decision lease was acquired.",
+      );
+    }
+    const intent = await this.readRequiredShapingDecisionIntent(
+      workItemId,
+      manifest.decision_id,
+    );
+    this.assertShapingManifestMatchesIntent(manifest, intent);
+    if (
+      stringify(nextGoal) !== intent.next_goal_bytes ||
+      `${JSON.stringify(nextState, null, 2)}\n` !== intent.next_state_bytes
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Shaping commit bytes differ from the durable decision intent.",
+      );
+    }
+
+    await this.writeInitialShapingDecisionManifest(manifest);
+    await this.afterShapingDecisionPendingManifestWritten();
+    await this.writeShapingDecisionArtifacts(intent, true);
+    await this.afterShapingDecisionStateReplaced();
+    const appliedManifest = shapingDecisionManifestSchema.parse({
+      ...manifest,
+      outcome: "applied",
+      completed_at: new Date().toISOString(),
+    });
+    await this.writeShapingDecisionManifest(appliedManifest);
+    return {
+      work_item: workItemSchema.parse({ goal: nextGoal, state: nextState }),
+      manifest: appliedManifest,
+    };
+  }
+
+  async reconcileShapingDecisionCommit(
+    lease: ControllerLease,
+    decisionIdInput: string,
+  ): Promise<ShapingDecisionCommitResult> {
+    const validatedLease = this.validateControllerLease(lease);
+    const decisionId = SHA256_SCHEMA.parse(decisionIdInput);
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+    await this.assertControllerLeaseOwnership(validatedLease);
+
+    const pending = await this.findPendingShapingDecisionManifest(workItemId);
+    if (pending !== null && pending.decision_id !== decisionId) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Pending shaping decision ${pending.decision_id} must be reconciled before ${decisionId}.`,
+      );
+    }
+    const manifest = await this.readShapingDecisionManifest(
+      workItemId,
+      decisionId,
+    );
+    if (manifest === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Shaping decision ${decisionId} has no durable manifest to reconcile.`,
+      );
+    }
+    if (manifest.outcome === "applied") {
+      const current = await this.readValidated(workItemId);
+      if (current === null) {
+        throw new ControllerConflictError(
+          "work_item_not_found",
+          workItemId,
+          `Work item ${workItemId} disappeared after its shaping decision committed.`,
+        );
+      }
+      return {
+        work_item: this.withoutActiveRun(current),
+        manifest,
+      };
+    }
+    if (manifest.outcome !== "pending") {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        `Shaping decision ${decisionId} is ${manifest.outcome}, not pending.`,
+      );
+    }
+
+    const intent = await this.readRequiredShapingDecisionIntent(
+      workItemId,
+      decisionId,
+    );
+    this.assertShapingManifestMatchesIntent(manifest, intent);
+    const workItemDirectory = join(this.workItemsDirectory, workItemId);
+    const durableGoalBytes = await this.readRequiredFile(
+      join(workItemDirectory, GOAL_FILE),
+    );
+    const durableStateBytes = await this.readRequiredFile(
+      join(workItemDirectory, STATE_FILE),
+    );
+    const durableGoalSha256 = this.hashArtifactSource(durableGoalBytes);
+    const durableStateSha256 = this.hashArtifactSource(durableStateBytes);
+    const goalIsNext = durableGoalSha256 === intent.next_goal_sha256;
+    const goalIsPrevious =
+      durableGoalSha256 === intent.previous_goal_sha256;
+    const stateIsNext = durableStateSha256 === intent.next_state_sha256;
+    const stateIsPrevious =
+      durableStateSha256 === intent.previous_state_sha256;
+
+    if (!goalIsNext || !stateIsNext) {
+      if (
+        (goalIsNext || goalIsPrevious) &&
+        (stateIsNext || stateIsPrevious)
+      ) {
+        await this.writeShapingDecisionArtifacts(intent, false);
+      } else {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItemId,
+          `Durable shaping decision pair is unknown: goal ${durableGoalSha256} (next ${intent.next_goal_sha256}, previous ${intent.previous_goal_sha256}); state ${durableStateSha256} (next ${intent.next_state_sha256}, previous ${intent.previous_state_sha256}).`,
+        );
+      }
+    }
+
+    const committedGoalBytes = await this.readRequiredFile(
+      join(workItemDirectory, GOAL_FILE),
+    );
+    const committedStateBytes = await this.readRequiredFile(
+      join(workItemDirectory, STATE_FILE),
+    );
+    if (
+      this.hashArtifactSource(committedGoalBytes) !== manifest.goal_sha256 ||
+      this.hashArtifactSource(committedStateBytes) !== manifest.state_sha256
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Reconciled shaping decision bytes do not match the pending manifest.",
+      );
+    }
+    const appliedManifest = shapingDecisionManifestSchema.parse({
+      ...manifest,
+      outcome: "applied",
+      completed_at: new Date().toISOString(),
+    });
+    await this.writeShapingDecisionManifest(appliedManifest);
+    return {
+      work_item: this.parseWorkItemBytes(
+        committedGoalBytes,
+        committedStateBytes,
+        workItemId,
+      ),
+      manifest: appliedManifest,
+    };
+  }
+
   async commitControllerMutation(
     lease: ControllerLease,
     input: ControllerMutationInput,
@@ -3503,6 +4092,18 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   protected async afterControllerGoalReplaced(): Promise<void> {
+    return;
+  }
+
+  protected async afterRetainedControllerStateCleared(): Promise<void> {
+    return;
+  }
+
+  protected async afterShapingDecisionPendingManifestWritten(): Promise<void> {
+    return;
+  }
+
+  protected async afterShapingDecisionStateReplaced(): Promise<void> {
     return;
   }
 
@@ -5066,6 +5667,505 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       workItemId,
       reason,
     );
+  }
+
+  private shapingDecisionPaths(
+    workItemId: string,
+    decisionId: string,
+  ): { directory: string; intent: string; manifest: string } {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedDecisionId = SHA256_SCHEMA.parse(decisionId);
+    const directory = join(
+      this.workItemsDirectory,
+      validatedWorkItemId,
+      SHAPING_DECISIONS_DIRECTORY,
+    );
+    return {
+      directory,
+      intent: join(directory, `${validatedDecisionId}.intent.json`),
+      manifest: join(directory, `${validatedDecisionId}.json`),
+    };
+  }
+
+  private assertIntentMissionBytes(
+    intent: ShapingDecisionIntentCaptureInput["intent"],
+    workItemId: string,
+  ): void {
+    let mission: ShapingMissionPackage;
+    try {
+      mission = shapingMissionPackageSchema.parse(
+        JSON.parse(intent.next_mission_package_bytes),
+      );
+    } catch (error) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        `Next shaping mission bytes are invalid: ${errorMessage(error)}`,
+      );
+    }
+    if (
+      serializeShapingPackage(mission) !==
+        intent.next_mission_package_bytes ||
+      mission.identity.work_item_id !== workItemId ||
+      mission.identity.phase !== intent.phase_to ||
+      mission.identity.input_sha256 !==
+        intent.next_mission_input_sha256 ||
+      mission.content_sha256 !== intent.next_mission_content_sha256
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Next shaping mission bytes do not match the intent's fixed identity and hashes.",
+      );
+    }
+  }
+
+  private shapingIntentReplayIdentity(
+    intent: ShapingDecisionIntentV1,
+  ): object {
+    return {
+      schema_version: intent.schema_version,
+      decision_id: intent.decision_id,
+      work_item_id: intent.work_item_id,
+      operation: intent.operation,
+      launch_mode: intent.launch_mode,
+      phase_from: intent.phase_from,
+      phase_to: intent.phase_to,
+      goal_input_sha256: intent.goal_input_sha256,
+      mission_content_sha256: intent.mission_content_sha256,
+      result_content_sha256: intent.result_content_sha256,
+      feedback_sha256: intent.feedback_sha256,
+      expected_shaping_state_sha256:
+        intent.expected_shaping_state_sha256,
+      next_requested_model: intent.next_requested_model,
+      next_mission_content_sha256:
+        intent.next_mission_content_sha256,
+      next_mission_input_sha256: intent.next_mission_input_sha256,
+      plan_repository_base_commit:
+        intent.plan_repository_base_commit,
+      plan_goal_contract_sha256:
+        intent.plan_goal_contract_sha256,
+      plan_goal_version: intent.plan_goal_version,
+      launch_fingerprint: intent.launch_fingerprint,
+      next_goal_bytes: intent.next_goal_bytes,
+      next_goal_sha256: intent.next_goal_sha256,
+      next_state_bytes: intent.next_state_bytes,
+      next_state_sha256: intent.next_state_sha256,
+      decision_receipt_bytes: intent.decision_receipt_bytes,
+      next_mission_package_bytes: intent.next_mission_package_bytes,
+    };
+  }
+
+  private validateStoredShapingDecisionIntent(
+    intent: ShapingDecisionIntentV1,
+  ): void {
+    const expectedDecisionId = deriveShapingDecisionId({
+      operation: intent.operation,
+      work_item_id: intent.work_item_id,
+      goal_input_sha256: intent.goal_input_sha256,
+      mission_content_sha256: intent.mission_content_sha256,
+      result_content_sha256: intent.result_content_sha256,
+      feedback_sha256: intent.feedback_sha256,
+      expected_shaping_state_sha256:
+        intent.expected_shaping_state_sha256,
+    });
+    if (
+      intent.decision_id !== expectedDecisionId ||
+      intent.previous_goal_sha256 !==
+        this.hashArtifactSource(intent.previous_goal_bytes) ||
+      intent.previous_state_sha256 !==
+        this.hashArtifactSource(intent.previous_state_bytes) ||
+      intent.next_goal_sha256 !==
+        this.hashArtifactSource(intent.next_goal_bytes) ||
+      intent.next_state_sha256 !==
+        this.hashArtifactSource(intent.next_state_bytes)
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        intent.work_item_id,
+        "Stored shaping decision intent hashes do not match its durable bytes.",
+      );
+    }
+    this.assertIntentMissionBytes(intent, intent.work_item_id);
+  }
+
+  private async readMatchingShapingDecisionIntent(
+    workItemId: string,
+    decisionId: string,
+    draft: ShapingDecisionIntentCaptureInput["intent"],
+    nextGoalBytes: string,
+    nextStateBytes: string,
+  ): Promise<ShapingDecisionIntentWriteResult | null> {
+    const paths = this.shapingDecisionPaths(workItemId, decisionId);
+    const source = await this.readOptionalFile(paths.intent);
+    if (source === null) {
+      return null;
+    }
+    let intent: ShapingDecisionIntentV1;
+    try {
+      intent = this.parseJson(
+        source,
+        paths.intent,
+        shapingDecisionIntentSchema,
+      );
+      this.validateStoredShapingDecisionIntent(intent);
+    } catch (error) {
+      if (
+        error instanceof ControllerConflictError &&
+        error.kind === "repair_required"
+      ) {
+        throw error;
+      }
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Stored shaping decision intent ${decisionId} needs repair: ${errorMessage(error)}`,
+      );
+    }
+    const expectedIdentity = {
+      schema_version: 1 as const,
+      decision_id: decisionId,
+      ...draft,
+      next_goal_bytes: nextGoalBytes,
+      next_goal_sha256: this.hashArtifactSource(nextGoalBytes),
+      next_state_bytes: nextStateBytes,
+      next_state_sha256: this.hashArtifactSource(nextStateBytes),
+    };
+    if (
+      !isDeepStrictEqual(
+        this.shapingIntentReplayIdentity(intent),
+        expectedIdentity,
+      )
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Stored shaping decision intent ${decisionId} differs from its replay.`,
+      );
+    }
+    return {
+      intent,
+      intent_path: paths.intent,
+      intent_source: source,
+    };
+  }
+
+  private async readRequiredShapingDecisionIntent(
+    workItemId: string,
+    decisionId: string,
+  ): Promise<ShapingDecisionIntentV1> {
+    const paths = this.shapingDecisionPaths(workItemId, decisionId);
+    const source = await this.readOptionalFile(paths.intent);
+    if (source === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Shaping decision ${decisionId} has no durable intent.`,
+      );
+    }
+    try {
+      const intent = this.parseJson(
+        source,
+        paths.intent,
+        shapingDecisionIntentSchema,
+      );
+      this.validateStoredShapingDecisionIntent(intent);
+      return intent;
+    } catch (error) {
+      if (error instanceof ControllerConflictError) {
+        throw error;
+      }
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Stored shaping decision intent ${decisionId} needs repair: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  async readShapingDecisionManifest(
+    workItemId: string,
+    decisionId: string,
+  ): Promise<ShapingDecisionManifestV1 | null> {
+    const paths = this.shapingDecisionPaths(workItemId, decisionId);
+    const source = await this.readOptionalFile(paths.manifest);
+    return source === null
+      ? null
+      : this.parseJson(
+          source,
+          paths.manifest,
+          shapingDecisionManifestSchema,
+        );
+  }
+
+  private async findPendingShapingDecisionManifest(
+    workItemId: string,
+  ): Promise<ShapingDecisionManifestV1 | null> {
+    const directory = join(
+      this.workItemsDirectory,
+      workItemId,
+      SHAPING_DECISIONS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(directory))) {
+      return null;
+    }
+    const pending: ShapingDecisionManifestV1[] = [];
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.name.endsWith(".intent.json")) {
+        continue;
+      }
+      const match = /^([0-9a-f]{64})\.json$/.exec(entry.name);
+      if (match === null) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "shaping decision entry must use <decision_id>.json",
+        );
+      }
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "shaping decision manifest must be a regular file",
+        );
+      }
+      const manifest = await this.readShapingDecisionManifest(
+        workItemId,
+        match[1],
+      );
+      if (manifest?.outcome === "pending") {
+        pending.push(manifest);
+      }
+    }
+    if (pending.length > 1) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Work item ${workItemId} has ${pending.length} pending shaping decisions.`,
+      );
+    }
+    return pending[0] ?? null;
+  }
+
+  private async writeInitialShapingDecisionManifest(
+    manifest: ShapingDecisionManifestV1,
+  ): Promise<void> {
+    const validated = shapingDecisionManifestSchema.parse(manifest);
+    const paths = this.shapingDecisionPaths(
+      validated.work_item_id,
+      validated.decision_id,
+    );
+    await this.ensureDirectory(paths.directory);
+    await writeFile(
+      paths.manifest,
+      `${JSON.stringify(validated, null, 2)}\n`,
+      { encoding: "utf8", flag: "wx" },
+    );
+  }
+
+  private async writeShapingDecisionManifest(
+    manifest: ShapingDecisionManifestV1,
+  ): Promise<void> {
+    const validated = shapingDecisionManifestSchema.parse(manifest);
+    const paths = this.shapingDecisionPaths(
+      validated.work_item_id,
+      validated.decision_id,
+    );
+    await this.writeJsonAtomically(paths.manifest, validated);
+  }
+
+  private validateShapingDecisionCommit(
+    lease: ControllerLease,
+    nextGoal: WorkItemGoal,
+    nextState: WorkItemState,
+    goalWasSupplied: boolean,
+    manifest: ShapingDecisionManifestV1,
+  ): void {
+    const workItemId = lease.work_item.goal.work_item_id;
+    if (
+      nextGoal.work_item_id !== workItemId ||
+      nextState.work_item_id !== workItemId ||
+      JSON.stringify(nextGoal.capture) !==
+        JSON.stringify(lease.work_item.goal.capture) ||
+      nextState.active_run !== undefined ||
+      manifest.outcome !== "pending" ||
+      manifest.work_item_id !== workItemId ||
+      manifest.phase_from !== lease.work_item.state.phase ||
+      manifest.phase_to !== nextState.phase ||
+      manifest.goal_sha256 !== this.hashArtifactSource(stringify(nextGoal)) ||
+      manifest.state_sha256 !==
+        this.hashArtifactSource(`${JSON.stringify(nextState, null, 2)}\n`)
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Shaping decision manifest must match the lease and exact committed bytes.",
+      );
+    }
+    if (goalWasSupplied) {
+      if (
+        manifest.operation !== "approve_spec" ||
+        nextGoal.goal_contract === undefined ||
+        manifest.goal_version !== nextGoal.goal_contract.goal_version ||
+        manifest.goal_version !== nextState.goal_version ||
+        manifest.input_revision !== nextState.input_revision
+      ) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          workItemId,
+          "Approval commits require one real goal contract with matching manifest versions.",
+        );
+      }
+    } else if (
+      manifest.goal_version !== null ||
+      manifest.input_revision !== null ||
+      stringify(nextGoal) !== stringify(lease.work_item.goal)
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "State-only shaping commits require null manifest versions and unchanged goal bytes.",
+      );
+    }
+  }
+
+  private shapingDecisionManifestIdentityMatches(
+    left: ShapingDecisionManifestV1,
+    right: ShapingDecisionManifestV1,
+  ): boolean {
+    const identity = (manifest: ShapingDecisionManifestV1) => ({
+      schema_version: manifest.schema_version,
+      decision_id: manifest.decision_id,
+      work_item_id: manifest.work_item_id,
+      operation: manifest.operation,
+      phase_from: manifest.phase_from,
+      phase_to: manifest.phase_to,
+      mission_content_sha256: manifest.mission_content_sha256,
+      result_content_sha256: manifest.result_content_sha256,
+      feedback_sha256: manifest.feedback_sha256,
+      expected_shaping_state_sha256:
+        manifest.expected_shaping_state_sha256,
+      next_mission_content_sha256:
+        manifest.next_mission_content_sha256,
+      goal_sha256: manifest.goal_sha256,
+      state_sha256: manifest.state_sha256,
+      goal_version: manifest.goal_version,
+      input_revision: manifest.input_revision,
+    });
+    return isDeepStrictEqual(identity(left), identity(right));
+  }
+
+  private assertShapingManifestMatchesIntent(
+    manifest: ShapingDecisionManifestV1,
+    intent: ShapingDecisionIntentV1,
+  ): void {
+    if (
+      manifest.decision_id !== intent.decision_id ||
+      manifest.work_item_id !== intent.work_item_id ||
+      manifest.operation !== intent.operation ||
+      manifest.phase_from !== intent.phase_from ||
+      manifest.phase_to !== intent.phase_to ||
+      manifest.mission_content_sha256 !== intent.mission_content_sha256 ||
+      manifest.result_content_sha256 !== intent.result_content_sha256 ||
+      manifest.feedback_sha256 !== intent.feedback_sha256 ||
+      manifest.expected_shaping_state_sha256 !==
+        intent.expected_shaping_state_sha256 ||
+      manifest.next_mission_content_sha256 !==
+        intent.next_mission_content_sha256 ||
+      manifest.goal_sha256 !== intent.next_goal_sha256 ||
+      manifest.state_sha256 !== intent.next_state_sha256
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        intent.work_item_id,
+        "Shaping decision manifest does not match its durable intent.",
+      );
+    }
+  }
+
+  private async writeShapingDecisionArtifacts(
+    intent: ShapingDecisionIntentV1,
+    injectFailure: boolean,
+  ): Promise<void> {
+    this.validateStoredShapingDecisionIntent(intent);
+    this.parseWorkItemBytes(
+      intent.next_goal_bytes,
+      intent.next_state_bytes,
+      intent.work_item_id,
+    );
+    const workItemDirectory = join(
+      this.workItemsDirectory,
+      intent.work_item_id,
+    );
+    const suffix = randomUUID();
+    const temporaryGoalPath = join(
+      workItemDirectory,
+      `.${GOAL_FILE}.${suffix}.shaping-decision.tmp`,
+    );
+    const temporaryStatePath = join(
+      workItemDirectory,
+      `.${STATE_FILE}.${suffix}.shaping-decision.tmp`,
+    );
+    const goalPath = join(workItemDirectory, GOAL_FILE);
+    const statePath = join(workItemDirectory, STATE_FILE);
+    try {
+      await writeFile(temporaryGoalPath, intent.next_goal_bytes, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await writeFile(temporaryStatePath, intent.next_state_bytes, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(temporaryGoalPath, goalPath);
+      if (injectFailure) {
+        await this.afterControllerGoalReplaced();
+      }
+      await rename(temporaryStatePath, statePath);
+    } catch (error) {
+      const cleanupErrors: unknown[] = [];
+      for (const path of [temporaryGoalPath, temporaryStatePath]) {
+        try {
+          await this.unlinkIfPresent(path);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupErrors],
+          "Shaping decision write failed and temporary cleanup was incomplete",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private parseWorkItemBytes(
+    goalBytes: string,
+    stateBytes: string,
+    workItemId: string,
+  ): WorkItem {
+    let stateValue: unknown;
+    try {
+      stateValue = JSON.parse(stateBytes);
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Stored shaping state bytes are invalid JSON: ${errorMessage(error)}`,
+      );
+    }
+    try {
+      return workItemSchema.parse({
+        goal: workItemGoalSchema.parse(parse(goalBytes)),
+        state: workItemStateSchema.parse(stateValue),
+      });
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Stored shaping goal/state bytes are invalid: ${errorMessage(error)}`,
+      );
+    }
   }
 
   private validateControllerLease(lease: ControllerLease): ControllerLease {

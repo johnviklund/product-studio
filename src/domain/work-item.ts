@@ -15,6 +15,12 @@ import type {
   ReviewMissionPackage,
 } from "./mission";
 import type { ConnectedRunRecordV1 } from "./connected-run";
+import type {
+  ShapingArtifactWriteResult,
+  ShapingDecisionIntentV1,
+  ShapingDecisionManifestV1,
+  ShapingIdentity,
+} from "./shaping";
 import { portfolioSourceIdSchema } from "./portfolio-source";
 import type {
   AppliedExecuteReviewSubject,
@@ -369,6 +375,49 @@ export interface ControllerMutationResult {
   manifest: ControllerRunManifest;
 }
 
+export type ShapingDecisionIntentDraft = Omit<
+  ShapingDecisionIntentV1,
+  | "decision_id"
+  | "previous_goal_bytes"
+  | "previous_goal_sha256"
+  | "previous_state_bytes"
+  | "previous_state_sha256"
+  | "next_goal_bytes"
+  | "next_goal_sha256"
+  | "next_state_bytes"
+  | "next_state_sha256"
+  | "created_at"
+>;
+
+export interface ShapingDecisionIntentCaptureInput {
+  intent: ShapingDecisionIntentDraft;
+  goal?: WorkItemGoal;
+  state: WorkItemState;
+}
+
+export interface ShapingDecisionIntentWriteResult {
+  intent: ShapingDecisionIntentV1;
+  intent_path: string;
+  intent_source: string;
+}
+
+export interface ShapingDecisionCommitInput {
+  goal?: WorkItemGoal;
+  state: WorkItemState;
+  manifest: ShapingDecisionManifestV1;
+}
+
+export interface ShapingDecisionCommitResult {
+  work_item: WorkItem;
+  manifest: ShapingDecisionManifestV1;
+}
+
+export interface RetainedControllerLeaseRepairResult {
+  repaired: boolean;
+  reason: "repaired" | "nothing_retained";
+  retained_run: ActiveRun | null;
+}
+
 export interface WorkItemRepository {
   readManifest(): Promise<ProductManifest>;
   create(input: CreateWorkItemInput): Promise<WorkItem>;
@@ -401,6 +450,10 @@ export interface WorkItemRepository {
     workItemId: string,
     activeRun: ActiveRun,
   ): Promise<ControllerLease | null>;
+  repairRetainedControllerLease(
+    workItemId: string,
+    input: { acknowledged_run_id: string },
+  ): Promise<RetainedControllerLeaseRepairResult>;
   readControllerRunManifest(
     workItemId: string,
     runId: string,
@@ -445,6 +498,32 @@ export interface WorkItemRepository {
     lease: ControllerLease,
     input: ControllerMutationInput,
   ): Promise<ControllerMutationResult>;
+  writeShapingDecisionIntent(
+    lease: ControllerLease,
+    input: ShapingDecisionIntentCaptureInput,
+  ): Promise<ShapingDecisionIntentWriteResult>;
+  readShapingDecisionIntent(
+    workItemId: string,
+    decisionId: string,
+  ): Promise<ShapingDecisionIntentV1 | null>;
+  readShapingDecisionManifest(
+    workItemId: string,
+    decisionId: string,
+  ): Promise<ShapingDecisionManifestV1 | null>;
+  publishLeasedShapingMission(
+    lease: ControllerLease,
+    identity: ShapingIdentity,
+    missionBytes: string,
+    input: { decision_id: string },
+  ): Promise<ShapingArtifactWriteResult>;
+  commitShapingDecision(
+    lease: ControllerLease,
+    input: ShapingDecisionCommitInput,
+  ): Promise<ShapingDecisionCommitResult>;
+  reconcileShapingDecisionCommit(
+    lease: ControllerLease,
+    decisionId: string,
+  ): Promise<ShapingDecisionCommitResult>;
   releaseControllerLease(lease: ControllerLease): Promise<void>;
 }
 
