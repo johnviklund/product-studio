@@ -693,7 +693,10 @@ export const planShapingInputSchema: z.ZodType<PlanShapingInput> = z
         input: result.identity,
       });
     }
-    if (approval.goal_contract_sha256 !== input.goal_contract_sha256) {
+    if (
+      input.revision === undefined &&
+      approval.goal_contract_sha256 !== input.goal_contract_sha256
+    ) {
       context.addIssue({
         code: "custom",
         message: "approved goal-contract SHA must match the Plan input",

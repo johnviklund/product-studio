@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+
+import { z } from "zod";
+import { parse as parseYaml } from "yaml";
 
 import {
   MISSION_SCHEMA_VERSION,
@@ -38,7 +42,42 @@ import type {
   VerificationRunner,
 } from "../domain/verification";
 import {
+  brainstormResultSubmissionSchema,
+  compileBrainstormMission,
+  compilePlanMission,
+  compileSpecMission,
+  deriveShapingDecisionId,
+  goalContractFromSpecProposal,
+  hashGoalContract,
+  hashGoalInput,
+  hashShapingDecisionState,
+  normalizeShapingGoalInput,
+  planResultSubmissionSchema,
+  serializeShapingPackage,
+  shapingDecisionReceiptSchema,
+  shapingMissionPackageSchema,
+  specResultSubmissionSchema,
+  type ShapingDecisionIntentV1,
+  type ShapingDecisionManifestV1,
+  type ShapingDecisionOperation,
+  type ShapingDecisionReceipt,
+  type ShapingDecisionState,
+  type BrainstormMissionPackage,
+  type PlanMissionPackage,
+  type ShapingIdentity,
+  type ShapingMissionPackage,
+  type ShapingPhase,
+  type ShapingReceiptWriteResult,
+  type SpecMissionPackage,
+  type StoredShapingArtifact,
+} from "../domain/shaping";
+import {
+  shapingRunLaunchFingerprint,
+  type ShapingRunRecordV1,
+} from "../domain/shaping-run";
+import {
   ControllerConflictError,
+  InvalidWorkspaceError,
   acceptPatchPlanInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
@@ -50,7 +89,9 @@ import {
   recordConnectedPermissionDenialInputSchema,
   saveWorkItemInputSchema,
   workItemIdSchema,
+  workItemGoalSchema,
   workItemSchema,
+  workItemStateSchema,
   type ActiveRun,
   type AcceptPatchPlanInput,
   type ControllerLease,
@@ -82,6 +123,153 @@ import {
 } from "../domain/workspace-path";
 
 type Clock = () => Date;
+
+const SHA256_SCHEMA = z.string().regex(/^[0-9a-f]{64}$/u);
+const nonEmptyTrimmedStringSchema = z
+  .string()
+  .refine((value) => value.trim().length > 0, "must not be empty")
+  .refine(
+    (value) => value === value.trim(),
+    "must not have leading or trailing whitespace",
+  );
+
+const shapingLaunchInputShape = {
+  launch_mode: z.enum(["connected", "manual"]),
+  next_requested_model: nonEmptyTrimmedStringSchema.nullable(),
+};
+
+function validateShapingLaunchInput(
+  input: { launch_mode: "connected" | "manual"; next_requested_model: string | null },
+  context: z.RefinementCtx,
+): void {
+  const connected = input.launch_mode === "connected";
+  if (connected !== (input.next_requested_model !== null)) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "connected launch mode requires one model and manual launch mode forbids it",
+      path: ["next_requested_model"],
+      input: input.next_requested_model,
+    });
+  }
+}
+
+const startBrainstormDecisionInputSchema = z
+  .strictObject({
+    ...shapingLaunchInputShape,
+    expected_mission_content_sha256: z.null(),
+    expected_result_content_sha256: z.null(),
+    expected_shaping_state_sha256: SHA256_SCHEMA,
+  })
+  .superRefine(validateShapingLaunchInput);
+
+const shapingResultDecisionInputSchema = z
+  .strictObject({
+    ...shapingLaunchInputShape,
+    expected_mission_content_sha256: SHA256_SCHEMA,
+    expected_result_content_sha256: SHA256_SCHEMA,
+    expected_shaping_state_sha256: SHA256_SCHEMA,
+  })
+  .superRefine(validateShapingLaunchInput);
+
+const requestShapingChangesInputSchema = z
+  .strictObject({
+    ...shapingLaunchInputShape,
+    expected_mission_content_sha256: SHA256_SCHEMA,
+    expected_result_content_sha256: SHA256_SCHEMA,
+    expected_shaping_state_sha256: SHA256_SCHEMA,
+    feedback: nonEmptyTrimmedStringSchema,
+  })
+  .superRefine(validateShapingLaunchInput);
+
+const approveSpecDecisionInputSchema = z
+  .strictObject({
+    ...shapingLaunchInputShape,
+    expected_mission_content_sha256: SHA256_SCHEMA,
+    expected_result_content_sha256: SHA256_SCHEMA,
+    expected_shaping_state_sha256: SHA256_SCHEMA,
+    goal_contract_sha256: SHA256_SCHEMA,
+  })
+  .superRefine(validateShapingLaunchInput);
+
+const replanWithUpdatedContractInputSchema = z
+  .strictObject({
+    ...shapingLaunchInputShape,
+    expected_mission_content_sha256: SHA256_SCHEMA,
+    expected_result_content_sha256: SHA256_SCHEMA,
+    expected_shaping_state_sha256: SHA256_SCHEMA,
+    goal_contract_sha256: SHA256_SCHEMA,
+  })
+  .superRefine(validateShapingLaunchInput);
+
+export type StartBrainstormDecisionInput = z.input<
+  typeof startBrainstormDecisionInputSchema
+>;
+export type ShapingResultDecisionInput = z.input<
+  typeof shapingResultDecisionInputSchema
+>;
+export type RequestShapingChangesInput = z.input<
+  typeof requestShapingChangesInputSchema
+>;
+export type ApproveSpecDecisionInput = z.input<
+  typeof approveSpecDecisionInputSchema
+>;
+export type ReplanWithUpdatedContractInput = z.input<
+  typeof replanWithUpdatedContractInputSchema
+>;
+
+export interface ShapingDecisionControllerResult {
+  work_item: WorkItem;
+  manifest: ShapingDecisionManifestV1;
+  intent: ShapingDecisionIntentV1;
+  decision_id: string;
+  launch_mode: "connected" | "manual";
+  next_requested_model: string | null;
+  launch_fingerprint: string | null;
+  next_mission: {
+    identity: ShapingIdentity;
+    content_sha256: string;
+  };
+  next_launch:
+    | {
+        status: "manual";
+        shaping_run_id: null;
+        reason: "founder_selected_manual";
+      }
+    | null;
+}
+
+interface ShapingDecisionRepository extends ControllerWorkItemRepository {
+  listShapingArtifacts(workItemId: string): Promise<StoredShapingArtifact[]>;
+  listShapingRuns(workItemId: string): Promise<ShapingRunRecordV1[]>;
+  writeShapingDecisionReceipt<TReceipt extends ShapingDecisionReceipt>(
+    receipt: TReceipt,
+  ): Promise<ShapingReceiptWriteResult<TReceipt>>;
+}
+
+interface ShapingDecisionBinding {
+  operation: ShapingDecisionOperation;
+  work_item_id: string;
+  goal_input_sha256: string;
+  mission_content_sha256: string | null;
+  result_content_sha256: string | null;
+  feedback_sha256: string | null;
+  expected_shaping_state_sha256: string;
+  launch_mode: "connected" | "manual";
+  next_requested_model: string | null;
+}
+
+interface PreparedShapingDecision {
+  phase_from: "idea" | ShapingPhase;
+  phase_to: ShapingPhase;
+  next_goal?: WorkItem["goal"];
+  next_state: WorkItem["state"];
+  next_mission: ShapingMissionPackage;
+  decision_receipt: ShapingDecisionReceipt | null;
+  plan_repository_base_commit: string | null;
+  plan_goal_contract_sha256: string | null;
+  plan_goal_version: number | null;
+}
 
 export interface ImportExternalResultResult extends ControllerMutationResult {
   evidence: ImportEvidenceSummary;
@@ -243,6 +431,281 @@ export class WorkItemController {
     private readonly git: GitVerificationAdapter,
     private readonly verificationRunner: VerificationRunner,
   ) {}
+
+  async startBrainstorm(
+    workItemId: string,
+    input: StartBrainstormDecisionInput,
+  ): Promise<ShapingDecisionControllerResult> {
+    return this.executeShapingDecision(
+      workItemId,
+      "start_brainstorm",
+      startBrainstormDecisionInputSchema.parse(input),
+    );
+  }
+
+  async requestShapingChanges(
+    workItemId: string,
+    input: RequestShapingChangesInput,
+  ): Promise<ShapingDecisionControllerResult> {
+    return this.executeShapingDecision(
+      workItemId,
+      "request_changes",
+      requestShapingChangesInputSchema.parse(input),
+    );
+  }
+
+  async useBrainstormResult(
+    workItemId: string,
+    input: ShapingResultDecisionInput,
+  ): Promise<ShapingDecisionControllerResult> {
+    return this.executeShapingDecision(
+      workItemId,
+      "use_brainstorm_result",
+      shapingResultDecisionInputSchema.parse(input),
+    );
+  }
+
+  async approveSpecResult(
+    workItemId: string,
+    input: ApproveSpecDecisionInput,
+  ): Promise<ShapingDecisionControllerResult> {
+    return this.executeShapingDecision(
+      workItemId,
+      "approve_spec",
+      approveSpecDecisionInputSchema.parse(input),
+    );
+  }
+
+  async replanWithUpdatedContract(
+    workItemId: string,
+    input: ReplanWithUpdatedContractInput,
+  ): Promise<ShapingDecisionControllerResult> {
+    return this.executeShapingDecision(
+      workItemId,
+      "replan_with_updated_contract",
+      replanWithUpdatedContractInputSchema.parse(input),
+    );
+  }
+
+  private async executeShapingDecision(
+    workItemId: string,
+    operation: ShapingDecisionOperation,
+    input:
+      | z.output<typeof startBrainstormDecisionInputSchema>
+      | z.output<typeof shapingResultDecisionInputSchema>
+      | z.output<typeof requestShapingChangesInputSchema>
+      | z.output<typeof approveSpecDecisionInputSchema>
+      | z.output<typeof replanWithUpdatedContractInputSchema>,
+  ): Promise<ShapingDecisionControllerResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const repository = this.shapingRepository();
+    const preLockItem = await repository.read(validatedId);
+    if (preLockItem === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    const feedbackSha256 =
+      operation === "request_changes"
+        ? this.hashSource(
+            requestShapingChangesInputSchema.parse(input).feedback,
+          )
+        : null;
+    const binding: ShapingDecisionBinding = {
+      operation,
+      work_item_id: validatedId,
+      goal_input_sha256: hashGoalInput({
+        title: preLockItem.goal.title,
+        notes: preLockItem.goal.notes,
+      }),
+      mission_content_sha256: input.expected_mission_content_sha256,
+      result_content_sha256: input.expected_result_content_sha256,
+      feedback_sha256: feedbackSha256,
+      expected_shaping_state_sha256: input.expected_shaping_state_sha256,
+      launch_mode: input.launch_mode,
+      next_requested_model: input.next_requested_model,
+    };
+    const decisionId = deriveShapingDecisionId({
+      operation: binding.operation,
+      work_item_id: binding.work_item_id,
+      goal_input_sha256: binding.goal_input_sha256,
+      mission_content_sha256: binding.mission_content_sha256,
+      result_content_sha256: binding.result_content_sha256,
+      feedback_sha256: binding.feedback_sha256,
+      expected_shaping_state_sha256:
+        binding.expected_shaping_state_sha256,
+    });
+    const idempotencyKey = `${validatedId}:shaping-decision:${decisionId}`;
+    const activeRun = this.activeRun(
+      deriveControllerRunId(idempotencyKey, "shaping-decision"),
+      idempotencyKey,
+    );
+    const lease = await repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const storedManifest = await repository.readShapingDecisionManifest(
+        validatedId,
+        decisionId,
+      );
+      if (storedManifest?.outcome === "applied") {
+        const storedIntent = await this.requireShapingDecisionIntent(
+          repository,
+          binding,
+          decisionId,
+        );
+        this.assertShapingDecisionManifestMatchesIntent(
+          storedManifest,
+          storedIntent,
+        );
+        return this.shapingDecisionResult(
+          this.workItemFromShapingIntent(storedIntent),
+          storedManifest,
+          storedIntent,
+        );
+      }
+      if (storedManifest?.outcome === "failed") {
+        throw this.conflict(
+          "idempotency_conflict",
+          validatedId,
+          `Shaping decision ${decisionId} is already failed.`,
+        );
+      }
+
+      const storedIntent = await repository.readShapingDecisionIntent(
+        validatedId,
+        decisionId,
+      );
+      if (storedIntent !== null) {
+        this.assertShapingDecisionIntentMatchesBinding(storedIntent, binding);
+        if (storedManifest?.outcome === "pending") {
+          this.assertShapingDecisionManifestMatchesIntent(
+            storedManifest,
+            storedIntent,
+          );
+          const reconciled =
+            await repository.reconcileShapingDecisionCommit(
+              lease,
+              decisionId,
+            );
+          return this.shapingDecisionResult(
+            reconciled.work_item,
+            reconciled.manifest,
+            storedIntent,
+          );
+        }
+        await this.assertResumableShapingIntent(
+          repository,
+          lease.work_item,
+          storedIntent,
+        );
+        return await this.materializeShapingDecision(
+          repository,
+          lease,
+          storedIntent,
+        );
+      }
+      if (storedManifest !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Shaping decision ${decisionId} has a manifest but no durable intent.`,
+        );
+      }
+
+      const artifacts = await repository.listShapingArtifacts(validatedId);
+      const runs = await repository.listShapingRuns(validatedId);
+      const currentShapingState = this.shapingDecisionState(
+        lease.work_item,
+        artifacts,
+        runs,
+      );
+      if (
+        hashShapingDecisionState(currentShapingState) !==
+        binding.expected_shaping_state_sha256
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "Expected shaping state does not match the durable work item and artifact tip.",
+        );
+      }
+
+      const prepared = await this.prepareShapingDecision(
+        operation,
+        lease.work_item,
+        artifacts,
+        input,
+      );
+      const missionBytes = serializeShapingPackage(prepared.next_mission);
+      const receiptBytes =
+        prepared.decision_receipt === null
+          ? null
+          : this.serializeDecisionReceipt(prepared.decision_receipt);
+      const launchFingerprint =
+        binding.next_requested_model === null
+          ? null
+          : shapingRunLaunchFingerprint(
+              prepared.next_mission.content_sha256,
+              binding.next_requested_model,
+            );
+      const writtenIntent = await repository.writeShapingDecisionIntent(
+        lease,
+        {
+          intent: {
+            schema_version: 1,
+            work_item_id: validatedId,
+            operation,
+            launch_mode: binding.launch_mode,
+            phase_from: prepared.phase_from,
+            phase_to: prepared.phase_to,
+            goal_input_sha256: binding.goal_input_sha256,
+            mission_content_sha256: binding.mission_content_sha256,
+            result_content_sha256: binding.result_content_sha256,
+            feedback_sha256: binding.feedback_sha256,
+            expected_shaping_state_sha256:
+              binding.expected_shaping_state_sha256,
+            next_requested_model: binding.next_requested_model,
+            next_mission_content_sha256:
+              prepared.next_mission.content_sha256,
+            next_mission_input_sha256:
+              prepared.next_mission.identity.input_sha256,
+            plan_repository_base_commit:
+              prepared.plan_repository_base_commit,
+            plan_goal_contract_sha256:
+              prepared.plan_goal_contract_sha256,
+            plan_goal_version: prepared.plan_goal_version,
+            launch_fingerprint: launchFingerprint,
+            decision_receipt_bytes: receiptBytes,
+            next_mission_package_bytes: missionBytes,
+          },
+          ...(prepared.next_goal === undefined
+            ? {}
+            : { goal: prepared.next_goal }),
+          state: prepared.next_state,
+        },
+      );
+      return await this.materializeShapingDecision(
+        repository,
+        lease,
+        writtenIntent.intent,
+      );
+    } finally {
+      await repository.releaseControllerLease(lease);
+    }
+  }
 
   async saveWorkItem(
     workItemId: string,
@@ -3197,6 +3660,1000 @@ export class WorkItemController {
         "Historical mission packages are read-only and cannot drive an active controller operation.",
       );
     }
+  }
+
+  private shapingRepository(): ShapingDecisionRepository {
+    return this.repository as ShapingDecisionRepository;
+  }
+
+  private async prepareShapingDecision(
+    operation: ShapingDecisionOperation,
+    item: WorkItem,
+    artifacts: StoredShapingArtifact[],
+    input:
+      | z.output<typeof startBrainstormDecisionInputSchema>
+      | z.output<typeof shapingResultDecisionInputSchema>
+      | z.output<typeof requestShapingChangesInputSchema>
+      | z.output<typeof approveSpecDecisionInputSchema>
+      | z.output<typeof replanWithUpdatedContractInputSchema>,
+  ): Promise<PreparedShapingDecision> {
+    const workItemId = item.goal.work_item_id;
+    if (item.state.status !== "active" || item.state.schema_version !== 2) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Shaping decisions require an active schema-v2 work item.",
+      );
+    }
+    const goalInput = normalizeShapingGoalInput(item.goal);
+
+    if (operation === "start_brainstorm") {
+      if (item.state.phase !== "idea") {
+        throw this.conflict(
+          "stale_expectation",
+          workItemId,
+          "Start Brainstorm requires the durable item to remain in Idea.",
+        );
+      }
+      if (
+        item.goal.goal_contract !== undefined ||
+        item.state.goal_version !== undefined ||
+        item.state.input_revision !== undefined
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          workItemId,
+          "Start Brainstorm requires an ungoverned Idea item.",
+        );
+      }
+      if (artifacts.length !== 0) {
+        throw this.conflict(
+          "stale_expectation",
+          workItemId,
+          "Start Brainstorm requires no existing shaping mission.",
+        );
+      }
+      return {
+        phase_from: "idea",
+        phase_to: "brainstorm",
+        next_state: workItemStateSchema.parse({
+          ...item.state,
+          phase: "brainstorm",
+          updated_at: nextTimestamp(item.state.updated_at, this.clock),
+        }),
+        next_mission: compileBrainstormMission({
+          work_item_id: workItemId,
+          shaping_input: { phase: "brainstorm", ...goalInput },
+        }),
+        decision_receipt: null,
+        plan_repository_base_commit: null,
+        plan_goal_contract_sha256: null,
+        plan_goal_version: null,
+      };
+    }
+
+    if (operation === "request_changes") {
+      const validated = requestShapingChangesInputSchema.parse(input);
+      const phase = this.requireShapingPhase(item);
+      const artifact = this.requireBoundAppliedShapingTip(
+        workItemId,
+        phase,
+        artifacts,
+        validated.expected_mission_content_sha256,
+        validated.expected_result_content_sha256,
+      );
+      if (phase === "plan") {
+        this.assertPlanMissionUsesCurrentContract(item, artifact);
+      }
+      const revision = {
+        ordinal: (artifact.mission.input.revision?.ordinal ?? 0) + 1,
+        supersedes_input_sha256:
+          artifact.mission.identity.input_sha256,
+        superseded_result_sha256:
+          validated.expected_result_content_sha256,
+        feedback: validated.feedback,
+      };
+      let nextMission: ShapingMissionPackage;
+      switch (phase) {
+        case "brainstorm": {
+          const currentMission =
+            artifact.mission as BrainstormMissionPackage;
+          nextMission = compileBrainstormMission({
+            work_item_id: workItemId,
+            shaping_input: {
+              ...currentMission.input,
+              ...goalInput,
+              phase,
+              revision,
+            },
+          });
+          break;
+        }
+        case "spec": {
+          const currentMission = artifact.mission as SpecMissionPackage;
+          nextMission = compileSpecMission({
+            work_item_id: workItemId,
+            shaping_input: {
+              ...currentMission.input,
+              ...goalInput,
+              phase,
+              revision,
+            },
+          });
+          break;
+        }
+        case "plan": {
+          const currentMission = artifact.mission as PlanMissionPackage;
+          nextMission = compilePlanMission({
+            work_item_id: workItemId,
+            shaping_input: {
+              ...currentMission.input,
+              ...goalInput,
+              phase,
+              revision,
+            },
+          });
+          break;
+        }
+      }
+      const nextPlanMission =
+        phase === "plan" ? (nextMission as PlanMissionPackage) : null;
+      return {
+        phase_from: phase,
+        phase_to: phase,
+        next_state: workItemStateSchema.parse({
+          ...item.state,
+          updated_at: nextTimestamp(item.state.updated_at, this.clock),
+        }),
+        next_mission: nextMission,
+        decision_receipt: null,
+        plan_repository_base_commit:
+          nextPlanMission?.input.repository_base_commit ?? null,
+        plan_goal_contract_sha256:
+          nextPlanMission?.input.goal_contract_sha256 ?? null,
+        plan_goal_version: nextPlanMission?.input.goal_version ?? null,
+      };
+    }
+
+    if (operation === "use_brainstorm_result") {
+      const validated = shapingResultDecisionInputSchema.parse(input);
+      this.requirePhase(item, "brainstorm");
+      this.requireUngovernedShapingItem(item);
+      const artifact = this.requireBoundAppliedShapingTip(
+        workItemId,
+        "brainstorm",
+        artifacts,
+        validated.expected_mission_content_sha256,
+        validated.expected_result_content_sha256,
+      );
+      if (artifact.decision !== null) {
+        throw this.conflict(
+          "stale_expectation",
+          workItemId,
+          "The Brainstorm revision already carries a decision receipt.",
+        );
+      }
+      const result = brainstormResultSubmissionSchema.parse(
+        JSON.parse(artifact.result!.result_source) as unknown,
+      );
+      const receipt: ShapingDecisionReceipt = {
+        shaping_schema_version: 2,
+        identity: result.identity,
+        mission_content_sha256:
+          validated.expected_mission_content_sha256,
+        result_content_sha256: validated.expected_result_content_sha256,
+        selected_at: this.clock().toISOString(),
+      };
+      const nextMission = compileSpecMission({
+        work_item_id: workItemId,
+        shaping_input: {
+          phase: "spec",
+          ...goalInput,
+          brainstorm_selection_sha256: this.hashSource(
+            this.serializeDecisionReceipt(receipt),
+          ),
+          brainstorm_selection: receipt,
+          brainstorm_result: result,
+        },
+      });
+      return {
+        phase_from: "brainstorm",
+        phase_to: "spec",
+        next_state: workItemStateSchema.parse({
+          ...item.state,
+          phase: "spec",
+          updated_at: nextTimestamp(item.state.updated_at, this.clock),
+        }),
+        next_mission: nextMission,
+        decision_receipt: receipt,
+        plan_repository_base_commit: null,
+        plan_goal_contract_sha256: null,
+        plan_goal_version: null,
+      };
+    }
+
+    if (operation === "approve_spec") {
+      const validated = approveSpecDecisionInputSchema.parse(input);
+      this.requirePhase(item, "spec");
+      const artifact = this.requireBoundAppliedShapingTip(
+        workItemId,
+        "spec",
+        artifacts,
+        validated.expected_mission_content_sha256,
+        validated.expected_result_content_sha256,
+      );
+      if (artifact.decision !== null) {
+        throw this.conflict(
+          "stale_expectation",
+          workItemId,
+          "The Spec revision already carries a decision receipt.",
+        );
+      }
+      const result = specResultSubmissionSchema.parse(
+        JSON.parse(artifact.result!.result_source) as unknown,
+      );
+      const nextGoalVersion = this.incrementVersion(
+        item.goal.goal_contract?.goal_version ?? 0,
+        workItemId,
+        "goal_version",
+      );
+      const nextInputRevision = this.incrementVersion(
+        item.state.input_revision ?? 0,
+        workItemId,
+        "input_revision",
+      );
+      const goalContract = goalContractFromSpecProposal(
+        result.proposal,
+        nextGoalVersion,
+      );
+      const goalContractSha256 = hashGoalContract(goalContract);
+      if (goalContractSha256 !== validated.goal_contract_sha256) {
+        throw this.conflict(
+          "stale_expectation",
+          workItemId,
+          "The approved Spec no longer derives the expected goal contract.",
+        );
+      }
+      const receipt: ShapingDecisionReceipt = {
+        shaping_schema_version: 2,
+        identity: result.identity,
+        mission_content_sha256:
+          validated.expected_mission_content_sha256,
+        result_content_sha256: validated.expected_result_content_sha256,
+        goal_contract_sha256: goalContractSha256,
+        approved_at: this.clock().toISOString(),
+      };
+      const repositoryBaseCommit = await this.git.readHeadCommit();
+      const nextMission = compilePlanMission({
+        work_item_id: workItemId,
+        shaping_input: {
+          phase: "plan",
+          ...goalInput,
+          spec_approval_sha256: this.hashSource(
+            this.serializeDecisionReceipt(receipt),
+          ),
+          spec_approval: receipt,
+          spec_result: result,
+          repository_base_commit: repositoryBaseCommit,
+          goal_contract_sha256: goalContractSha256,
+          goal_version: nextGoalVersion,
+        },
+      });
+      return {
+        phase_from: "spec",
+        phase_to: "plan",
+        next_goal: workItemGoalSchema.parse({
+          ...item.goal,
+          goal_contract: goalContract,
+        }),
+        next_state: workItemStateSchema.parse({
+          ...item.state,
+          phase: "plan",
+          goal_version: nextGoalVersion,
+          input_revision: nextInputRevision,
+          attempt: 0,
+          patch_cycle: 0,
+          updated_at: nextTimestamp(item.state.updated_at, this.clock),
+        }),
+        next_mission: nextMission,
+        decision_receipt: receipt,
+        plan_repository_base_commit: repositoryBaseCommit,
+        plan_goal_contract_sha256: goalContractSha256,
+        plan_goal_version: nextGoalVersion,
+      };
+    }
+
+    const validated = replanWithUpdatedContractInputSchema.parse(input);
+    this.requirePhase(item, "plan");
+    const artifact = this.requireBoundAppliedShapingTip(
+      workItemId,
+      "plan",
+      artifacts,
+      validated.expected_mission_content_sha256,
+      validated.expected_result_content_sha256,
+    );
+    const currentPlanMission = artifact.mission as PlanMissionPackage;
+    planResultSubmissionSchema.parse(
+      JSON.parse(artifact.result!.result_source) as unknown,
+    );
+    const goalContract = item.goal.goal_contract;
+    const goalVersion = item.state.goal_version;
+    if (
+      goalContract === undefined ||
+      goalVersion === undefined ||
+      item.state.input_revision === undefined ||
+      goalContract.goal_version !== goalVersion
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Replan requires one current governed goal contract.",
+      );
+    }
+    const goalContractSha256 = hashGoalContract(goalContract);
+    if (goalContractSha256 !== validated.goal_contract_sha256) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Replan is bound to a stale goal contract.",
+      );
+    }
+    if (
+      currentPlanMission.input.goal_contract_sha256 === goalContractSha256 &&
+      currentPlanMission.input.goal_version === goalVersion
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "The current Plan revision is already bound to the durable contract.",
+      );
+    }
+    const repositoryBaseCommit = await this.git.readHeadCommit();
+    const nextMission = compilePlanMission({
+      work_item_id: workItemId,
+      shaping_input: {
+        ...currentPlanMission.input,
+        ...goalInput,
+        phase: "plan",
+        repository_base_commit: repositoryBaseCommit,
+        goal_contract_sha256: goalContractSha256,
+        goal_version: goalVersion,
+        revision: {
+          ordinal: (currentPlanMission.input.revision?.ordinal ?? 0) + 1,
+          supersedes_input_sha256:
+            artifact.mission.identity.input_sha256,
+          superseded_result_sha256:
+            validated.expected_result_content_sha256,
+          feedback: `Replan for updated goal contract version ${goalVersion} (${goalContractSha256}).`,
+        },
+      },
+    });
+    return {
+      phase_from: "plan",
+      phase_to: "plan",
+      next_state: workItemStateSchema.parse({
+        ...item.state,
+        updated_at: nextTimestamp(item.state.updated_at, this.clock),
+      }),
+      next_mission: nextMission,
+      decision_receipt: null,
+      plan_repository_base_commit: repositoryBaseCommit,
+      plan_goal_contract_sha256: goalContractSha256,
+      plan_goal_version: goalVersion,
+    };
+  }
+
+  private shapingDecisionState(
+    item: WorkItem,
+    artifacts: StoredShapingArtifact[],
+    runs: ShapingRunRecordV1[],
+  ): ShapingDecisionState {
+    const phase = item.state.phase;
+    const tip =
+      phase === "brainstorm" || phase === "spec" || phase === "plan"
+        ? this.resolveShapingTip(item.goal.work_item_id, phase, artifacts)
+        : null;
+    const nonTerminalRuns = runs.filter(
+      (run) => run.lifecycle.status !== "terminal",
+    );
+    const currentRuns =
+      tip === null
+        ? []
+        : nonTerminalRuns.filter(
+            (run) =>
+              run.mission.phase === tip.mission.identity.phase &&
+              run.mission.input_sha256 ===
+                tip.mission.identity.input_sha256 &&
+              run.mission.content_sha256 === tip.mission.content_sha256,
+          );
+    if (
+      currentRuns.length > 1 ||
+      nonTerminalRuns.length !== currentRuns.length
+    ) {
+      throw this.conflict(
+        "repair_required",
+        item.goal.work_item_id,
+        "Shaping state has an ambiguous non-terminal run.",
+      );
+    }
+    return {
+      work_item_id: item.goal.work_item_id,
+      phase,
+      status: item.state.status,
+      goal_input_sha256: hashGoalInput({
+        title: item.goal.title,
+        notes: item.goal.notes,
+      }),
+      goal_version: item.state.goal_version ?? null,
+      input_revision: item.state.input_revision ?? null,
+      goal_contract_sha256:
+        item.goal.goal_contract === undefined
+          ? null
+          : hashGoalContract(item.goal.goal_contract),
+      current_mission_input_sha256:
+        tip?.mission.identity.input_sha256 ?? null,
+      current_mission_content_sha256: tip?.mission.content_sha256 ?? null,
+      applied_result_content_sha256:
+        tip?.result?.result_content_sha256 ?? null,
+      decision_receipt_sha256:
+        tip?.decision?.decision_content_sha256 ?? null,
+      active_shaping_run_id: currentRuns[0]?.shaping_run_id ?? null,
+    };
+  }
+
+  private resolveShapingTip(
+    workItemId: string,
+    phase: ShapingPhase,
+    artifacts: StoredShapingArtifact[],
+  ): StoredShapingArtifact | null {
+    const phaseArtifacts = artifacts.filter(
+      (artifact) => artifact.mission.identity.phase === phase,
+    );
+    if (phaseArtifacts.length === 0) {
+      return null;
+    }
+    const byInput = new Map<string, StoredShapingArtifact>();
+    for (const artifact of phaseArtifacts) {
+      const inputSha256 = artifact.mission.identity.input_sha256;
+      if (byInput.has(inputSha256)) {
+        throw this.conflict(
+          "repair_required",
+          workItemId,
+          `Shaping phase ${phase} contains duplicate mission identity ${inputSha256}.`,
+        );
+      }
+      byInput.set(inputSha256, artifact);
+    }
+    const superseded = new Set<string>();
+    for (const artifact of phaseArtifacts) {
+      const revision = artifact.mission.input.revision;
+      if (revision === undefined) {
+        continue;
+      }
+      const predecessor = byInput.get(revision.supersedes_input_sha256);
+      const expectedOrdinal =
+        (predecessor?.mission.input.revision?.ordinal ?? 0) + 1;
+      if (
+        predecessor === undefined ||
+        revision.ordinal !== expectedOrdinal ||
+        predecessor.result === null ||
+        predecessor.result.result_content_sha256 !==
+          revision.superseded_result_sha256
+      ) {
+        throw this.conflict(
+          "repair_required",
+          workItemId,
+          `Shaping revision ${artifact.mission.identity.input_sha256} has an invalid predecessor.`,
+        );
+      }
+      superseded.add(revision.supersedes_input_sha256);
+    }
+    const tips = phaseArtifacts.filter(
+      (artifact) =>
+        !superseded.has(artifact.mission.identity.input_sha256),
+    );
+    if (tips.length !== 1) {
+      throw this.conflict(
+        "repair_required",
+        workItemId,
+        `Shaping phase ${phase} must have exactly one revision tip; found ${tips.length}.`,
+      );
+    }
+    return tips[0];
+  }
+
+  private requireBoundAppliedShapingTip(
+    workItemId: string,
+    phase: ShapingPhase,
+    artifacts: StoredShapingArtifact[],
+    missionContentSha256: string,
+    resultContentSha256: string,
+  ): StoredShapingArtifact {
+    const tip = this.resolveShapingTip(workItemId, phase, artifacts);
+    if (
+      tip === null ||
+      tip.mission.content_sha256 !== missionContentSha256 ||
+      tip.result?.result_content_sha256 !== resultContentSha256 ||
+      tip.import_receipt?.outcome !== "applied" ||
+      tip.applied_marker === null
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        `The bound ${phase} mission is not the tip with its applied result.`,
+      );
+    }
+    return tip;
+  }
+
+  private requirePhase(item: WorkItem, phase: ShapingPhase): void {
+    if (item.state.phase !== phase) {
+      throw this.conflict(
+        "stale_expectation",
+        item.goal.work_item_id,
+        `Expected shaping phase ${phase} but found ${item.state.phase}.`,
+      );
+    }
+  }
+
+  private requireShapingPhase(item: WorkItem): ShapingPhase {
+    const phase = item.state.phase;
+    if (phase !== "brainstorm" && phase !== "spec" && phase !== "plan") {
+      throw this.conflict(
+        "stale_expectation",
+        item.goal.work_item_id,
+        `Request changes requires a shaping phase; found ${phase}.`,
+      );
+    }
+    return phase;
+  }
+
+  private requireUngovernedShapingItem(item: WorkItem): void {
+    if (
+      item.goal.goal_contract !== undefined ||
+      item.state.goal_version !== undefined ||
+      item.state.input_revision !== undefined
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        item.goal.work_item_id,
+        "This shaping decision requires an item without a governed goal contract.",
+      );
+    }
+  }
+
+  private assertPlanMissionUsesCurrentContract(
+    item: WorkItem,
+    artifact: StoredShapingArtifact,
+  ): void {
+    const mission = artifact.mission as PlanMissionPackage;
+    if (
+      artifact.mission.identity.phase !== "plan" ||
+      item.goal.goal_contract === undefined ||
+      item.state.goal_version === undefined ||
+      mission.input.goal_contract_sha256 !==
+        hashGoalContract(item.goal.goal_contract) ||
+      mission.input.goal_version !== item.state.goal_version
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        item.goal.work_item_id,
+        "The Plan decision is bound to a superseded goal contract.",
+      );
+    }
+  }
+
+  private async requireShapingDecisionIntent(
+    repository: ShapingDecisionRepository,
+    binding: ShapingDecisionBinding,
+    decisionId: string,
+  ): Promise<ShapingDecisionIntentV1> {
+    const intent = await repository.readShapingDecisionIntent(
+      binding.work_item_id,
+      decisionId,
+    );
+    if (intent === null) {
+      throw this.conflict(
+        "repair_required",
+        binding.work_item_id,
+        `Applied shaping decision ${decisionId} has no durable intent.`,
+      );
+    }
+    this.assertShapingDecisionIntentMatchesBinding(intent, binding);
+    return intent;
+  }
+
+  private assertShapingDecisionIntentMatchesBinding(
+    intent: ShapingDecisionIntentV1,
+    binding: ShapingDecisionBinding,
+  ): void {
+    const expectedDecisionId = deriveShapingDecisionId({
+      operation: binding.operation,
+      work_item_id: binding.work_item_id,
+      goal_input_sha256: binding.goal_input_sha256,
+      mission_content_sha256: binding.mission_content_sha256,
+      result_content_sha256: binding.result_content_sha256,
+      feedback_sha256: binding.feedback_sha256,
+      expected_shaping_state_sha256:
+        binding.expected_shaping_state_sha256,
+    });
+    const identityMatches =
+      intent.decision_id === expectedDecisionId &&
+      intent.operation === binding.operation &&
+      intent.work_item_id === binding.work_item_id &&
+      intent.goal_input_sha256 === binding.goal_input_sha256 &&
+      intent.mission_content_sha256 === binding.mission_content_sha256 &&
+      intent.result_content_sha256 === binding.result_content_sha256 &&
+      intent.feedback_sha256 === binding.feedback_sha256 &&
+      intent.expected_shaping_state_sha256 ===
+        binding.expected_shaping_state_sha256;
+    if (!identityMatches) {
+      throw this.conflict(
+        "idempotency_conflict",
+        binding.work_item_id,
+        `Stored shaping intent ${intent.decision_id} does not match the decision request.`,
+      );
+    }
+    if (
+      intent.launch_mode !== binding.launch_mode ||
+      intent.next_requested_model !== binding.next_requested_model
+    ) {
+      throw this.conflict(
+        "idempotency_conflict",
+        binding.work_item_id,
+        "A shaping decision replay cannot change its launch mode or requested model.",
+      );
+    }
+  }
+
+  private assertShapingDecisionManifestMatchesIntent(
+    manifest: ShapingDecisionManifestV1,
+    intent: ShapingDecisionIntentV1,
+  ): void {
+    const manifestIdentity = {
+      schema_version: manifest.schema_version,
+      decision_id: manifest.decision_id,
+      work_item_id: manifest.work_item_id,
+      operation: manifest.operation,
+      phase_from: manifest.phase_from,
+      phase_to: manifest.phase_to,
+      mission_content_sha256: manifest.mission_content_sha256,
+      result_content_sha256: manifest.result_content_sha256,
+      feedback_sha256: manifest.feedback_sha256,
+      expected_shaping_state_sha256:
+        manifest.expected_shaping_state_sha256,
+      next_mission_content_sha256:
+        manifest.next_mission_content_sha256,
+      goal_sha256: manifest.goal_sha256,
+      state_sha256: manifest.state_sha256,
+      goal_version: manifest.goal_version,
+      input_revision: manifest.input_revision,
+    };
+    const intentIdentity = {
+      schema_version: 1 as const,
+      decision_id: intent.decision_id,
+      work_item_id: intent.work_item_id,
+      operation: intent.operation,
+      phase_from: intent.phase_from,
+      phase_to: intent.phase_to,
+      mission_content_sha256: intent.mission_content_sha256,
+      result_content_sha256: intent.result_content_sha256,
+      feedback_sha256: intent.feedback_sha256,
+      expected_shaping_state_sha256:
+        intent.expected_shaping_state_sha256,
+      next_mission_content_sha256:
+        intent.next_mission_content_sha256,
+      goal_sha256: intent.next_goal_sha256,
+      state_sha256: intent.next_state_sha256,
+      goal_version:
+        intent.operation === "approve_spec"
+          ? intent.plan_goal_version
+          : null,
+      input_revision:
+        intent.operation === "approve_spec"
+          ? this.workItemFromShapingIntent(intent).state.input_revision ?? null
+          : null,
+    };
+    if (!isDeepStrictEqual(manifestIdentity, intentIdentity)) {
+      throw this.conflict(
+        "idempotency_conflict",
+        intent.work_item_id,
+        `Stored shaping manifest ${manifest.decision_id} differs from its intent.`,
+      );
+    }
+  }
+
+  private async assertResumableShapingIntent(
+    repository: ShapingDecisionRepository,
+    currentItem: WorkItem,
+    intent: ShapingDecisionIntentV1,
+  ): Promise<void> {
+    const previousItem = this.workItemFromShapingBytes(
+      intent.previous_goal_bytes,
+      intent.previous_state_bytes,
+    );
+    const nextItem = this.workItemFromShapingIntent(intent);
+    const currentWithoutRun = this.withoutControllerActiveRun(currentItem);
+    const previousWithoutRun = this.withoutControllerActiveRun(previousItem);
+    const nextWithoutRun = this.withoutControllerActiveRun(nextItem);
+    const isPrevious = isDeepStrictEqual(
+      currentWithoutRun,
+      previousWithoutRun,
+    );
+    const isNext = isDeepStrictEqual(currentWithoutRun, nextWithoutRun);
+    if (!isPrevious && !isNext) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "Durable work-item state is neither the previous nor next pair recorded by the shaping intent.",
+      );
+    }
+    if (isNext) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "A shaping intent reached its next goal/state pair without a pending or applied manifest.",
+      );
+    }
+
+    let artifacts: StoredShapingArtifact[];
+    try {
+      artifacts = await repository.listShapingArtifacts(
+        intent.work_item_id,
+      );
+    } catch (error) {
+      if (error instanceof InvalidWorkspaceError) {
+        throw this.conflict(
+          "repair_required",
+          intent.work_item_id,
+          `The pending shaping decision found a non-identical durable artifact: ${error.message}`,
+        );
+      }
+      throw error;
+    }
+    let predictedMissionCount = 0;
+    const reconstructedArtifacts = artifacts.flatMap((artifact) => {
+      if (
+        artifact.mission.content_sha256 ===
+        intent.next_mission_content_sha256
+      ) {
+        predictedMissionCount += 1;
+        return [];
+      }
+      if (
+        intent.decision_receipt_bytes !== null &&
+        artifact.mission.content_sha256 === intent.mission_content_sha256
+      ) {
+        if (
+          artifact.decision !== null &&
+          this.serializeDecisionReceipt(artifact.decision.receipt) !==
+            intent.decision_receipt_bytes
+        ) {
+          throw this.conflict(
+            "idempotency_conflict",
+            intent.work_item_id,
+            "The stored shaping decision receipt differs from the pending intent.",
+          );
+        }
+        return [{ ...artifact, decision: null }];
+      }
+      return [artifact];
+    });
+    if (predictedMissionCount > 1) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "More than one mission matches the pending intent's predicted content hash.",
+      );
+    }
+
+    const runs = await repository.listShapingRuns(intent.work_item_id);
+    const reconstructedRuns = runs.filter((run) => {
+      if (
+        run.mission.content_sha256 !==
+          intent.next_mission_content_sha256 ||
+        run.lifecycle.status === "terminal"
+      ) {
+        return true;
+      }
+      const requestedModel = run.provenance.requested_model.value;
+      const fingerprint =
+        requestedModel === null
+          ? null
+          : shapingRunLaunchFingerprint(
+              run.mission.content_sha256,
+              requestedModel,
+            );
+      if (fingerprint !== intent.launch_fingerprint) {
+        throw this.conflict(
+          "lease_held",
+          intent.work_item_id,
+          "A different active shaping run conflicts with the pending decision.",
+        );
+      }
+      return false;
+    });
+    const reconstructedState = this.shapingDecisionState(
+      previousWithoutRun,
+      reconstructedArtifacts,
+      reconstructedRuns,
+    );
+    if (
+      hashShapingDecisionState(reconstructedState) !==
+      intent.expected_shaping_state_sha256
+    ) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "Durable artifacts contain drift beyond the exact receipt and mission predicted by the shaping intent.",
+      );
+    }
+  }
+
+  private async materializeShapingDecision(
+    repository: ShapingDecisionRepository,
+    lease: ControllerLease,
+    intent: ShapingDecisionIntentV1,
+  ): Promise<ShapingDecisionControllerResult> {
+    if (intent.decision_receipt_bytes !== null) {
+      const parsedReceipt = shapingDecisionReceiptSchema.parse(
+        JSON.parse(intent.decision_receipt_bytes) as unknown,
+      );
+      if (
+        this.serializeDecisionReceipt(parsedReceipt) !==
+        intent.decision_receipt_bytes
+      ) {
+        throw this.conflict(
+          "repair_required",
+          intent.work_item_id,
+          "The intent's decision receipt bytes are not canonical.",
+        );
+      }
+      const writtenReceipt =
+        await repository.writeShapingDecisionReceipt(parsedReceipt);
+      if (
+        writtenReceipt.receipt_content_sha256 !==
+        this.hashSource(intent.decision_receipt_bytes) ||
+        this.serializeDecisionReceipt(writtenReceipt.receipt) !==
+          intent.decision_receipt_bytes
+      ) {
+        throw this.conflict(
+          "idempotency_conflict",
+          intent.work_item_id,
+          "The durable decision receipt differs from the shaping intent.",
+        );
+      }
+    }
+
+    const mission = shapingMissionPackageSchema.parse(
+      JSON.parse(intent.next_mission_package_bytes) as unknown,
+    );
+    if (
+      serializeShapingPackage(mission) !==
+        intent.next_mission_package_bytes ||
+      mission.content_sha256 !== intent.next_mission_content_sha256 ||
+      mission.identity.input_sha256 !== intent.next_mission_input_sha256
+    ) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "The pending shaping mission bytes do not match their intent hashes.",
+      );
+    }
+    await repository.publishLeasedShapingMission(
+      lease,
+      mission.identity,
+      intent.next_mission_package_bytes,
+      { decision_id: intent.decision_id },
+    );
+
+    const nextItem = this.workItemFromShapingIntent(intent);
+    const pendingManifest: ShapingDecisionManifestV1 = {
+      schema_version: 1,
+      decision_id: intent.decision_id,
+      work_item_id: intent.work_item_id,
+      operation: intent.operation,
+      phase_from: intent.phase_from,
+      phase_to: intent.phase_to,
+      mission_content_sha256: intent.mission_content_sha256,
+      result_content_sha256: intent.result_content_sha256,
+      feedback_sha256: intent.feedback_sha256,
+      expected_shaping_state_sha256:
+        intent.expected_shaping_state_sha256,
+      next_mission_content_sha256:
+        intent.next_mission_content_sha256,
+      goal_sha256: intent.next_goal_sha256,
+      state_sha256: intent.next_state_sha256,
+      goal_version:
+        intent.operation === "approve_spec"
+          ? nextItem.state.goal_version ?? null
+          : null,
+      input_revision:
+        intent.operation === "approve_spec"
+          ? nextItem.state.input_revision ?? null
+          : null,
+      started_at: intent.created_at,
+      outcome: "pending",
+    };
+    const committed = await repository.commitShapingDecision(lease, {
+      ...(intent.operation === "approve_spec"
+        ? { goal: nextItem.goal }
+        : {}),
+      state: nextItem.state,
+      manifest: pendingManifest,
+    });
+    return this.shapingDecisionResult(
+      committed.work_item,
+      committed.manifest,
+      intent,
+    );
+  }
+
+  private shapingDecisionResult(
+    workItem: WorkItem,
+    manifest: ShapingDecisionManifestV1,
+    intent: ShapingDecisionIntentV1,
+  ): ShapingDecisionControllerResult {
+    const mission = shapingMissionPackageSchema.parse(
+      JSON.parse(intent.next_mission_package_bytes) as unknown,
+    );
+    return {
+      work_item: workItem,
+      manifest,
+      intent,
+      decision_id: intent.decision_id,
+      launch_mode: intent.launch_mode,
+      next_requested_model: intent.next_requested_model,
+      launch_fingerprint: intent.launch_fingerprint,
+      next_mission: {
+        identity: mission.identity,
+        content_sha256: mission.content_sha256,
+      },
+      next_launch:
+        intent.launch_mode === "manual"
+          ? {
+              status: "manual",
+              shaping_run_id: null,
+              reason: "founder_selected_manual",
+            }
+          : null,
+    };
+  }
+
+  private workItemFromShapingIntent(
+    intent: ShapingDecisionIntentV1,
+  ): WorkItem {
+    return this.workItemFromShapingBytes(
+      intent.next_goal_bytes,
+      intent.next_state_bytes,
+    );
+  }
+
+  private workItemFromShapingBytes(
+    goalBytes: string,
+    stateBytes: string,
+  ): WorkItem {
+    return workItemSchema.parse({
+      goal: workItemGoalSchema.parse(parseYaml(goalBytes) as unknown),
+      state: workItemStateSchema.parse(JSON.parse(stateBytes) as unknown),
+    });
+  }
+
+  private withoutControllerActiveRun(item: WorkItem): WorkItem {
+    const state = { ...item.state };
+    delete state.active_run;
+    return workItemSchema.parse({ goal: item.goal, state });
+  }
+
+  private serializeDecisionReceipt(
+    receipt: ShapingDecisionReceipt,
+  ): string {
+    const parsed = shapingDecisionReceiptSchema.parse(receipt);
+    return `${JSON.stringify(parsed, null, 2)}\n`;
+  }
+
+  private hashSource(source: string): string {
+    return createHash("sha256").update(source).digest("hex");
   }
 
   private activeRun(runId: string, idempotencyKey: string): ActiveRun {

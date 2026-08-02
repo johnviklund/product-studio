@@ -1,6 +1,14 @@
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { stringify } from "yaml";
@@ -42,6 +50,21 @@ import {
   type ReviewFindingLink,
   type StoredImportEvidence,
 } from "../../src/domain/result";
+import {
+  compileBrainstormMission,
+  goalContractFromSpecProposal,
+  hashGoalContract,
+  hashGoalInput,
+  hashShapingDecisionState,
+  type BrainstormMissionPackage,
+  type BrainstormResultSubmission,
+  type PlanResultSubmission,
+  type ShapingMissionPackage,
+  type ShapingPhase,
+  type SpecResultSubmission,
+  type StoredShapingArtifact,
+} from "../../src/domain/shaping";
+import { deriveManualShapingProductionId } from "../../src/domain/shaping-run";
 import type {
   GitVerificationAdapter,
   VerificationRunner,
@@ -53,7 +76,10 @@ import {
   type VerificationCommand,
   type WorkItem,
 } from "../../src/domain/work-item";
-import { ProductWorkspace } from "../../src/workspace/product-workspace";
+import {
+  ProductWorkspace,
+  type ShapingRunCreateInput,
+} from "../../src/workspace/product-workspace";
 
 const createdRoots: string[] = [];
 const fixedClock = () => new Date("2026-07-21T21:00:00.000Z");
@@ -132,9 +158,11 @@ function createController(
   });
 }
 
-async function createWorkspace(): Promise<{
+async function createWorkspaceWith<TRepository extends ProductWorkspace>(
+  createRepository: (root: string) => TRepository,
+): Promise<{
   root: string;
-  repository: ProductWorkspace;
+  repository: TRepository;
 }> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-controller-"));
   createdRoots.push(root);
@@ -164,11 +192,52 @@ async function createWorkspace(): Promise<{
   );
   return {
     root,
-    repository: new ProductWorkspace(root, {
+    repository: createRepository(root),
+  };
+}
+
+async function createWorkspace(): Promise<{
+  root: string;
+  repository: ProductWorkspace;
+}> {
+  return createWorkspaceWith(
+    (root) =>
+      new ProductWorkspace(root, {
+        git: passingGit,
+        verificationRunner: passingRunner,
+      }),
+  );
+}
+
+type CommitFailureBoundary = "pending_manifest" | "applied_manifest";
+
+class BoundaryFailingShapingDecisionWorkspace extends ProductWorkspace {
+  private failureBoundary: CommitFailureBoundary | null = null;
+
+  constructor(root: string) {
+    super(root, {
       git: passingGit,
       verificationRunner: passingRunner,
-    }),
-  };
+    });
+  }
+
+  armFailure(boundary: CommitFailureBoundary): void {
+    this.failureBoundary = boundary;
+  }
+
+  protected override async afterShapingDecisionPendingManifestWritten(): Promise<void> {
+    if (this.failureBoundary === "pending_manifest") {
+      this.failureBoundary = null;
+      throw new Error("injected failure after pending decision manifest");
+    }
+  }
+
+  protected override async afterShapingDecisionStateReplaced(): Promise<void> {
+    if (this.failureBoundary === "applied_manifest") {
+      this.failureBoundary = null;
+      throw new Error("injected failure before applied decision manifest");
+    }
+  }
 }
 
 interface ImportTestRepository extends ProductWorkspace {
@@ -881,6 +950,447 @@ async function createUncontractedItem(repository: ProductWorkspace) {
     title: "Build the controller foundation",
     type: "Feature",
   });
+}
+
+function shapingHash(source: string): string {
+  return createHash("sha256").update(source).digest("hex");
+}
+
+async function writeAppliedControllerShapingBundle(
+  repository: ProductWorkspace,
+  artifact: StoredShapingArtifact,
+  result:
+    | BrainstormResultSubmission
+    | SpecResultSubmission
+    | PlanResultSubmission,
+): Promise<string> {
+  const missionDirectory = dirname(
+    join(repository.workspaceRoot, artifact.mission_path),
+  );
+  const appliedDirectory = join(missionDirectory, "applied");
+  const resultSource = `${JSON.stringify(result, null, 2)}\n`;
+  const resultContentSha256 = shapingHash(resultSource);
+  const ingressPath = `.founder/shaping-ingress/${artifact.mission.identity.work_item_id}/${artifact.mission.identity.phase}-${artifact.mission.identity.input_sha256}/result.json`;
+  const importReceipt = {
+    shaping_schema_version: 2 as const,
+    identity: artifact.mission.identity,
+    shaping_mission_content_sha256: artifact.mission.content_sha256,
+    result_content_sha256: resultContentSha256,
+    outcome: "applied" as const,
+    first_published_at: "2026-08-02T11:00:00.000Z",
+    reasons: [],
+  };
+  const productionReceipt = {
+    schema_version: 1 as const,
+    production_id: deriveManualShapingProductionId(
+      artifact.mission.content_sha256,
+      resultContentSha256,
+    ),
+    origin: "manual_import" as const,
+    shaping_run_id: null,
+    produced_at: "2026-08-02T11:00:01.000Z",
+    requested_model: { value: null, assurance: "unknown" as const },
+    effective_model: {
+      assurance: "unknown" as const,
+      model_id: null,
+      deployment_id: null,
+      observed_event_sha256: null,
+    },
+    ingress_path: ingressPath,
+    result_content_sha256: resultContentSha256,
+  };
+  const importSource = `${JSON.stringify(importReceipt, null, 2)}\n`;
+  const productionSource = `${JSON.stringify(productionReceipt, null, 2)}\n`;
+  const marker = {
+    schema_version: 1 as const,
+    mission_content_sha256: artifact.mission.content_sha256,
+    result_content_sha256: resultContentSha256,
+    component_sha256: {
+      result: resultContentSha256,
+      import: shapingHash(importSource),
+      production: shapingHash(productionSource),
+    },
+    component_bytes: {
+      result: Buffer.byteLength(resultSource),
+      import: Buffer.byteLength(importSource),
+      production: Buffer.byteLength(productionSource),
+    },
+    committed_at: "2026-08-02T11:00:02.000Z",
+  };
+  await mkdir(appliedDirectory);
+  await writeFile(join(appliedDirectory, "result.json"), resultSource, "utf8");
+  await writeFile(join(appliedDirectory, "import.json"), importSource, "utf8");
+  await writeFile(
+    join(appliedDirectory, "production.json"),
+    productionSource,
+    "utf8",
+  );
+  await writeFile(
+    join(appliedDirectory, "applied.json"),
+    `${JSON.stringify(marker, null, 2)}\n`,
+    "utf8",
+  );
+  return resultContentSha256;
+}
+
+function shapingResultForMission(
+  mission: ShapingMissionPackage,
+): BrainstormResultSubmission | SpecResultSubmission | PlanResultSubmission {
+  switch (mission.identity.phase) {
+    case "brainstorm":
+      return {
+        result_schema_version: 1,
+        brainstorm_mission_content_sha256: mission.content_sha256,
+        identity: mission.identity,
+        problem_statement: "The current workflow lacks a durable guided handoff.",
+        approach: "Publish one immutable result and advance through leased decisions.",
+        non_goals: ["Do not authorize Execute."],
+        open_questions: ["Which evidence should the next seat verify?"],
+      };
+    case "spec":
+      return {
+        result_schema_version: 1,
+        spec_mission_content_sha256: mission.content_sha256,
+        identity: mission.identity,
+        proposal: {
+          purpose: "Make shaping handoffs durable and replayable.",
+          acceptance_criteria: ["Each decision commits exactly once."],
+          non_goals: ["Do not launch from the controller."],
+          allowed_scope: ["src/application", "tests/application"],
+          review_ready: ["The focused controller suite passes."],
+        },
+      };
+    case "plan":
+      return {
+        result_schema_version: 1,
+        plan_mission_content_sha256: mission.content_sha256,
+        identity: mission.identity,
+        summary: "Implement the approved shaping handoff in bounded steps.",
+        checklist: [
+          {
+            id: "controller",
+            step: "Implement the leased composite decision.",
+            verification_check: "Run the focused controller suite.",
+          },
+        ],
+        relevant_skills: [],
+        product_doc_impacts: [],
+        todo_impacts: [],
+        open_questions: [],
+      };
+  }
+}
+
+async function currentShapingStateHash(
+  repository: ProductWorkspace,
+  item: WorkItem,
+): Promise<string> {
+  const phase = item.state.phase;
+  const tip =
+    phase === "brainstorm" || phase === "spec" || phase === "plan"
+      ? await repository.resolveCurrentMissionRevision(
+          item.goal.work_item_id,
+          phase,
+        )
+      : null;
+  const runs = await repository.listShapingRuns(item.goal.work_item_id);
+  const currentRuns =
+    tip === null
+      ? []
+      : runs.filter(
+          (run) =>
+            run.lifecycle.status !== "terminal" &&
+            run.mission.phase === tip.mission.identity.phase &&
+            run.mission.input_sha256 === tip.mission.identity.input_sha256 &&
+            run.mission.content_sha256 === tip.mission.content_sha256,
+        );
+  return hashShapingDecisionState({
+    work_item_id: item.goal.work_item_id,
+    phase,
+    status: item.state.status,
+    goal_input_sha256: hashGoalInput({
+      title: item.goal.title,
+      notes: item.goal.notes,
+    }),
+    goal_version: item.state.goal_version ?? null,
+    input_revision: item.state.input_revision ?? null,
+    goal_contract_sha256:
+      item.goal.goal_contract === undefined
+        ? null
+        : hashGoalContract(item.goal.goal_contract),
+    current_mission_input_sha256:
+      tip?.mission.identity.input_sha256 ?? null,
+    current_mission_content_sha256: tip?.mission.content_sha256 ?? null,
+    applied_result_content_sha256:
+      tip?.result?.result_content_sha256 ?? null,
+    decision_receipt_sha256:
+      tip?.decision?.decision_content_sha256 ?? null,
+    active_shaping_run_id: currentRuns[0]?.shaping_run_id ?? null,
+  });
+}
+
+async function currentShapingTip(
+  repository: ProductWorkspace,
+  item: WorkItem,
+): Promise<StoredShapingArtifact> {
+  const phase = item.state.phase as ShapingPhase;
+  const tip = await repository.resolveCurrentMissionRevision(
+    item.goal.work_item_id,
+    phase,
+  );
+  if (tip === null) {
+    throw new Error(`Expected a ${phase} shaping tip`);
+  }
+  return tip;
+}
+
+function createControllerAt(
+  repository: ProductWorkspace,
+  timestamp: string,
+): WorkItemController {
+  return new WorkItemController(
+    repository,
+    () => new Date(timestamp),
+    passingGit,
+    passingRunner,
+  );
+}
+
+async function createAppliedBrainstormDecisionFixture(
+  repository: ProductWorkspace,
+) {
+  const initial = await createUncontractedItem(repository);
+  const controller = createController(repository);
+  const started = await controller.startBrainstorm(
+    initial.goal.work_item_id,
+    {
+      launch_mode: "manual",
+      next_requested_model: null,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        initial,
+      ),
+    },
+  );
+  const tip = await currentShapingTip(repository, started.work_item);
+  const resultContentSha256 = await writeAppliedControllerShapingBundle(
+    repository,
+    tip,
+    shapingResultForMission(tip.mission),
+  );
+  return {
+    initial,
+    started,
+    tip,
+    resultContentSha256,
+    input: {
+      launch_mode: "manual" as const,
+      next_requested_model: null,
+      expected_mission_content_sha256: tip.mission.content_sha256,
+      expected_result_content_sha256: resultContentSha256,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        started.work_item,
+      ),
+    },
+  };
+}
+
+async function createAppliedSpecDecisionFixture(
+  repository: ProductWorkspace,
+) {
+  const brainstorm = await createAppliedBrainstormDecisionFixture(repository);
+  const used = await createController(repository).useBrainstormResult(
+    brainstorm.started.work_item.goal.work_item_id,
+    brainstorm.input,
+  );
+  const tip = await currentShapingTip(repository, used.work_item);
+  const result = shapingResultForMission(
+    tip.mission,
+  ) as SpecResultSubmission;
+  const resultContentSha256 = await writeAppliedControllerShapingBundle(
+    repository,
+    tip,
+    result,
+  );
+  return {
+    ...brainstorm,
+    used,
+    tip,
+    result,
+    resultContentSha256,
+    input: {
+      launch_mode: "manual" as const,
+      next_requested_model: null,
+      expected_mission_content_sha256: tip.mission.content_sha256,
+      expected_result_content_sha256: resultContentSha256,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        used.work_item,
+      ),
+      goal_contract_sha256: hashGoalContract(
+        goalContractFromSpecProposal(result.proposal, 1),
+      ),
+    },
+  };
+}
+
+type ShapingResponseLossBoundary =
+  | "before_intent"
+  | "after_intent"
+  | "after_receipt"
+  | "after_mission"
+  | "after_applied_manifest";
+
+function injectShapingResponseLoss(
+  repository: ProductWorkspace,
+  boundary: ShapingResponseLossBoundary,
+): void {
+  if (boundary === "before_intent" || boundary === "after_intent") {
+    const writeIntent =
+      repository.writeShapingDecisionIntent.bind(repository);
+    let fail = true;
+    repository.writeShapingDecisionIntent = async (lease, input) => {
+      if (fail && boundary === "before_intent") {
+        fail = false;
+        throw new Error("injected response loss before shaping intent");
+      }
+      const written = await writeIntent(lease, input);
+      if (fail) {
+        fail = false;
+        throw new Error("injected response loss after shaping intent");
+      }
+      return written;
+    };
+    return;
+  }
+
+  if (boundary === "after_receipt") {
+    const writeReceipt =
+      repository.writeShapingDecisionReceipt.bind(repository);
+    let fail = true;
+    repository.writeShapingDecisionReceipt = async (receipt) => {
+      const written = await writeReceipt(receipt);
+      if (fail) {
+        fail = false;
+        throw new Error("injected response loss after decision receipt");
+      }
+      return written;
+    };
+    return;
+  }
+
+  if (boundary === "after_mission") {
+    const publishMission =
+      repository.publishLeasedShapingMission.bind(repository);
+    let fail = true;
+    repository.publishLeasedShapingMission = async (
+      lease,
+      identity,
+      missionBytes,
+      input,
+    ) => {
+      const written = await publishMission(
+        lease,
+        identity,
+        missionBytes,
+        input,
+      );
+      if (fail) {
+        fail = false;
+        throw new Error("injected response loss after shaping mission");
+      }
+      return written;
+    };
+    return;
+  }
+
+  const commit = repository.commitShapingDecision.bind(repository);
+  let fail = true;
+  repository.commitShapingDecision = async (lease, input) => {
+    const committed = await commit(lease, input);
+    if (fail) {
+      fail = false;
+      throw new Error("injected response loss after applied manifest");
+    }
+    return committed;
+  };
+}
+
+function shapingRunInputForMission(
+  mission: ShapingMissionPackage,
+  requestedModel: string,
+): ShapingRunCreateInput {
+  return {
+    mission,
+    record: {
+      schema_version: 1,
+      shaping_run_id: "90000000-0000-4000-8000-000000000013",
+      mission: {
+        phase: mission.identity.phase,
+        work_item_id: mission.identity.work_item_id,
+        input_sha256: mission.identity.input_sha256,
+        content_sha256: mission.content_sha256,
+      },
+      provenance: {
+        role: { value: "writer", assurance: "controller_observed" },
+        seat: {
+          value: mission.identity.phase,
+          assurance: "controller_observed",
+        },
+        requested_model: {
+          value: requestedModel,
+          assurance: "user_declared",
+        },
+        effective_model: {
+          assurance: "unknown",
+          model_id: null,
+          deployment_id: null,
+          observed_event_sha256: null,
+        },
+        effort: { value: "high", assurance: "user_declared" },
+        harness: {
+          value: { id: "local-agent-cli", version: "1.0.0" },
+          assurance: "adapter_attested",
+        },
+        adapter_profile: {
+          value: {
+            adapter_id: "local-acp-adapter",
+            adapter_version: "1.0.0",
+            profile_id: "artifact-only-shaping-v1",
+          },
+          assurance: "adapter_attested",
+        },
+        resolved_profile_sha256: {
+          value: "a".repeat(64),
+          assurance: "controller_observed",
+        },
+        resolved_skill_set_sha256: {
+          value: "b".repeat(64),
+          assurance: "controller_observed",
+        },
+      },
+      lifecycle: {
+        status: "starting",
+        started_at: "2026-08-02T12:00:00.000Z",
+        updated_at: "2026-08-02T12:00:00.000Z",
+        completed_at: null,
+        terminal: null,
+      },
+      limits: {
+        wall_clock_timeout_ms: 900_000,
+        max_event_count: 100,
+        max_event_bytes: 100_000,
+        max_output_bytes: 10_000,
+        termination_grace_ms: 5_000,
+        drain_grace_ms: 1_000,
+      },
+      process: null,
+      diagnostics: { entries: [], truncated: false },
+    },
+  };
 }
 
 const firstContract = {
@@ -2450,6 +2960,1056 @@ describe("WorkItemController", () => {
         },
       ),
     ).rejects.toMatchObject({ kind: "stale_expectation" });
+  });
+
+  it("commits Start Brainstorm once and replays its stored launch contract", async () => {
+    const { repository } = await createWorkspace();
+    const item = await createUncontractedItem(repository);
+    const input = {
+      launch_mode: "connected" as const,
+      next_requested_model: "brainstorm-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        item,
+      ),
+    };
+    const first = await createController(repository).startBrainstorm(
+      item.goal.work_item_id,
+      input,
+    );
+
+    expect(first).toMatchObject({
+      work_item: { state: { phase: "brainstorm" } },
+      manifest: { operation: "start_brainstorm", outcome: "applied" },
+      launch_mode: "connected",
+      next_requested_model: "brainstorm-model",
+      next_launch: null,
+    });
+    expect(first.launch_fingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(first.intent.next_goal_bytes).toBe(
+      first.intent.previous_goal_bytes,
+    );
+    expect(first.intent.next_state_bytes).not.toBe(
+      first.intent.previous_state_bytes,
+    );
+    expect(await repository.listShapingRuns(item.goal.work_item_id)).toEqual(
+      [],
+    );
+
+    const replay = await createControllerAt(
+      repository,
+      "2026-08-03T21:00:00.000Z",
+    ).startBrainstorm(item.goal.work_item_id, input);
+    expect(replay).toEqual(first);
+    await expect(
+      createController(repository).startBrainstorm(item.goal.work_item_id, {
+        ...input,
+        next_requested_model: "different-model",
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    await expect(
+      createController(repository).startBrainstorm(item.goal.work_item_id, {
+        ...input,
+        launch_mode: "manual",
+        next_requested_model: null,
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+
+    const decisionDirectory = join(
+      repository.workspaceRoot,
+      ".founder",
+      "work-items",
+      item.goal.work_item_id,
+      "shaping-decisions",
+    );
+    expect((await readdir(decisionDirectory)).sort()).toEqual(
+      [
+        `${first.decision_id}.intent.json`,
+        `${first.decision_id}.json`,
+      ].sort(),
+    );
+    expect(
+      (await repository.listShapingArtifacts(item.goal.work_item_id)).filter(
+        (artifact) => artifact.mission.identity.phase === "brainstorm",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("runs all five decisions in manual mode with immutable replay and no process", async () => {
+    const { repository } = await createWorkspace();
+    const commit = repository.commitShapingDecision.bind(repository);
+    const commitOperations: string[] = [];
+    repository.commitShapingDecision = async (lease, input) => {
+      commitOperations.push(input.manifest.operation);
+      return commit(lease, input);
+    };
+    const controller = createController(repository);
+    const initial = await createUncontractedItem(repository);
+    const manual = {
+      launch_mode: "manual" as const,
+      next_requested_model: null,
+    };
+    const decisions = [];
+
+    const startInput = {
+      ...manual,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        initial,
+      ),
+    };
+    const started = await controller.startBrainstorm(
+      initial.goal.work_item_id,
+      startInput,
+    );
+    decisions.push(started);
+    expect(
+      await createControllerAt(
+        repository,
+        "2026-08-03T21:00:00.000Z",
+      ).startBrainstorm(initial.goal.work_item_id, startInput),
+    ).toEqual(started);
+    await expect(
+      controller.startBrainstorm(initial.goal.work_item_id, {
+        ...startInput,
+        launch_mode: "connected",
+        next_requested_model: "brainstorm-model",
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+
+    let current = started.work_item;
+    let tip = await currentShapingTip(repository, current);
+    let resultSha256 = await writeAppliedControllerShapingBundle(
+      repository,
+      tip,
+      shapingResultForMission(tip.mission),
+    );
+    const originalBrainstormBinding = {
+      expected_mission_content_sha256: tip.mission.content_sha256,
+      expected_result_content_sha256: resultSha256,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        current,
+      ),
+    };
+    const requestInput = {
+      ...manual,
+      ...originalBrainstormBinding,
+      feedback: "Clarify the recovery behavior before the Spec handoff.",
+    };
+    const requested = await controller.requestShapingChanges(
+      current.goal.work_item_id,
+      requestInput,
+    );
+    decisions.push(requested);
+    expect(requested.work_item.state.phase).toBe("brainstorm");
+    expect(requested.intent.next_goal_bytes).toBe(
+      requested.intent.previous_goal_bytes,
+    );
+    expect(
+      await createControllerAt(
+        repository,
+        "2026-08-03T22:00:00.000Z",
+      ).requestShapingChanges(current.goal.work_item_id, requestInput),
+    ).toEqual(requested);
+    await expect(
+      controller.useBrainstormResult(
+        current.goal.work_item_id,
+        { ...manual, ...originalBrainstormBinding },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+
+    current = requested.work_item;
+    tip = await currentShapingTip(repository, current);
+    expect(tip.mission.input.revision).toMatchObject({
+      ordinal: 1,
+      feedback: requestInput.feedback,
+    });
+    resultSha256 = await writeAppliedControllerShapingBundle(
+      repository,
+      tip,
+      shapingResultForMission(tip.mission),
+    );
+    const useInput = {
+      ...manual,
+      expected_mission_content_sha256: tip.mission.content_sha256,
+      expected_result_content_sha256: resultSha256,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        current,
+      ),
+    };
+    const used = await controller.useBrainstormResult(
+      current.goal.work_item_id,
+      useInput,
+    );
+    decisions.push(used);
+    expect(used.work_item.state.phase).toBe("spec");
+    expect(used.work_item.goal).not.toHaveProperty("goal_contract");
+    expect(used.work_item.state).not.toHaveProperty("goal_version");
+    expect(
+      await createControllerAt(
+        repository,
+        "2026-08-03T23:00:00.000Z",
+      ).useBrainstormResult(current.goal.work_item_id, useInput),
+    ).toEqual(used);
+
+    current = used.work_item;
+    tip = await currentShapingTip(repository, current);
+    const specResult = shapingResultForMission(
+      tip.mission,
+    ) as SpecResultSubmission;
+    resultSha256 = await writeAppliedControllerShapingBundle(
+      repository,
+      tip,
+      specResult,
+    );
+    const approvalContract = goalContractFromSpecProposal(
+      specResult.proposal,
+      1,
+    );
+    const approveInput = {
+      ...manual,
+      expected_mission_content_sha256: tip.mission.content_sha256,
+      expected_result_content_sha256: resultSha256,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        current,
+      ),
+      goal_contract_sha256: hashGoalContract(approvalContract),
+    };
+    const approved = await controller.approveSpecResult(
+      current.goal.work_item_id,
+      approveInput,
+    );
+    decisions.push(approved);
+    expect(approved.work_item).toMatchObject({
+      goal: { goal_contract: { goal_version: 1 } },
+      state: {
+        phase: "plan",
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+    });
+    expect(
+      await createControllerAt(
+        repository,
+        "2026-08-04T00:00:00.000Z",
+      ).approveSpecResult(current.goal.work_item_id, approveInput),
+    ).toEqual(approved);
+
+    current = approved.work_item;
+    tip = await currentShapingTip(repository, current);
+    resultSha256 = await writeAppliedControllerShapingBundle(
+      repository,
+      tip,
+      shapingResultForMission(tip.mission),
+    );
+    const stalePlanMission = tip.mission;
+    const stalePlanResultSha256 = resultSha256;
+    const contract = current.goal.goal_contract!;
+    const edited = await controller.saveWorkItem(current.goal.work_item_id, {
+      target_source_id: "ws_123e4567-e89b-12d3-a456-426614174000",
+      title: current.goal.title,
+      type: current.goal.type ?? null,
+      priority: current.goal.priority ?? null,
+      tags: current.goal.tags ?? [],
+      notes: current.goal.notes ?? null,
+      goal_contract: {
+        purpose: `${contract.purpose} Updated after Plan.`,
+        acceptance_criteria: contract.acceptance_criteria,
+        non_goals: contract.non_goals,
+        allowed_scope: contract.allowed_scope,
+        review_ready: contract.review_ready,
+      },
+      expected_goal_version: current.state.goal_version,
+      expected_input_revision: current.state.input_revision,
+    });
+    current = edited.work_item;
+    const replanInput = {
+      ...manual,
+      expected_mission_content_sha256: stalePlanMission.content_sha256,
+      expected_result_content_sha256: stalePlanResultSha256,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        current,
+      ),
+      goal_contract_sha256: hashGoalContract(current.goal.goal_contract!),
+    };
+    await expect(
+      controller.requestShapingChanges(current.goal.work_item_id, {
+        ...manual,
+        expected_mission_content_sha256:
+          stalePlanMission.content_sha256,
+        expected_result_content_sha256: stalePlanResultSha256,
+        expected_shaping_state_sha256:
+          replanInput.expected_shaping_state_sha256,
+        feedback: "This stale Plan must not accept another decision.",
+      }),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    await expect(
+      controller.replanWithUpdatedContract(current.goal.work_item_id, {
+        ...replanInput,
+        goal_contract_sha256: hashGoalContract(contract),
+      }),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    const replanned = await controller.replanWithUpdatedContract(
+      current.goal.work_item_id,
+      replanInput,
+    );
+    decisions.push(replanned);
+    expect(replanned.work_item.state).toMatchObject({
+      phase: "plan",
+      goal_version: 2,
+      input_revision: 2,
+    });
+    expect(replanned.intent.decision_receipt_bytes).toBeNull();
+    expect(replanned.intent.next_goal_bytes).toBe(
+      replanned.intent.previous_goal_bytes,
+    );
+    const replannedTip = await currentShapingTip(
+      repository,
+      replanned.work_item,
+    );
+    expect(replannedTip.mission.input).toMatchObject({
+      phase: "plan",
+      goal_contract_sha256: replanInput.goal_contract_sha256,
+      goal_version: 2,
+      spec_approval: stalePlanMission.input.spec_approval,
+      spec_approval_sha256:
+        stalePlanMission.input.spec_approval_sha256,
+      revision: {
+        supersedes_input_sha256:
+          stalePlanMission.identity.input_sha256,
+        superseded_result_sha256: stalePlanResultSha256,
+      },
+    });
+    expect(
+      await createControllerAt(
+        repository,
+        "2026-08-04T01:00:00.000Z",
+      ).replanWithUpdatedContract(current.goal.work_item_id, replanInput),
+    ).toEqual(replanned);
+
+    expect(decisions.map((decision) => decision.manifest.operation)).toEqual([
+      "start_brainstorm",
+      "request_changes",
+      "use_brainstorm_result",
+      "approve_spec",
+      "replan_with_updated_contract",
+    ]);
+    expect(commitOperations).toEqual(
+      decisions.map((decision) => decision.manifest.operation),
+    );
+    for (const decision of decisions) {
+      expect(decision).toMatchObject({
+        launch_mode: "manual",
+        next_requested_model: null,
+        launch_fingerprint: null,
+        next_launch: {
+          status: "manual",
+          shaping_run_id: null,
+          reason: "founder_selected_manual",
+        },
+        manifest: { outcome: "applied" },
+      });
+      expect(shapingHash(decision.intent.previous_goal_bytes)).toBe(
+        decision.intent.previous_goal_sha256,
+      );
+      expect(shapingHash(decision.intent.previous_state_bytes)).toBe(
+        decision.intent.previous_state_sha256,
+      );
+      expect(shapingHash(decision.intent.next_goal_bytes)).toBe(
+        decision.intent.next_goal_sha256,
+      );
+      expect(shapingHash(decision.intent.next_state_bytes)).toBe(
+        decision.intent.next_state_sha256,
+      );
+      expect(decision.intent.next_state_bytes).not.toBe(
+        decision.intent.previous_state_bytes,
+      );
+      expect(
+        decision.intent.next_goal_bytes ===
+          decision.intent.previous_goal_bytes,
+      ).toBe(decision.manifest.operation !== "approve_spec");
+    }
+    const shapingArtifacts = await repository.listShapingArtifacts(
+      initial.goal.work_item_id,
+    );
+    expect(shapingArtifacts).toHaveLength(5);
+    expect(
+      shapingArtifacts.filter((artifact) => artifact.decision !== null),
+    ).toHaveLength(2);
+    expect(
+      decisions.every((decision) =>
+        shapingArtifacts.some(
+          (artifact) =>
+            artifact.mission.content_sha256 ===
+            decision.intent.next_mission_content_sha256,
+        ),
+      ),
+    ).toBe(true);
+    expect(await repository.listShapingRuns(initial.goal.work_item_id)).toEqual(
+      [],
+    );
+    expect(replanned.work_item.state.phase).not.toBe("execute");
+  });
+
+  it.each([
+    { name: "before A0", boundary: "before_intent" as const },
+    { name: "between A0 and A", boundary: "after_intent" as const },
+    { name: "between A and B", boundary: "after_receipt" as const },
+    { name: "between B and C", boundary: "after_mission" as const },
+    {
+      name: "after the pending manifest and before C",
+      boundary: "pending_manifest" as const,
+    },
+    {
+      name: "between C and the applied manifest",
+      boundary: "applied_manifest" as const,
+    },
+    {
+      name: "after the applied manifest",
+      boundary: "after_applied_manifest" as const,
+    },
+  ])(
+    "recovers one shaping decision after response loss $name",
+    async ({ boundary }) => {
+      const { repository } = await createWorkspaceWith(
+        (root) => new BoundaryFailingShapingDecisionWorkspace(root),
+      );
+      const fixture =
+        await createAppliedBrainstormDecisionFixture(repository);
+      const commit = repository.commitShapingDecision.bind(repository);
+      let commitCount = 0;
+      repository.commitShapingDecision = async (lease, input) => {
+        commitCount += 1;
+        return commit(lease, input);
+      };
+      if (
+        boundary === "pending_manifest" ||
+        boundary === "applied_manifest"
+      ) {
+        repository.armFailure(boundary);
+      } else {
+        injectShapingResponseLoss(repository, boundary);
+      }
+
+      await expect(
+        createController(repository).useBrainstormResult(
+          fixture.started.work_item.goal.work_item_id,
+          fixture.input,
+        ),
+      ).rejects.toThrow(/injected/u);
+
+      const recovered = await createControllerAt(
+        repository,
+        "2026-08-04T02:00:00.000Z",
+      ).useBrainstormResult(
+        fixture.started.work_item.goal.work_item_id,
+        fixture.input,
+      );
+      expect(recovered).toMatchObject({
+        work_item: { state: { phase: "spec" } },
+        manifest: {
+          operation: "use_brainstorm_result",
+          outcome: "applied",
+        },
+        launch_mode: "manual",
+        next_requested_model: null,
+        launch_fingerprint: null,
+      });
+      expect(commitCount).toBe(1);
+      expect(
+        await createControllerAt(
+          repository,
+          "2026-08-04T03:00:00.000Z",
+        ).useBrainstormResult(
+          fixture.started.work_item.goal.work_item_id,
+          fixture.input,
+        ),
+      ).toEqual(recovered);
+      expect(commitCount).toBe(1);
+
+      const decisionDirectory = join(
+        repository.workspaceRoot,
+        ".founder",
+        "work-items",
+        fixture.started.work_item.goal.work_item_id,
+        "shaping-decisions",
+      );
+      expect(
+        (await readdir(decisionDirectory))
+          .filter((name) => name.startsWith(recovered.decision_id))
+          .sort(),
+      ).toEqual(
+        [
+          `${recovered.decision_id}.intent.json`,
+          `${recovered.decision_id}.json`,
+        ].sort(),
+      );
+      const artifacts = await repository.listShapingArtifacts(
+        fixture.started.work_item.goal.work_item_id,
+      );
+      expect(
+        artifacts.filter(
+          (artifact) => artifact.mission.identity.phase === "brainstorm",
+        ),
+      ).toHaveLength(1);
+      expect(
+        artifacts.filter(
+          (artifact) => artifact.mission.identity.phase === "spec",
+        ),
+      ).toHaveLength(1);
+      expect(
+        artifacts.filter((artifact) => artifact.decision !== null),
+      ).toHaveLength(1);
+      expect(
+        await repository.listShapingRuns(
+          fixture.started.work_item.goal.work_item_id,
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it("fails closed on a retained controller lease without claiming it", async () => {
+    const { repository } = await createWorkspace();
+    const item = await createUncontractedItem(repository);
+    const input = {
+      launch_mode: "manual" as const,
+      next_requested_model: null,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        item,
+      ),
+    };
+    const retainedRun = {
+      run_id: "90000000-0000-4000-8000-000000000014",
+      idempotency_key: "retained-step-13-lease",
+      acquired_at: "2026-08-02T12:30:00.000Z",
+    };
+    const retainedLease = await repository.acquireControllerLease(
+      item.goal.work_item_id,
+      retainedRun,
+    );
+    if (retainedLease === null) {
+      throw new Error("Expected the retained-lease fixture to exist.");
+    }
+    try {
+      await expect(
+        createController(repository).startBrainstorm(
+          item.goal.work_item_id,
+          input,
+        ),
+      ).rejects.toMatchObject({
+        kind: "repair_required",
+        reason: expect.stringContaining(retainedRun.run_id),
+      });
+    } finally {
+      await repository.releaseControllerLease(retainedLease);
+    }
+  });
+
+  it.each(["title", "notes"] as const)(
+    "rejects a stale shaping hash when only %s changed",
+    async (field) => {
+      const { root, repository } = await createWorkspace();
+      const item = await createUncontractedItem(repository);
+      const input = {
+        launch_mode: "manual" as const,
+        next_requested_model: null,
+        expected_mission_content_sha256: null,
+        expected_result_content_sha256: null,
+        expected_shaping_state_sha256: await currentShapingStateHash(
+          repository,
+          item,
+        ),
+      };
+      const changedGoal =
+        field === "title"
+          ? { ...item.goal, title: `${item.goal.title} changed` }
+          : { ...item.goal, notes: "Changed notes only." };
+      await writeFile(
+        join(
+          root,
+          ".founder",
+          "work-items",
+          item.goal.work_item_id,
+          "goal.yaml",
+        ),
+        stringify(changedGoal),
+        "utf8",
+      );
+
+      await expect(
+        createController(repository).startBrainstorm(
+          item.goal.work_item_id,
+          input,
+        ),
+      ).rejects.toMatchObject({ kind: "stale_expectation" });
+      expect(
+        await repository.listShapingArtifacts(item.goal.work_item_id),
+      ).toEqual([]);
+      expect((await repository.read(item.goal.work_item_id))?.state.phase).toBe(
+        "idea",
+      );
+    },
+  );
+
+  it("rejects a result that is not the revision's applied result", async () => {
+    const { repository } = await createWorkspace();
+    const initial = await createUncontractedItem(repository);
+    const started = await createController(repository).startBrainstorm(
+      initial.goal.work_item_id,
+      {
+        launch_mode: "manual",
+        next_requested_model: null,
+        expected_mission_content_sha256: null,
+        expected_result_content_sha256: null,
+        expected_shaping_state_sha256: await currentShapingStateHash(
+          repository,
+          initial,
+        ),
+      },
+    );
+    const tip = await currentShapingTip(repository, started.work_item);
+
+    await expect(
+      createController(repository).useBrainstormResult(
+        started.work_item.goal.work_item_id,
+        {
+          launch_mode: "manual",
+          next_requested_model: null,
+          expected_mission_content_sha256: tip.mission.content_sha256,
+          expected_result_content_sha256: "f".repeat(64),
+          expected_shaping_state_sha256: await currentShapingStateHash(
+            repository,
+            started.work_item,
+          ),
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+  });
+
+  it("serializes request-vs-request and request-vs-use against one new tip", async () => {
+    const { repository } = await createWorkspace();
+    const fixture = await createAppliedBrainstormDecisionFixture(repository);
+    const firstRequest = {
+      ...fixture.input,
+      feedback: "First serialized revision wins.",
+    };
+    const requested = await createController(
+      repository,
+    ).requestShapingChanges(
+      fixture.started.work_item.goal.work_item_id,
+      firstRequest,
+    );
+
+    await expect(
+      createController(repository).requestShapingChanges(
+        fixture.started.work_item.goal.work_item_id,
+        {
+          ...fixture.input,
+          feedback: "The request serialized second must lose.",
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    await expect(
+      createController(repository).useBrainstormResult(
+        fixture.started.work_item.goal.work_item_id,
+        fixture.input,
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+
+    const tip = await currentShapingTip(repository, requested.work_item);
+    expect(tip.mission.input.revision).toMatchObject({
+      ordinal: 1,
+      feedback: firstRequest.feedback,
+    });
+    expect(
+      (await repository.listShapingArtifacts(
+        fixture.started.work_item.goal.work_item_id,
+      )).filter(
+        (artifact) =>
+          artifact.mission.identity.phase === "brainstorm" &&
+          artifact.mission.input.revision !== undefined,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("serializes request-vs-approve and rejects a mismatched contract hash", async () => {
+    const { repository } = await createWorkspace();
+    const fixture = await createAppliedSpecDecisionFixture(repository);
+    const controller = createController(repository);
+
+    await expect(
+      controller.approveSpecResult(
+        fixture.used.work_item.goal.work_item_id,
+        {
+          ...fixture.input,
+          goal_contract_sha256: "f".repeat(64),
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+
+    const requested = await controller.requestShapingChanges(
+      fixture.used.work_item.goal.work_item_id,
+      {
+        launch_mode: fixture.input.launch_mode,
+        next_requested_model: fixture.input.next_requested_model,
+        expected_mission_content_sha256:
+          fixture.input.expected_mission_content_sha256,
+        expected_result_content_sha256:
+          fixture.input.expected_result_content_sha256,
+        expected_shaping_state_sha256:
+          fixture.input.expected_shaping_state_sha256,
+        feedback: "Revise the Spec before approval.",
+      },
+    );
+    await expect(
+      controller.approveSpecResult(
+        fixture.used.work_item.goal.work_item_id,
+        fixture.input,
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    expect(requested.work_item.state.phase).toBe("spec");
+    expect(
+      (await currentShapingTip(repository, requested.work_item)).mission.input
+        .revision,
+    ).toMatchObject({
+      ordinal: 1,
+      feedback: "Revise the Spec before approval.",
+    });
+  });
+
+  it("rejects a durable manifest that disagrees with its intent", async () => {
+    const { root, repository } = await createWorkspace();
+    const item = await createUncontractedItem(repository);
+    const input = {
+      launch_mode: "connected" as const,
+      next_requested_model: "brainstorm-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        item,
+      ),
+    };
+    const started = await createController(repository).startBrainstorm(
+      item.goal.work_item_id,
+      input,
+    );
+    const manifestPath = join(
+      root,
+      ".founder",
+      "work-items",
+      item.goal.work_item_id,
+      "shaping-decisions",
+      `${started.decision_id}.json`,
+    );
+    const manifest = JSON.parse(
+      await readFile(manifestPath, "utf8"),
+    ) as Record<string, unknown>;
+    await writeFile(
+      manifestPath,
+      `${JSON.stringify(
+        {
+          ...manifest,
+          next_mission_content_sha256: "e".repeat(64),
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    await expect(
+      createController(repository).startBrainstorm(
+        item.goal.work_item_id,
+        input,
+      ),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    expect(await repository.listShapingRuns(item.goal.work_item_id)).toEqual(
+      [],
+    );
+  });
+
+  it("rejects a predicted decision receipt that differs from its intent", async () => {
+    const { repository } = await createWorkspace();
+    const fixture = await createAppliedBrainstormDecisionFixture(repository);
+    injectShapingResponseLoss(repository, "after_receipt");
+    await expect(
+      createController(repository).useBrainstormResult(
+        fixture.started.work_item.goal.work_item_id,
+        fixture.input,
+      ),
+    ).rejects.toThrow(/injected/u);
+    const tip = await currentShapingTip(
+      repository,
+      fixture.started.work_item,
+    );
+    if (tip.decision === null) {
+      throw new Error("Expected the partial decision receipt.");
+    }
+    await writeFile(
+      join(repository.workspaceRoot, tip.decision.decision_path),
+      `${JSON.stringify(
+        {
+          ...tip.decision.receipt,
+          selected_at: "2026-08-04T04:00:00.000Z",
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    await expect(
+      createControllerAt(
+        repository,
+        "2026-08-04T05:00:00.000Z",
+      ).useBrainstormResult(
+        fixture.started.work_item.goal.work_item_id,
+        fixture.input,
+      ),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+  });
+
+  it.each(["changed_status", "third_mission"] as const)(
+    "rejects unrelated drift from a pending intent: %s",
+    async (drift) => {
+      const { root, repository } = await createWorkspace();
+      const fixture =
+        await createAppliedBrainstormDecisionFixture(repository);
+      injectShapingResponseLoss(repository, "after_intent");
+      await expect(
+        createController(repository).useBrainstormResult(
+          fixture.started.work_item.goal.work_item_id,
+          fixture.input,
+        ),
+      ).rejects.toThrow(/injected/u);
+
+      if (drift === "changed_status") {
+        const current = await repository.read(
+          fixture.started.work_item.goal.work_item_id,
+        );
+        if (current === null) {
+          throw new Error("Expected the shaping work item.");
+        }
+        await writeFile(
+          join(
+            root,
+            ".founder",
+            "work-items",
+            current.goal.work_item_id,
+            "state.json",
+          ),
+          `${JSON.stringify(
+            {
+              ...current.state,
+              status: "paused",
+              updated_at: "2026-08-04T06:00:00.000Z",
+            },
+            null,
+            2,
+          )}\n`,
+          "utf8",
+        );
+      } else {
+        const mission =
+          fixture.tip.mission as BrainstormMissionPackage;
+        const foreignMission = compileBrainstormMission({
+          work_item_id: mission.identity.work_item_id,
+          shaping_input: {
+            ...mission.input,
+            revision: {
+              ordinal: (mission.input.revision?.ordinal ?? 0) + 1,
+              supersedes_input_sha256: mission.identity.input_sha256,
+              superseded_result_sha256: fixture.resultContentSha256,
+              feedback: "Unrelated third mission.",
+            },
+          },
+        });
+        await repository.writeShapingMissionPackage(
+          foreignMission.identity,
+          () => foreignMission,
+        );
+      }
+
+      await expect(
+        createControllerAt(
+          repository,
+          "2026-08-04T07:00:00.000Z",
+        ).useBrainstormResult(
+          fixture.started.work_item.goal.work_item_id,
+          fixture.input,
+        ),
+      ).rejects.toMatchObject({ kind: "repair_required" });
+    },
+  );
+
+  it("maps a non-identical predicted mission to repair_required", async () => {
+    const { repository } = await createWorkspace();
+    const fixture = await createAppliedBrainstormDecisionFixture(repository);
+    injectShapingResponseLoss(repository, "after_mission");
+    await expect(
+      createController(repository).useBrainstormResult(
+        fixture.started.work_item.goal.work_item_id,
+        fixture.input,
+      ),
+    ).rejects.toThrow(/injected/u);
+    const predicted = (
+      await repository.listShapingArtifacts(
+        fixture.started.work_item.goal.work_item_id,
+      )
+    ).find((artifact) => artifact.mission.identity.phase === "spec");
+    if (predicted === undefined) {
+      throw new Error("Expected the predicted Spec mission.");
+    }
+    await writeFile(
+      join(repository.workspaceRoot, predicted.task_path),
+      "corrupted predicted mission\n",
+      "utf8",
+    );
+
+    await expect(
+      createControllerAt(
+        repository,
+        "2026-08-04T08:00:00.000Z",
+      ).useBrainstormResult(
+        fixture.started.work_item.goal.work_item_id,
+        fixture.input,
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+  });
+
+  it("rejects a pending manifest for a different shaping decision", async () => {
+    const { root, repository } = await createWorkspaceWith(
+      (workspaceRoot) =>
+        new BoundaryFailingShapingDecisionWorkspace(workspaceRoot),
+    );
+    const item = await createUncontractedItem(repository);
+    const input = {
+      launch_mode: "manual" as const,
+      next_requested_model: null,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        item,
+      ),
+    };
+    repository.armFailure("pending_manifest");
+    await expect(
+      createController(repository).startBrainstorm(
+        item.goal.work_item_id,
+        input,
+      ),
+    ).rejects.toThrow(/injected/u);
+
+    const decisionDirectory = join(
+      root,
+      ".founder",
+      "work-items",
+      item.goal.work_item_id,
+      "shaping-decisions",
+    );
+    const manifestName = (await readdir(decisionDirectory)).find(
+      (name) =>
+        name.endsWith(".json") && !name.endsWith(".intent.json"),
+    );
+    if (manifestName === undefined) {
+      throw new Error("Expected the pending shaping manifest.");
+    }
+    const manifestPath = join(decisionDirectory, manifestName);
+    const manifest = JSON.parse(
+      await readFile(manifestPath, "utf8"),
+    ) as Record<string, unknown>;
+    const foreignDecisionId = "d".repeat(64);
+    await writeFile(
+      join(decisionDirectory, `${foreignDecisionId}.json`),
+      `${JSON.stringify(
+        { ...manifest, decision_id: foreignDecisionId },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await rm(manifestPath);
+
+    await expect(
+      createControllerAt(
+        repository,
+        "2026-08-04T09:00:00.000Z",
+      ).startBrainstorm(item.goal.work_item_id, input),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+  });
+
+  it("rejects a different active run under a pending launch fingerprint", async () => {
+    const { repository } = await createWorkspace();
+    const item = await createUncontractedItem(repository);
+    const input = {
+      launch_mode: "connected" as const,
+      next_requested_model: "brainstorm-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        item,
+      ),
+    };
+    injectShapingResponseLoss(repository, "after_mission");
+    await expect(
+      createController(repository).startBrainstorm(
+        item.goal.work_item_id,
+        input,
+      ),
+    ).rejects.toThrow(/injected/u);
+
+    const decisionDirectory = join(
+      repository.workspaceRoot,
+      ".founder",
+      "work-items",
+      item.goal.work_item_id,
+      "shaping-decisions",
+    );
+    const intentName = (await readdir(decisionDirectory)).find((name) =>
+      name.endsWith(".intent.json"),
+    );
+    if (intentName === undefined) {
+      throw new Error("Expected the pending shaping intent.");
+    }
+    const intent = await repository.readShapingDecisionIntent(
+      item.goal.work_item_id,
+      intentName.replace(/\.intent\.json$/u, ""),
+    );
+    if (intent === null) {
+      throw new Error("Expected the pending shaping intent.");
+    }
+    const mission = JSON.parse(
+      intent.next_mission_package_bytes,
+    ) as ShapingMissionPackage;
+    await repository.createShapingRun(
+      shapingRunInputForMission(mission, "different-model"),
+    );
+
+    await expect(
+      createControllerAt(
+        repository,
+        "2026-08-04T10:00:00.000Z",
+      ).startBrainstorm(item.goal.work_item_id, input),
+    ).rejects.toMatchObject({ kind: "lease_held" });
+    expect(await repository.listShapingRuns(item.goal.work_item_id)).toHaveLength(
+      1,
+    );
   });
 
   it("derives the transition idempotency key from exactly the governed tuple", () => {
