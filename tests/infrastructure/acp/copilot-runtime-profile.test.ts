@@ -243,18 +243,35 @@ describe("Copilot ACP runtime profile", () => {
     expect(() =>
       createCopilotRuntimeProfile(
         input({
-          required_available_tools: ["view", "create"],
+          required_available_tools: ["view", "apply_patch"],
         }),
       ),
-    ).toThrow("Required Copilot tools are unavailable: create, view.");
+    ).toThrow("Required Copilot tools are unavailable: apply_patch, view.");
 
     const prepared = createCopilotRuntimeProfile(
       input({
-        available_tools: ["view", "create"],
-        required_available_tools: ["view", "create"],
+        available_tools: ["view", "apply_patch"],
+        required_available_tools: ["view", "apply_patch"],
       }),
     );
-    expect(prepared.runtime_profile.args).toContain("create,view");
+    expect(prepared.runtime_profile.args).toContain("apply_patch,view");
+  });
+
+  it("records whether a write-only ACP client filesystem channel is enabled", () => {
+    const writeTextFile = vi.fn(async () => undefined);
+    const enabled = createCopilotRuntimeProfile(
+      input({ write_text_file: writeTextFile }),
+    );
+    const disabled = createCopilotRuntimeProfile(input());
+
+    expect(enabled.runtime_profile.write_text_file).toBe(writeTextFile);
+    expect(enabled.sanitized_profile_evidence.client_fs_write_text_file).toBe(
+      true,
+    );
+    expect(disabled.runtime_profile.write_text_file).toBeUndefined();
+    expect(disabled.sanitized_profile_evidence.client_fs_write_text_file).toBe(
+      false,
+    );
   });
 
   it("normalizes only exact, non-shell Copilot permission requests", () => {

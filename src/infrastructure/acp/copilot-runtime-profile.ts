@@ -16,6 +16,7 @@ import type {
   AcpRuntimeProfile,
   AcpSession,
   AcpSessionCallbacks,
+  AcpWriteTextFileHandler,
   NormalizedPermissionEvaluator,
 } from "./acp-client";
 
@@ -84,6 +85,7 @@ export interface CopilotRuntimeProfileInput {
   readonly environment: Readonly<Record<string, string>>;
   readonly workspace_cwd: string;
   readonly evaluate_permission: NormalizedPermissionEvaluator;
+  readonly write_text_file?: AcpWriteTextFileHandler;
   readonly limits: ConnectedRunLimits;
 }
 
@@ -102,6 +104,7 @@ export interface CopilotSanitizedProfileEvidence {
   readonly containment_assurance: "not_independently_enforced";
   readonly machine_authority: "launching_user";
   readonly requested_mcp_server_count: 0;
+  readonly client_fs_write_text_file: boolean;
   readonly credential_environment: "explicit_allowlist_without_credential_values";
 }
 
@@ -428,6 +431,7 @@ export function createCopilotRuntimeProfile(
     containment_assurance: "not_independently_enforced",
     machine_authority: "launching_user",
     requested_mcp_server_count: 0,
+    client_fs_write_text_file: input.write_text_file !== undefined,
     credential_environment: "explicit_allowlist_without_credential_values",
   };
 
@@ -439,6 +443,7 @@ export function createCopilotRuntimeProfile(
       environment: resolveEnvironment(input.environment),
       workspace_cwd: workspaceCwd,
       evaluate_permission: input.evaluate_permission,
+      write_text_file: input.write_text_file,
       limits: input.limits,
       normalize_permission: (request) =>
         normalizeCopilotPermission(request, workspaceCwd),

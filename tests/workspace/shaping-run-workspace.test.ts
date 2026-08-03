@@ -257,6 +257,19 @@ class FailBeforeBundleRenameWorkspace extends ProductWorkspace {
   }
 }
 
+class AbortAfterAcpIngressStagedWorkspace extends ProductWorkspace {
+  constructor(
+    root: string,
+    private readonly controller: AbortController,
+  ) {
+    super(root);
+  }
+
+  protected override async afterShapingAcpIngressStaged(): Promise<void> {
+    this.controller.abort();
+  }
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(
@@ -375,6 +388,141 @@ describe("shaping-run workspace storage", () => {
         shapingRunInput(fixture.mission, secondRunId),
       ),
     ).resolves.toMatchObject({ created: true });
+  });
+
+  it("owns bounded exact-path ACP ingress writes with immutable replay semantics", async () => {
+    const fixture = await createFixture();
+    const { workspace, created } = await createRun(fixture);
+    await workspace.startShapingRun(workItemId, firstRunId, processIdentity);
+    const ingressPath = join(
+      fixture.root,
+      ...created.instruction.ingress_path.split("/"),
+    );
+    const source = `${JSON.stringify(validResult(fixture.mission), null, 2)}\n`;
+
+    await expect(
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        source,
+      ),
+    ).resolves.toEqual({ written: true });
+    await expect(
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        source,
+      ),
+    ).resolves.toEqual({ written: false });
+    await expect(
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        '{"different":true}\n',
+      ),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    await expect(
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        join(fixture.root, "sibling.json"),
+        source,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        "",
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        "x".repeat(created.instruction.max_result_bytes + 1),
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(readFile(ingressPath, "utf8")).resolves.toBe(source);
+  });
+
+  it("removes staged ACP ingress bytes when the write is aborted before publication", async () => {
+    const fixture = await createFixture();
+    const controller = new AbortController();
+    const workspace = new AbortAfterAcpIngressStagedWorkspace(
+      fixture.root,
+      controller,
+    );
+    const created = await workspace.createShapingRun(
+      shapingRunInput(fixture.mission),
+    );
+    await workspace.startShapingRun(workItemId, firstRunId, processIdentity);
+    const ingressPath = join(
+      fixture.root,
+      ...created.instruction.ingress_path.split("/"),
+    );
+    await expect(
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        `${JSON.stringify(validResult(fixture.mission), null, 2)}\n`,
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    expect(controller.signal.aborted).toBe(true);
+    await expect(readdir(join(ingressPath, ".."))).resolves.toEqual([]);
+  });
+
+  it("publishes concurrent identical ACP ingress writes without exposing partial final bytes", async () => {
+    const fixture = await createFixture();
+    const { workspace, created } = await createRun(fixture);
+    await workspace.startShapingRun(workItemId, firstRunId, processIdentity);
+    const ingressPath = join(
+      fixture.root,
+      ...created.instruction.ingress_path.split("/"),
+    );
+    const source = `${JSON.stringify(validResult(fixture.mission), null, 2)}\n`;
+
+    const outcomes = await Promise.all([
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        source,
+      ),
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        source,
+      ),
+    ]);
+
+    expect(outcomes).toEqual(
+      expect.arrayContaining([{ written: true }, { written: false }]),
+    );
+    await expect(readFile(ingressPath, "utf8")).resolves.toBe(source);
+    await expect(readdir(join(ingressPath, ".."))).resolves.toEqual([
+      "result.json",
+    ]);
+  });
+
+  it("rejects a symlink at the ACP ingress file", async () => {
+    const fixture = await createFixture();
+    const { workspace, created } = await createRun(fixture);
+    await workspace.startShapingRun(workItemId, firstRunId, processIdentity);
+    const ingressPath = join(
+      fixture.root,
+      ...created.instruction.ingress_path.split("/"),
+    );
+    const outsidePath = join(fixture.root, "outside-result.json");
+    await writeFile(outsidePath, '{"outside":true}\n', "utf8");
+    await symlink(outsidePath, ingressPath, "file");
+
+    await expect(
+      workspace.writeShapingAcpTextFile(
+        created.instruction,
+        ingressPath,
+        '{"outside":true}\n',
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
   });
 
   it("fails closed on a tampered instruction and on a symlinked ingress directory", async () => {

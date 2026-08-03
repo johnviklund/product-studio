@@ -148,6 +148,7 @@ import type {
   AcpRunResult,
   AcpSession,
   AcpSessionCallbacks,
+  AcpWriteTextFileHandler,
 } from "../infrastructure/acp/acp-client";
 import {
   createCopilotRuntimeProfile,
@@ -196,6 +197,7 @@ type WorkspaceGateway = Pick<
   | "readShapingMissionPackage"
   | "listShapingArtifacts"
   | "writeShapingIngressInstruction"
+  | "writeShapingAcpTextFile"
   | "readShapingIngressBytes"
   | "publishAppliedShapingResult"
   | "createShapingRun"
@@ -442,6 +444,7 @@ export interface PreparedShapingRuntime {
     instruction: ShapingIngressInstructionV1,
     writePolicy: ShapingRunRecordV1["write_policy"],
     eventSink: AcpEventSink,
+    writeTextFile: AcpWriteTextFileHandler,
     callbacks?: AcpSessionCallbacks,
   ): Promise<AcpSession>;
 }
@@ -569,6 +572,7 @@ export interface CopilotConnectedExecuteRuntimeOptions {
     | "requested_model"
     | "workspace_cwd"
     | "evaluate_permission"
+    | "write_text_file"
     | "limits"
   > & {
     default_model: string;
@@ -1646,11 +1650,12 @@ export class PortfolioService {
     }
 
     const eventSink: AcpEventSink = {
-      append: (event) =>
+      append: (event, signal) =>
         source.workspace.appendConnectedRunEvent(
           workItemId,
           launched.connected_run.connected_run_id,
           event,
+          signal,
         ),
     };
     const key = this.connectedSessionKey(
@@ -1676,12 +1681,13 @@ export class PortfolioService {
           },
           session.process,
         ),
-      persist_effective_model: (effectiveModel) =>
+      persist_effective_model: (effectiveModel, signal) =>
         source.workspace
           .updateConnectedRunEffectiveModel(
             workItemId,
             launched.connected_run.connected_run_id,
             effectiveModel,
+            signal,
           )
           .then(() => undefined),
       prompt: `Execute the governed task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
@@ -3580,11 +3586,12 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
         launched.record.shaping_run_id,
       );
       const eventSink: AcpEventSink = {
-        append: (event) =>
+        append: (event, signal) =>
           source.workspace.appendShapingRunEvent(
             workItemId,
             launched.record.shaping_run_id,
             event,
+            signal,
           ),
       };
       const key = this.shapingSessionKey(
@@ -3598,6 +3605,15 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
             instruction,
             launched.record.write_policy,
             eventSink,
+            (request, signal) =>
+              source.workspace
+                .writeShapingAcpTextFile(
+                  instruction,
+                  request.path,
+                  request.content,
+                  signal,
+                )
+                .then(() => undefined),
             callbacks,
           ),
         mark_running: (session) =>
@@ -3606,12 +3622,13 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
             launched.record.shaping_run_id,
             session.process,
           ),
-        persist_effective_model: (effectiveModel) =>
+        persist_effective_model: (effectiveModel, signal) =>
           source.workspace
             .updateShapingRunEffectiveModel(
               workItemId,
               launched.record.shaping_run_id,
               effectiveModel,
+              signal,
             )
             .then(() => undefined),
         prompt: composeConnectedShapingPrompt(instruction),

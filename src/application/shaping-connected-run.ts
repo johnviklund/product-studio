@@ -16,6 +16,7 @@ import {
   type AcpRunResult,
   type AcpSession,
   type AcpSessionCallbacks,
+  type AcpWriteTextFileHandler,
 } from "../infrastructure/acp/acp-client";
 import {
   COPILOT_ADAPTER_ID,
@@ -38,6 +39,33 @@ type AdapterAttestedEffectiveModel = Extract<
 interface ModelObservation {
   readonly source: "session_new" | "config_option_update";
   readonly config_options: readonly SessionConfigOption[];
+  readonly signal: AbortSignal;
+}
+
+function signalWasAborted(signal: AbortSignal | null): boolean {
+  return signal?.aborted === true;
+}
+
+async function runWithAbort<T>(
+  operation: () => Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) {
+    throw new Error("Model observation persistence was interrupted.");
+  }
+  let rejectAborted!: (error: Error) => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAborted = reject;
+  });
+  const onAbort = () => {
+    rejectAborted(new Error("Model observation persistence was interrupted."));
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await Promise.race([operation(), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 export interface ConnectedAcpRunHooks<RunningRecord, TerminalRecord> {
@@ -47,6 +75,7 @@ export interface ConnectedAcpRunHooks<RunningRecord, TerminalRecord> {
   readonly mark_running: (session: AcpSession) => Promise<RunningRecord>;
   readonly persist_effective_model: (
     effectiveModel: AdapterAttestedEffectiveModel,
+    signal: AbortSignal,
   ) => Promise<void>;
   readonly prompt: string;
   readonly complete: (result: AcpRunResult) => Promise<TerminalRecord>;
@@ -78,12 +107,14 @@ function observationFromUpdate(
   event: Parameters<
     NonNullable<AcpSessionCallbacks["on_session_update"]>
   >[0],
+  signal: AbortSignal,
 ): ModelObservation | null {
   return event.config_options === null
     ? null
     : {
         source: "config_option_update",
         config_options: event.config_options,
+        signal,
       };
 }
 
@@ -100,7 +131,14 @@ async function persistObservation(
     config_options: observation.config_options,
   });
   if (extracted !== null) {
-    await persist({ assurance: "adapter_attested", ...extracted });
+    await runWithAbort(
+      () =>
+        persist(
+          { assurance: "adapter_attested", ...extracted },
+          observation.signal,
+        ),
+      observation.signal,
+    );
   }
 }
 
@@ -108,6 +146,7 @@ export async function startConnectedAcpRun<RunningRecord, TerminalRecord>(
   hooks: ConnectedAcpRunHooks<RunningRecord, TerminalRecord>,
 ): Promise<StartedConnectedAcpRun<RunningRecord>> {
   const pendingUpdates: ModelObservation[] = [];
+  let runtimeSignal: AbortSignal | null = null;
   let activated = false;
   let observationQueue: Promise<void> = Promise.resolve();
   const enqueue = (observation: ModelObservation): Promise<void> => {
@@ -120,8 +159,9 @@ export async function startConnectedAcpRun<RunningRecord, TerminalRecord>(
   let session: AcpSession | undefined;
   try {
     session = await hooks.start_session({
-      on_session_update: (event) => {
-        const observation = observationFromUpdate(event);
+      on_session_update: (event, signal) => {
+        runtimeSignal = signal;
+        const observation = observationFromUpdate(event, signal);
         if (observation === null) {
           return;
         }
@@ -133,12 +173,25 @@ export async function startConnectedAcpRun<RunningRecord, TerminalRecord>(
       },
     });
     const running = await hooks.mark_running(session);
-    await enqueue({
-      source: "session_new",
-      config_options: session.config_options,
-    });
-    for (const observation of pendingUpdates) {
-      await enqueue(observation);
+    const startupController = new AbortController();
+    const startupTimeout = setTimeout(() => {
+      startupController.abort();
+    }, session.wall_clock_timeout_ms);
+    startupTimeout.unref();
+    try {
+      await enqueue({
+        source: "session_new",
+        config_options: session.config_options,
+        signal: startupController.signal,
+      });
+      for (const observation of pendingUpdates) {
+        await enqueue({
+          ...observation,
+          signal: startupController.signal,
+        });
+      }
+    } finally {
+      clearTimeout(startupTimeout);
     }
     activated = true;
 
@@ -151,7 +204,9 @@ export async function startConnectedAcpRun<RunningRecord, TerminalRecord>(
       await completionGate;
       try {
         const result = await activeSession.run(hooks.prompt);
-        await observationQueue;
+        if (!signalWasAborted(runtimeSignal)) {
+          await observationQueue;
+        }
         const terminal = await hooks.complete(result);
         await hooks.after_complete?.(result, terminal);
       } catch (error) {
@@ -163,7 +218,9 @@ export async function startConnectedAcpRun<RunningRecord, TerminalRecord>(
     })();
     const cancel = async () => {
       await activeSession.cancel().catch(() => undefined);
-      await observationQueue.catch(() => undefined);
+      if (!signalWasAborted(runtimeSignal)) {
+        await observationQueue.catch(() => undefined);
+      }
       await completion;
     };
     hooks.started?.({ session: activeSession, cancel }, running);
@@ -200,6 +257,7 @@ export interface CopilotConnectedShapingRuntimeOptions {
     | "required_available_tools"
     | "workspace_cwd"
     | "evaluate_permission"
+    | "write_text_file"
     | "limits"
   >;
 }
@@ -227,12 +285,15 @@ export class CopilotConnectedShapingRuntime implements ConnectedShapingRuntime {
     const base = {
       ...this.options.profile,
       requested_model: input.requested_model,
-      required_available_tools: ["view", "create"],
+      required_available_tools: ["view", "apply_patch"],
       workspace_cwd: input.workspace_cwd,
       limits: input.limits,
     };
     const prepared = createCopilotRuntimeProfile({
       ...base,
+      write_text_file: async () => {
+        throw new Error("Prepared shaping runtime cannot write before launch.");
+      },
       evaluate_permission: () => ({
         decision: "reject_once",
         reason: "shaping_instruction_not_loaded",
@@ -242,7 +303,13 @@ export class CopilotConnectedShapingRuntime implements ConnectedShapingRuntime {
       requested_model: input.requested_model,
       reasoning_effort: this.options.profile.reasoning_effort,
       sanitized_profile: prepared.sanitized_profile_evidence,
-      start: (instructionInput, policyInput, eventSink, callbacks) => {
+      start: (
+        instructionInput,
+        policyInput,
+        eventSink,
+        writeTextFile: AcpWriteTextFileHandler,
+        callbacks,
+      ) => {
         const instruction = shapingIngressInstructionSchema.parse(
           instructionInput,
         );
@@ -250,6 +317,7 @@ export class CopilotConnectedShapingRuntime implements ConnectedShapingRuntime {
           shapingRunWritePolicySchema.parse(policyInput);
         const profile = createCopilotRuntimeProfile({
           ...base,
+          write_text_file: writeTextFile,
           evaluate_permission: (request) =>
             evaluateShapingPermissionRequest(instruction, policy, request),
         });

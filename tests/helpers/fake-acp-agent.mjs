@@ -9,6 +9,7 @@ const sessionId = "product-studio-fake-session";
 let currentConfigOptions = Array.isArray(scenario.session_config_options)
   ? scenario.session_config_options
   : [];
+let clientCapabilities = {};
 
 function permissionOptions() {
   return [
@@ -19,10 +20,20 @@ function permissionOptions() {
 
 const application = acp
   .agent({ name: "product-studio-fake-agent" })
-  .onRequest(acp.methods.agent.initialize, () => ({
-    protocolVersion: acp.PROTOCOL_VERSION,
-    agentCapabilities: { loadSession: false },
-  }))
+  .onRequest(acp.methods.agent.initialize, async (context) => {
+    clientCapabilities = context.params.clientCapabilities;
+    if (scenario.record_client_capabilities === true && sentinelPath !== null) {
+      await writeFile(
+        `${sentinelPath}.client-capabilities`,
+        `${JSON.stringify(clientCapabilities)}\n`,
+        "utf8",
+      );
+    }
+    return {
+      protocolVersion: acp.PROTOCOL_VERSION,
+      agentCapabilities: { loadSession: false },
+    };
+  })
   .onRequest(acp.methods.agent.session.new, (context) => {
     if (!Array.isArray(context.params.mcpServers) || context.params.mcpServers.length !== 0) {
       throw new Error("The client must request zero MCP servers.");
@@ -161,6 +172,34 @@ const application = acp
               : "failed",
         },
       });
+    }
+    if (
+      typeof scenario.client_write_path === "string" &&
+      typeof scenario.client_write_content === "string"
+    ) {
+      try {
+        const writeCount =
+          Number.isSafeInteger(scenario.client_write_count) &&
+          scenario.client_write_count > 0
+            ? scenario.client_write_count
+            : 1;
+        await Promise.all(
+          Array.from({ length: writeCount }, () =>
+            context.client.request(acp.methods.client.fs.writeTextFile, {
+              sessionId:
+                typeof scenario.client_write_session_id === "string"
+                  ? scenario.client_write_session_id
+                  : sessionId,
+              path: scenario.client_write_path,
+              content: scenario.client_write_content,
+            }),
+          ),
+        );
+      } catch (error) {
+        if (scenario.ignore_client_write_error !== true) {
+          throw error;
+        }
+      }
     }
     return { stopReason: "end_turn" };
   })

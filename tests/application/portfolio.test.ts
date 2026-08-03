@@ -156,6 +156,7 @@ function preparedRuntime(
       containment_assurance: "not_independently_enforced",
       machine_authority: "launching_user",
       requested_mcp_server_count: 0,
+      client_fs_write_text_file: false,
       credential_environment: "explicit_allowlist_without_credential_values",
     },
     start: vi.fn(async (eventSink: AcpEventSink) => {
@@ -188,6 +189,7 @@ function preparedShapingRuntime(
       protocol_version: 1,
       requested_mcp_server_count: 0,
       config_options: [],
+      wall_clock_timeout_ms: 2_000,
       process: {
         pid: 5000 + sessionOrdinal,
         process_group_id: 5000 + sessionOrdinal,
@@ -224,6 +226,7 @@ function preparedShapingRuntime(
           containment_assurance: "not_independently_enforced",
           machine_authority: "launching_user",
           requested_mcp_server_count: 0,
+          client_fs_write_text_file: true,
           credential_environment:
             "explicit_allowlist_without_credential_values",
         },
@@ -293,6 +296,7 @@ function fakeArtifactOnlyRuntime(options: {
   config_update?: readonly ReturnType<typeof modelConfigOption>[] | null;
   delay_ms?: number;
   result_source?: string;
+  use_client_write?: boolean;
 } = {}) {
   const adapter = new StdioAcpClientAdapter();
   const prompts: string[] = [];
@@ -322,6 +326,7 @@ function fakeArtifactOnlyRuntime(options: {
         containment_assurance: "not_independently_enforced",
         machine_authority: "launching_user",
         requested_mcp_server_count: 0,
+        client_fs_write_text_file: true,
         credential_environment:
           "explicit_allowlist_without_credential_values",
       },
@@ -329,6 +334,7 @@ function fakeArtifactOnlyRuntime(options: {
         instruction: ShapingIngressInstructionV1,
         policy: ShapingRunWritePolicy,
         eventSink: AcpEventSink,
+        writeTextFile,
         callbacks,
       ) => {
         starts(instruction, policy);
@@ -364,11 +370,11 @@ function fakeArtifactOnlyRuntime(options: {
                         modelConfigOption("adapter-model-b", "deployment-b"),
                       ],
                   }),
-              requests: [request],
+              requests: options.use_client_write === true ? [] : [request],
               ...(options.delay_ms === undefined
                 ? {}
                 : { delay_ms: options.delay_ms }),
-              write_requested_file: true,
+              write_requested_file: options.use_client_write !== true,
               write_permission_sentinel: false,
               result_source:
                 options.result_source ??
@@ -377,6 +383,21 @@ function fakeArtifactOnlyRuntime(options: {
                   null,
                   2,
                 )}\n`,
+              ...(options.use_client_write === true
+                ? {
+                    client_write_path: join(
+                      input.workspace_cwd,
+                      ...instruction.ingress_path.split("/"),
+                    ),
+                    client_write_content:
+                      options.result_source ??
+                      `${JSON.stringify(
+                        shapingResultForMission(input.mission),
+                        null,
+                        2,
+                      )}\n`,
+                  }
+                : {}),
             }),
             PRODUCT_STUDIO_FAKE_ACP_SENTINEL: join(
               input.workspace_cwd,
@@ -391,6 +412,9 @@ function fakeArtifactOnlyRuntime(options: {
               requestInput,
             ),
           limits: input.limits,
+          ...(options.use_client_write === true
+            ? { write_text_file: writeTextFile }
+            : {}),
           normalize_permission: (requestInput) =>
             canonicalFakeRequest(requestInput.toolCall.rawInput),
         };
@@ -400,6 +424,7 @@ function fakeArtifactOnlyRuntime(options: {
           protocol_version: session.protocol_version,
           requested_mcp_server_count: session.requested_mcp_server_count,
           config_options: session.config_options,
+          wall_clock_timeout_ms: session.wall_clock_timeout_ms,
           process: session.process,
           run: (prompt: string) => {
             prompts.push(prompt);
@@ -2073,6 +2098,50 @@ describe("PortfolioService", () => {
     }
   });
 
+  it("publishes shaping output received through the advertised ACP client filesystem fallback", async () => {
+    const root = await createWorkspace("ACP client filesystem Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Produce shaping through ACP client filesystem",
+      type: "Feature",
+    });
+    const fake = fakeArtifactOnlyRuntime({ use_client_write: true });
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+
+    await service.startBrainstorm(sourceId, created.goal.work_item_id, {
+      launch_mode: "connected",
+      next_requested_model: "requested-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+
+    await expect.poll(async () => {
+      const listing = await service.listShapingArtifacts(
+        sourceId,
+        created.goal.work_item_id,
+      );
+      return currentPhaseArtifact(listing.artifacts, "brainstorm").result !== null;
+    }).toBe(true);
+    const listing = await service.listShapingArtifacts(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(listing.runs[0]).toMatchObject({
+      lifecycle: { status: "terminal", terminal_outcome: "completed" },
+    });
+  });
+
   it("joins cancellation to an in-flight shaping publication instead of terminalizing twice", async () => {
     const root = await createWorkspace("Serialized shaping cancellation Workspace");
     const repository = new PausedShapingPublicationWorkspace(root, {
@@ -3086,6 +3155,7 @@ describe("PortfolioService", () => {
       protocol_version: 1,
       requested_mcp_server_count: 0,
       config_options: [],
+      wall_clock_timeout_ms: 2_000,
       process: {
         pid: 4001,
         process_group_id: 4001,
@@ -3241,6 +3311,7 @@ describe("PortfolioService", () => {
       protocol_version: 1,
       requested_mcp_server_count: 0,
       config_options: [],
+      wall_clock_timeout_ms: 2_000,
       process: {
         pid: 4002,
         process_group_id: 4002,

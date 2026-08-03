@@ -75,6 +75,83 @@ class FailFirstConfigUpdateSink extends MemoryEventSink {
   }
 }
 
+class NeverSettlingPermissionSink extends MemoryEventSink {
+  readonly permissionStarted: Promise<void>;
+  private markPermissionStarted!: () => void;
+
+  constructor() {
+    super();
+    this.permissionStarted = new Promise<void>((resolveStarted) => {
+      this.markPermissionStarted = resolveStarted;
+    });
+  }
+
+  override async append(
+    event: AcpEvidenceEvent,
+  ): Promise<{ limit_reached: boolean }> {
+    if (event.kind === "permission") {
+      this.markPermissionStarted();
+      await new Promise<void>(() => undefined);
+    }
+    return super.append(event);
+  }
+}
+
+class NeverSettlingRunFinishedSink extends MemoryEventSink {
+  override async append(
+    event: AcpEvidenceEvent,
+  ): Promise<{ limit_reached: boolean }> {
+    if (event.kind === "run_finished") {
+      await new Promise<void>(() => undefined);
+    }
+    return super.append(event);
+  }
+}
+
+class DelayedRunFinishedSink extends MemoryEventSink {
+  readonly appendStarted: Promise<void>;
+  readonly appendFinished: Promise<void>;
+  private markAppendStarted!: () => void;
+  private releaseAppend!: () => void;
+  private markAppendFinished!: () => void;
+  private readonly appendReleased: Promise<void>;
+
+  constructor() {
+    super();
+    this.appendStarted = new Promise<void>((resolveStarted) => {
+      this.markAppendStarted = resolveStarted;
+    });
+    this.appendReleased = new Promise<void>((resolveReleased) => {
+      this.releaseAppend = resolveReleased;
+    });
+    this.appendFinished = new Promise<void>((resolveFinished) => {
+      this.markAppendFinished = resolveFinished;
+    });
+  }
+
+  release(): void {
+    this.releaseAppend();
+  }
+
+  override async append(
+    event: AcpEvidenceEvent,
+    signal?: AbortSignal,
+  ): Promise<{ limit_reached: boolean }> {
+    if (event.kind !== "run_finished") {
+      return super.append(event);
+    }
+    this.markAppendStarted();
+    await this.appendReleased;
+    try {
+      return signal?.aborted === true
+        ? { limit_reached: false }
+        : await super.append(event);
+    } finally {
+      this.markAppendFinished();
+    }
+  }
+}
+
 async function createRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-acp-client-"));
   createdRoots.push(root);
@@ -280,6 +357,272 @@ describe("stdio ACP client adapter", () => {
     await expect(session.run("Begin the mission.")).resolves.toMatchObject({
       outcome: "completed",
     });
+  });
+
+  it("advertises and mediates write-only client filesystem capability only when a writer is supplied", async () => {
+    const root = await createRoot();
+    const sentinel = join(root, "client-fs-sentinel");
+    const writeTextFile = vi.fn(async () => undefined);
+    const target = join(root, "src", "result.json");
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            record_client_capabilities: true,
+            client_write_path: target,
+            client_write_content: '{"ok":true}\n',
+          },
+          sentinel,
+        ),
+        write_text_file: writeTextFile,
+      },
+      new MemoryEventSink(),
+    );
+
+    await expect(session.run("Use the client filesystem channel.")).resolves.toMatchObject({
+      outcome: "completed",
+      permissions: [expect.objectContaining({ kind: "in_envelope" })],
+    });
+    expect(writeTextFile).toHaveBeenCalledWith({
+      sessionId: session.session_id,
+      path: target,
+      content: '{"ok":true}\n',
+    }, expect.any(AbortSignal));
+    await expect(
+      readFile(`${sentinel}.client-capabilities`, "utf8").then(JSON.parse),
+    ).resolves.toMatchObject({
+      fs: { readTextFile: false, writeTextFile: true },
+      terminal: false,
+    });
+
+    const disabledSentinel = join(root, "disabled-client-fs-sentinel");
+    const disabled = await new StdioAcpClientAdapter().start(
+      profile(
+        root,
+        { record_client_capabilities: true },
+        disabledSentinel,
+      ),
+      new MemoryEventSink(),
+    );
+    await disabled.close();
+    await expect(
+      readFile(`${disabledSentinel}.client-capabilities`, "utf8").then(JSON.parse),
+    ).resolves.toMatchObject({
+      fs: { readTextFile: false, writeTextFile: false },
+      terminal: false,
+    });
+  });
+
+  it("rejects a direct client filesystem write outside the runtime evaluator", async () => {
+    const root = await createRoot();
+    const writeTextFile = vi.fn(async () => undefined);
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            client_write_path: join(dirname(root), "outside-client-fs.json"),
+            client_write_content: '{"blocked":true}\n',
+            ignore_client_write_error: true,
+          },
+          join(root, "denied-client-fs-sentinel"),
+        ),
+        write_text_file: writeTextFile,
+      },
+      new MemoryEventSink(),
+    );
+
+    await expect(session.run("Try a denied client filesystem write.")).resolves.toMatchObject({
+      outcome: "missing_permission",
+    });
+    expect(writeTextFile).not.toHaveBeenCalled();
+  });
+
+  it("serializes concurrent client filesystem writes through permission recording and persistence", async () => {
+    const root = await createRoot();
+    let activeWrites = 0;
+    let maximumActiveWrites = 0;
+    const writeTextFile = vi.fn(async () => {
+      activeWrites += 1;
+      maximumActiveWrites = Math.max(maximumActiveWrites, activeWrites);
+      await new Promise((resolveWrite) => setTimeout(resolveWrite, 20));
+      activeWrites -= 1;
+    });
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            client_write_path: join(root, "src", "result.json"),
+            client_write_content: '{"ok":true}\n',
+            client_write_count: 2,
+          },
+          join(root, "concurrent-client-fs-sentinel"),
+        ),
+        write_text_file: writeTextFile,
+      },
+      new MemoryEventSink(),
+    );
+
+    await expect(session.run("Issue concurrent client filesystem writes.")).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(writeTextFile).toHaveBeenCalledTimes(2);
+    expect(maximumActiveWrites).toBe(1);
+  });
+
+  it("aborts and settles an accepted client filesystem write before cancellation completes", async () => {
+    const root = await createRoot();
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolveStarted) => {
+      markWriteStarted = resolveStarted;
+    });
+    let observedSignal: AbortSignal = new AbortController().signal;
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            client_write_path: join(root, "src", "result.json"),
+            client_write_content: '{"ok":true}\n',
+          },
+          join(root, "cancel-client-fs-sentinel"),
+        ),
+        write_text_file: async (_request, signal) => {
+          observedSignal = signal;
+          markWriteStarted();
+          await new Promise<void>((resolveAborted) => {
+            if (signal.aborted) {
+              resolveAborted();
+              return;
+            }
+            signal.addEventListener("abort", () => resolveAborted(), {
+              once: true,
+            });
+          });
+        },
+      },
+      new MemoryEventSink(),
+    );
+
+    const run = session.run("Begin a delayed client filesystem write.");
+    await writeStarted;
+    await session.cancel();
+    await expect(run).resolves.toMatchObject({ outcome: "cancelled" });
+    expect(observedSignal.aborted).toBe(true);
+    expect(isRunning(session.process.pid)).toBe(false);
+  });
+
+  it("bounds timeout terminalization when an accepted client filesystem writer never settles", async () => {
+    const root = await createRoot();
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolveStarted) => {
+      markWriteStarted = resolveStarted;
+    });
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            client_write_path: join(root, "src", "result.json"),
+            client_write_content: '{"ok":true}\n',
+          },
+          join(root, "timeout-client-fs-sentinel"),
+        ),
+        limits: {
+          ...limits,
+          wall_clock_timeout_ms: 30,
+        },
+        write_text_file: async () => {
+          markWriteStarted();
+          await new Promise<void>(() => undefined);
+        },
+      },
+      new MemoryEventSink(),
+    );
+
+    const run = session.run(
+      "Begin a noncooperative client filesystem write before timeout.",
+    );
+    await writeStarted;
+    await expect(run).resolves.toMatchObject({ outcome: "timed_out" });
+    expect(isRunning(session.process.pid)).toBe(false);
+  });
+
+  it("bounds timeout terminalization when permission evidence never settles before the writer", async () => {
+    const root = await createRoot();
+    const sink = new NeverSettlingPermissionSink();
+    const writeTextFile = vi.fn(async () => undefined);
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            client_write_path: join(root, "src", "result.json"),
+            client_write_content: '{"ok":true}\n',
+          },
+          join(root, "timeout-permission-sentinel"),
+        ),
+        limits: { ...limits, wall_clock_timeout_ms: 30 },
+        write_text_file: writeTextFile,
+      },
+      sink,
+    );
+
+    const run = session.run("Begin a write whose permission evidence stalls.");
+    await sink.permissionStarted;
+    await expect(run).resolves.toMatchObject({
+      outcome: "timed_out",
+      permissions: [expect.objectContaining({ kind: "in_envelope" })],
+    });
+    expect(writeTextFile).not.toHaveBeenCalled();
+    expect(isRunning(session.process.pid)).toBe(false);
+    expect(sink.events.some((event) => event.kind === "run_finished")).toBe(
+      false,
+    );
+  });
+
+  it("bounds the wall clock when terminal evidence never settles", async () => {
+    const root = await createRoot();
+    const sink = new NeverSettlingRunFinishedSink();
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(root, {}, join(root, "terminal-evidence-sentinel")),
+        limits: { ...limits, wall_clock_timeout_ms: 30 },
+      },
+      sink,
+    );
+
+    await expect(session.run("Complete before terminal evidence stalls.")).resolves.toMatchObject({
+      outcome: "timed_out",
+    });
+    expect(isRunning(session.process.pid)).toBe(false);
+    expect(sink.events.some((event) => event.kind === "run_finished")).toBe(
+      false,
+    );
+  });
+
+  it("aborts terminal evidence that reaches publication after the wall deadline", async () => {
+    const root = await createRoot();
+    const sink = new DelayedRunFinishedSink();
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(root, {}, join(root, "delayed-terminal-evidence-sentinel")),
+        limits: { ...limits, wall_clock_timeout_ms: 30 },
+      },
+      sink,
+    );
+
+    const run = session.run("Delay terminal evidence until after timeout.");
+    await sink.appendStarted;
+    await expect(run).resolves.toMatchObject({ outcome: "timed_out" });
+    sink.release();
+    await sink.appendFinished;
+
+    expect(sink.events.some((event) => event.kind === "run_finished")).toBe(
+      false,
+    );
   });
 
   it("bounds session initialization and terminates the child when model configuration stalls", async () => {

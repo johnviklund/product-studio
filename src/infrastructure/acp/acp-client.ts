@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 
 import * as acp from "@agentclientprotocol/sdk";
@@ -19,6 +19,11 @@ export type NormalizedPermissionEvaluator = (
   readonly reason: string | null;
 };
 
+export type AcpWriteTextFileHandler = (
+  request: acp.WriteTextFileRequest,
+  signal: AbortSignal,
+) => Promise<void>;
+
 export interface AcpRuntimeProfile {
   readonly adapter_id: string;
   readonly executable: string;
@@ -30,6 +35,7 @@ export interface AcpRuntimeProfile {
   readonly normalize_permission: (
     request: acp.RequestPermissionRequest,
   ) => CanonicalCapabilityRequest | null;
+  readonly write_text_file?: AcpWriteTextFileHandler;
   readonly initialize_session?: (
     session: AcpSessionInitializer,
   ) => Promise<void>;
@@ -45,7 +51,10 @@ export interface AcpSessionInitializer {
 }
 
 export interface AcpEventSink {
-  append(event: AcpEvidenceEvent): Promise<{ readonly limit_reached: boolean }>;
+  append(
+    event: AcpEvidenceEvent,
+    signal?: AbortSignal,
+  ): Promise<{ readonly limit_reached: boolean }>;
 }
 
 export interface AcpClientAdapter {
@@ -57,7 +66,10 @@ export interface AcpClientAdapter {
 }
 
 export interface AcpSessionCallbacks {
-  on_session_update?(event: AcpSessionUpdateEvent): Promise<void> | void;
+  on_session_update?(
+    event: AcpSessionUpdateEvent,
+    signal: AbortSignal,
+  ): Promise<void> | void;
 }
 
 export interface AcpSession {
@@ -65,6 +77,7 @@ export interface AcpSession {
   readonly protocol_version: number;
   readonly requested_mcp_server_count: 0;
   readonly config_options: readonly acp.SessionConfigOption[];
+  readonly wall_clock_timeout_ms: number;
   readonly process: {
     readonly pid: number;
     readonly process_group_id: number;
@@ -257,10 +270,44 @@ function validateRuntimeProfile(profile: AcpRuntimeProfile): AcpRuntimeProfile {
   return profile;
 }
 
+function normalizeWriteTextFileRequest(
+  request: acp.WriteTextFileRequest,
+  workspaceCwd: string,
+): CanonicalCapabilityRequest | null {
+  if (!isAbsolute(request.path)) {
+    return null;
+  }
+  const absolutePath = resolve(request.path);
+  const workspaceRelativePath = relative(workspaceCwd, absolutePath);
+  if (
+    workspaceRelativePath === "" ||
+    workspaceRelativePath === ".." ||
+    workspaceRelativePath.startsWith(`..${sep}`) ||
+    isAbsolute(workspaceRelativePath)
+  ) {
+    return workspaceRelativePath === ""
+      ? null
+      : {
+          schema_version: 1,
+          kind: "outside_workspace_write",
+          path: absolutePath,
+        };
+  }
+  return {
+    schema_version: 1,
+    kind: "workspace_write",
+    path: workspaceRelativePath.split(sep).join("/"),
+  };
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolveSleep) => {
     setTimeout(resolveSleep, milliseconds);
   });
+}
+
+function abortWasRequested(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
 }
 
 async function withinTimeout<T>(
@@ -300,7 +347,11 @@ class AcpEvidenceRecorder {
   async record(
     kind: AcpEvidenceEvent["kind"],
     payload: AcpEvidenceEvent["payload"],
+    signal?: AbortSignal,
   ): Promise<void> {
+    if (abortWasRequested(signal)) {
+      throw new AcpClientError("ACP evidence recording was interrupted.");
+    }
     const eventWithoutHash = {
       schema_version: 1 as const,
       sequence: this.sequence + 1,
@@ -317,7 +368,10 @@ class AcpEvidenceRecorder {
     if (this.retainedBytes + eventBytes > this.maxOutputBytes) {
       throw new AcpEventLimitError("ACP event output limit reached.");
     }
-    const result = await this.sink.append(event);
+    const result = await this.sink.append(event, signal);
+    if (abortWasRequested(signal)) {
+      throw new AcpClientError("ACP evidence recording was interrupted.");
+    }
     if (result.limit_reached) {
       throw new AcpEventLimitError("Connected-run event limit reached.");
     }
@@ -341,6 +395,11 @@ class StdioAcpSession implements AcpSession {
   private processClosed: Promise<void>;
   private callbackQueue: Promise<void> = Promise.resolve();
   private lastConfigOptionsSha256: string | null = null;
+  private readonly writeAbortController = new AbortController();
+
+  get wall_clock_timeout_ms(): number {
+    return this.profile.limits.wall_clock_timeout_ms;
+  }
 
   constructor(
     private readonly profile: AcpRuntimeProfile,
@@ -377,28 +436,36 @@ class StdioAcpSession implements AcpSession {
     this.runInFlight = true;
     let timeout: NodeJS.Timeout | undefined;
     try {
+      const timedOut = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          reject(new AcpTimeoutError("ACP run timed out."));
+        }, this.profile.limits.wall_clock_timeout_ms);
+        timeout.unref();
+      });
       const response = await Promise.race([
         this.activeSession.prompt(prompt),
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => {
-            reject(new AcpTimeoutError("ACP run timed out."));
-          }, this.profile.limits.wall_clock_timeout_ms);
-          timeout.unref();
-        }),
+        timedOut,
       ]);
-      await this.callbackQueue;
+      await Promise.race([this.callbackQueue, timedOut]);
       const result = this.resultFromStopReason(response.stopReason);
-      await this.recorder.record("run_finished", {
-        outcome: result.outcome,
-        partial: result.partial,
-        stop_reason: result.stop_reason,
-      });
+      await Promise.race([
+        this.recorder.record(
+          "run_finished",
+          {
+            outcome: result.outcome,
+            partial: result.partial,
+            stop_reason: result.stop_reason,
+          },
+          this.writeAbortController.signal,
+        ),
+        timedOut,
+      ]);
       await this.close();
       return result;
     } catch (error) {
-      const result = this.resultFromError(error);
-      await this.recordFailureResult(result);
       await this.close(true);
+      await this.callbackQueue;
+      const result = this.resultFromError(error);
       return result;
     } finally {
       if (timeout !== undefined) {
@@ -413,6 +480,7 @@ class StdioAcpSession implements AcpSession {
       return;
     }
     this.cancellationRequested = true;
+    this.writeAbortController.abort();
     try {
       await this.connection.agent.notify(acp.methods.agent.session.cancel, {
         sessionId: this.session_id,
@@ -424,6 +492,9 @@ class StdioAcpSession implements AcpSession {
   }
 
   async close(force = false): Promise<void> {
+    if (force) {
+      this.writeAbortController.abort();
+    }
     if (this.closed) {
       return;
     }
@@ -461,6 +532,7 @@ class StdioAcpSession implements AcpSession {
     notification: acp.SessionNotification,
   ): Promise<void> {
     return this.enqueueCallback(async () => {
+      const signal = this.writeAbortController.signal;
       const event = summarizeSessionUpdate(notification);
       const configOptionsSha256 =
         event.config_options === null
@@ -481,8 +553,12 @@ class StdioAcpSession implements AcpSession {
               model_option_count: modelOptionCount(event.config_options),
               observed_event_sha256: configOptionsSha256,
             },
+        signal,
       );
-      await this.callbacks.on_session_update?.(event);
+      if (signal.aborted) {
+        throw new AcpClientError("ACP session update was interrupted.");
+      }
+      await this.callbacks.on_session_update?.(event, signal);
       if (configOptionsSha256 !== null) {
         this.lastConfigOptionsSha256 = configOptionsSha256;
       }
@@ -526,60 +602,132 @@ class StdioAcpSession implements AcpSession {
       normalized = null;
     }
 
-    if (normalized === null) {
-      this.permissionOutcomes.push({
-        kind: "invalid_request",
-        reason: "missing_or_unnormalizable_permission_detail",
-      });
-      await this.recorder.record("permission", {
-        decision: "invalid_request",
-        operation_sha256: null,
-        reason: "missing_or_unnormalizable_permission_detail",
-      });
+    const decision = await this.recordPermissionEvaluation(normalized);
+    if (decision === "invalid") {
       return selectOption(request.options, "reject_once");
     }
-
-    const operationSha256 = hashCanonicalCapabilityRequest(normalized);
-    const evaluation = this.profile.evaluate_permission(normalized);
-    if (evaluation.decision === "allow_once") {
-      this.permissionOutcomes.push({
-        kind: "in_envelope",
-        request: normalized,
-        operation_sha256: operationSha256,
-      });
-      await this.recorder.record("permission", {
-        decision: "in_envelope",
-        operation_sha256: operationSha256,
-        reason: null,
-      });
+    if (decision === "allow") {
       const allowed = selectOption(request.options, "allow_once");
       if (allowed.outcome.outcome !== "selected") {
         throw new AcpClientError("ACP request did not offer one-run approval.");
       }
       return allowed;
     }
-
-    this.permissionOutcomes.push({
-      kind: "missing_permission",
-      request: normalized,
-      operation_sha256: operationSha256,
-      reason: "outside_capability_envelope",
-    });
-    await this.recorder.record("permission", {
-      decision: "missing_permission",
-      operation_sha256: operationSha256,
-      reason: "outside_capability_envelope",
-    });
     return selectOption(request.options, "reject_once");
   }
 
+  async handleWriteTextFile(
+    request: acp.WriteTextFileRequest,
+    writer: AcpWriteTextFileHandler,
+  ): Promise<void> {
+    if (request.sessionId !== this.session_id) {
+      throw new AcpClientError("ACP client filesystem session does not match.");
+    }
+    await this.enqueueCallback(async () => {
+      if (this.writeAbortController.signal.aborted) {
+        throw new AcpClientError("ACP client filesystem write was interrupted.");
+      }
+      const decision = await this.recordPermissionEvaluation(
+        normalizeWriteTextFileRequest(request, this.profile.workspace_cwd),
+      );
+      if (decision !== "allow") {
+        throw new AcpClientError("ACP client filesystem write was denied.");
+      }
+      await writer(request, this.writeAbortController.signal);
+    });
+  }
+
+  private async recordPermissionEvaluation(
+    normalized: CanonicalCapabilityRequest | null,
+  ): Promise<"allow" | "reject" | "invalid"> {
+    if (normalized === null) {
+      this.permissionOutcomes.push({
+        kind: "invalid_request",
+        reason: "missing_or_unnormalizable_permission_detail",
+      });
+      await this.recorder.record(
+        "permission",
+        {
+          decision: "invalid_request",
+          operation_sha256: null,
+          reason: "missing_or_unnormalizable_permission_detail",
+        },
+        this.writeAbortController.signal,
+      );
+      return "invalid";
+    }
+
+    const canonical = canonicalizeCapabilityRequest(normalized);
+    const operationSha256 = hashCanonicalCapabilityRequest(canonical);
+    const evaluation = this.profile.evaluate_permission(canonical);
+    if (evaluation.decision === "allow_once") {
+      this.permissionOutcomes.push({
+        kind: "in_envelope",
+        request: canonical,
+        operation_sha256: operationSha256,
+      });
+      await this.recorder.record(
+        "permission",
+        {
+          decision: "in_envelope",
+          operation_sha256: operationSha256,
+          reason: null,
+        },
+        this.writeAbortController.signal,
+      );
+      return "allow";
+    }
+
+    this.permissionOutcomes.push({
+      kind: "missing_permission",
+      request: canonical,
+      operation_sha256: operationSha256,
+      reason: "outside_capability_envelope",
+    });
+    await this.recorder.record(
+      "permission",
+      {
+        decision: "missing_permission",
+        operation_sha256: operationSha256,
+        reason: "outside_capability_envelope",
+      },
+      this.writeAbortController.signal,
+    );
+    return "reject";
+  }
+
   private enqueueCallback<T>(operation: () => Promise<T>): Promise<T> {
-    const queued = this.callbackQueue.then(operation);
+    const queued = this.callbackQueue.then(() =>
+      this.invokeCallbackWithAbort(operation),
+    );
     this.callbackQueue = queued.then(
       () => undefined,
       () => undefined,
     );
     return queued;
+  }
+
+  private async invokeCallbackWithAbort<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const signal = this.writeAbortController.signal;
+    if (signal.aborted) {
+      throw new AcpClientError("ACP callback was interrupted.");
+    }
+    let rejectAborted!: (error: AcpClientError) => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAborted = reject;
+    });
+    const onAbort = () => {
+      rejectAborted(new AcpClientError("ACP callback was interrupted."));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    const running = Promise.resolve().then(operation);
+    try {
+      return await Promise.race([running, aborted]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
   private resultFromStopReason(stopReason: acp.StopReason): AcpRunResult {
@@ -624,18 +772,6 @@ class StdioAcpSession implements AcpSession {
       stop_reason: null,
       permissions: [...this.permissionOutcomes],
     };
-  }
-
-  private async recordFailureResult(result: AcpRunResult): Promise<void> {
-    try {
-      await this.recorder.record("run_finished", {
-        outcome: result.outcome,
-        partial: result.partial,
-        stop_reason: result.stop_reason,
-      });
-    } catch {
-      // The original bounded-output failure remains authoritative.
-    }
   }
 
   private signalGroup(signal: NodeJS.Signals): void {
@@ -727,6 +863,16 @@ export class StdioAcpClientAdapter implements AcpClientAdapter {
         if (session !== null) {
           await session.handleSessionUpdate(context.params);
         }
+      })
+      .onRequest(acp.methods.client.fs.writeTextFile, async (context) => {
+        if (session === null || profile.write_text_file === undefined) {
+          throw new AcpClientError("ACP client filesystem writes are unavailable.");
+        }
+        await session.handleWriteTextFile(
+          context.params,
+          profile.write_text_file,
+        );
+        return {};
       });
 
     try {
@@ -738,7 +884,10 @@ export class StdioAcpClientAdapter implements AcpClientAdapter {
       const initialized = await withinTimeout(
         connection.agent.request(acp.methods.agent.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: {},
+          clientCapabilities:
+            profile.write_text_file === undefined
+              ? {}
+              : { fs: { writeTextFile: true } },
         }),
         ACP_HANDSHAKE_TIMEOUT_MS,
       );

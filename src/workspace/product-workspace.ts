@@ -1,8 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
 import {
-  appendFile,
+  appendFileSync,
+  closeSync,
+  constants as fsConstants,
+  fsyncSync,
+  linkSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import {
   lstat,
   mkdir,
   open,
@@ -13,7 +22,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { join, posix, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual, promisify, TextDecoder } from "node:util";
 
 import { parse, stringify } from "yaml";
@@ -363,6 +372,20 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function unlinkFileSyncIfPresent(filePath: string): void {
+  try {
+    unlinkSync(filePath);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+function abortWasRequested(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
 }
 
 function validationReason(
@@ -1268,12 +1291,20 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       EffectiveModelIdentity,
       { assurance: "adapter_attested" }
     >,
+    signal?: AbortSignal,
   ): Promise<ConnectedRunRecordV1> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
     const validatedEffectiveModel = effectiveModelIdentitySchema.parse(
       effectiveModel,
     );
+    if (abortWasRequested(signal)) {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "Connected-run model observation was interrupted.",
+      );
+    }
     if (validatedEffectiveModel.assurance !== "adapter_attested") {
       throw new ControllerConflictError(
         "invalid_transition",
@@ -1315,9 +1346,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         effective_model: validatedEffectiveModel,
       },
     });
-    await this.writeJsonAtomically(
+    await this.writeJsonAtomicallyAbortable(
       this.connectedRunPaths(validatedWorkItemId, validatedRunId).run,
       updated,
+      signal,
     );
     return updated;
   }
@@ -1366,9 +1398,17 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     workItemId: string,
     connectedRunId: string,
     event: unknown,
+    signal?: AbortSignal,
   ): Promise<ConnectedRunEventAppendResult> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    if (abortWasRequested(signal)) {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "Connected-run event append was interrupted.",
+      );
+    }
     const paths = this.connectedRunPaths(validatedWorkItemId, validatedRunId);
     const eventLockPath = join(paths.directory, CONNECTED_RUN_EVENTS_LOCK_FILE);
     try {
@@ -1418,7 +1458,14 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         };
       }
 
-      await appendFile(paths.events, line, "utf8");
+      if (abortWasRequested(signal)) {
+        throw new ControllerConflictError(
+          "invalid_transition",
+          validatedWorkItemId,
+          "Connected-run event append was interrupted.",
+        );
+      }
+      appendFileSync(paths.events, line, "utf8");
       return {
         appended: true,
         limit_reached: false,
@@ -1426,7 +1473,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         event_bytes: stats.event_bytes + lineBytes,
       };
     } finally {
-      await this.unlinkIfPresent(eventLockPath);
+      unlinkFileSyncIfPresent(eventLockPath);
     }
   }
 
@@ -1742,12 +1789,20 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       EffectiveModelIdentity,
       { assurance: "adapter_attested" }
     >,
+    signal?: AbortSignal,
   ): Promise<ShapingRunRecordV1> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
     const validatedEffectiveModel = effectiveModelIdentitySchema.parse(
       effectiveModel,
     );
+    if (abortWasRequested(signal)) {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "Shaping-run model observation was interrupted.",
+      );
+    }
     if (validatedEffectiveModel.assurance !== "adapter_attested") {
       throw new ControllerConflictError(
         "invalid_transition",
@@ -1789,9 +1844,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         effective_model: validatedEffectiveModel,
       },
     });
-    await this.writeJsonAtomically(
+    await this.writeJsonAtomicallyAbortable(
       this.shapingRunPaths(validatedWorkItemId, validatedRunId).run,
       updated,
+      signal,
     );
     return updated;
   }
@@ -1889,9 +1945,17 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     workItemId: string,
     shapingRunId: string,
     event: unknown,
+    signal?: AbortSignal,
   ): Promise<ShapingRunEventAppendResult> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
+    if (abortWasRequested(signal)) {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "Shaping-run event append was interrupted.",
+      );
+    }
     const paths = this.shapingRunPaths(validatedWorkItemId, validatedRunId);
     const eventLockPath = join(paths.directory, SHAPING_RUN_EVENTS_LOCK_FILE);
     try {
@@ -1936,7 +2000,14 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       if (limitReached) {
         return { appended: false, limit_reached: true, ...stats };
       }
-      await appendFile(paths.events, line, "utf8");
+      if (abortWasRequested(signal)) {
+        throw new ControllerConflictError(
+          "invalid_transition",
+          validatedWorkItemId,
+          "Shaping-run event append was interrupted.",
+        );
+      }
+      appendFileSync(paths.events, line, "utf8");
       return {
         appended: true,
         limit_reached: false,
@@ -1944,7 +2015,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         event_bytes: stats.event_bytes + lineBytes,
       };
     } finally {
-      await this.unlinkIfPresent(eventLockPath);
+      unlinkFileSyncIfPresent(eventLockPath);
     }
   }
 
@@ -2934,6 +3005,174 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       }
       throw error;
     }
+  }
+
+  async writeShapingAcpTextFile(
+    instructionInput: ShapingIngressInstructionV1,
+    requestedPath: string,
+    content: string,
+    signal?: AbortSignal,
+  ): Promise<{ written: boolean }> {
+    const instruction = await this.readDurableShapingInstruction(
+      instructionInput,
+    );
+    if (
+      instruction.origin !== "connected_run" ||
+      instruction.shaping_run_id === null
+    ) {
+      throw this.missionNotReady(
+        instruction.work_item_id,
+        "ACP shaping writes require a connected-run instruction.",
+      );
+    }
+    const record = await this.requireShapingRun(
+      instruction.work_item_id,
+      instruction.shaping_run_id,
+    );
+    const runInstruction = await this.readShapingRunInstructionForRecord(
+      record,
+    );
+    if (
+      runInstruction.instruction_sha256 !== instruction.instruction_sha256
+    ) {
+      throw this.invalid(
+        instruction.ingress_path,
+        "ACP shaping write must match the run's durable instruction",
+      );
+    }
+    if (record.lifecycle.status !== "running") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        instruction.work_item_id,
+        "ACP shaping writes require a running shaping run.",
+      );
+    }
+    if (abortWasRequested(signal)) {
+      throw this.missionNotReady(
+        instruction.work_item_id,
+        "ACP shaping write was interrupted before publication.",
+      );
+    }
+
+    const ingressPath = join(
+      this.workspaceRoot,
+      ...instruction.ingress_path.split("/"),
+    );
+    if (
+      !isAbsolute(requestedPath) ||
+      resolve(requestedPath) !== ingressPath ||
+      requestedPath !== ingressPath
+    ) {
+      throw this.missionNotReady(
+        instruction.work_item_id,
+        "ACP shaping write path does not match the exact ingress path.",
+      );
+    }
+    const contentBytes = Buffer.from(content, "utf8");
+    if (
+      contentBytes.byteLength === 0 ||
+      contentBytes.byteLength > instruction.max_result_bytes
+    ) {
+      throw this.missionNotReady(
+        instruction.work_item_id,
+        `ACP shaping write must contain 1-${instruction.max_result_bytes} bytes.`,
+      );
+    }
+    await this.assertSafeShapingIngressParent(instruction.ingress_path);
+
+    const stagingPath = `${ingressPath}.${randomUUID()}.acp-write.tmp`;
+    let descriptor: number | null = null;
+    let persistenceError: unknown = null;
+    try {
+      if (abortWasRequested(signal)) {
+        throw new Error("ACP shaping write was interrupted before staging.");
+      }
+      descriptor = openSync(
+        stagingPath,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          fsConstants.O_NOFOLLOW,
+        0o600,
+      );
+      writeFileSync(descriptor, contentBytes);
+      fsyncSync(descriptor);
+    } catch (error) {
+      persistenceError = error;
+    } finally {
+      if (descriptor !== null) {
+        try {
+          closeSync(descriptor);
+        } catch (error) {
+          persistenceError ??= error;
+        }
+      }
+    }
+    if (persistenceError !== null) {
+      const failure = this.missionNotReady(
+        instruction.work_item_id,
+        `ACP shaping write could not persist staging: ${errorMessage(persistenceError)}`,
+      );
+      try {
+        unlinkFileSyncIfPresent(stagingPath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [failure, cleanupError],
+          "ACP shaping staging write failed and its file could not be removed",
+        );
+      }
+      throw failure;
+    }
+    await this.afterShapingAcpIngressStaged();
+
+    let outcome: { written: boolean };
+    try {
+      if (abortWasRequested(signal)) {
+        throw this.missionNotReady(
+          instruction.work_item_id,
+          "ACP shaping write was interrupted before publication.",
+        );
+      }
+      try {
+        linkSync(stagingPath, ingressPath);
+        outcome = { written: true };
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "EEXIST") {
+          throw this.missionNotReady(
+            instruction.work_item_id,
+            `ACP shaping write could not publish ingress: ${errorMessage(error)}`,
+          );
+        }
+        const existing = await this.readShapingIngressBytes(instruction);
+        if (!existing.equals(contentBytes)) {
+          throw new ControllerConflictError(
+            "idempotency_conflict",
+            instruction.work_item_id,
+            "Existing shaping ingress bytes differ from the ACP write replay.",
+          );
+        }
+        outcome = { written: false };
+      }
+    } catch (error) {
+      try {
+        unlinkFileSyncIfPresent(stagingPath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "ACP shaping ingress publication failed and its staging file could not be removed",
+        );
+      }
+      throw error;
+    }
+    try {
+      unlinkFileSyncIfPresent(stagingPath);
+    } catch (error) {
+      throw this.missionNotReady(
+        instruction.work_item_id,
+        `ACP shaping write could not remove staging: ${errorMessage(error)}`,
+      );
+    }
+    return outcome;
   }
 
   async readShapingIngressBytes(
@@ -4818,6 +5057,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   protected async afterShapingIngressInstructionWritten(
     _instructionPath: string,
   ): Promise<void> {
+    return;
+  }
+
+  protected async afterShapingAcpIngressStaged(): Promise<void> {
     return;
   }
 
@@ -8500,6 +8743,38 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         throw new AggregateError(
           [error, cleanupError],
           "JSON write failed and its temporary file could not be removed",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async writeJsonAtomicallyAbortable(
+    targetPath: string,
+    value: unknown,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const temporaryPath = `${targetPath}.${randomUUID()}.tmp`;
+    try {
+      if (abortWasRequested(signal)) {
+        throw new Error("Atomic JSON write was interrupted.");
+      }
+      await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+        signal,
+      });
+      if (abortWasRequested(signal)) {
+        throw new Error("Atomic JSON write was interrupted.");
+      }
+      renameSync(temporaryPath, targetPath);
+    } catch (error) {
+      try {
+        unlinkFileSyncIfPresent(temporaryPath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Abortable JSON write failed and its temporary file could not be removed",
         );
       }
       throw error;
