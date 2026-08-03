@@ -97,6 +97,7 @@ import {
   type ConnectedRunSummary,
 } from "../domain/connected-run";
 import {
+  capabilityRequestMatchesEnvelope,
   capabilityEnvelopeV1Schema,
   isCapabilityEnvelopeNarrowing,
   type CapabilityEnvelopeV1,
@@ -144,6 +145,7 @@ import type {
   AcpEventSink,
   AcpRunResult,
   AcpSession,
+  AcpSessionCallbacks,
 } from "../infrastructure/acp/acp-client";
 import {
   createCopilotRuntimeProfile,
@@ -156,6 +158,11 @@ import type {
 } from "../workspace/product-workspace";
 import { PortfolioPreferencesStore } from "../workspace/portfolio-preferences";
 import { PortfolioRegistry } from "../workspace/portfolio-registry";
+import {
+  composeConnectedShapingPrompt,
+  startConnectedAcpRun,
+  type OwnedConnectedAcpRun,
+} from "./shaping-connected-run";
 
 type WorkspaceGateway = Pick<
   ProductWorkspace,
@@ -193,6 +200,11 @@ type WorkspaceGateway = Pick<
   | "readShapingRun"
   | "readShapingRunInstruction"
   | "listShapingRuns"
+  | "startShapingRun"
+  | "updateShapingRunEffectiveModel"
+  | "appendShapingRunEvent"
+  | "completeShapingRun"
+  | "reconcileShapingRuns"
   | "readShapingDecisionIntent"
   | "readShapingDecisionManifest"
   | "writeShapingDecisionReceipt"
@@ -205,8 +217,10 @@ type WorkspaceGateway = Pick<
   | "readConnectedRun"
   | "listConnectedRuns"
   | "startConnectedRun"
+  | "updateConnectedRunEffectiveModel"
   | "appendConnectedRunEvent"
   | "completeConnectedRun"
+  | "reconcileConnectedRuns"
   | "readImportEvidence"
   | "listImportEvidence"
   | "writeImportEvidence"
@@ -414,7 +428,19 @@ export interface ShapingRuntimePrepareInput {
 export interface PreparedShapingRuntime {
   requested_model: string;
   reasoning_effort: string;
-  sanitized_profile: CopilotSanitizedProfileEvidence;
+  sanitized_profile: Omit<
+    CopilotSanitizedProfileEvidence,
+    "adapter_id" | "profile_id"
+  > & {
+    adapter_id: string;
+    profile_id: string;
+  };
+  start(
+    instruction: ShapingIngressInstructionV1,
+    writePolicy: ShapingRunRecordV1["write_policy"],
+    eventSink: AcpEventSink,
+    callbacks?: AcpSessionCallbacks,
+  ): Promise<AcpSession>;
 }
 
 export interface ConnectedShapingRuntime {
@@ -517,7 +543,10 @@ export interface PreparedConnectedRuntime {
   requested_model: string;
   reasoning_effort: string;
   sanitized_profile: CopilotSanitizedProfileEvidence;
-  start(event_sink: AcpEventSink): Promise<AcpSession>;
+  start(
+    event_sink: AcpEventSink,
+    callbacks?: AcpSessionCallbacks,
+  ): Promise<AcpSession>;
 }
 
 export interface ConnectedExecuteRuntime {
@@ -527,7 +556,10 @@ export interface ConnectedExecuteRuntime {
 export interface CopilotConnectedExecuteRuntimeOptions {
   profile: Omit<
     CopilotRuntimeProfileInput,
-    "requested_model" | "workspace_cwd" | "capability_envelope" | "limits"
+    | "requested_model"
+    | "workspace_cwd"
+    | "evaluate_permission"
+    | "limits"
   > & {
     default_model: string;
   };
@@ -549,14 +581,21 @@ export class CopilotConnectedExecuteRuntime
       ...this.options.profile,
       requested_model: requestedModel,
       workspace_cwd: input.workspace_cwd,
-      capability_envelope: input.capability_envelope,
+      evaluate_permission: (request) =>
+        capabilityRequestMatchesEnvelope(request, input.capability_envelope)
+          ? { decision: "allow_once", reason: null }
+          : {
+              decision: "reject_once",
+              reason: "outside_capability_envelope",
+            },
       limits: input.limits,
     });
     return {
       requested_model: requestedModel,
       reasoning_effort: this.options.profile.reasoning_effort,
       sanitized_profile: profile.sanitized_profile_evidence,
-      start: (eventSink) => this.adapter.start(profile.runtime_profile, eventSink),
+      start: (eventSink, callbacks) =>
+        this.adapter.start(profile.runtime_profile, eventSink, callbacks),
     };
   }
 }
@@ -714,7 +753,14 @@ export class PortfolioService {
   readonly inboxRoot: string;
   readonly transfersRoot: string;
   private readonly preferencesStore: PortfolioPreferencesStore;
-  private readonly liveConnectedSessions = new Map<string, AcpSession>();
+  private readonly liveConnectedSessions = new Map<
+    string,
+    OwnedConnectedAcpRun
+  >();
+  private readonly liveShapingSessions = new Map<
+    string,
+    OwnedConnectedAcpRun
+  >();
 
   listWorkspaces(): Promise<RegisteredWorkspace[]> {
     return this.registry.read();
@@ -1133,6 +1179,82 @@ export class PortfolioService {
     return this.portfolioShapingLaunchResult(source, workItemId, launched);
   }
 
+  async cancelShapingRun(
+    sourceId: string,
+    workItemId: string,
+    shapingRunId: string,
+  ): Promise<PortfolioShapingLaunchResult> {
+    const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
+    const { source } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+    );
+    const record = await source.workspace.readShapingRun(
+      workItemId,
+      validatedRunId,
+    );
+    if (record === null) {
+      throw this.missionNotReady(workItemId, "Shaping run was not found.");
+    }
+    if (record.lifecycle.status === "terminal") {
+      return this.portfolioShapingLaunchResult(source, workItemId, {
+        record,
+        instruction: await source.workspace.readShapingRunInstruction(
+          workItemId,
+          validatedRunId,
+        ),
+        created: false,
+      });
+    }
+    const key = this.shapingSessionKey(
+      source.source_id,
+      workItemId,
+      validatedRunId,
+    );
+    const handle = this.liveShapingSessions.get(key);
+    if (handle === undefined) {
+      const current = await source.workspace.readShapingRun(
+        workItemId,
+        validatedRunId,
+      );
+      if (current?.lifecycle.status === "terminal") {
+        return this.portfolioShapingLaunchResult(source, workItemId, {
+          record: current,
+          instruction: await source.workspace.readShapingRunInstruction(
+            workItemId,
+            validatedRunId,
+          ),
+          created: false,
+        });
+      }
+      throw this.missionNotReady(
+        workItemId,
+        "This service cannot safely cancel a shaping run it did not start.",
+      );
+    }
+    await handle.cancel();
+    const terminal = await source.workspace.readShapingRun(
+      workItemId,
+      validatedRunId,
+    );
+    if (terminal?.lifecycle.status !== "terminal") {
+      throw this.missionNotReady(
+        workItemId,
+        "Shaping cancellation did not reach a durable terminal state.",
+      );
+    }
+    this.liveShapingSessions.delete(key);
+    await this.rebuild();
+    return this.portfolioShapingLaunchResult(source, workItemId, {
+      record: terminal,
+      instruction: await source.workspace.readShapingRunInstruction(
+        workItemId,
+        validatedRunId,
+      ),
+      created: false,
+    });
+  }
+
   async startBrainstorm(
     sourceId: string,
     workItemId: string,
@@ -1457,45 +1579,83 @@ export class PortfolioService {
           event,
         ),
     };
-    let session: AcpSession | undefined;
-    let running: ConnectedRunRecordV1;
-    try {
-      session = await prepared.start(eventSink);
-      running = await source.workspace.startConnectedRun(
-        workItemId,
-        launched.connected_run.connected_run_id,
-        {
-          protocol_version: {
-            value: session.protocol_version,
-            assurance: "adapter_attested",
-          },
-          session_id: {
-            value: session.session_id,
-            assurance: "adapter_attested",
-          },
-        },
-        session.process,
-      );
-      const key = this.connectedSessionKey(
-        source.source_id,
-        workItemId,
-        running.connected_run_id,
-      );
-      this.liveConnectedSessions.set(key, session);
-      void this.observeConnectedRun(source, workItemId, mission, running, session);
-    } catch (error) {
-      if (session !== undefined) {
-        await session.close().catch(() => undefined);
-      }
-      await source.workspace
-        .completeConnectedRun(
+    const key = this.connectedSessionKey(
+      source.source_id,
+      workItemId,
+      launched.connected_run.connected_run_id,
+    );
+    const started = await startConnectedAcpRun({
+      start_session: (callbacks) => prepared.start(eventSink, callbacks),
+      mark_running: (session) =>
+        source.workspace.startConnectedRun(
           workItemId,
           launched.connected_run.connected_run_id,
-          this.failedConnectedTerminal(),
-        )
-        .catch(() => undefined);
-      throw error;
-    }
+          {
+            protocol_version: {
+              value: session.protocol_version,
+              assurance: "adapter_attested",
+            },
+            session_id: {
+              value: session.session_id,
+              assurance: "adapter_attested",
+            },
+          },
+          session.process,
+        ),
+      persist_effective_model: (effectiveModel) =>
+        source.workspace
+          .updateConnectedRunEffectiveModel(
+            workItemId,
+            launched.connected_run.connected_run_id,
+            effectiveModel,
+          )
+          .then(() => undefined),
+      prompt: `Execute the governed task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
+      complete: (result) =>
+        this.completeObservedConnectedRun(
+          source,
+          workItemId,
+          launched.connected_run.connected_run_id,
+          result,
+        ),
+      fail: async () => {
+        await source.workspace
+          .completeConnectedRun(
+            workItemId,
+            launched.connected_run.connected_run_id,
+            this.failedConnectedTerminal(),
+          )
+          .catch(() => undefined);
+        await this.rebuild().catch(() => undefined);
+      },
+      started: (handle) => {
+        this.liveConnectedSessions.set(key, handle);
+      },
+      after_complete: async (result, terminal) => {
+        if (terminal.lifecycle.terminal?.outcome !== result.outcome) {
+          return;
+        }
+        if (result.outcome === "missing_permission") {
+          await this.recordMissingPermission(
+            source,
+            workItemId,
+            mission,
+            launched.connected_run,
+            result,
+          );
+        } else if (result.outcome === "completed") {
+          await this.importResult(source.source_id, workItemId);
+        }
+        await this.rebuild();
+      },
+      settled: async (session) => {
+        if (this.liveConnectedSessions.get(key)?.session === session) {
+          this.liveConnectedSessions.delete(key);
+        }
+      },
+    });
+    const running = started.running;
+    void started.completion;
     await this.rebuild();
     return {
       ...this.toPortfolioItem(source, launched.work_item),
@@ -1527,7 +1687,10 @@ export class PortfolioService {
     if (workItem === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
-    const record = await source.workspace.readConnectedRun(workItemId, validatedRunId);
+    const record = await source.workspace.readConnectedRun(
+      workItemId,
+      validatedRunId,
+    );
     if (record === null) {
       throw this.missionNotReady(workItemId, "Connected run was not found.");
     }
@@ -1537,28 +1700,47 @@ export class PortfolioService {
         connected_run: summarizeConnectedRun(record),
       };
     }
-    const key = this.connectedSessionKey(source.source_id, workItemId, validatedRunId);
-    const session = this.liveConnectedSessions.get(key);
-    if (session === undefined) {
+    const key = this.connectedSessionKey(
+      source.source_id,
+      workItemId,
+      validatedRunId,
+    );
+    const handle = this.liveConnectedSessions.get(key);
+    if (handle === undefined) {
+      const current = await source.workspace.readConnectedRun(
+        workItemId,
+        validatedRunId,
+      );
+      if (current?.lifecycle.status === "terminal") {
+        return {
+          ...this.toPortfolioItem(source, workItem),
+          connected_run: summarizeConnectedRun(current),
+        };
+      }
       throw this.missionNotReady(
         workItemId,
         "This service cannot safely cancel a connected run it did not start.",
       );
     }
-    await session.cancel();
-    const terminal = await source.workspace.completeConnectedRun(
+    await handle.cancel();
+    const terminal = await source.workspace.readConnectedRun(
       workItemId,
       validatedRunId,
-      {
-        outcome: "cancelled",
-        partial: true,
-        reason: "Cancellation was requested by the Product Studio operator.",
-      },
     );
+    if (terminal?.lifecycle.status !== "terminal") {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected cancellation did not reach a durable terminal state.",
+      );
+    }
     this.liveConnectedSessions.delete(key);
     await this.rebuild();
+    const currentWorkItem = await source.workspace.read(workItemId);
+    if (currentWorkItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
     return {
-      ...this.toPortfolioItem(source, workItem),
+      ...this.toPortfolioItem(source, currentWorkItem),
       connected_run: summarizeConnectedRun(terminal),
     };
   }
@@ -2084,6 +2266,30 @@ export class PortfolioService {
     const records = await this.readTransferJournals();
     for (const record of records) {
       await this.recoverTransfer(record);
+    }
+  }
+
+  async reconcileRunState(): Promise<void> {
+    try {
+      const inbox = await this.ensureInboxWorkspace();
+      await inbox.reconcileConnectedRuns();
+      await inbox.reconcileShapingRuns();
+    } catch (error) {
+      if (!isExpectedWorkspaceFailure(error)) {
+        throw error;
+      }
+    }
+    for (const workspace of await this.registry.read()) {
+      try {
+        const repository = this.makeWorkspace(workspace.workspace_path);
+        await repository.readManifest();
+        await repository.reconcileConnectedRuns();
+        await repository.reconcileShapingRuns();
+      } catch (error) {
+        if (!isExpectedWorkspaceFailure(error)) {
+          throw error;
+        }
+      }
     }
   }
 
@@ -3262,7 +3468,130 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       seat: mission.identity.phase,
       requested_model: requestedModel,
     });
-    return launched;
+    if (!launched.created) {
+      return launched;
+    }
+
+    try {
+      const instruction = await source.workspace.readShapingRunInstruction(
+        workItemId,
+        launched.record.shaping_run_id,
+      );
+      const eventSink: AcpEventSink = {
+        append: (event) =>
+          source.workspace.appendShapingRunEvent(
+            workItemId,
+            launched.record.shaping_run_id,
+            event,
+          ),
+      };
+      const key = this.shapingSessionKey(
+        source.source_id,
+        workItemId,
+        launched.record.shaping_run_id,
+      );
+      const started = await startConnectedAcpRun({
+        start_session: (callbacks) =>
+          prepared.start(
+            instruction,
+            launched.record.write_policy,
+            eventSink,
+            callbacks,
+          ),
+        mark_running: (session) =>
+          source.workspace.startShapingRun(
+            workItemId,
+            launched.record.shaping_run_id,
+            session.process,
+          ),
+        persist_effective_model: (effectiveModel) =>
+          source.workspace
+            .updateShapingRunEffectiveModel(
+              workItemId,
+              launched.record.shaping_run_id,
+              effectiveModel,
+            )
+            .then(() => undefined),
+        prompt: composeConnectedShapingPrompt(instruction),
+        complete: (result) =>
+          source.workspace.completeShapingRun(
+            workItemId,
+            launched.record.shaping_run_id,
+            this.shapingTerminalFromResult(result),
+          ),
+        fail: async () => {
+          await this.failObservedShapingRun(
+            source,
+            workItemId,
+            launched.record.shaping_run_id,
+          );
+          await this.rebuild().catch(() => undefined);
+        },
+        started: (handle) => {
+          this.liveShapingSessions.set(key, handle);
+        },
+        after_complete: async () => {
+          await this.rebuild();
+        },
+        settled: async (session) => {
+          if (this.liveShapingSessions.get(key)?.session === session) {
+            this.liveShapingSessions.delete(key);
+          }
+        },
+      });
+      void started.completion;
+      return {
+        record: started.running,
+        instruction,
+        created: true,
+      };
+    } catch {
+      const failed = await this.failObservedShapingRun(
+        source,
+        workItemId,
+        launched.record.shaping_run_id,
+      );
+      await this.rebuild().catch(() => undefined);
+      if (failed === null) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItemId,
+          "The durable shaping run disappeared after launch.",
+        );
+      }
+      return {
+        record: failed,
+        instruction: launched.instruction,
+        created: true,
+      };
+    }
+  }
+
+  private async failObservedShapingRun(
+    source: ResolvedSource,
+    workItemId: string,
+    shapingRunId: string,
+  ): Promise<ShapingRunRecordV1 | null> {
+    const current = await source.workspace
+      .readShapingRun(workItemId, shapingRunId)
+      .catch(() => null);
+    if (current?.lifecycle.status === "terminal") {
+      return current;
+    }
+    await source.workspace.reconcileShapingRuns().catch(() => []);
+    const reconciled = await source.workspace
+      .readShapingRun(workItemId, shapingRunId)
+      .catch(() => null);
+    if (reconciled?.lifecycle.status === "terminal") {
+      return reconciled;
+    }
+    return source.workspace
+      .completeShapingRun(
+        workItemId,
+        shapingRunId,
+        this.failedShapingTerminal(),
+      )
+      .catch(() => null);
   }
 
   private shapingRunFingerprint(run: ShapingRunRecordV1): string {
@@ -3313,12 +3642,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
           decided.intent.next_requested_model!,
           decided.intent.launch_fingerprint!,
         );
-        nextLaunch = {
-          status: "launched",
-          shaping_run_id: launched.record.shaping_run_id,
-          reason: null,
-          created: launched.created,
-        };
+        nextLaunch = this.shapingNextLaunch(launched);
       } catch (error) {
         nextLaunch = {
           status: "failed",
@@ -3344,14 +3668,28 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     return {
       source_id: source.source_id,
       work_item_id: workItemId,
-      next_launch: {
-        status: "launched",
-        shaping_run_id: launched.record.shaping_run_id,
-        reason: null,
-        created: launched.created,
-      },
+      next_launch: this.shapingNextLaunch(launched),
       shaping_run: summarizeShapingRun(launched.record),
     };
+  }
+
+  private shapingNextLaunch(
+    launched: ShapingRunCreateResult,
+  ): ShapingNextLaunch {
+    const terminal = launched.record.lifecycle.terminal;
+    return terminal === null
+      ? {
+          status: "launched",
+          shaping_run_id: launched.record.shaping_run_id,
+          reason: null,
+          created: launched.created,
+        }
+      : {
+          status: "failed",
+          shaping_run_id: launched.record.shaping_run_id,
+          reason: terminal.reason,
+          created: launched.created,
+        };
   }
 
   private assertCommittedShapingIntentState(
@@ -3781,60 +4119,6 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     };
   }
 
-  private async observeConnectedRun(
-    source: ResolvedSource,
-    workItemId: string,
-    mission: MissionCompilation,
-    record: ConnectedRunRecordV1,
-    session: AcpSession,
-  ): Promise<void> {
-    const key = this.connectedSessionKey(
-      source.source_id,
-      workItemId,
-      record.connected_run_id,
-    );
-    try {
-      const result = await session.run(
-        `Execute the governed task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
-      );
-      const terminal = await this.completeObservedConnectedRun(
-        source,
-        workItemId,
-        record.connected_run_id,
-        result,
-      );
-      if (terminal.lifecycle.terminal?.outcome !== result.outcome) {
-        return;
-      }
-      if (result.outcome === "missing_permission") {
-        await this.recordMissingPermission(
-          source,
-          workItemId,
-          mission,
-          record,
-          result,
-        );
-      } else if (result.outcome === "completed") {
-        await this.importResult(source.source_id, workItemId);
-      }
-      await this.rebuild();
-    } catch {
-      await source.workspace
-        .completeConnectedRun(
-          workItemId,
-          record.connected_run_id,
-          this.failedConnectedTerminal(),
-        )
-        .catch(() => undefined);
-      await this.rebuild().catch(() => undefined);
-    } finally {
-      if (this.liveConnectedSessions.get(key) === session) {
-        this.liveConnectedSessions.delete(key);
-      }
-      await session.close().catch(() => undefined);
-    }
-  }
-
   private async completeObservedConnectedRun(
     source: ResolvedSource,
     workItemId: string,
@@ -3901,6 +4185,9 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     if (result.outcome === "completed") {
       return { outcome: "completed" as const, partial: false, reason: null };
     }
+    if (result.outcome === "cancelled") {
+      return this.cancelledConnectedTerminal();
+    }
     return {
       outcome: result.outcome,
       partial: result.partial,
@@ -3919,12 +4206,67 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     };
   }
 
+  private cancelledConnectedTerminal() {
+    return {
+      outcome: "cancelled" as const,
+      partial: true,
+      reason: "Cancellation was requested by the Product Studio operator.",
+    };
+  }
+
+  private shapingTerminalFromResult(result: AcpRunResult) {
+    if (result.outcome === "completed") {
+      return { outcome: "completed" as const, partial: false, reason: null };
+    }
+    if (result.outcome === "missing_permission") {
+      return {
+        outcome: "failed" as const,
+        partial: true,
+        reason:
+          "The artifact-only shaping runtime denied a mediated request outside its single-ingress write policy.",
+      };
+    }
+    if (result.outcome === "cancelled") {
+      return this.cancelledShapingTerminal();
+    }
+    return {
+      outcome: result.outcome,
+      partial: result.partial,
+      reason: "The ACP adapter did not complete the artifact-only shaping mission.",
+    };
+  }
+
+  private failedShapingTerminal() {
+    return {
+      outcome: "failed" as const,
+      partial: true,
+      reason:
+        "The ACP runtime failed before the artifact-only shaping mission completed.",
+    };
+  }
+
+  private cancelledShapingTerminal() {
+    return {
+      outcome: "cancelled" as const,
+      partial: true,
+      reason: "Cancellation was requested by the Product Studio operator.",
+    };
+  }
+
   private connectedSessionKey(
     sourceId: string,
     workItemId: string,
     connectedRunId: string,
   ): string {
     return `${sourceId}:${workItemId}:${connectedRunId}`;
+  }
+
+  private shapingSessionKey(
+    sourceId: string,
+    workItemId: string,
+    shapingRunId: string,
+  ): string {
+    return `${sourceId}:${workItemId}:${shapingRunId}`;
   }
 
   private hashConnectedValue(value: unknown): string {

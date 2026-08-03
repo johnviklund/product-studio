@@ -376,6 +376,56 @@ describe("connected-run workspace storage", () => {
     const root = await createWorkspace();
     const workspace = new ProductWorkspace(root);
     await workspace.createConnectedRun(connectedRun(firstRunId));
+    await workspace.startConnectedRun(
+      workItemId,
+      firstRunId,
+      {
+        protocol_version: { value: 1, assurance: "adapter_attested" },
+        session_id: {
+          value: "connected-model-session",
+          assurance: "adapter_attested",
+        },
+      },
+      {
+        pid: 4321,
+        process_group_id: 4321,
+        started_at: "2026-07-26T18:00:01.000Z",
+      },
+    );
+    const modelA = {
+      assurance: "adapter_attested" as const,
+      model_id: "model-a",
+      deployment_id: "deployment-a",
+      observed_event_sha256: "1".repeat(64),
+    };
+    const modelB = {
+      assurance: "adapter_attested" as const,
+      model_id: "model-b",
+      deployment_id: "deployment-b",
+      observed_event_sha256: "2".repeat(64),
+    };
+    await workspace.updateConnectedRunEffectiveModel(
+      workItemId,
+      firstRunId,
+      modelA,
+    );
+    const modelASource = await readFile(
+      join(runDirectory(root), "run.json"),
+      "utf8",
+    );
+    await workspace.updateConnectedRunEffectiveModel(
+      workItemId,
+      firstRunId,
+      modelA,
+    );
+    expect(await readFile(join(runDirectory(root), "run.json"), "utf8")).toBe(
+      modelASource,
+    );
+    await workspace.updateConnectedRunEffectiveModel(
+      workItemId,
+      firstRunId,
+      modelB,
+    );
     const terminal = {
       outcome: "failed" as const,
       partial: true,
@@ -391,6 +441,7 @@ describe("connected-run workspace storage", () => {
       status: "terminal",
       terminal,
     });
+    expect(completed.provenance.effective_model).toEqual(modelB);
     await expect(
       workspace.completeConnectedRun(workItemId, firstRunId, terminal),
     ).resolves.toEqual(completed);
@@ -399,6 +450,12 @@ describe("connected-run workspace storage", () => {
         outcome: "cancelled",
         partial: true,
         reason: "A different terminal outcome.",
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict", workItemId });
+    await expect(
+      workspace.updateConnectedRunEffectiveModel(workItemId, firstRunId, {
+        ...modelB,
+        model_id: "model-c",
       }),
     ).rejects.toMatchObject({ kind: "idempotency_conflict", workItemId });
 

@@ -9,7 +9,10 @@ import {
   CopilotConnectedExecuteRuntime,
   PortfolioService,
   type ConnectedExecuteRuntime,
+  type ConnectedShapingRuntime,
 } from "./portfolio";
+import { readTrustedOriginConfig, type TrustedOriginConfig } from "./request-origin";
+import { CopilotConnectedShapingRuntime } from "./shaping-connected-run";
 
 const applicationRoot = process.cwd();
 const localDataRoot = join(applicationRoot, ".local-data");
@@ -19,6 +22,7 @@ export const portfolioIndexPath = join(localDataRoot, "index.sqlite");
 export const portfolioInboxRoot = join(applicationRoot, ".portfolio", "inbox");
 
 let portfolioServicePromise: Promise<PortfolioService> | undefined;
+let trustedOriginConfig: TrustedOriginConfig | undefined;
 
 const copilotRuntimeProfileSchema = z.strictObject({
   preflight: z.strictObject({
@@ -42,10 +46,15 @@ const copilotRuntimeProfileSchema = z.strictObject({
   environment: z.record(z.string(), z.string()),
 });
 
-function configuredConnectedRuntime(): ConnectedExecuteRuntime | undefined {
+interface ConfiguredRuntimes {
+  connected: ConnectedExecuteRuntime | undefined;
+  shaping: ConnectedShapingRuntime | undefined;
+}
+
+function configuredRuntimes(): ConfiguredRuntimes {
   const source = process.env.PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON;
   if (source === undefined || source === "") {
-    return undefined;
+    return { connected: undefined, shaping: undefined };
   }
   let parsed: unknown;
   try {
@@ -53,13 +62,27 @@ function configuredConnectedRuntime(): ConnectedExecuteRuntime | undefined {
   } catch {
     throw new Error("PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON must be valid JSON.");
   }
-  return new CopilotConnectedExecuteRuntime(new StdioAcpClientAdapter(), {
-    profile: copilotRuntimeProfileSchema.parse(parsed),
-  });
+  const validated = copilotRuntimeProfileSchema.parse(parsed);
+  const { default_model: defaultModel, ...sharedProfile } = validated;
+  const adapter = new StdioAcpClientAdapter();
+  return {
+    connected: new CopilotConnectedExecuteRuntime(adapter, {
+      profile: { ...sharedProfile, default_model: defaultModel },
+    }),
+    shaping: new CopilotConnectedShapingRuntime(adapter, {
+      profile: sharedProfile,
+    }),
+  };
+}
+
+export function getPortfolioTrustedOriginConfig(): TrustedOriginConfig {
+  trustedOriginConfig ??= readTrustedOriginConfig(process.env);
+  return trustedOriginConfig;
 }
 
 export function getPortfolioService(): Promise<PortfolioService> {
   if (portfolioServicePromise === undefined) {
+    const runtimes = configuredRuntimes();
     const registry = new PortfolioRegistry(portfolioRegistryPath);
     const index = new SQLitePortfolioIndex(portfolioIndexPath);
     const service = new PortfolioService(
@@ -67,11 +90,13 @@ export function getPortfolioService(): Promise<PortfolioService> {
       index,
       portfolioInboxRoot,
       undefined,
-      configuredConnectedRuntime(),
+      runtimes.connected,
+      runtimes.shaping,
     );
 
     portfolioServicePromise = service
-      .rebuild()
+      .reconcileRunState()
+      .then(() => service.rebuild())
       .then(() => service)
       .catch((error: unknown) => {
         index.close();

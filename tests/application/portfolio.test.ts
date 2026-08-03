@@ -41,9 +41,15 @@ import {
   hashGoalInput,
   hashShapingDecisionState,
   goalContractFromSpecProposal,
+  type ShapingIngressInstructionV1,
   type ShapingMissionPackage,
   type ShapingPhase,
 } from "../../src/domain/shaping";
+import {
+  evaluateShapingPermissionRequest,
+  type ShapingRunWritePolicy,
+} from "../../src/domain/shaping-run";
+import type { CanonicalCapabilityRequest } from "../../src/domain/capability-envelope";
 import {
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
@@ -64,9 +70,11 @@ import { PortfolioRegistry } from "../../src/workspace/portfolio-registry";
 import type {
   AcpClientAdapter,
   AcpEventSink,
+  AcpRuntimeProfile,
   AcpRunResult,
   AcpSession,
 } from "../../src/infrastructure/acp/acp-client";
+import { StdioAcpClientAdapter } from "../../src/infrastructure/acp/acp-client";
 
 const createdRoots: string[] = [];
 const controllerGit: GitVerificationAdapter = {
@@ -110,6 +118,20 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+class PausedShapingPublicationWorkspace extends ProductWorkspace {
+  readonly publicationStarted = deferred<void>();
+  readonly resumePublication = deferred<void>();
+
+  protected override async afterShapingAppliedComponentWritten(
+    component: "result" | "import" | "production" | "applied",
+  ): Promise<void> {
+    if (component === "applied") {
+      this.publicationStarted.resolve(undefined);
+      await this.resumePublication.promise;
+    }
+  }
 }
 
 function preparedRuntime(
@@ -158,6 +180,24 @@ function preparedShapingRuntime(
 ) {
   let availableModels = [...initialModels];
   let prepareFailure: Error | null = null;
+  let sessionOrdinal = 0;
+  const start = vi.fn(async (): Promise<AcpSession> => {
+    sessionOrdinal += 1;
+    return {
+      session_id: `fake-shaping-session-${sessionOrdinal}`,
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      process: {
+        pid: 5000 + sessionOrdinal,
+        process_group_id: 5000 + sessionOrdinal,
+        started_at: "2026-07-30T12:00:00.000Z",
+      },
+      run: vi.fn(() => new Promise<AcpRunResult>(() => undefined)),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+  });
   const prepare = vi.fn(
     async (input: {
       mission: ShapingMissionPackage;
@@ -187,6 +227,7 @@ function preparedShapingRuntime(
           credential_environment:
             "explicit_allowlist_without_credential_values",
         },
+        start,
       };
     },
   );
@@ -202,6 +243,7 @@ function preparedShapingRuntime(
   return {
     runtime,
     prepare,
+    start,
     setAvailableModels(models: string[]) {
       availableModels = [...models];
     },
@@ -209,6 +251,167 @@ function preparedShapingRuntime(
       prepareFailure = error;
     },
   };
+}
+
+function canonicalFakeRequest(raw: unknown): CanonicalCapabilityRequest | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const request = raw as Partial<CanonicalCapabilityRequest>;
+  return request.schema_version === 1 && typeof request.kind === "string"
+    ? (request as CanonicalCapabilityRequest)
+    : null;
+}
+
+function modelConfigOption(
+  currentValue: string,
+  deploymentId: string,
+) {
+  return {
+    type: "select" as const,
+    id: "model",
+    name: "MODEL_NAME_MUST_NOT_PERSIST",
+    description: "MODEL_DESCRIPTION_MUST_NOT_PERSIST",
+    category: "model",
+    currentValue,
+    options: [
+      { value: "adapter-model-a", name: "MODEL_A_NAME_MUST_NOT_PERSIST" },
+      { value: "adapter-model-b", name: "MODEL_B_NAME_MUST_NOT_PERSIST" },
+    ],
+    _meta: {
+      deployment_id: deploymentId,
+      private_note: "MODEL_META_MUST_NOT_PERSIST",
+    },
+  };
+}
+
+function fakeArtifactOnlyRuntime(options: {
+  request?: (
+    instruction: ShapingIngressInstructionV1,
+  ) => CanonicalCapabilityRequest;
+  session_config_options?: readonly ReturnType<typeof modelConfigOption>[];
+  config_update?: readonly ReturnType<typeof modelConfigOption>[] | null;
+  delay_ms?: number;
+  result_source?: string;
+} = {}) {
+  const adapter = new StdioAcpClientAdapter();
+  const prompts: string[] = [];
+  const starts = vi.fn();
+  const runtime: ConnectedShapingRuntime = {
+    configuration: () => ({
+      adapter_id: "fake-shaping-acp",
+      adapter_version: "1.0.0",
+      profile_id: "artifact-only-shaping-v1",
+      available_model_ids: ["requested-model"],
+    }),
+    prepare: async (input) => ({
+      requested_model: input.requested_model,
+      reasoning_effort: "high",
+      sanitized_profile: {
+        adapter_id: "fake-shaping-acp",
+        adapter_version: "1.0.0",
+        profile_id: "artifact-only-shaping-v1",
+        executable: "fake-acp",
+        argv: ["--stdio", "--model", input.requested_model],
+        requested_model: input.requested_model,
+        reasoning_effort: "high",
+        available_tools: ["edit"],
+        excluded_tools: ["execute", "fetch", "mcp"],
+        authentication: "noninteractive_authenticated",
+        execution_mode: "permission_mediated_local",
+        containment_assurance: "not_independently_enforced",
+        machine_authority: "launching_user",
+        requested_mcp_server_count: 0,
+        credential_environment:
+          "explicit_allowlist_without_credential_values",
+      },
+      start: async (
+        instruction: ShapingIngressInstructionV1,
+        policy: ShapingRunWritePolicy,
+        eventSink: AcpEventSink,
+        callbacks,
+      ) => {
+        starts(instruction, policy);
+        const request =
+          options.request?.(instruction) ??
+          ({
+            schema_version: 1,
+            kind: "workspace_write",
+            path: instruction.ingress_path,
+          } as const);
+        const profile: AcpRuntimeProfile = {
+          adapter_id: "fake-shaping-acp",
+          executable: process.execPath,
+          args: [
+            join(
+              process.cwd(),
+              "tests",
+              "helpers",
+              "fake-acp-agent.mjs",
+            ),
+          ],
+          environment: {
+            PRODUCT_STUDIO_FAKE_ACP_SCENARIO: JSON.stringify({
+              session_config_options:
+                options.session_config_options ?? [
+                  modelConfigOption("adapter-model-a", "deployment-a"),
+                ],
+              ...(options.config_update === null
+                ? {}
+                : {
+                    config_option_update:
+                      options.config_update ?? [
+                        modelConfigOption("adapter-model-b", "deployment-b"),
+                      ],
+                  }),
+              requests: [request],
+              ...(options.delay_ms === undefined
+                ? {}
+                : { delay_ms: options.delay_ms }),
+              write_requested_file: true,
+              write_permission_sentinel: false,
+              result_source:
+                options.result_source ??
+                `${JSON.stringify(
+                  shapingResultForMission(input.mission),
+                  null,
+                  2,
+                )}\n`,
+            }),
+            PRODUCT_STUDIO_FAKE_ACP_SENTINEL: join(
+              input.workspace_cwd,
+              ".fake-shaping-sentinel",
+            ),
+          },
+          workspace_cwd: input.workspace_cwd,
+          evaluate_permission: (requestInput) =>
+            evaluateShapingPermissionRequest(
+              instruction,
+              policy,
+              requestInput,
+            ),
+          limits: input.limits,
+          normalize_permission: (requestInput) =>
+            canonicalFakeRequest(requestInput.toolCall.rawInput),
+        };
+        const session = await adapter.start(profile, eventSink, callbacks);
+        return {
+          session_id: session.session_id,
+          protocol_version: session.protocol_version,
+          requested_mcp_server_count: session.requested_mcp_server_count,
+          config_options: session.config_options,
+          process: session.process,
+          run: (prompt: string) => {
+            prompts.push(prompt);
+            return session.run(prompt);
+          },
+          cancel: () => session.cancel(),
+          close: () => session.close(),
+        };
+      },
+    }),
+  };
+  return { runtime, prompts, starts };
 }
 
 function createMemoryIndex() {
@@ -684,6 +887,37 @@ describe("PortfolioService", () => {
     ]);
     await expect(service.list()).resolves.toEqual(rebuild.items);
     await expect(service.listWorkspaces()).resolves.toHaveLength(2);
+    index.close();
+  });
+
+  it("reconciles valid workspaces without letting a missing workspace block startup", async () => {
+    const invalidRoot = await createWorkspace("Missing During Reconciliation");
+    const validRoot = await createWorkspace("Reconciled During Startup");
+    await new ProductWorkspace(invalidRoot).create({
+      title: "Removed before startup reconciliation",
+      type: "Fix",
+    });
+    await new ProductWorkspace(validRoot).create({
+      title: "Still reconciled",
+      type: "MVP",
+    });
+    const { index, service } = await createService();
+    await service.register({ workspace_path: invalidRoot });
+    await service.register({ workspace_path: validRoot });
+    await rm(invalidRoot, { recursive: true, force: true });
+
+    await expect(service.reconcileRunState()).resolves.toBeUndefined();
+    const rebuild = await service.rebuild();
+
+    expect(rebuild.items).toHaveLength(1);
+    expect(rebuild.items[0]?.project?.workspace_path).toBe(validRoot);
+    expect(rebuild.failures).toMatchObject([
+      {
+        source_id: expect.stringMatching(/^ws_/),
+        project: { workspace_path: invalidRoot },
+        reason: expect.any(String),
+      },
+    ]);
     index.close();
   });
 
@@ -1591,6 +1825,563 @@ describe("PortfolioService", () => {
     expect(fake.prepare).toHaveBeenCalledTimes(3);
   });
 
+  it("runs artifact-only shaping through ACP, publishes before ready, and persists the last adapter-observed model", async () => {
+    const root = await createWorkspace("Artifact-only ACP Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Produce one artifact-only shaping result",
+      type: "Feature",
+    });
+    const fake = fakeArtifactOnlyRuntime();
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const launched = await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "requested-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    expect(launched.next_launch).toMatchObject({
+      status: "launched",
+      created: true,
+    });
+    const shapingRunId = launched.next_launch.shaping_run_id;
+    if (shapingRunId === null) {
+      throw new Error("Expected one artifact-only shaping run.");
+    }
+
+    await expect.poll(async () => {
+      const listing = await service.listShapingArtifacts(sourceId, workItemId);
+      return currentPhaseArtifact(listing.artifacts, "brainstorm").result !== null;
+    }).toBe(true);
+    const listing = await service.listShapingArtifacts(sourceId, workItemId);
+    const artifact = currentPhaseArtifact(listing.artifacts, "brainstorm");
+    const run = listing.runs.find(
+      (candidate) => candidate.shaping_run_id === shapingRunId,
+    );
+    expect(run).toMatchObject({
+      provenance: {
+        requested_model: {
+          value: "requested-model",
+          assurance: "user_declared",
+        },
+        effective_model: {
+          assurance: "adapter_attested",
+          model_id: "adapter-model-b",
+          deployment_id: "deployment-b",
+        },
+      },
+      lifecycle: {
+        status: "terminal",
+        terminal_outcome: "completed",
+      },
+    });
+    expect(artifact.production_receipt).toMatchObject({
+      origin: "connected_run",
+      production_id: shapingRunId,
+      shaping_run_id: shapingRunId,
+      requested_model: { value: "requested-model" },
+      effective_model: {
+        assurance: "adapter_attested",
+        model_id: "adapter-model-b",
+        deployment_id: "deployment-b",
+      },
+    });
+    expect(artifact.result).not.toBeNull();
+
+    const instructionPath = join(
+      root,
+      ".founder",
+      "shaping-runs",
+      workItemId,
+      shapingRunId,
+      "instruction.json",
+    );
+    const runPath = join(dirname(instructionPath), "run.json");
+    const evidencePath = join(dirname(instructionPath), "events.ndjson");
+    const prompt = fake.prompts[0]!;
+    const durableSources = [
+      prompt,
+      await readFile(instructionPath, "utf8"),
+      await readFile(runPath, "utf8"),
+      await readFile(join(root, artifact.mission_path), "utf8"),
+      await readFile(join(root, artifact.task_path), "utf8"),
+    ].join("\n");
+    expect(prompt).toContain(artifact.mission.content_sha256);
+    expect(prompt).toContain(
+      `.founder/shaping-runs/${workItemId}/${shapingRunId}/ingress/result.json`,
+    );
+    for (const forbidden of [
+      "http://127.0.0.1:3000",
+      "/api/",
+      "expected_",
+      "goal_contract_sha256",
+    ]) {
+      expect(durableSources).not.toContain(forbidden);
+    }
+    const evidence = await readFile(evidencePath, "utf8");
+    for (const canary of [
+      "MODEL_NAME_MUST_NOT_PERSIST",
+      "MODEL_DESCRIPTION_MUST_NOT_PERSIST",
+      "MODEL_A_NAME_MUST_NOT_PERSIST",
+      "MODEL_B_NAME_MUST_NOT_PERSIST",
+      "MODEL_META_MUST_NOT_PERSIST",
+    ]) {
+      expect(evidence).not.toContain(canary);
+    }
+  });
+
+  it("joins cancellation to an in-flight shaping publication instead of terminalizing twice", async () => {
+    const root = await createWorkspace("Serialized shaping cancellation Workspace");
+    const repository = new PausedShapingPublicationWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Serialize cancellation with publication",
+      type: "Feature",
+    });
+    const fake = fakeArtifactOnlyRuntime();
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const launched = await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "requested-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    const runId = launched.next_launch.shaping_run_id;
+    if (runId === null) {
+      throw new Error("Expected one shaping run with paused publication.");
+    }
+    await repository.publicationStarted.promise;
+
+    const cancellation = service.cancelShapingRun(
+      sourceId,
+      workItemId,
+      runId,
+    );
+    const stateBeforePublicationSettles = await Promise.race([
+      cancellation.then(() => "settled" as const),
+      new Promise<"waiting">((resolveWaiting) => {
+        setTimeout(() => resolveWaiting("waiting"), 50);
+      }),
+    ]);
+    repository.resumePublication.resolve(undefined);
+
+    expect(stateBeforePublicationSettles).toBe("waiting");
+    const result = await cancellation;
+    if (result.shaping_run === null) {
+      throw new Error("Expected the completed shaping run after cancellation joined.");
+    }
+    expect(result.shaping_run.lifecycle).toMatchObject({
+      status: "terminal",
+      terminal_outcome: "completed",
+    });
+    const listing = await service.listShapingArtifacts(sourceId, workItemId);
+    expect(currentPhaseArtifact(listing.artifacts, "brainstorm").result).not.toBeNull();
+    expect(listing.runs).toHaveLength(1);
+    await expect(
+      service.launchShapingRun(sourceId, workItemId, "brainstorm", {
+        requested_model: "requested-model",
+      }),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+  });
+
+  it.each([
+    ["zero model options", [], null, "unknown"],
+    [
+      "two model options",
+      [
+        modelConfigOption("adapter-model-a", "deployment-a"),
+        {
+          ...modelConfigOption("adapter-model-b", "deployment-b"),
+          id: "secondary-model",
+        },
+      ],
+      null,
+      "unknown",
+    ],
+    [
+      "automatic model selection",
+      [modelConfigOption("auto", "deployment-auto")],
+      null,
+      "unknown",
+    ],
+    [
+      "an invalid later update",
+      [modelConfigOption("adapter-model-a", "deployment-a")],
+      [modelConfigOption("auto", "deployment-auto")],
+      "adapter-model-a",
+    ],
+  ] as const)(
+    "keeps effective-model provenance truthful for %s",
+    async (_label, initialOptions, updateOptions, expectedModel) => {
+      const root = await createWorkspace("Truthful model provenance Workspace");
+      const repository = new ProductWorkspace(root, {
+        git: controllerGit,
+        verificationRunner: controllerRunner,
+      });
+      const created = await repository.create({
+        title: "Keep unresolved model provenance unknown",
+        type: "Feature",
+      });
+      const fake = fakeArtifactOnlyRuntime({
+        session_config_options: initialOptions,
+        config_update: updateOptions,
+      });
+      const { service } = await createService(
+        new SQLitePortfolioIndex(":memory:"),
+        () => repository,
+        undefined,
+        fake.runtime,
+      );
+      const registration = await service.register({ workspace_path: root });
+      const sourceId = registration.workspace.workspace_id;
+      await service.startBrainstorm(sourceId, created.goal.work_item_id, {
+        launch_mode: "connected",
+        next_requested_model: "requested-model",
+        expected_mission_content_sha256: null,
+        expected_result_content_sha256: null,
+        expected_shaping_state_sha256: ideaShapingStateSha256(created),
+      });
+      await expect.poll(async () => {
+        const listing = await service.listShapingArtifacts(
+          sourceId,
+          created.goal.work_item_id,
+        );
+        return currentPhaseArtifact(listing.artifacts, "brainstorm")
+          .production_receipt?.effective_model.model_id;
+      }).toBe(expectedModel === "unknown" ? null : expectedModel);
+      const artifact = currentPhaseArtifact(
+        (
+          await service.listShapingArtifacts(
+            sourceId,
+            created.goal.work_item_id,
+          )
+        ).artifacts,
+        "brainstorm",
+      );
+      expect(artifact.production_receipt?.effective_model.assurance).toBe(
+        expectedModel === "unknown" ? "unknown" : "adapter_attested",
+      );
+    },
+  );
+
+  it.each([
+    [
+      "another workspace path",
+      (instruction: ShapingIngressInstructionV1) => ({
+        schema_version: 1 as const,
+        kind: "workspace_write" as const,
+        path: `${dirname(instruction.ingress_path)}/sibling.json`,
+      }),
+    ],
+    [
+      "a command",
+      () => ({
+        schema_version: 1 as const,
+        kind: "command" as const,
+        executable: "npm",
+        args: ["test"],
+      }),
+    ],
+    [
+      "the configured loopback URL",
+      () => ({
+        schema_version: 1 as const,
+        kind: "url" as const,
+        method: "GET" as const,
+        protocol: "http" as const,
+        host: "127.0.0.1:3000",
+        path: "/api/portfolio",
+      }),
+    ],
+    [
+      "an MCP server",
+      () => ({
+        schema_version: 1 as const,
+        kind: "mcp" as const,
+        server: "product-studio",
+      }),
+    ],
+    [
+      "a credential",
+      () => ({
+        schema_version: 1 as const,
+        kind: "credential" as const,
+        source: "environment",
+      }),
+    ],
+  ])("fails a mediated shaping request for %s without applying a result", async (_label, request) => {
+    const root = await createWorkspace("Denied artifact-only ACP Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Deny every non-ingress capability",
+      type: "Feature",
+    });
+    const fake = fakeArtifactOnlyRuntime({ request });
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const launched = await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "requested-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    const runId = launched.next_launch.shaping_run_id;
+    if (runId === null) {
+      throw new Error("Expected one denied shaping run.");
+    }
+    await expect.poll(async () => {
+      const record = await repository.readShapingRun(workItemId, runId);
+      return record?.lifecycle.status;
+    }).toBe("terminal");
+    const listing = await service.listShapingArtifacts(sourceId, workItemId);
+    expect(currentPhaseArtifact(listing.artifacts, "brainstorm").result).toBeNull();
+    expect(listing.runs).toContainEqual(
+      expect.objectContaining({
+        shaping_run_id: runId,
+        lifecycle: expect.objectContaining({
+          status: "terminal",
+          terminal_outcome: "failed",
+        }),
+        diagnostics: expect.objectContaining({ count: 1 }),
+      }),
+    );
+    expect(await service.listAttention()).toEqual([]);
+  });
+
+  it("rejects invalid shaping output without persisting its bytes in diagnostics or evidence", async () => {
+    const root = await createWorkspace("Redacted shaping rejection Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Reject invalid output without leaking it",
+      type: "Feature",
+    });
+    const canary = "SHAPING_RESULT_SECRET_CANARY";
+    const fake = fakeArtifactOnlyRuntime({ result_source: canary });
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const launched = await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "requested-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    const runId = launched.next_launch.shaping_run_id;
+    if (runId === null) {
+      throw new Error("Expected one rejected shaping run.");
+    }
+    await expect.poll(async () => {
+      const record = await repository.readShapingRun(workItemId, runId);
+      return record?.lifecycle.status;
+    }).toBe("terminal");
+
+    const runDirectory = join(
+      root,
+      ".founder",
+      "shaping-runs",
+      workItemId,
+      runId,
+    );
+    const listing = await service.listShapingArtifacts(sourceId, workItemId);
+    const retained = [
+      await readFile(join(runDirectory, "run.json"), "utf8"),
+      await readFile(join(runDirectory, "events.ndjson"), "utf8"),
+      JSON.stringify(listing),
+    ].join("\n");
+    expect(retained).not.toContain(canary);
+    expect(listing.runs).toContainEqual(
+      expect.objectContaining({
+        shaping_run_id: runId,
+        lifecycle: expect.objectContaining({
+          status: "terminal",
+          terminal_outcome: "failed",
+        }),
+        diagnostics: expect.objectContaining({ count: 1 }),
+      }),
+    );
+  });
+
+  it("stops a tampered shaping instruction before ACP evaluation and terminalizes the durable run", async () => {
+    const root = await createWorkspace("Tampered shaping instruction Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const createShapingRun = repository.createShapingRun.bind(repository);
+    vi.spyOn(repository, "createShapingRun").mockImplementation(async (input) => {
+      const createdRun = await createShapingRun(input);
+      if (createdRun.created) {
+        await writeFile(
+          join(
+            root,
+            ".founder",
+            "shaping-runs",
+            createdRun.record.mission.work_item_id,
+            createdRun.record.shaping_run_id,
+            "instruction.json",
+          ),
+          `${JSON.stringify(
+            { ...createdRun.instruction, ingress_path: "tampered/result.json" },
+            null,
+            2,
+          )}\n`,
+          "utf8",
+        );
+      }
+      return createdRun;
+    });
+    const created = await repository.create({
+      title: "Reject a changed instruction",
+      type: "Feature",
+    });
+    const fake = fakeArtifactOnlyRuntime();
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const launched = await service.startBrainstorm(
+      registration.workspace.workspace_id,
+      created.goal.work_item_id,
+      {
+        launch_mode: "connected",
+        next_requested_model: "requested-model",
+        expected_mission_content_sha256: null,
+        expected_result_content_sha256: null,
+        expected_shaping_state_sha256: ideaShapingStateSha256(created),
+      },
+    );
+    expect(launched.next_launch).toMatchObject({
+      status: "failed",
+      shaping_run_id: expect.any(String),
+    });
+    expect(fake.starts).not.toHaveBeenCalled();
+    const runId = launched.next_launch.shaping_run_id!;
+    const rawRun = JSON.parse(
+      await readFile(
+        join(
+          root,
+          ".founder",
+          "shaping-runs",
+          created.goal.work_item_id,
+          runId,
+          "run.json",
+        ),
+        "utf8",
+      ),
+    ) as { lifecycle: { status: string; terminal: { outcome: string } } };
+    expect(rawRun.lifecycle).toMatchObject({
+      status: "terminal",
+      terminal: { outcome: "failed" },
+    });
+  });
+
+  it("cancels only an owned shaping session and leaves the mission retryable", async () => {
+    const root = await createWorkspace("Cancelled artifact-only ACP Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Cancel an owned shaping run",
+      type: "Feature",
+    });
+    const fake = fakeArtifactOnlyRuntime({ delay_ms: 500 });
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const launched = await service.startBrainstorm(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        launch_mode: "connected",
+        next_requested_model: "requested-model",
+        expected_mission_content_sha256: null,
+        expected_result_content_sha256: null,
+        expected_shaping_state_sha256: ideaShapingStateSha256(created),
+      },
+    );
+    const runId = launched.next_launch.shaping_run_id!;
+    const cancelled = await service.cancelShapingRun(
+      sourceId,
+      created.goal.work_item_id,
+      runId,
+    );
+    expect(cancelled.shaping_run).toMatchObject({
+      lifecycle: {
+        status: "terminal",
+        terminal_outcome: "cancelled",
+      },
+    });
+    const retry = await service.launchShapingRun(
+      sourceId,
+      created.goal.work_item_id,
+      "brainstorm",
+      { requested_model: "requested-model" },
+    );
+    expect(retry.next_launch).toMatchObject({
+      status: "launched",
+      created: true,
+    });
+    expect(retry.next_launch.shaping_run_id).not.toBe(runId);
+    await service.cancelShapingRun(
+      sourceId,
+      created.goal.work_item_id,
+      retry.next_launch.shaping_run_id!,
+    );
+  });
+
   it("creates an immutable feedback revision and reports fewer than three configured models without blocking launch", async () => {
     const root = await createWorkspace("Feedback Shaping Workspace");
     const repository = new ProductWorkspace(root, {
@@ -2120,6 +2911,7 @@ describe("PortfolioService", () => {
       session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
       protocol_version: 1,
       requested_mcp_server_count: 0,
+      config_options: [],
       process: {
         pid: 4001,
         process_group_id: 4001,
@@ -2274,6 +3066,7 @@ describe("PortfolioService", () => {
       session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2",
       protocol_version: 1,
       requested_mcp_server_count: 0,
+      config_options: [],
       process: {
         pid: 4002,
         process_group_id: 4002,

@@ -6,13 +6,18 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
 import {
-  capabilityRequestMatchesEnvelope,
   canonicalizeCapabilityRequest,
   hashCanonicalCapabilityRequest,
   type CanonicalCapabilityRequest,
-  type CapabilityEnvelopeV1,
 } from "../../domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../domain/connected-run";
+
+export type NormalizedPermissionEvaluator = (
+  request: CanonicalCapabilityRequest,
+) => {
+  readonly decision: "allow_once" | "reject_once";
+  readonly reason: string | null;
+};
 
 export interface AcpRuntimeProfile {
   readonly adapter_id: string;
@@ -20,7 +25,7 @@ export interface AcpRuntimeProfile {
   readonly args: readonly string[];
   readonly environment: Readonly<Record<string, string>>;
   readonly workspace_cwd: string;
-  readonly capability_envelope: CapabilityEnvelopeV1;
+  readonly evaluate_permission: NormalizedPermissionEvaluator;
   readonly limits: ConnectedRunLimits;
   readonly normalize_permission: (
     request: acp.RequestPermissionRequest,
@@ -54,6 +59,7 @@ export interface AcpSession {
   readonly session_id: string;
   readonly protocol_version: number;
   readonly requested_mcp_server_count: 0;
+  readonly config_options: readonly acp.SessionConfigOption[];
   readonly process: {
     readonly pid: number;
     readonly process_group_id: number;
@@ -111,6 +117,7 @@ export interface AcpSessionUpdateEvent {
   readonly tool_call_id: string | null;
   readonly tool_kind: string | null;
   readonly tool_status: string | null;
+  readonly config_options: readonly acp.SessionConfigOption[] | null;
 }
 
 interface AcpStdioClientAdapterOptions {
@@ -135,6 +142,7 @@ class AcpEventLimitError extends AcpClientError {}
 class AcpTimeoutError extends AcpClientError {}
 
 const ACP_HANDSHAKE_TIMEOUT_MS = 5_000;
+const SAFE_CONFIG_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u;
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
@@ -154,6 +162,48 @@ function hashEvent(event: Omit<AcpEvidenceEvent, "event_sha256">): string {
   return createHash("sha256")
     .update(`${canonicalJson(event)}\n`)
     .digest("hex");
+}
+
+function configOptionValues(
+  options: acp.SessionConfigSelectOptions,
+): string[] {
+  return options.flatMap((option) =>
+    "group" in option
+      ? option.options.map((choice) => choice.value)
+      : [option.value],
+  );
+}
+
+function sanitizedDeploymentId(option: acp.SessionConfigOption): string | null {
+  const value = option._meta?.deployment_id;
+  return typeof value === "string" && SAFE_CONFIG_IDENTIFIER.test(value)
+    ? value
+    : null;
+}
+
+function sanitizedConfigOption(option: acp.SessionConfigOption) {
+  const common = {
+    id: option.id,
+    type: option.type,
+    category: option.category ?? null,
+    currentValue: option.currentValue,
+    deployment_id: sanitizedDeploymentId(option),
+  };
+  return option.type === "select"
+    ? { ...common, values: configOptionValues(option.options) }
+    : { ...common, values: [] as string[] };
+}
+
+export function hashAcpSessionConfigOptions(
+  options: readonly acp.SessionConfigOption[],
+): string {
+  return createHash("sha256")
+    .update(`${canonicalJson(options.map(sanitizedConfigOption))}\n`)
+    .digest("hex");
+}
+
+function modelOptionCount(options: readonly acp.SessionConfigOption[]): number {
+  return options.filter((option) => option.category === "model").length;
 }
 
 function selectOption(
@@ -273,6 +323,7 @@ class StdioAcpSession implements AcpSession {
   readonly session_id: string;
   readonly protocol_version: number;
   readonly requested_mcp_server_count = 0 as const;
+  readonly config_options: readonly acp.SessionConfigOption[];
   readonly process: { pid: number; process_group_id: number; started_at: string };
 
   private readonly permissionOutcomes: AcpPermissionOutcome[] = [];
@@ -294,6 +345,7 @@ class StdioAcpSession implements AcpSession {
   ) {
     this.session_id = activeSession.sessionId;
     this.protocol_version = protocolVersion;
+    this.config_options = activeSession.newSessionResponse.configOptions ?? [];
     const pid = child.pid;
     if (pid === undefined) {
       throw new AcpClientError("ACP process did not provide a process ID.");
@@ -358,6 +410,7 @@ class StdioAcpSession implements AcpSession {
       });
     } finally {
       await this.close(true);
+      await this.callbackQueue;
     }
   }
 
@@ -400,13 +453,24 @@ class StdioAcpSession implements AcpSession {
   ): Promise<void> {
     return this.enqueueCallback(async () => {
       const event = summarizeSessionUpdate(notification);
-      await this.recorder.record("session_update", {
-        session_id: event.session_id,
-        update_kind: event.update_kind,
-        tool_call_id: event.tool_call_id,
-        tool_kind: event.tool_kind,
-        tool_status: event.tool_status,
-      });
+      await this.recorder.record(
+        "session_update",
+        event.config_options === null
+          ? {
+              session_id: event.session_id,
+              update_kind: event.update_kind,
+              tool_call_id: event.tool_call_id,
+              tool_kind: event.tool_kind,
+              tool_status: event.tool_status,
+            }
+          : {
+              update_kind: event.update_kind,
+              model_option_count: modelOptionCount(event.config_options),
+              observed_event_sha256: hashAcpSessionConfigOptions(
+                event.config_options,
+              ),
+            },
+      );
       await this.callbacks.on_session_update?.(event);
     });
   }
@@ -443,7 +507,8 @@ class StdioAcpSession implements AcpSession {
     }
 
     const operationSha256 = hashCanonicalCapabilityRequest(normalized);
-    if (capabilityRequestMatchesEnvelope(normalized, this.profile.capability_envelope)) {
+    const evaluation = this.profile.evaluate_permission(normalized);
+    if (evaluation.decision === "allow_once") {
       this.permissionOutcomes.push({
         kind: "in_envelope",
         request: normalized,
@@ -568,6 +633,10 @@ function summarizeSessionUpdate(
     tool_call_id: isToolUpdate ? update.toolCallId : null,
     tool_kind: isToolUpdate ? (update.kind ?? null) : null,
     tool_status: isToolUpdate ? (update.status ?? null) : null,
+    config_options:
+      update.sessionUpdate === "config_option_update"
+        ? update.configOptions
+        : null,
   };
 }
 
@@ -656,6 +725,13 @@ export class StdioAcpClientAdapter implements AcpClientAdapter {
         protocol_version: initialized.protocolVersion,
         requested_mcp_server_count: 0,
         session_id: session.session_id,
+      });
+      await recorder.record("session_update", {
+        update_kind: "session_new",
+        model_option_count: modelOptionCount(session.config_options),
+        observed_event_sha256: hashAcpSessionConfigOptions(
+          session.config_options,
+        ),
       });
       await profile.initialize_session?.({
         prompt: async (command) => activeSession.prompt(command),

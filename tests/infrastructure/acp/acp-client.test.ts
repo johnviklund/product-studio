@@ -3,15 +3,17 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  capabilityRequestMatchesEnvelope,
   resolveCapabilityEnvelope,
   type CanonicalCapabilityRequest,
   type ExecutionDefaultsV1,
 } from "../../../src/domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../../src/domain/connected-run";
 import {
+  hashAcpSessionConfigOptions,
   StdioAcpClientAdapter,
   type AcpEvidenceEvent,
   type AcpEventSink,
@@ -80,6 +82,7 @@ function profile(
   scenario: unknown,
   sentinelPath: string,
 ): AcpRuntimeProfile {
+  const envelope = resolveCapabilityEnvelope(["src", "tests"], defaults);
   return {
     adapter_id: "fake-acp",
     executable: process.execPath,
@@ -89,7 +92,13 @@ function profile(
       PRODUCT_STUDIO_FAKE_ACP_SENTINEL: sentinelPath,
     },
     workspace_cwd: root,
-    capability_envelope: resolveCapabilityEnvelope(["src", "tests"], defaults),
+    evaluate_permission: (request) =>
+      capabilityRequestMatchesEnvelope(request, envelope)
+        ? { decision: "allow_once", reason: null }
+        : {
+            decision: "reject_once",
+            reason: "outside_capability_envelope",
+          },
     limits,
     normalize_permission: (request) => capabilityRequest(request.toolCall.rawInput),
   };
@@ -329,5 +338,178 @@ describe("stdio ACP client adapter", () => {
       partial: true,
     });
     expect(isRunning(cancellingSession.process.pid)).toBe(false);
+  });
+
+  it("records only redacted model-observation scalars and exposes initial and updated config options", async () => {
+    const root = await createRoot();
+    const sink = new MemoryEventSink();
+    const initial = [
+      {
+        type: "select" as const,
+        id: "model",
+        name: "MODEL_NAME_CANARY",
+        description: "MODEL_DESCRIPTION_CANARY",
+        category: "model",
+        currentValue: "gpt-5.4",
+        options: [
+          { value: "gpt-5.4", name: "CHOICE_NAME_CANARY" },
+          { value: "gpt-5.5", name: "OTHER_CHOICE_CANARY" },
+        ],
+        _meta: {
+          deployment_id: "regional-gpt-5.4",
+          private_note: "META_CANARY",
+        },
+      },
+    ];
+    const updated = [
+      {
+        ...initial[0],
+        currentValue: "gpt-5.5",
+        _meta: {
+          deployment_id: "regional-gpt-5.5",
+          private_note: "UPDATED_META_CANARY",
+        },
+      },
+    ];
+    const callbacks: Array<{ kind: string; optionCount: number | null }> = [];
+    const session = await new StdioAcpClientAdapter().start(
+      profile(
+        root,
+        {
+          session_config_options: initial,
+          config_option_update: updated,
+        },
+        join(root, "model-sentinel"),
+      ),
+      sink,
+      {
+        on_session_update: (event) => {
+          callbacks.push({
+            kind: event.update_kind,
+            optionCount: event.config_options?.length ?? null,
+          });
+        },
+      },
+    );
+
+    expect(session.config_options).toEqual(initial);
+    await expect(session.run("Observe model configuration.")).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(callbacks).toContainEqual({
+      kind: "agent_message_chunk",
+      optionCount: null,
+    });
+    expect(callbacks).toContainEqual({
+      kind: "config_option_update",
+      optionCount: 1,
+    });
+    const observations = sink.events.filter(
+      (event) =>
+        event.kind === "session_update" &&
+        ["session_new", "config_option_update"].includes(
+          String(event.payload.update_kind),
+        ),
+    );
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(Object.keys(observation.payload).sort()).toEqual([
+        "model_option_count",
+        "observed_event_sha256",
+        "update_kind",
+      ]);
+      expect(observation.payload.model_option_count).toBe(1);
+      expect(observation.payload.observed_event_sha256).toMatch(/^[0-9a-f]{64}$/u);
+    }
+    const evidence = JSON.stringify(sink.events);
+    for (const canary of [
+      "MODEL_NAME_CANARY",
+      "MODEL_DESCRIPTION_CANARY",
+      "CHOICE_NAME_CANARY",
+      "OTHER_CHOICE_CANARY",
+      "META_CANARY",
+      "UPDATED_META_CANARY",
+    ]) {
+      expect(evidence).not.toContain(canary);
+    }
+  });
+
+  it("hashes only the allowed config scalars and normalizes unsafe deployment metadata to null", () => {
+    const option = {
+      type: "select" as const,
+      id: "model",
+      name: "Model display name",
+      description: "Display description",
+      category: "model",
+      currentValue: "gpt-5.4",
+      options: [{ value: "gpt-5.4", name: "Choice display name" }],
+      _meta: { deployment_id: "deployment-a", private_note: "secret-a" },
+    };
+    const first = hashAcpSessionConfigOptions([option]);
+    expect(
+      hashAcpSessionConfigOptions([
+        {
+          ...option,
+          _meta: { deployment_id: "deployment-b", private_note: "secret-b" },
+        },
+      ]),
+    ).not.toBe(first);
+    expect(
+      hashAcpSessionConfigOptions([
+        {
+          ...option,
+          name: "Renamed model",
+          description: "Renamed description",
+          options: [{ value: "gpt-5.4", name: "Renamed choice" }],
+          _meta: { deployment_id: "deployment-a", private_note: "changed" },
+        },
+      ]),
+    ).toBe(first);
+    expect(
+      hashAcpSessionConfigOptions([
+        {
+          ...option,
+          _meta: { deployment_id: "unsafe secret deployment" },
+        },
+      ]),
+    ).toBe(hashAcpSessionConfigOptions([{ ...option, _meta: {} }]));
+  });
+
+  it("delegates a mediated write decision to the injected shaping evaluator", async () => {
+    const root = await createRoot();
+    const sentinel = join(root, "shaping-evaluator-sentinel");
+    const evaluator = vi.fn(() => ({
+      decision: "reject_once" as const,
+      reason: "write_path_not_allowed",
+    }));
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            requests: [
+              {
+                schema_version: 1,
+                kind: "workspace_write",
+                path: "src/example.ts",
+              },
+            ],
+          },
+          sentinel,
+        ),
+        evaluate_permission: evaluator,
+      },
+      new MemoryEventSink(),
+    );
+
+    await expect(session.run("Try the shaping write.")).resolves.toMatchObject({
+      outcome: "missing_permission",
+    });
+    expect(evaluator).toHaveBeenCalledWith({
+      schema_version: 1,
+      kind: "workspace_write",
+      path: "src/example.ts",
+    });
+    expect(await exists(`${sentinel}.1`)).toBe(false);
   });
 });

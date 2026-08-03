@@ -8,7 +8,6 @@ import {
   normalizeApprovedCommandForm,
   normalizeApprovedUrlOperation,
   type CanonicalCapabilityRequest,
-  type CapabilityEnvelopeV1,
 } from "../../domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../domain/connected-run";
 import type {
@@ -17,12 +16,13 @@ import type {
   AcpRuntimeProfile,
   AcpSession,
   AcpSessionCallbacks,
+  NormalizedPermissionEvaluator,
 } from "./acp-client";
 
 const execFileAsync = promisify(execFile);
 
-const COPILOT_ADAPTER_ID = "copilot-acp";
-const COPILOT_PROFILE_ID = "noninteractive-execute-v1";
+export const COPILOT_ADAPTER_ID = "copilot-acp";
+export const COPILOT_PROFILE_ID = "noninteractive-execute-v1";
 const VERSION_OUTPUT = /^GitHub Copilot CLI (\d+\.\d+\.\d+)\.?\s*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u;
@@ -82,7 +82,7 @@ export interface CopilotRuntimeProfileInput {
   readonly excluded_tools: readonly string[];
   readonly environment: Readonly<Record<string, string>>;
   readonly workspace_cwd: string;
-  readonly capability_envelope: CapabilityEnvelopeV1;
+  readonly evaluate_permission: NormalizedPermissionEvaluator;
   readonly limits: ConnectedRunLimits;
 }
 
@@ -404,7 +404,7 @@ export function createCopilotRuntimeProfile(
       args,
       environment: resolveEnvironment(input.environment),
       workspace_cwd: workspaceCwd,
-      capability_envelope: input.capability_envelope,
+      evaluate_permission: input.evaluate_permission,
       limits: input.limits,
       normalize_permission: (request) =>
         normalizeCopilotPermission(request, workspaceCwd),

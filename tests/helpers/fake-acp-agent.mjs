@@ -24,7 +24,12 @@ const application = acp
     if (!Array.isArray(context.params.mcpServers) || context.params.mcpServers.length !== 0) {
       throw new Error("The client must request zero MCP servers.");
     }
-    return { sessionId };
+    return {
+      sessionId,
+      ...(Array.isArray(scenario.session_config_options)
+        ? { configOptions: scenario.session_config_options }
+        : {}),
+    };
   })
   .onRequest(acp.methods.agent.session.prompt, async (context) => {
     if (scenario.kind === "silent_refusal") {
@@ -50,6 +55,16 @@ const application = acp
       },
     });
 
+    if (Array.isArray(scenario.config_option_update)) {
+      await context.client.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: scenario.config_option_update,
+        },
+      });
+    }
+
     const requests = Array.isArray(scenario.requests) ? scenario.requests : [];
     for (let index = 0; index < requests.length; index += 1) {
       const decision = await context.client.request(
@@ -68,10 +83,21 @@ const application = acp
       );
       if (
         decision.outcome.outcome === "selected" &&
-        decision.outcome.optionId === "allow" &&
-        sentinelPath !== null
+        decision.outcome.optionId === "allow"
       ) {
-        await writeFile(`${sentinelPath}.${index + 1}`, "allowed\n", "utf8");
+        if (
+          sentinelPath !== null &&
+          scenario.write_permission_sentinel !== false
+        ) {
+          await writeFile(`${sentinelPath}.${index + 1}`, "allowed\n", "utf8");
+        }
+        if (
+          scenario.write_requested_file === true &&
+          typeof requests[index]?.path === "string" &&
+          typeof scenario.result_source === "string"
+        ) {
+          await writeFile(requests[index].path, scenario.result_source, "utf8");
+        }
       }
       await context.client.notify(acp.methods.client.session.update, {
         sessionId,

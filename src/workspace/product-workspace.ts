@@ -109,10 +109,12 @@ import {
   connectedRunProcessIdentitySchema,
   connectedRunRecordV1Schema,
   connectedRunTerminalSchema,
+  effectiveModelIdentitySchema,
   type ConnectedRunProtocolIdentity,
   type ConnectedRunTerminal,
   type ConnectedRunProcessIdentity,
   type ConnectedRunRecordV1,
+  type EffectiveModelIdentity,
 } from "../domain/connected-run";
 import {
   brainstormResultSubmissionSchema,
@@ -1259,6 +1261,67 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return updated;
   }
 
+  async updateConnectedRunEffectiveModel(
+    workItemId: string,
+    connectedRunId: string,
+    effectiveModel: Extract<
+      EffectiveModelIdentity,
+      { assurance: "adapter_attested" }
+    >,
+  ): Promise<ConnectedRunRecordV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    const validatedEffectiveModel = effectiveModelIdentitySchema.parse(
+      effectiveModel,
+    );
+    if (validatedEffectiveModel.assurance !== "adapter_attested") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "A connected run effective model must be adapter-attested.",
+      );
+    }
+    const record = await this.requireConnectedRun(
+      validatedWorkItemId,
+      validatedRunId,
+    );
+    if (
+      isDeepStrictEqual(
+        record.provenance.effective_model,
+        validatedEffectiveModel,
+      )
+    ) {
+      return record;
+    }
+    if (record.lifecycle.status === "terminal") {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        validatedWorkItemId,
+        "A terminal connected run cannot record a different effective model.",
+      );
+    }
+    if (record.lifecycle.status !== "running") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "A connected run must be running before it records an effective model.",
+      );
+    }
+
+    const updated = connectedRunRecordV1Schema.parse({
+      ...record,
+      provenance: {
+        ...record.provenance,
+        effective_model: validatedEffectiveModel,
+      },
+    });
+    await this.writeJsonAtomically(
+      this.connectedRunPaths(validatedWorkItemId, validatedRunId).run,
+      updated,
+    );
+    return updated;
+  }
+
   async completeConnectedRun(
     workItemId: string,
     connectedRunId: string,
@@ -1672,6 +1735,67 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return updated;
   }
 
+  async updateShapingRunEffectiveModel(
+    workItemId: string,
+    shapingRunId: string,
+    effectiveModel: Extract<
+      EffectiveModelIdentity,
+      { assurance: "adapter_attested" }
+    >,
+  ): Promise<ShapingRunRecordV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
+    const validatedEffectiveModel = effectiveModelIdentitySchema.parse(
+      effectiveModel,
+    );
+    if (validatedEffectiveModel.assurance !== "adapter_attested") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "A shaping run effective model must be adapter-attested.",
+      );
+    }
+    const record = await this.requireShapingRun(
+      validatedWorkItemId,
+      validatedRunId,
+    );
+    if (
+      isDeepStrictEqual(
+        record.provenance.effective_model,
+        validatedEffectiveModel,
+      )
+    ) {
+      return record;
+    }
+    if (record.lifecycle.status === "terminal") {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        validatedWorkItemId,
+        "A terminal shaping run cannot record a different effective model.",
+      );
+    }
+    if (record.lifecycle.status !== "running") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "A shaping run must be running before it records an effective model.",
+      );
+    }
+
+    const updated = shapingRunRecordV1Schema.parse({
+      ...record,
+      provenance: {
+        ...record.provenance,
+        effective_model: validatedEffectiveModel,
+      },
+    });
+    await this.writeJsonAtomically(
+      this.shapingRunPaths(validatedWorkItemId, validatedRunId).run,
+      updated,
+    );
+    return updated;
+  }
+
   async completeShapingRun(
     workItemId: string,
     shapingRunId: string,
@@ -1680,7 +1804,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
     const validatedTerminal = connectedRunTerminalSchema.parse(terminal);
-    const record = await this.requireShapingRun(
+    let record = await this.requireShapingRunForCompletion(
       validatedWorkItemId,
       validatedRunId,
     );
@@ -1725,10 +1849,37 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           throw error;
         }
         if (this.isShapingOutputRejection(error)) {
-          await this.failShapingRunAfterRejectedOutput(record, error);
+          await this.failShapingRunAfterRejectedOutput(record);
         }
         throw error;
       }
+    }
+
+    if (
+      ["missing_permission", "failed", "timed_out"].includes(
+        validatedTerminal.outcome,
+      )
+    ) {
+      const entries = [...record.diagnostics.entries];
+      let truncated = record.diagnostics.truncated;
+      if (entries.length < 20) {
+        entries.push({
+          observed_at: timestampAtOrAfter(record.lifecycle.updated_at),
+          code: `shaping_${validatedTerminal.outcome}`,
+          message:
+            truncateUtf8(
+              validatedTerminal.reason ??
+                "The artifact-only shaping runtime did not complete.",
+              500,
+            ) || "The artifact-only shaping runtime did not complete.",
+        });
+      } else {
+        truncated = true;
+      }
+      record = shapingRunRecordV1Schema.parse({
+        ...record,
+        diagnostics: { entries, truncated },
+      });
     }
 
     return this.terminalizeShapingRun(record, validatedTerminal);
@@ -7312,6 +7463,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     workItemId: string,
     shapingRunId: string,
     itemDirectory: string,
+    validateInstruction = true,
   ): Promise<ShapingRunRecordV1 | null> {
     const paths = this.shapingRunPaths(workItemId, shapingRunId);
     if (!(await this.hasSafeDirectory(paths.directory))) {
@@ -7339,7 +7491,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
-    await this.readShapingRunInstructionForRecord(record);
+    if (validateInstruction) {
+      await this.readShapingRunInstructionForRecord(record);
+    }
     const storedProcess = await this.readShapingRunProcess(paths.process);
     if (
       record.process !== null &&
@@ -7502,6 +7656,39 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return record;
   }
 
+  private async requireShapingRunForCompletion(
+    workItemId: string,
+    shapingRunId: string,
+  ): Promise<ShapingRunRecordV1> {
+    await this.readManifest();
+    const itemDirectory = join(
+      this.founderDirectory,
+      SHAPING_RUNS_DIRECTORY,
+      workItemId,
+    );
+    if (!(await this.hasSafeDirectory(itemDirectory))) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Shaping run ${shapingRunId} was not found.`,
+      );
+    }
+    const record = await this.readShapingRunFromDirectory(
+      workItemId,
+      shapingRunId,
+      itemDirectory,
+      false,
+    );
+    if (record === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Shaping run ${shapingRunId} was not found.`,
+      );
+    }
+    return record;
+  }
+
   private shapingRunFingerprint(record: ShapingRunRecordV1): string {
     const requestedModel = record.provenance.requested_model.value;
     if (requestedModel === null) {
@@ -7572,11 +7759,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
   private async failShapingRunAfterRejectedOutput(
     record: ShapingRunRecordV1,
-    error: unknown,
   ): Promise<ShapingRunRecordV1> {
     const observedAt = timestampAtOrAfter(record.lifecycle.updated_at);
-    const message =
-      truncateUtf8(errorMessage(error), 500) || "Shaping output was rejected.";
+    const message = "Artifact-only shaping output failed validation.";
     const entries = [...record.diagnostics.entries];
     let truncated = record.diagnostics.truncated;
     if (entries.length < 20) {
@@ -7588,15 +7773,16 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     } else {
       truncated = true;
     }
-    const reason =
-      truncateUtf8(`Shaping output was rejected: ${message}`, 200) ||
-      "Shaping output was rejected.";
     return this.terminalizeShapingRun(
       shapingRunRecordV1Schema.parse({
         ...record,
         diagnostics: { entries, truncated },
       }),
-      { outcome: "failed", partial: true, reason },
+      {
+        outcome: "failed",
+        partial: true,
+        reason: "Shaping output was rejected.",
+      },
     );
   }
 

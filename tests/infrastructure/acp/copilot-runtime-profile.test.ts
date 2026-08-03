@@ -52,9 +52,19 @@ function input(
     environment: {
       PATH: "/usr/bin:/bin",
       COPILOT_TOKEN: "credential-value-must-not-survive",
+      PRODUCT_STUDIO_APP_ORIGIN: "http://127.0.0.1:3000",
     },
     workspace_cwd: workspaceCwd,
-    capability_envelope: resolveCapabilityEnvelope(["src"], defaults),
+    evaluate_permission: (request) =>
+      capabilityRequestMatchesEnvelope(
+        request,
+        resolveCapabilityEnvelope(["src"], defaults),
+      )
+        ? { decision: "allow_once", reason: null }
+        : {
+            decision: "reject_once",
+            reason: "outside_capability_envelope",
+          },
     limits,
     ...overrides,
   };
@@ -81,7 +91,13 @@ describe("Copilot ACP runtime profile", () => {
     });
     expect(runner).toHaveBeenCalledWith("copilot", ["--version"]);
 
-    const profile = createCopilotRuntimeProfile(input());
+    const evaluator = vi.fn(() => ({
+      decision: "reject_once" as const,
+      reason: "test_evaluator",
+    }));
+    const profile = createCopilotRuntimeProfile(
+      input({ evaluate_permission: evaluator }),
+    );
     expect(profile.runtime_profile.args).toEqual([
       "--acp",
       "--stdio",
@@ -108,6 +124,8 @@ describe("Copilot ACP runtime profile", () => {
       NO_COLOR: "1",
       PATH: "/usr/bin:/bin",
     });
+    expect(profile.runtime_profile.evaluate_permission).toBe(evaluator);
+    expect(profile.runtime_profile).not.toHaveProperty("capability_envelope");
     const prompt = vi.fn(async () => ({ stopReason: "end_turn" as const }));
     await expect(
       profile.runtime_profile.initialize_session?.({ prompt }),
@@ -121,6 +139,8 @@ describe("Copilot ACP runtime profile", () => {
       requested_mcp_server_count: 0,
     });
     expect(JSON.stringify(profile)).not.toContain("credential-value-must-not-survive");
+    expect(JSON.stringify(profile)).not.toContain("PRODUCT_STUDIO_APP_ORIGIN");
+    expect(JSON.stringify(profile)).not.toContain("http://127.0.0.1:3000");
     expect(
       profile.runtime_profile.args.some((argument) =>
         /^(?:-p|--prompt|--allow-all|--yolo|--additional-mcp-config|--add-github-mcp-tool|--allow-tool|--allow-url)/u.test(
@@ -312,6 +332,47 @@ describe("Copilot ACP runtime profile", () => {
         config_options: options,
       }),
     ).toBeNull();
+    expect(
+      extractEffectiveModel({
+        source: "session_new",
+        verification: "acp_observed",
+        observed_event_sha256: eventSha256,
+        config_options: [],
+      }),
+    ).toBeNull();
+    expect(
+      extractEffectiveModel({
+        source: "session_new",
+        verification: "acp_observed",
+        observed_event_sha256: eventSha256,
+        config_options: [options[0]!, { ...options[0]!, id: "model-secondary" }],
+      }),
+    ).toBeNull();
+    expect(
+      extractEffectiveModel({
+        source: "session_new",
+        verification: "acp_observed",
+        observed_event_sha256: eventSha256,
+        config_options: [{ ...options[0]!, currentValue: "gpt-unknown" }],
+      }),
+    ).toBeNull();
+    expect(
+      extractEffectiveModel({
+        source: "config_option_update",
+        verification: "acp_observed",
+        observed_event_sha256: eventSha256,
+        config_options: [
+          {
+            ...options[0]!,
+            _meta: { deployment_id: "unsafe deployment secret" },
+          },
+        ],
+      }),
+    ).toEqual({
+      model_id: "gpt-5.5",
+      deployment_id: null,
+      observed_event_sha256: eventSha256,
+    });
   });
 
   it("fails malformed executable and authentication preflight data closed", async () => {

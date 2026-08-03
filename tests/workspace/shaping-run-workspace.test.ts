@@ -417,6 +417,38 @@ describe("shaping-run workspace storage", () => {
   it("publishes a completed ingress as the sole applied production and blocks another launch", async () => {
     const fixture = await createFixture();
     const { workspace, created } = await createRun(fixture);
+    await workspace.startShapingRun(workItemId, firstRunId, processIdentity);
+    const modelA = {
+      assurance: "adapter_attested" as const,
+      model_id: "model-a",
+      deployment_id: "deployment-a",
+      observed_event_sha256: "1".repeat(64),
+    };
+    const modelB = {
+      assurance: "adapter_attested" as const,
+      model_id: "model-b",
+      deployment_id: "deployment-b",
+      observed_event_sha256: "2".repeat(64),
+    };
+    await workspace.updateShapingRunEffectiveModel(
+      workItemId,
+      firstRunId,
+      modelA,
+    );
+    await workspace.updateShapingRunEffectiveModel(
+      workItemId,
+      firstRunId,
+      modelB,
+    );
+    await expect(
+      workspace.updateShapingRunEffectiveModel(
+        workItemId,
+        firstRunId,
+        modelB,
+      ),
+    ).resolves.toMatchObject({
+      provenance: { effective_model: modelB },
+    });
     await writeIngress(
       fixture.root,
       created.instruction.ingress_path,
@@ -449,7 +481,14 @@ describe("shaping-run workspace storage", () => {
       origin: "connected_run",
       production_id: firstRunId,
       shaping_run_id: firstRunId,
+      effective_model: modelB,
     });
+    await expect(
+      workspace.updateShapingRunEffectiveModel(workItemId, firstRunId, {
+        ...modelB,
+        model_id: "model-c",
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict", workItemId });
     await expect(
       workspace.createShapingRun(
         shapingRunInput(fixture.mission, secondRunId),
@@ -499,6 +538,18 @@ describe("shaping-run workspace storage", () => {
     const created = await workspace.createShapingRun(
       shapingRunInput(fixture.mission),
     );
+    await workspace.startShapingRun(workItemId, firstRunId, processIdentity);
+    const observedModel = {
+      assurance: "adapter_attested" as const,
+      model_id: "model-b",
+      deployment_id: "deployment-b",
+      observed_event_sha256: "3".repeat(64),
+    };
+    await workspace.updateShapingRunEffectiveModel(
+      workItemId,
+      firstRunId,
+      observedModel,
+    );
     await writeIngress(
       fixture.root,
       created.instruction.ingress_path,
@@ -514,7 +565,7 @@ describe("shaping-run workspace storage", () => {
     expect(
       (await workspace.readShapingRun(workItemId, firstRunId))?.lifecycle
         .status,
-    ).toBe("starting");
+    ).toBe("running");
     const appliedDirectory = join(
       fixture.root,
       ".founder",
@@ -532,6 +583,12 @@ describe("shaping-run workspace storage", () => {
       status: "terminal",
       terminal: { outcome: "completed" },
     });
+    expect(reconciled.provenance.effective_model).toEqual(observedModel);
+    expect(
+      JSON.parse(
+        await readFile(join(appliedDirectory, "production.json"), "utf8"),
+      ).effective_model,
+    ).toEqual(observedModel);
     expect(probeCalls).toBe(0);
     expect(await readFile(join(appliedDirectory, "applied.json"), "utf8")).toBe(
       markerBefore,
