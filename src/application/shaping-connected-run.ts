@@ -239,12 +239,72 @@ export function composeConnectedShapingPrompt(
   instructionInput: ShapingIngressInstructionV1,
 ): string {
   const instruction = shapingIngressInstructionSchema.parse(instructionInput);
+  const identity = {
+    phase: instruction.phase,
+    work_item_id: instruction.work_item_id,
+    input_sha256: instruction.mission_input_sha256,
+  };
+  const resultShape = (() => {
+    switch (instruction.phase) {
+      case "brainstorm":
+        return {
+          result_schema_version: 1,
+          brainstorm_mission_content_sha256:
+            instruction.mission_content_sha256,
+          identity,
+          problem_statement:
+            "Describe the mission-specific problem in one non-empty string.",
+          approach:
+            "Describe the mission-specific approach in one non-empty string.",
+          non_goals: ["Name one mission-specific non-goal."],
+          open_questions: ["Name one mission-specific open question."],
+        };
+      case "spec":
+        return {
+          result_schema_version: 1,
+          spec_mission_content_sha256: instruction.mission_content_sha256,
+          identity,
+          proposal: {
+            purpose: "State the mission-specific purpose.",
+            acceptance_criteria: [
+              "State one mission-specific acceptance criterion.",
+            ],
+            non_goals: ["Name one mission-specific non-goal."],
+            allowed_scope: ["path/to/mission-specific-scope"],
+            review_ready: [
+              "State one mission-specific review-readiness check.",
+            ],
+          },
+        };
+      case "plan":
+        return {
+          result_schema_version: 1,
+          plan_mission_content_sha256: instruction.mission_content_sha256,
+          identity,
+          summary: "Summarize the mission-specific implementation plan.",
+          checklist: [
+            {
+              id: "step-1",
+              step: "Describe one mission-specific implementation step.",
+              verification_check:
+                "Describe the deterministic verification for this step.",
+            },
+          ],
+          relevant_skills: [],
+          product_doc_impacts: [],
+          todo_impacts: [],
+          open_questions: [],
+        };
+    }
+  })();
   return [
     `Read the immutable shaping task at ${instruction.task_path}.`,
     `Mission content SHA-256: ${instruction.mission_content_sha256}.`,
     `Write exactly one JSON result to ${instruction.ingress_path}.`,
     `Result schema version: ${instruction.result_schema_version}.`,
     `Required fields: ${instruction.required_fields.join(", ")}.`,
+    "Use a strict JSON object with no additional keys. Replace every descriptive example value, including proposal.allowed_scope and every checklist or list entry, with mission-specific content. Preserve only result_schema_version, the mission content hash, and the identity object exactly as shown below.",
+    `Exact result shape: ${JSON.stringify(resultShape)}`,
     `Maximum result bytes: ${instruction.max_result_bytes}.`,
     "Do not modify workflow state, make approval decisions, or write any other path.",
   ].join("\n");
