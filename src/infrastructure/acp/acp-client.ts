@@ -36,7 +36,12 @@ export interface AcpRuntimeProfile {
 }
 
 export interface AcpSessionInitializer {
+  readonly config_options: readonly acp.SessionConfigOption[];
   prompt(command: string): Promise<{ readonly stopReason: acp.StopReason }>;
+  set_config_option(
+    configId: string,
+    value: string,
+  ): Promise<acp.SetSessionConfigOptionResponse>;
 }
 
 export interface AcpEventSink {
@@ -122,6 +127,7 @@ export interface AcpSessionUpdateEvent {
 
 interface AcpStdioClientAdapterOptions {
   now?: () => Date;
+  session_initialization_timeout_ms?: number;
   spawn_process?: (
     command: string,
     args: readonly string[],
@@ -142,6 +148,7 @@ class AcpEventLimitError extends AcpClientError {}
 class AcpTimeoutError extends AcpClientError {}
 
 const ACP_HANDSHAKE_TIMEOUT_MS = 5_000;
+const ACP_SESSION_INITIALIZATION_TIMEOUT_MS = 30_000;
 const SAFE_CONFIG_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u;
 
 function canonicalJson(value: unknown): string {
@@ -259,6 +266,7 @@ function sleep(milliseconds: number): Promise<void> {
 async function withinTimeout<T>(
   operation: Promise<T>,
   timeoutMilliseconds: number,
+  message = "ACP handshake timed out.",
 ): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   try {
@@ -266,7 +274,7 @@ async function withinTimeout<T>(
       operation,
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
-          reject(new AcpTimeoutError("ACP handshake timed out."));
+          reject(new AcpTimeoutError(message));
         }, timeoutMilliseconds);
         timeout.unref();
       }),
@@ -332,6 +340,7 @@ class StdioAcpSession implements AcpSession {
   private cancellationRequested = false;
   private processClosed: Promise<void>;
   private callbackQueue: Promise<void> = Promise.resolve();
+  private lastConfigOptionsSha256: string | null = null;
 
   constructor(
     private readonly profile: AcpRuntimeProfile,
@@ -453,6 +462,10 @@ class StdioAcpSession implements AcpSession {
   ): Promise<void> {
     return this.enqueueCallback(async () => {
       const event = summarizeSessionUpdate(notification);
+      const configOptionsSha256 =
+        event.config_options === null
+          ? null
+          : hashAcpSessionConfigOptions(event.config_options);
       await this.recorder.record(
         "session_update",
         event.config_options === null
@@ -466,12 +479,32 @@ class StdioAcpSession implements AcpSession {
           : {
               update_kind: event.update_kind,
               model_option_count: modelOptionCount(event.config_options),
-              observed_event_sha256: hashAcpSessionConfigOptions(
-                event.config_options,
-              ),
+              observed_event_sha256: configOptionsSha256,
             },
       );
       await this.callbacks.on_session_update?.(event);
+      if (configOptionsSha256 !== null) {
+        this.lastConfigOptionsSha256 = configOptionsSha256;
+      }
+    });
+  }
+
+  async handleConfigOptionResponse(
+    configOptions: readonly acp.SessionConfigOption[],
+  ): Promise<void> {
+    await this.callbackQueue;
+    if (
+      this.lastConfigOptionsSha256 ===
+      hashAcpSessionConfigOptions(configOptions)
+    ) {
+      return;
+    }
+    await this.handleSessionUpdate({
+      sessionId: this.session_id,
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [...configOptions],
+      },
     });
   }
 
@@ -642,12 +675,22 @@ function summarizeSessionUpdate(
 
 export class StdioAcpClientAdapter implements AcpClientAdapter {
   private readonly now: () => Date;
+  private readonly sessionInitializationTimeoutMs: number;
   private readonly spawnProcess: NonNullable<
     AcpStdioClientAdapterOptions["spawn_process"]
   >;
 
   constructor(options: AcpStdioClientAdapterOptions = {}) {
     this.now = options.now ?? (() => new Date());
+    this.sessionInitializationTimeoutMs =
+      options.session_initialization_timeout_ms ??
+      ACP_SESSION_INITIALIZATION_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(this.sessionInitializationTimeoutMs) ||
+      this.sessionInitializationTimeoutMs <= 0
+    ) {
+      throw new AcpClientError("Invalid ACP session initialization timeout.");
+    }
     this.spawnProcess = options.spawn_process ?? spawn;
   }
 
@@ -720,23 +763,45 @@ export class StdioAcpClientAdapter implements AcpClientAdapter {
         callbacks,
         this.now,
       );
+      const initializedSession = session;
       await recorder.record("session_started", {
         adapter_id: profile.adapter_id,
         protocol_version: initialized.protocolVersion,
         requested_mcp_server_count: 0,
-        session_id: session.session_id,
+        session_id: initializedSession.session_id,
       });
       await recorder.record("session_update", {
         update_kind: "session_new",
-        model_option_count: modelOptionCount(session.config_options),
+        model_option_count: modelOptionCount(initializedSession.config_options),
         observed_event_sha256: hashAcpSessionConfigOptions(
-          session.config_options,
+          initializedSession.config_options,
         ),
       });
-      await profile.initialize_session?.({
-        prompt: async (command) => activeSession.prompt(command),
-      });
-      return session;
+      if (profile.initialize_session !== undefined) {
+        await withinTimeout(
+          profile.initialize_session({
+            config_options: initializedSession.config_options,
+            prompt: async (command) => activeSession.prompt(command),
+            set_config_option: async (configId, value) => {
+              const response = await connection.agent.request(
+                acp.methods.agent.session.setConfigOption,
+                {
+                  sessionId: activeSession.sessionId,
+                  configId,
+                  value,
+                },
+              );
+              await initializedSession.handleConfigOptionResponse(
+                response.configOptions,
+              );
+              return response;
+            },
+          }),
+          this.sessionInitializationTimeoutMs,
+          "ACP session initialization timed out.",
+        );
+      }
+      return initializedSession;
     } catch (error) {
       await session?.close(true);
       child.kill("SIGTERM");

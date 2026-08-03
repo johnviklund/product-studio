@@ -197,6 +197,7 @@ export interface CopilotConnectedShapingRuntimeOptions {
   readonly profile: Omit<
     CopilotRuntimeProfileInput,
     | "requested_model"
+    | "required_available_tools"
     | "workspace_cwd"
     | "evaluate_permission"
     | "limits"
@@ -226,6 +227,7 @@ export class CopilotConnectedShapingRuntime implements ConnectedShapingRuntime {
     const base = {
       ...this.options.profile,
       requested_model: input.requested_model,
+      required_available_tools: ["view", "create"],
       workspace_cwd: input.workspace_cwd,
       limits: input.limits,
     };

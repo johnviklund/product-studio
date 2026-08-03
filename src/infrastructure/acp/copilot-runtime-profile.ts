@@ -79,6 +79,7 @@ export interface CopilotRuntimeProfileInput {
   readonly requested_model: string;
   readonly reasoning_effort: CopilotReasoningEffort;
   readonly available_tools: readonly string[];
+  readonly required_available_tools?: readonly string[];
   readonly excluded_tools: readonly string[];
   readonly environment: Readonly<Record<string, string>>;
   readonly workspace_cwd: string;
@@ -293,6 +294,27 @@ function optionValues(
   );
 }
 
+function requestedModelOption(
+  options: readonly acp.SessionConfigOption[],
+  requestedModel: string,
+): (acp.SessionConfigOption & { readonly type: "select" }) | null {
+  const modelOptions = options.filter(
+    (
+      option,
+    ): option is acp.SessionConfigOption & { readonly type: "select" } =>
+      option.type === "select" && option.category === "model",
+  );
+  if (modelOptions.length !== 1) {
+    return null;
+  }
+  const modelOption = modelOptions[0]!;
+  return optionValues(modelOption.options).some(
+    (option) => option.value === requestedModel,
+  )
+    ? modelOption
+    : null;
+}
+
 function deploymentId(option: acp.SessionConfigOption): string | null {
   const value = option._meta?.deployment_id;
   return typeof value === "string" && SAFE_IDENTIFIER.test(value) ? value : null;
@@ -351,6 +373,18 @@ export function createCopilotRuntimeProfile(
   }
 
   const availableTools = normalizeTools(input.available_tools, "available");
+  const requiredAvailableTools =
+    input.required_available_tools === undefined
+      ? []
+      : normalizeTools(input.required_available_tools, "available");
+  const missingRequiredTools = requiredAvailableTools.filter(
+    (tool) => !availableTools.includes(tool),
+  );
+  if (missingRequiredTools.length > 0) {
+    throw new CopilotRuntimeProfileError(
+      `Required Copilot tools are unavailable: ${missingRequiredTools.join(", ")}.`,
+    );
+  }
   const excludedTools = normalizeTools(input.excluded_tools, "excluded");
   if (excludedTools.some((tool) => availableTools.includes(tool))) {
     throw new CopilotRuntimeProfileError("Available and excluded tools must not overlap.");
@@ -409,9 +443,39 @@ export function createCopilotRuntimeProfile(
       normalize_permission: (request) =>
         normalizeCopilotPermission(request, workspaceCwd),
       initialize_session: async (session) => {
+        const initialModelOptions = session.config_options.filter(
+          (option) => option.type === "select" && option.category === "model",
+        );
+        if (initialModelOptions.length !== 1) {
+          throw new CopilotRuntimeProfileError(
+            "Copilot did not expose exactly one model configuration option.",
+          );
+        }
+        const modelOption = requestedModelOption(
+          session.config_options,
+          requestedModel,
+        );
+        if (modelOption === null) {
+          throw new CopilotRuntimeProfileError(
+            "Requested Copilot model is unavailable in the ACP session.",
+          );
+        }
         const response = await session.prompt("/sandbox enable");
         if (response.stopReason !== "end_turn") {
           throw new CopilotRuntimeProfileError("Copilot sandbox enablement was not confirmed.");
+        }
+        const configured = await session.set_config_option(
+          modelOption.id,
+          requestedModel,
+        );
+        const confirmedModel = requestedModelOption(
+          configured.configOptions,
+          requestedModel,
+        );
+        if (confirmedModel?.currentValue !== requestedModel) {
+          throw new CopilotRuntimeProfileError(
+            "Copilot did not confirm the requested model.",
+          );
         }
       },
     },

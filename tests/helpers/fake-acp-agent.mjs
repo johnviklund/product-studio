@@ -6,6 +6,9 @@ import * as acp from "@agentclientprotocol/sdk";
 const scenario = JSON.parse(process.env.PRODUCT_STUDIO_FAKE_ACP_SCENARIO ?? "{}");
 const sentinelPath = process.env.PRODUCT_STUDIO_FAKE_ACP_SENTINEL ?? null;
 const sessionId = "product-studio-fake-session";
+let currentConfigOptions = Array.isArray(scenario.session_config_options)
+  ? scenario.session_config_options
+  : [];
 
 function permissionOptions() {
   return [
@@ -26,10 +29,57 @@ const application = acp
     }
     return {
       sessionId,
-      ...(Array.isArray(scenario.session_config_options)
-        ? { configOptions: scenario.session_config_options }
+      ...(currentConfigOptions.length > 0
+        ? { configOptions: currentConfigOptions }
         : {}),
     };
+  })
+  .onRequest(acp.methods.agent.session.setConfigOption, async (context) => {
+    if (sentinelPath !== null) {
+      await writeFile(
+        `${sentinelPath}.set-config-pid`,
+        `${process.pid}\n`,
+        "utf8",
+      );
+    }
+    if (
+      typeof scenario.set_config_option_delay_ms === "number" &&
+      scenario.set_config_option_delay_ms > 0
+    ) {
+      await new Promise((resolveDelay) =>
+        setTimeout(resolveDelay, scenario.set_config_option_delay_ms),
+      );
+    }
+    currentConfigOptions = Array.isArray(scenario.set_config_option_response)
+      ? scenario.set_config_option_response
+      : currentConfigOptions.map((option) =>
+          option.id === context.params.configId
+            ? { ...option, currentValue: context.params.value }
+            : option,
+        );
+    if (sentinelPath !== null) {
+      await writeFile(
+        `${sentinelPath}.set-config`,
+        `${JSON.stringify(context.params)}\n`,
+        "utf8",
+      );
+    }
+    if (scenario.notify_set_config_option !== false) {
+      const notification = context.client.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: currentConfigOptions,
+        },
+      });
+      if (scenario.ignore_set_config_notification_failure === true) {
+        void notification.catch(() => undefined);
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+      } else {
+        await notification;
+      }
+    }
+    return { configOptions: currentConfigOptions };
   })
   .onRequest(acp.methods.agent.session.prompt, async (context) => {
     if (scenario.kind === "silent_refusal") {

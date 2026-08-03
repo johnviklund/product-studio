@@ -57,6 +57,24 @@ class MemoryEventSink implements AcpEventSink {
   }
 }
 
+class FailFirstConfigUpdateSink extends MemoryEventSink {
+  private failed = false;
+
+  override async append(
+    event: AcpEvidenceEvent,
+  ): Promise<{ limit_reached: boolean }> {
+    if (
+      !this.failed &&
+      event.kind === "session_update" &&
+      event.payload.update_kind === "config_option_update"
+    ) {
+      this.failed = true;
+      throw new Error("Injected config evidence failure.");
+    }
+    return super.append(event);
+  }
+}
+
 async function createRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-acp-client-"));
   createdRoots.push(root);
@@ -208,23 +226,156 @@ describe("stdio ACP client adapter", () => {
     const root = await createRoot();
     const sink = new MemoryEventSink();
     const startupPrompts: string[] = [];
+    const initialModelConfig = {
+      type: "select" as const,
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: "claude-opus-5",
+      options: [
+        { value: "gpt-5.4", name: "GPT-5.4" },
+        { value: "claude-opus-5", name: "Claude Opus 5" },
+      ],
+    };
+    const configUpdates: string[] = [];
+    const sentinel = join(root, "initializer-sentinel");
     const session = await new StdioAcpClientAdapter().start(
       {
-        ...profile(root, {}, join(root, "initializer-sentinel")),
+        ...profile(
+          root,
+          {
+            session_config_options: [initialModelConfig],
+            notify_set_config_option: false,
+          },
+          sentinel,
+        ),
         initialize_session: async (initializer) => {
+          expect(initializer.config_options).toEqual([initialModelConfig]);
           startupPrompts.push("/sandbox enable");
           await expect(initializer.prompt("/sandbox enable")).resolves.toEqual({
             stopReason: "end_turn",
           });
+          await expect(
+            initializer.set_config_option("model", "gpt-5.4"),
+          ).resolves.toEqual({
+            configOptions: [
+              { ...initialModelConfig, currentValue: "gpt-5.4" },
+            ],
+          });
         },
       },
       sink,
+      {
+        on_session_update: (event) => {
+          configUpdates.push(event.update_kind);
+        },
+      },
     );
 
     expect(startupPrompts).toEqual(["/sandbox enable"]);
+    await expect(readFile(`${sentinel}.set-config`, "utf8")).resolves.toContain(
+      '"configId":"model"',
+    );
+    expect(configUpdates).toContain("config_option_update");
     await expect(session.run("Begin the mission.")).resolves.toMatchObject({
       outcome: "completed",
     });
+  });
+
+  it("bounds session initialization and terminates the child when model configuration stalls", async () => {
+    const root = await createRoot();
+    const sink = new MemoryEventSink();
+    const sentinel = join(root, "initializer-timeout-sentinel");
+    const modelConfig = {
+      type: "select" as const,
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: "gpt-5.4",
+      options: [{ value: "gpt-5.4", name: "GPT-5.4" }],
+    };
+    const adapter = new StdioAcpClientAdapter({
+      session_initialization_timeout_ms: 20,
+    });
+    const outcome = await adapter
+      .start(
+        {
+          ...profile(
+            root,
+            {
+              session_config_options: [modelConfig],
+              set_config_option_delay_ms: 150,
+            },
+            sentinel,
+          ),
+          initialize_session: async (initializer) => {
+            await initializer.set_config_option("model", "gpt-5.4");
+          },
+        },
+        sink,
+      )
+      .then(
+        (session) => ({ kind: "resolved" as const, session }),
+        (error: unknown) => ({
+          kind: "rejected" as const,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    if (outcome.kind === "resolved") {
+      await outcome.session.close();
+    }
+
+    expect(outcome).toEqual({
+      kind: "rejected",
+      message: "ACP session initialization timed out.",
+    });
+    const pid = Number(
+      (await readFile(`${sentinel}.set-config-pid`, "utf8")).trim(),
+    );
+    await expect.poll(() => isRunning(pid)).toBe(false);
+  });
+
+  it("retries config-option evidence from the setter response when notification persistence fails", async () => {
+    const root = await createRoot();
+    const sink = new FailFirstConfigUpdateSink();
+    const modelConfig = {
+      type: "select" as const,
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: "gpt-5.4",
+      options: [{ value: "gpt-5.4", name: "GPT-5.4" }],
+    };
+    const updates: string[] = [];
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            session_config_options: [modelConfig],
+            ignore_set_config_notification_failure: true,
+          },
+          join(root, "config-evidence-sentinel"),
+        ),
+        initialize_session: async (initializer) => {
+          await initializer.set_config_option("model", "gpt-5.4");
+        },
+      },
+      sink,
+      {
+        on_session_update: (event) => {
+          updates.push(event.update_kind);
+        },
+      },
+    );
+
+    expect(updates).toEqual(["config_option_update"]);
+    expect(
+      sink.events.filter(
+        (event) => event.payload.update_kind === "config_option_update",
+      ),
+    ).toHaveLength(1);
+    await session.close();
   });
 
   it("rejects an exact out-of-envelope request, keeps its canonical identity, and prevents its sentinel", async () => {

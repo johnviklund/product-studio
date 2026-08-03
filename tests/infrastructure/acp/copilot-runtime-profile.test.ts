@@ -126,11 +126,39 @@ describe("Copilot ACP runtime profile", () => {
     });
     expect(profile.runtime_profile.evaluate_permission).toBe(evaluator);
     expect(profile.runtime_profile).not.toHaveProperty("capability_envelope");
-    const prompt = vi.fn(async () => ({ stopReason: "end_turn" as const }));
+    const calls: string[] = [];
+    const modelConfig = {
+      type: "select" as const,
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: "claude-opus-5",
+      options: [
+        { value: "gpt-5.4", name: "GPT-5.4" },
+        { value: "gpt-5.5", name: "GPT-5.5" },
+        { value: "claude-opus-5", name: "Claude Opus 5" },
+      ],
+    };
+    const prompt = vi.fn(async () => {
+      calls.push("sandbox");
+      return { stopReason: "end_turn" as const };
+    });
+    const setConfigOption = vi.fn(async () => {
+      calls.push("model");
+      return {
+        configOptions: [{ ...modelConfig, currentValue: "gpt-5.4" }],
+      };
+    });
     await expect(
-      profile.runtime_profile.initialize_session?.({ prompt }),
+      profile.runtime_profile.initialize_session?.({
+        config_options: [modelConfig],
+        prompt,
+        set_config_option: setConfigOption,
+      }),
     ).resolves.toBeUndefined();
     expect(prompt).toHaveBeenCalledWith("/sandbox enable");
+    expect(setConfigOption).toHaveBeenCalledWith("model", "gpt-5.4");
+    expect(calls).toEqual(["sandbox", "model"]);
     expect(profile.sanitized_profile_evidence).toMatchObject({
       executable: "copilot",
       execution_mode: "permission_mediated_local",
@@ -150,6 +178,53 @@ describe("Copilot ACP runtime profile", () => {
     ).toBe(false);
   });
 
+  it("fails closed before mission work when Copilot cannot confirm the requested model", async () => {
+    const profile = createCopilotRuntimeProfile(input());
+    const prompt = vi.fn(async () => ({ stopReason: "end_turn" as const }));
+    const baseModelConfig = {
+      type: "select" as const,
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: "gpt-5.5",
+      options: [
+        { value: "gpt-5.4", name: "GPT-5.4" },
+        { value: "gpt-5.5", name: "GPT-5.5" },
+      ],
+    };
+
+    await expect(
+      profile.runtime_profile.initialize_session?.({
+        config_options: [],
+        prompt,
+        set_config_option: vi.fn(),
+      }),
+    ).rejects.toThrow("Copilot did not expose exactly one model configuration option.");
+
+    await expect(
+      profile.runtime_profile.initialize_session?.({
+        config_options: [
+          {
+            ...baseModelConfig,
+            options: [{ value: "gpt-5.5", name: "GPT-5.5" }],
+          },
+        ],
+        prompt,
+        set_config_option: vi.fn(),
+      }),
+    ).rejects.toThrow("Requested Copilot model is unavailable in the ACP session.");
+
+    await expect(
+      profile.runtime_profile.initialize_session?.({
+        config_options: [baseModelConfig],
+        prompt,
+        set_config_option: vi.fn(async () => ({
+          configOptions: [baseModelConfig],
+        })),
+      }),
+    ).rejects.toThrow("Copilot did not confirm the requested model.");
+  });
+
   it("fails an unknown model before invoking the ACP adapter and never falls back", async () => {
     const adapter = {
       start: vi.fn(),
@@ -162,6 +237,24 @@ describe("Copilot ACP runtime profile", () => {
       startCopilotRuntime(adapter, input({ requested_model: "gpt-unknown" }), sink),
     ).rejects.toThrow("Requested Copilot model is unavailable.");
     expect(adapter.start).not.toHaveBeenCalled();
+  });
+
+  it("fails before spawn when a caller-required Copilot tool is not exposed", () => {
+    expect(() =>
+      createCopilotRuntimeProfile(
+        input({
+          required_available_tools: ["view", "create"],
+        }),
+      ),
+    ).toThrow("Required Copilot tools are unavailable: create, view.");
+
+    const prepared = createCopilotRuntimeProfile(
+      input({
+        available_tools: ["view", "create"],
+        required_available_tools: ["view", "create"],
+      }),
+    );
+    expect(prepared.runtime_profile.args).toContain("create,view");
   });
 
   it("normalizes only exact, non-shell Copilot permission requests", () => {
