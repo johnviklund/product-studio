@@ -3,9 +3,12 @@ import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  canEditGoalContractFromFullWorkItem,
   ConnectedExecuteSection,
   PatchWorkflowSection,
   RunEvidenceSection,
+  selectedModelForShapingPicker,
+  ShapingDecisionView,
   ShapingSection,
   specProposalToGoalContractDraft,
 } from "../components/kanban/detail-panel";
@@ -19,10 +22,23 @@ import type { ConnectedRunSummary } from "../src/domain/connected-run";
 import type {
   BrainstormMissionPackage,
   BrainstormResultSubmission,
+  PlanResultSubmission,
+  ShapingPhase,
+  ShapingResultSubmission,
   SpecMissionPackage,
   SpecResultSubmission,
   StoredShapingArtifact,
 } from "../src/domain/shaping";
+import type { ShapingModelPickerOption } from "../src/domain/portfolio-preferences";
+import type { GoalContract, WorkItemPhase } from "../src/domain/work-item";
+import {
+  shapingHandoffForItem,
+  type DecisionFirstShapingHandoffProjection,
+  type ShapingHandoffItemProjectionInput,
+  type ShapingRunProjectionInput,
+  type ShapingSurfaceContext,
+} from "../src/presentation/board";
+import { shapingActionRequest } from "../src/presentation/shaping-interaction";
 
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
 const missionContentSha256 = "a".repeat(64);
@@ -226,6 +242,249 @@ const specImport: ShapingImportResult = {
   },
   result: specResult,
 };
+
+const shapingStateSha256 = "8".repeat(64);
+const goalContractSha256 = "9".repeat(64);
+const planResult: PlanResultSubmission = {
+  result_schema_version: 1,
+  plan_mission_content_sha256: missionContentSha256,
+  identity: {
+    phase: "plan",
+    work_item_id: workItemId,
+    input_sha256: "7".repeat(64),
+  },
+  summary: "Implement the guided decision surfaces in bounded steps.",
+  checklist: Array.from({ length: 7 }, (_, index) => ({
+    id: `P${index + 1}`,
+    step: `Plan checklist step ${index + 1}`,
+    verification_check: `Verify plan checklist step ${index + 1}`,
+  })),
+  relevant_skills: ["frontend-design"],
+  product_doc_impacts: ["PRODUCT.md"],
+  todo_impacts: [],
+  open_questions: ["When should Execute be opened?"],
+};
+const decisionGoalContract: GoalContract = {
+  schema_version: 1,
+  goal_version: 1,
+  purpose: specResult.proposal.purpose,
+  acceptance_criteria: [...specResult.proposal.acceptance_criteria],
+  non_goals: [...specResult.proposal.non_goals],
+  allowed_scope: [...specResult.proposal.allowed_scope],
+  review_ready: [...specResult.proposal.review_ready],
+};
+
+function decisionModelOption(
+  modelId: string,
+  overrides: Partial<ShapingModelPickerOption> = {},
+): ShapingModelPickerOption {
+  return {
+    model_id: modelId,
+    used_by_seats: [],
+    saved_preference: false,
+    recommended: false,
+    preselected: false,
+    reuse_warning: null,
+    ...overrides,
+  };
+}
+
+type DecisionSurfaceContextOverrides = Omit<
+  Partial<ShapingSurfaceContext>,
+  "models"
+> & {
+  models?: Partial<ShapingSurfaceContext["models"]>;
+};
+
+function decisionSurfaceContext(
+  overrides: DecisionSurfaceContextOverrides = {},
+): ShapingSurfaceContext {
+  const { models: modelOverrides, ...contextOverrides } = overrides;
+  const models: ShapingSurfaceContext["models"] = {
+    status: "available",
+    reason: null,
+    available_model_ids: ["model-a", "model-b", "model-c"],
+    model_use: [
+      {
+        seat: "brainstorm",
+        production_id: "prod-brainstorm",
+        shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+        requested_model: "model-a",
+        effective_model: null,
+      },
+    ],
+    model_picker_options: {
+      brainstorm: [
+        decisionModelOption("model-a", {
+          recommended: true,
+          preselected: true,
+        }),
+        decisionModelOption("model-b"),
+        decisionModelOption("model-c"),
+      ],
+      spec: [
+        decisionModelOption("model-b", {
+          recommended: true,
+          preselected: true,
+        }),
+        decisionModelOption("model-c"),
+        decisionModelOption("model-a", {
+          used_by_seats: ["brainstorm"],
+          reuse_warning: "model-a was already used by brainstorm.",
+        }),
+      ],
+      plan: [
+        decisionModelOption("model-c", {
+          recommended: true,
+          preselected: true,
+        }),
+        decisionModelOption("model-b"),
+        decisionModelOption("model-a", {
+          used_by_seats: ["brainstorm"],
+          reuse_warning: "model-a was already used by brainstorm.",
+        }),
+      ],
+    },
+  };
+  return {
+    expected_shaping_state_sha256: shapingStateSha256,
+    revision: {
+      mission_content_sha256: missionContentSha256,
+      result: { status: "none" },
+    },
+    run: null,
+    models: { ...models, ...modelOverrides },
+    refresh: {
+      last_checked_at: "2026-08-03T12:00:00.000Z",
+      refreshing: false,
+      stale: false,
+      refresh_failure: null,
+    },
+    derived_goal_contract_sha256: goalContractSha256,
+    current_goal_contract_sha256: goalContractSha256,
+    post_commit_launch_failure: null,
+    manual_recovery: null,
+    ...contextOverrides,
+  };
+}
+
+function decisionItem(
+  phase: WorkItemPhase,
+  contract?: GoalContract,
+): ShapingHandoffItemProjectionInput {
+  return {
+    source_id: "source-1",
+    work_item: {
+      goal: contract === undefined ? {} : { goal_contract: contract },
+      state: { phase, status: "active" },
+    },
+  };
+}
+
+function decisionRun(
+  status: ShapingRunProjectionInput["status"],
+  terminalOutcome: ShapingRunProjectionInput["terminal_outcome"] = null,
+  overrides: Partial<ShapingRunProjectionInput> = {},
+): ShapingRunProjectionInput {
+  return {
+    shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+    status,
+    terminal_outcome: terminalOutcome,
+    latest_update: "Inspecting the bounded mission.",
+    sanitized_reason: "The result failed validation.",
+    denied_operation_kind: "url",
+    timeout_limit: "The 900 second wall-clock limit",
+    ...overrides,
+  };
+}
+
+function appliedDecisionContext(
+  phase: ShapingPhase,
+  result: ShapingResultSubmission,
+  overrides: DecisionSurfaceContextOverrides = {},
+): ShapingSurfaceContext {
+  return decisionSurfaceContext({
+    revision: {
+      mission_content_sha256: missionContentSha256,
+      result: {
+        status: "applied",
+        result_content_sha256: resultContentSha256,
+        result,
+      },
+      ...(phase === "plan"
+        ? {
+            plan_goal_contract_sha256: goalContractSha256,
+            plan_goal_version: 1,
+          }
+        : {}),
+    },
+    ...overrides,
+  });
+}
+
+function renderDecision(
+  projection: DecisionFirstShapingHandoffProjection,
+  selectedModel: string | null = null,
+): string {
+  return renderToStaticMarkup(
+    <ShapingDecisionView
+      fieldId="decision"
+      projection={projection}
+      selectedModel={selectedModel}
+      onSelectModel={noop}
+      onAction={noop}
+      onShowFullWorkItem={noop}
+    />,
+  );
+}
+
+function visibleMarkup(html: string): string {
+  return html
+    .replaceAll("&amp;", "&")
+    .replaceAll("&#x27;", "'")
+    .replaceAll("&quot;", '"');
+}
+
+function regionNames(html: string): string[] {
+  return Array.from(
+    html.matchAll(/data-region="([^"]+)"/gu),
+    (match) => match[1]!,
+  );
+}
+
+function countOccurrences(value: string, needle: string): number {
+  return value.split(needle).length - 1;
+}
+
+function exactButtonCount(html: string, label: string): number {
+  const encodedLabel = label.replaceAll("&", "&amp;").replaceAll("'", "&#x27;");
+  return countOccurrences(html, `>${encodedLabel}</button>`);
+}
+
+function buttonAttributes(
+  html: string,
+  label: string,
+  occurrence: "first" | "last" = "first",
+): string {
+  const encodedLabel = label.replaceAll("&", "&amp;").replaceAll("'", "&#x27;");
+  const target = `>${encodedLabel}</button>`;
+  const labelIndex =
+    occurrence === "first" ? html.indexOf(target) : html.lastIndexOf(target);
+  if (labelIndex < 0) {
+    throw new Error(`button not found: ${label}`);
+  }
+  const buttonIndex = html.lastIndexOf("<button", labelIndex);
+  return html.slice(buttonIndex, labelIndex);
+}
+
+function advancedRecoveryMarkup(html: string): string {
+  const start = html.indexOf('data-region="advanced-recovery"');
+  const end = html.indexOf("</details>", start);
+  if (start < 0 || end < 0) {
+    throw new Error("advanced recovery disclosure not found");
+  }
+  return visibleMarkup(html.slice(start, end));
+}
 
 type ShapingProps = ComponentProps<typeof ShapingSection>;
 
@@ -485,6 +744,603 @@ describe("detail panel shaping workflow", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("detail panel decision-first shaping", () => {
+  it("submits the model visibly selected when every picker option was used", () => {
+    const usedOption = decisionModelOption("model-used", {
+      used_by_seats: ["brainstorm"],
+      reuse_warning: "model-used was already used by brainstorm.",
+    });
+    const projection = shapingHandoffForItem(
+      decisionItem("idea"),
+      decisionSurfaceContext({
+        revision: null,
+        models: {
+          available_model_ids: ["model-used"],
+          model_picker_options: {
+            brainstorm: [usedOption],
+            spec: [usedOption],
+            plan: [usedOption],
+          },
+        },
+      }),
+    );
+    if (projection.mode !== "idea" || projection.model_picker == null) {
+      throw new Error("expected an Idea picker");
+    }
+    expect(projection.model_picker.selected_model).toBeNull();
+
+    const selectedModel = selectedModelForShapingPicker(
+      projection.model_picker,
+      null,
+    );
+    expect(selectedModel).toBe("model-used");
+    expect(renderDecision(projection)).toContain(
+      '<option value="model-used" selected="">',
+    );
+
+    const primaryAction = projection.actions.find((action) => action.primary);
+    if (primaryAction === undefined) {
+      throw new Error("expected the primary Start Brainstorm action");
+    }
+    const request = shapingActionRequest({
+      source_id: "source-1",
+      work_item_id: workItemId,
+      projection,
+      action: primaryAction,
+      selected_model: selectedModel,
+    });
+    expect(request.status).toBe("ready");
+    if (request.status === "ready") {
+      expect(request.body.requested_model).toBe("model-used");
+    }
+  });
+
+  it("keeps an ungoverned Idea's full editor from activating a goal contract", () => {
+    expect(canEditGoalContractFromFullWorkItem("idea", false)).toBe(false);
+    expect(canEditGoalContractFromFullWorkItem("idea", true)).toBe(true);
+    expect(canEditGoalContractFromFullWorkItem("brainstorm", false)).toBe(true);
+    expect(canEditGoalContractFromFullWorkItem("spec", false)).toBe(true);
+    expect(canEditGoalContractFromFullWorkItem("plan", true)).toBe(true);
+  });
+
+  it("renders the Brainstorm regions in phase-exact order without foreign fields", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      appliedDecisionContext("brainstorm", brainstormResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "brainstorm") {
+      throw new Error("expected a ready Brainstorm projection");
+    }
+
+    const html = renderDecision(projection);
+    const visible = visibleMarkup(html);
+
+    expect(regionNames(html)).toEqual([
+      "status",
+      "summary",
+      "non-goals",
+      "unresolved-questions",
+      "provenance",
+      "next-step",
+      "advanced-recovery",
+      "footer",
+    ]);
+    expect(visible).toContain("Brainstorm result ready");
+    expect(visible).toContain("Problem statement");
+    expect(visible).toContain("Approach");
+    expect(visible).toContain("Non-goals");
+    expect(visible).toContain("Unresolved questions");
+    expect(visible).not.toContain("Acceptance criteria (observable)");
+    expect(visible).not.toContain("Governed fields");
+    expect(visible).toContain("View full work item");
+    expect(html).not.toContain('role="tab"');
+  });
+
+  it("renders Spec governed fields once and keeps the persistent footer outside scrolling", () => {
+    const uniqueSpecResult: SpecResultSubmission = {
+      ...specResult,
+      proposal: {
+        purpose: "Unique purpose decision text",
+        acceptance_criteria: ["Unique acceptance criterion text"],
+        non_goals: ["Unique non-goal text"],
+        allowed_scope: ["Unique allowed-scope text"],
+        review_ready: ["Unique review-ready text"],
+      },
+    };
+    const projection = shapingHandoffForItem(
+      decisionItem("spec"),
+      appliedDecisionContext("spec", uniqueSpecResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "spec") {
+      throw new Error("expected a ready Spec projection");
+    }
+
+    const html = renderDecision(projection);
+    const visible = visibleMarkup(html);
+
+    expect(regionNames(html)).toEqual([
+      "status",
+      "summary",
+      "criteria",
+      "governed-fields",
+      "provenance",
+      "next-step",
+      "advanced-recovery",
+      "footer",
+    ]);
+    expect(visible).toContain("Spec ready for approval");
+    expect(visible).toContain("Acceptance criteria (observable)");
+    expect(visible).toContain("Governed fields");
+    expect(visible).not.toContain("Unresolved questions");
+    for (const fieldValue of [
+      uniqueSpecResult.proposal.purpose,
+      ...uniqueSpecResult.proposal.acceptance_criteria,
+      ...uniqueSpecResult.proposal.non_goals,
+      ...uniqueSpecResult.proposal.allowed_scope,
+      ...uniqueSpecResult.proposal.review_ready,
+    ]) {
+      expect(countOccurrences(visible, fieldValue), fieldValue).toBe(1);
+    }
+    expect(html).toMatch(
+      /data-shaping-scroll-region="true" class="[^"]*overflow-y-auto[^"]*"/u,
+    );
+    expect(html).toMatch(
+      /<footer data-region="footer" data-shaping-footer="persistent" class="[^"]*shrink-0[^"]*"/u,
+    );
+    expect(html).toContain(
+      '</details></div><footer data-region="footer" data-shaping-footer="persistent"',
+    );
+    expect(
+      html.slice(html.indexOf('<footer data-region="footer"'), html.indexOf("</footer>")),
+    ).not.toContain("sticky");
+    expect(buttonAttributes(html, "Approve & run Plan")).not.toContain(
+      ' disabled=""',
+    );
+  });
+
+  it("renders exact prose and list preview boundaries with deterministic labels", () => {
+    const previewResult: BrainstormResultSubmission = {
+      ...brainstormResult,
+      problem_statement: "p".repeat(320),
+      approach: "q".repeat(321),
+      non_goals: [
+        "Non-goal one",
+        "Non-goal two",
+        "Non-goal three",
+        "Non-goal four",
+        "Non-goal five must stay outside the bounded preview",
+      ],
+      open_questions: [`Question ${"z".repeat(161)}`],
+    };
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      appliedDecisionContext("brainstorm", previewResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "brainstorm") {
+      throw new Error("expected a ready Brainstorm projection");
+    }
+
+    const visible = visibleMarkup(renderDecision(projection));
+
+    expect(visible).toContain("p".repeat(320));
+    expect(visible).not.toContain("p".repeat(320) + "…");
+    expect(visible).toContain(`${"q".repeat(320)}…`);
+    expect(visible).not.toContain("q".repeat(321));
+    expect(countOccurrences(visible, "Show full text")).toBe(1);
+    expect(visible).toContain("Show all 5");
+    expect(visible).toContain("Show all 1");
+    expect(visible).not.toContain("Non-goal five must stay outside");
+    expect(visible).not.toContain("z".repeat(161));
+  });
+
+  it("promotes the Idea manual counterpart only when connected launch is unavailable", () => {
+    const available = shapingHandoffForItem(
+      decisionItem("idea"),
+      decisionSurfaceContext({ revision: null }),
+    );
+    const unavailable = shapingHandoffForItem(
+      decisionItem("idea"),
+      decisionSurfaceContext({
+        revision: null,
+        models: {
+          status: "unavailable",
+          reason: "The connected runtime is unavailable.",
+          available_model_ids: [],
+          model_picker_options: { brainstorm: [], spec: [], plan: [] },
+        },
+      }),
+    );
+    if (available.mode !== "idea" || unavailable.mode !== "idea") {
+      throw new Error("expected Idea projections");
+    }
+
+    const availableHtml = renderDecision(available);
+    const unavailableHtml = renderDecision(unavailable);
+
+    expect(regionNames(availableHtml)).toEqual([
+      "status",
+      "next-step",
+      "advanced-recovery",
+      "footer",
+    ]);
+    expect(exactButtonCount(availableHtml, "Start Brainstorm")).toBe(1);
+    expect(
+      advancedRecoveryMarkup(availableHtml),
+    ).toContain("Start Brainstorm without a model");
+    expect(buttonAttributes(availableHtml, "Start Brainstorm")).toContain(
+      'data-action-priority="primary"',
+    );
+    expect(availableHtml).toContain('<select aria-label="Brainstorm model"');
+
+    expect(regionNames(unavailableHtml)).toEqual([
+      "status",
+      "runtime",
+      "advanced-recovery",
+      "footer",
+    ]);
+    expect(visibleMarkup(unavailableHtml)).toContain(
+      "The connected runtime is unavailable.",
+    );
+    expect(exactButtonCount(unavailableHtml, "Start Brainstorm")).toBe(0);
+    expect(
+      exactButtonCount(unavailableHtml, "Start Brainstorm without a model"),
+    ).toBe(2);
+    expect(advancedRecoveryMarkup(unavailableHtml)).toContain(
+      "Start Brainstorm without a model",
+    );
+    expect(
+      buttonAttributes(
+        unavailableHtml,
+        "Start Brainstorm without a model",
+        "last",
+      ),
+    ).toContain('data-action-priority="primary"');
+    expect(unavailableHtml).not.toContain("<select");
+  });
+
+  it("keeps ready manual counterparts in recovery and promotes them without a runtime", () => {
+    const cases = [
+      {
+        phase: "brainstorm" as const,
+        result: brainstormResult,
+        connected: "Use result & run Spec",
+        manual: "Use result & prepare Spec",
+      },
+      {
+        phase: "spec" as const,
+        result: specResult,
+        connected: "Approve & run Plan",
+        manual: "Approve & prepare Plan",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const available = shapingHandoffForItem(
+        decisionItem(testCase.phase),
+        appliedDecisionContext(testCase.phase, testCase.result),
+      );
+      const unavailable = shapingHandoffForItem(
+        decisionItem(testCase.phase),
+        appliedDecisionContext(testCase.phase, testCase.result, {
+          models: {
+            status: "unavailable",
+            reason: "The connected runtime is unavailable.",
+            available_model_ids: [],
+            model_picker_options: { brainstorm: [], spec: [], plan: [] },
+          },
+        }),
+      );
+      if (
+        available.mode !== "ready" ||
+        available.phase !== testCase.phase ||
+        unavailable.mode !== "ready" ||
+        unavailable.phase !== testCase.phase
+      ) {
+        throw new Error(`expected ready ${testCase.phase} projections`);
+      }
+
+      const availableHtml = renderDecision(available);
+      const unavailableHtml = renderDecision(unavailable);
+      const recovery = advancedRecoveryMarkup(availableHtml);
+
+      expect(recovery, `${testCase.phase}: manual counterpart`).toContain(
+        testCase.manual,
+      );
+      expect(recovery, `${testCase.phase}: manual request changes`).toContain(
+        "Request changes & prepare rerun",
+      );
+      expect(buttonAttributes(availableHtml, testCase.connected)).toContain(
+        'data-action-priority="primary"',
+      );
+      expect(exactButtonCount(unavailableHtml, testCase.connected)).toBe(0);
+      expect(exactButtonCount(unavailableHtml, testCase.manual)).toBe(1);
+      expect(buttonAttributes(unavailableHtml, testCase.manual)).toContain(
+        'data-action-priority="primary"',
+      );
+      expect(advancedRecoveryMarkup(unavailableHtml)).toContain(
+        "Request changes & prepare rerun",
+      );
+      expect(unavailableHtml).not.toContain("<select");
+    }
+  });
+
+  it("ends Plan at an explicit Execute boundary with no primary or next-seat control", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("plan", decisionGoalContract),
+      appliedDecisionContext("plan", planResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "plan") {
+      throw new Error("expected a ready Plan projection");
+    }
+
+    const html = renderDecision(projection);
+    const visible = visibleMarkup(html);
+
+    expect(regionNames(html)).toEqual([
+      "status",
+      "summary",
+      "criteria",
+      "unresolved-questions",
+      "provenance",
+      "advanced-recovery",
+      "footer",
+    ]);
+    expect(visible).toContain("Plan result ready");
+    expect(visible).toContain("Plan checklist");
+    expect(visible).toContain("Show all 7");
+    expect(visible).not.toContain("Plan checklist step 7");
+    expect(visible).not.toContain("Governed fields");
+    expect(visible).not.toContain("Next step");
+    expect(html).not.toContain("<select");
+    expect(html).not.toContain('data-action-priority="primary"');
+    expect(visible).toContain("Execute approval is not part of this slice.");
+    expect(visible).not.toContain("Execute the plan");
+    expect(advancedRecoveryMarkup(html)).toContain(
+      "Request changes & prepare rerun",
+    );
+
+    const shortProjection = shapingHandoffForItem(
+      decisionItem("plan", decisionGoalContract),
+      appliedDecisionContext("plan", {
+        ...planResult,
+        checklist: [
+          {
+            id: "P1",
+            step: "Render one short checklist entry",
+            verification_check: "The short verification stays visible",
+          },
+        ],
+      }),
+    );
+    if (shortProjection.mode !== "ready" || shortProjection.phase !== "plan") {
+      throw new Error("expected a short ready Plan projection");
+    }
+    const shortVisible = visibleMarkup(renderDecision(shortProjection));
+    expect(shortVisible).toContain(
+      "Verification · The short verification stays visible",
+    );
+    expect(shortVisible).not.toContain("Show all");
+  });
+
+  it("renders superseded Plan as a replan decision and never offers Start Plan", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("plan", decisionGoalContract),
+      appliedDecisionContext("plan", planResult, {
+        current_goal_contract_sha256: "e".repeat(64),
+      }),
+    );
+    if (projection.mode !== "plan_result_superseded") {
+      throw new Error("expected a superseded Plan projection");
+    }
+
+    const html = renderDecision(projection);
+    const visible = visibleMarkup(html);
+
+    expect(visible).toContain("Plan result superseded");
+    expect(visible).toContain(
+      "The governed contract changed after this plan was produced.",
+    );
+    expect(exactButtonCount(html, "Replan with updated contract")).toBe(1);
+    expect(
+      buttonAttributes(html, "Replan with updated contract"),
+    ).toContain('data-action-priority="primary"');
+    expect(advancedRecoveryMarkup(html)).toContain("Replan & prepare Plan");
+    expect(advancedRecoveryMarkup(html)).toContain(
+      "Request changes & prepare rerun",
+    );
+    expect(visible).not.toContain("Start Plan");
+  });
+
+  it("keeps launch failure, terminal failure, and manual recovery visibly distinct", () => {
+    const postCommit = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        post_commit_launch_failure: {
+          manifest_outcome: "applied",
+          decision_id: "d".repeat(64),
+          locked_model: "model-a",
+          reason: "The adapter did not start.",
+        },
+      }),
+    );
+    const lockedUnavailable = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        post_commit_launch_failure: {
+          manifest_outcome: "applied",
+          decision_id: "e".repeat(64),
+          locked_model: "retired-model",
+          reason: "The recorded model is unavailable.",
+        },
+      }),
+    );
+    const terminal = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        run: decisionRun("terminal", "failed"),
+      }),
+    );
+    const manual = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        manual_recovery: {
+          state: "ready",
+          task: "Run this bounded task",
+          instruction_path: ".founder/instruction.json",
+          ingress_path: ".founder/result.json",
+        },
+      }),
+    );
+    if (
+      postCommit.mode !== "post_commit_launch_failure" ||
+      lockedUnavailable.mode !== "post_commit_launch_failure" ||
+      terminal.mode !== "terminal_run_failure" ||
+      manual.mode !== "manual_recovery"
+    ) {
+      throw new Error("expected distinct recovery projections");
+    }
+
+    const postCommitHtml = renderDecision(postCommit);
+    const lockedUnavailableHtml = renderDecision(lockedUnavailable);
+    const terminalHtml = renderDecision(terminal);
+    const manualHtml = renderDecision(manual);
+
+    expect(visibleMarkup(postCommitHtml)).toContain("Brainstorm launch failed");
+    expect(visibleMarkup(postCommitHtml)).toContain("Locked model");
+    expect(visibleMarkup(postCommitHtml)).toContain("model-a");
+    expect(exactButtonCount(postCommitHtml, "Retry launch")).toBe(1);
+    expect(postCommitHtml).not.toContain("<select");
+
+    expect(visibleMarkup(lockedUnavailableHtml)).toContain(
+      "The locked model is no longer available. Start a new attempt with another model.",
+    );
+    expect(visibleMarkup(lockedUnavailableHtml)).toContain("retired-model");
+    expect(exactButtonCount(lockedUnavailableHtml, "Start Brainstorm")).toBe(1);
+    expect(buttonAttributes(lockedUnavailableHtml, "Start Brainstorm")).toContain(
+      'data-action-priority="primary"',
+    );
+    expect(exactButtonCount(lockedUnavailableHtml, "Retry launch")).toBe(0);
+    expect(lockedUnavailableHtml).not.toContain("<select");
+
+    expect(visibleMarkup(terminalHtml)).toContain("Brainstorm failed");
+    expect(visibleMarkup(terminalHtml)).toContain("The result failed validation.");
+    expect(exactButtonCount(terminalHtml, "Retry Brainstorm")).toBe(1);
+    expect(terminalHtml).toContain('<select aria-label="Brainstorm model"');
+    expect(advancedRecoveryMarkup(terminalHtml)).toContain(
+      "Prepare manual recovery",
+    );
+
+    expect(visibleMarkup(manualHtml)).toContain("Brainstorm manual recovery");
+    expect(visibleMarkup(manualHtml)).toContain(
+      "Prepare or import the current revision through the bounded manual path.",
+    );
+    expect(exactButtonCount(manualHtml, "Copy manual task")).toBe(1);
+    expect(visibleMarkup(manualHtml)).not.toContain("Brainstorm failed");
+    expect(visibleMarkup(manualHtml)).not.toContain("launch failed");
+  });
+
+  it("renders unknown provenance, unused selection, and a non-blocking reuse warning", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("spec"),
+      appliedDecisionContext("spec", specResult, {
+        models: {
+          model_use: [
+            {
+              seat: "brainstorm",
+              production_id: "prod-brainstorm",
+              shaping_run_id: null,
+              requested_model: "model-a",
+              effective_model: null,
+            },
+            {
+              seat: "spec",
+              production_id: "prod-spec",
+              shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2",
+              requested_model: "model-b",
+              effective_model: "model-b-effective",
+            },
+          ],
+          model_picker_options: {
+            brainstorm: [decisionModelOption("model-a")],
+            spec: [decisionModelOption("model-b")],
+            plan: [
+              decisionModelOption("model-a", {
+                used_by_seats: ["brainstorm"],
+                saved_preference: true,
+                preselected: true,
+                reuse_warning: "model-a was already used by brainstorm.",
+              }),
+              decisionModelOption("model-c", { recommended: true }),
+              decisionModelOption("model-b"),
+            ],
+          },
+        },
+      }),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "spec") {
+      throw new Error("expected a ready Spec projection");
+    }
+
+    const defaultHtml = renderDecision(projection);
+    const reuseHtml = renderDecision(projection, "model-a");
+    const visible = visibleMarkup(defaultHtml);
+
+    expect(visible).toContain(
+      "Brainstorm · requested model-a · effective unknown",
+    );
+    expect(visible).toContain(
+      "Spec · requested model-b · effective model-b-effective",
+    );
+    expect(visible.indexOf("model-c · unused")).toBeLessThan(
+      visible.indexOf("model-a · used by brainstorm"),
+    );
+    expect(visible.indexOf("model-b · unused")).toBeLessThan(
+      visible.indexOf("model-a · used by brainstorm"),
+    );
+    expect(defaultHtml).toMatch(
+      /<option value="model-c" selected="">model-c · unused<\/option>/u,
+    );
+    expect(defaultHtml).not.toMatch(
+      /<option value="model-a" selected="">/u,
+    );
+    expect(visibleMarkup(reuseHtml)).toContain(
+      "model-a was already used by brainstorm.",
+    );
+    expect(buttonAttributes(reuseHtml, "Approve & run Plan")).not.toContain(
+      ' disabled=""',
+    );
+  });
+
+  it("keeps retired comparison and review-gate literals out of every ready surface", () => {
+    const readyHtml = [
+      renderDecision(
+        shapingHandoffForItem(
+          decisionItem("brainstorm"),
+          appliedDecisionContext("brainstorm", brainstormResult),
+        ),
+      ),
+      renderDecision(
+        shapingHandoffForItem(
+          decisionItem("spec"),
+          appliedDecisionContext("spec", specResult),
+        ),
+      ),
+      renderDecision(
+        shapingHandoffForItem(
+          decisionItem("plan", decisionGoalContract),
+          appliedDecisionContext("plan", planResult),
+        ),
+      ),
+    ].map(visibleMarkup).join("\n");
+
+    expect(readyHtml).not.toContain("Run another model");
+    expect(readyHtml).not.toContain("candidate");
+    expect(readyHtml).not.toContain("Review the complete contract");
+    expect(readyHtml).not.toContain("I've reviewed this contract");
+    expect(readyHtml).not.toContain("Execute the plan");
   });
 });
 

@@ -77,6 +77,7 @@ import {
   workItemAttentionSchema,
   workItemIdSchema,
   workItemSchema,
+  workItemStateSchema,
   type CreateCaptureInput,
   type ControllerRunManifest,
   type RetainedControllerLeaseRepairResult,
@@ -208,6 +209,7 @@ type WorkspaceGateway = Pick<
   | "reconcileShapingRuns"
   | "readShapingDecisionIntent"
   | "readShapingDecisionManifest"
+  | "listShapingDecisionManifests"
   | "writeShapingDecisionReceipt"
   | "writeShapingDecisionIntent"
   | "publishLeasedShapingMission"
@@ -474,6 +476,12 @@ export interface ShapingRetryLaunchInput {
   expected_shaping_state_sha256: string;
 }
 
+export interface ShapingPostCommitLaunchFailure {
+  decision_id: string;
+  locked_model: string;
+  reason: string;
+}
+
 export interface ShapingArtifactListing {
   source_id: string;
   work_item_id: string;
@@ -483,6 +491,7 @@ export interface ShapingArtifactListing {
   model_availability: ShapingModelAvailability;
   model_use: WorkflowModelUse[];
   model_picker_options: Record<ShapingPhase, ShapingModelPickerOption[]>;
+  post_commit_launch_failure: ShapingPostCommitLaunchFailure | null;
 }
 
 export interface PortfolioImportResult extends PortfolioWorkItem {
@@ -1507,11 +1516,17 @@ export class PortfolioService {
     sourceId: string,
     workItemId: string,
   ): Promise<ShapingArtifactListing> {
-    const { source, workItem } = await this.requireActiveShapingItem(
+    const { source, workItem } = await this.requireReadableShapingItem(
       sourceId,
       workItemId,
     );
     const artifacts = await source.workspace.listShapingArtifacts(workItemId);
+    if (workItem.state.phase === "idea" && artifacts.length !== 0) {
+      throw this.missionNotReady(
+        workItemId,
+        "Start Brainstorm requires an Idea with no existing shaping mission.",
+      );
+    }
     const runs = await source.workspace.listShapingRuns(workItemId);
     const modelAvailability = this.shapingModelAvailability();
     const modelUse = this.workflowModelUse(workItemId, artifacts, runs);
@@ -1519,6 +1534,13 @@ export class PortfolioService {
       modelAvailability,
       modelUse,
     );
+    const postCommitLaunchFailure =
+      await this.currentPostCommitLaunchFailure(
+        source,
+        workItem,
+        artifacts,
+        runs,
+      );
     return {
       source_id: source.source_id,
       work_item_id: workItemId,
@@ -1530,6 +1552,7 @@ export class PortfolioService {
       model_availability: modelAvailability,
       model_use: modelUse,
       model_picker_options: modelPickerOptions,
+      post_commit_launch_failure: postCommitLaunchFailure,
     };
   }
 
@@ -2755,6 +2778,34 @@ export class PortfolioService {
     return { source, workItem };
   }
 
+  private async requireReadableShapingItem(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<{ source: ResolvedSource; workItem: WorkItem }> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    if (
+      source.source_id === INBOX_SOURCE_ID ||
+      workItem.state.status !== "active" ||
+      (workItem.state.phase !== "idea" &&
+        !this.isShapingPhase(workItem.state.phase)) ||
+      (workItem.state.phase === "idea" &&
+        (workItem.state.schema_version !== 2 ||
+          workItem.goal.goal_contract !== undefined ||
+          workItem.state.goal_version !== undefined ||
+          workItem.state.input_revision !== undefined))
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Shaping reads require an assigned item in active Idea, Brainstorm, Spec, or Plan.",
+      );
+    }
+    return { source, workItem };
+  }
+
   private async requireDecisionSource(
     sourceId: string,
     workItemId: string,
@@ -3763,6 +3814,146 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
         "Durable goal/state do not equal the applied shaping decision intent.",
       );
     }
+  }
+
+  private async currentPostCommitLaunchFailure(
+    source: ResolvedSource,
+    workItem: WorkItem,
+    artifacts: StoredShapingArtifact[],
+    runs: ShapingRunRecordV1[],
+  ): Promise<ShapingPostCommitLaunchFailure | null> {
+    const phase = workItem.state.phase;
+    if (workItem.state.status !== "active" || !this.isShapingPhase(phase)) {
+      return null;
+    }
+    const tip = this.resolveShapingTip(
+      workItem.goal.work_item_id,
+      phase,
+      artifacts,
+    );
+    if (tip === null || tip.result !== null) {
+      return null;
+    }
+    const hasRunForCurrentRevision = runs.some(
+      (run) =>
+        run.mission.phase === phase &&
+        run.mission.input_sha256 === tip.mission.identity.input_sha256 &&
+        run.mission.content_sha256 === tip.mission.content_sha256,
+    );
+    if (hasRunForCurrentRevision) {
+      return null;
+    }
+
+    const candidates: ShapingDecisionIntentV1[] = [];
+    const manifests =
+      await source.workspace.listShapingDecisionManifests(
+        workItem.goal.work_item_id,
+      );
+    for (const manifest of manifests) {
+      if (manifest.phase_to !== phase) {
+        continue;
+      }
+      const intent = await source.workspace.readShapingDecisionIntent(
+        workItem.goal.work_item_id,
+        manifest.decision_id,
+      );
+      if (intent === null) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItem.goal.work_item_id,
+          `Applied shaping decision ${manifest.decision_id} has no durable intent.`,
+        );
+      }
+      let intendedState: WorkItem["state"];
+      try {
+        intendedState = workItemStateSchema.parse(
+          JSON.parse(intent.next_state_bytes) as unknown,
+        );
+      } catch {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItem.goal.work_item_id,
+          `Applied shaping decision ${manifest.decision_id} has an invalid intended state.`,
+        );
+      }
+      const manifestGoalVersion =
+        intent.operation === "approve_spec"
+          ? intent.plan_goal_version
+          : null;
+      const manifestInputRevision =
+        intent.operation === "approve_spec"
+          ? intendedState.input_revision ?? null
+          : null;
+      if (
+        manifest.decision_id !== intent.decision_id ||
+        manifest.work_item_id !== intent.work_item_id ||
+        manifest.operation !== intent.operation ||
+        manifest.phase_from !== intent.phase_from ||
+        manifest.phase_to !== intent.phase_to ||
+        manifest.mission_content_sha256 !== intent.mission_content_sha256 ||
+        manifest.result_content_sha256 !== intent.result_content_sha256 ||
+        manifest.feedback_sha256 !== intent.feedback_sha256 ||
+        manifest.expected_shaping_state_sha256 !==
+          intent.expected_shaping_state_sha256 ||
+        manifest.next_mission_content_sha256 !==
+          intent.next_mission_content_sha256 ||
+        manifest.goal_sha256 !== intent.next_goal_sha256 ||
+        manifest.state_sha256 !== intent.next_state_sha256 ||
+        manifest.goal_version !== manifestGoalVersion ||
+        manifest.input_revision !== manifestInputRevision
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItem.goal.work_item_id,
+          `Shaping decision ${manifest.decision_id} disagrees with its durable intent.`,
+        );
+      }
+      const matchesCurrentTip =
+        intent.next_mission_input_sha256 ===
+          tip.mission.identity.input_sha256 &&
+        intent.next_mission_content_sha256 === tip.mission.content_sha256;
+      if (matchesCurrentTip && manifest.outcome !== "applied") {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItem.goal.work_item_id,
+          `Shaping decision ${manifest.decision_id} is ${manifest.outcome}; replay the leased decision before launching its mission.`,
+        );
+      }
+      if (
+        manifest.outcome === "applied" &&
+        intent.launch_mode === "connected" &&
+        matchesCurrentTip
+      ) {
+        candidates.push(intent);
+      }
+    }
+    if (candidates.length > 1) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItem.goal.work_item_id,
+        `Current ${phase} revision has multiple applied launch intents.`,
+      );
+    }
+    const intent = candidates[0];
+    if (intent === undefined) {
+      return null;
+    }
+    this.assertCommittedShapingIntentState(workItem, intent);
+    if (
+      intent.next_requested_model === null ||
+      intent.launch_fingerprint === null
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItem.goal.work_item_id,
+        `Connected shaping decision ${intent.decision_id} has no locked launch binding.`,
+      );
+    }
+    return {
+      decision_id: intent.decision_id,
+      locked_model: intent.next_requested_model,
+      reason: "The committed shaping decision has no matching shaping run.",
+    };
   }
 
   private workflowModelUse(

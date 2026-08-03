@@ -1599,6 +1599,10 @@ describe("PortfolioService", () => {
       },
     });
     expect(await repository.listShapingRuns(workItemId)).toEqual([]);
+    expect(
+      (await service.listShapingArtifacts(sourceId, workItemId))
+        .post_commit_launch_failure,
+    ).toBeNull();
 
     const compiled = await service.compileBrainstormMission(
       sourceId,
@@ -1620,6 +1624,133 @@ describe("PortfolioService", () => {
         requested_model: "missing-model",
       }),
     ).rejects.toMatchObject({ kind: "mission_not_ready" });
+  });
+
+  it("lists the coherent shaping read model for assigned active Idea while refusing Inbox", async () => {
+    const root = await createWorkspace("Idea Shaping Listing Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Choose a Brainstorm model",
+      type: "Feature",
+    });
+    const fake = preparedShapingRuntime(["model-a", "model-b"]);
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const pickerOptions = [
+      {
+        model_id: "model-a",
+        used_by_seats: [],
+        saved_preference: false,
+        recommended: true,
+        preselected: true,
+        reuse_warning: null,
+      },
+      {
+        model_id: "model-b",
+        used_by_seats: [],
+        saved_preference: false,
+        recommended: false,
+        preselected: false,
+        reuse_warning: null,
+      },
+    ];
+
+    await expect(
+      service.listShapingArtifacts(sourceId, created.goal.work_item_id),
+    ).resolves.toEqual({
+      source_id: sourceId,
+      work_item_id: created.goal.work_item_id,
+      artifacts: [],
+      runs: [],
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+      model_availability: {
+        status: "available",
+        adapter_id: "fake-shaping-acp",
+        adapter_version: "1.0.0",
+        profile_id: "artifact-only-shaping-v1",
+        available_model_ids: ["model-a", "model-b"],
+        distinct_model_count: 2,
+        has_three_distinct_models: false,
+        reason: null,
+      },
+      model_use: [],
+      model_picker_options: {
+        brainstorm: pickerOptions,
+        spec: pickerOptions,
+        plan: pickerOptions,
+      },
+      post_commit_launch_failure: null,
+    });
+
+    const governedGoalPath = join(
+      root,
+      ".founder",
+      "work-items",
+      created.goal.work_item_id,
+      "goal.yaml",
+    );
+    const governedStatePath = join(
+      root,
+      ".founder",
+      "work-items",
+      created.goal.work_item_id,
+      "state.json",
+    );
+    const governedGoal = {
+      ...created.goal,
+      goal_contract: {
+        schema_version: 1,
+        goal_version: 1,
+        purpose: "Keep this governed Idea out of Start Brainstorm.",
+        acceptance_criteria: ["The shaping read is refused"],
+        non_goals: ["Do not reinterpret a governed Idea"],
+        allowed_scope: ["src/application/portfolio.ts"],
+        review_ready: ["The refusal is deterministic"],
+      },
+    };
+    const governedState = {
+      ...created.state,
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      patch_cycle: 0,
+    };
+    await writeFile(
+      governedGoalPath,
+      stringify(governedGoal),
+      "utf8",
+    );
+    await writeFile(
+      governedStatePath,
+      JSON.stringify(governedState, null, 2) + "\n",
+      "utf8",
+    );
+    await expect(
+      service.listShapingArtifacts(sourceId, created.goal.work_item_id),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+
+    const inboxItem = await service.createCapture({
+      title: "Keep Inbox outside shaping reads",
+      capture_kind: "idea",
+    });
+    await expect(
+      service.listShapingArtifacts(
+        INBOX_SOURCE_ID,
+        inboxItem.work_item.goal.work_item_id,
+      ),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      workItemId: inboxItem.work_item.goal.work_item_id,
+    });
   });
 
   it("runs the connected Brainstorm, Spec, and Plan handoffs with one commit-then-launch action each", async () => {
@@ -2501,6 +2632,33 @@ describe("PortfolioService", () => {
       },
     });
     expect(await repository.listShapingRuns(workItemId)).toEqual([]);
+    const durableFailureListing = await service.listShapingArtifacts(
+      sourceId,
+      workItemId,
+    );
+    expect(durableFailureListing.post_commit_launch_failure).toEqual({
+      decision_id: decision.decision_id,
+      locked_model: "locked-model",
+      reason: "The committed shaping decision has no matching shaping run.",
+    });
+    const { service: restartedService } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const restartedRegistration = await restartedService.register({
+      workspace_path: root,
+    });
+    const restartedSourceId = restartedRegistration.workspace.workspace_id;
+    expect(
+      (
+        await restartedService.listShapingArtifacts(
+          restartedSourceId,
+          workItemId,
+        )
+      ).post_commit_launch_failure,
+    ).toEqual(durableFailureListing.post_commit_launch_failure);
 
     const decisionDirectory = join(
       root,
@@ -2523,11 +2681,15 @@ describe("PortfolioService", () => {
       previous_state_bytes: string;
       next_state_bytes: string;
     };
+    await unlink(manifestPath);
+    await expect(
+      service.listShapingArtifacts(sourceId, workItemId),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+    await writeFile(manifestPath, manifestSource, "utf8");
     const retryInput = {
       decision_id: decision.decision_id,
-      expected_shaping_state_sha256: (
-        await service.listShapingArtifacts(sourceId, workItemId)
-      ).expected_shaping_state_sha256,
+      expected_shaping_state_sha256:
+        durableFailureListing.expected_shaping_state_sha256,
     };
 
     const pendingManifest = JSON.parse(manifestSource) as Record<
@@ -2541,6 +2703,9 @@ describe("PortfolioService", () => {
       JSON.stringify(pendingManifest, null, 2) + "\n",
       "utf8",
     );
+    await expect(
+      service.listShapingArtifacts(sourceId, workItemId),
+    ).rejects.toMatchObject({ kind: "repair_required" });
     await expect(
       service.retryShapingLaunch(
         sourceId,
@@ -2582,6 +2747,10 @@ describe("PortfolioService", () => {
       status: "launched",
       created: true,
     });
+    expect(
+      (await service.listShapingArtifacts(sourceId, workItemId))
+        .post_commit_launch_failure,
+    ).toBeNull();
     expect(await readFile(intentPath, "utf8")).toBe(intentSource);
     expect(await readFile(manifestPath, "utf8")).toBe(manifestSource);
 
@@ -2628,6 +2797,10 @@ describe("PortfolioService", () => {
       sourceId,
       second.goal.work_item_id,
     );
+    expect(secondListing.post_commit_launch_failure).toMatchObject({
+      decision_id: failed.decision_id,
+      locked_model: "locked-model",
+    });
     const secondRetryInput = {
       decision_id: failed.decision_id,
       expected_shaping_state_sha256:
@@ -2675,14 +2848,15 @@ describe("PortfolioService", () => {
     expect(await readFile(secondManifestPath, "utf8")).toBe(
       secondManifestBefore,
     );
+    const newAttemptListing = await service.listShapingArtifacts(
+      sourceId,
+      second.goal.work_item_id,
+    );
+    expect(newAttemptListing.post_commit_launch_failure).toBeNull();
     const secondAttemptRetryInput = {
       ...secondRetryInput,
-      expected_shaping_state_sha256: (
-        await service.listShapingArtifacts(
-          sourceId,
-          second.goal.work_item_id,
-        )
-      ).expected_shaping_state_sha256,
+      expected_shaping_state_sha256:
+        newAttemptListing.expected_shaping_state_sha256,
     };
     await expect(
       service.retryShapingLaunch(

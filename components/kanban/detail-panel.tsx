@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
 } from "react";
 import {
   ArrowLeft,
@@ -20,11 +21,14 @@ import type {
   BrainstormMissionCompilation,
   MissionCompilation,
   PatchMissionCompilation,
+  PlanMissionCompilation,
   PortfolioImportResult,
   PortfolioPatchImportResult,
   PortfolioPatchPlanResult,
   PortfolioReviewImportResult,
   PortfolioRetryResult,
+  PortfolioShapingDecisionResult,
+  PortfolioShapingLaunchResult,
   ReviewMissionCompilation,
   ShapingArtifactListing,
   ShapingImportResult,
@@ -44,6 +48,7 @@ import type {
 import type { ConnectedRunSummary } from "@/src/domain/connected-run";
 import type {
   BrainstormResultSubmission,
+  ShapingPhase,
   ShapingResultSubmission,
   SpecResultSubmission,
   StoredShapingArtifact,
@@ -51,6 +56,8 @@ import type {
 import {
   WORK_ITEM_PRIORITIES,
   WORK_ITEM_TYPES,
+  type GoalContract,
+  type WorkItemPhase,
   type WorkItemPriority,
   type WorkItemType,
 } from "@/src/domain/work-item";
@@ -66,9 +73,18 @@ import {
   shapingHandoffForItem,
   type BoardColumnId,
   type ConnectedExecuteProjection,
+  type DecisionFirstShapingHandoffProjection,
   type PatchAttentionProjection,
+  type ShapingActionProjection,
+  type ShapingChecklistPreview,
   type ShapingHandoffProjection,
+  type ShapingListPreview,
+  type ShapingModelPickerProjection,
+  type ShapingRevisionProjectionInput,
+  type ShapingSurfaceContext,
+  type ShapingTextPreview,
 } from "@/src/presentation/board";
+import { shapingActionRequest } from "@/src/presentation/shaping-interaction";
 
 interface DetailPanelProps {
   item: PortfolioWorkItem;
@@ -146,9 +162,28 @@ interface ConnectedRunState {
 
 interface ShapingArtifactState {
   itemKey: string;
-  result: ShapingArtifactListing["artifacts"];
+  listing: ShapingArtifactListing | null;
+  currentGoalContractSha256: string | null;
+  derivedGoalContractSha256: string | null;
   loading: boolean;
   error: string | null;
+}
+
+interface ShapingModelSelectionState {
+  pickerKey: string;
+  model: string;
+}
+
+interface ShapingLaunchFailureState {
+  itemKey: string;
+  decision_id: string;
+  locked_model: string;
+  reason: string;
+}
+
+interface ShapingNewAttemptState {
+  itemKey: string;
+  decision_id: string;
 }
 
 interface ShapingCompilationState {
@@ -360,7 +395,7 @@ async function requestShapingArtifacts(
   workItemId: string,
   signal?: AbortSignal,
 ): Promise<
-  { result: ShapingArtifactListing["artifacts"] | null; error: string | null } | null
+  { result: ShapingArtifactListing | null; error: string | null } | null
 > {
   try {
     const response = await fetch(
@@ -382,7 +417,7 @@ async function requestShapingArtifacts(
             : "Shaping history could not be loaded.",
       };
     }
-    return { result: body.artifacts, error: null };
+    return { result: body, error: null };
   } catch {
     if (signal?.aborted) {
       return null;
@@ -393,6 +428,277 @@ async function requestShapingArtifacts(
         "Shaping history could not be loaded. Check the local server and try again.",
     };
   }
+}
+
+function currentShapingTip(
+  phase: ShapingPhase,
+  artifacts: readonly StoredShapingArtifact[],
+): StoredShapingArtifact | null {
+  const phaseArtifacts = artifacts.filter(
+    (artifact) => artifact.mission.identity.phase === phase,
+  );
+  if (phaseArtifacts.length === 0) {
+    return null;
+  }
+  const superseded = new Set(
+    phaseArtifacts.flatMap((artifact) => {
+      const revision = artifact.mission.input.revision;
+      return revision === undefined ? [] : [revision.supersedes_input_sha256];
+    }),
+  );
+  const tips = phaseArtifacts.filter(
+    (artifact) => !superseded.has(artifact.mission.identity.input_sha256),
+  );
+  return tips.length === 1 ? tips[0]! : null;
+}
+
+function parsedShapingResult(
+  artifact: StoredShapingArtifact,
+): ShapingResultSubmission | null {
+  if (artifact.result === null) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(artifact.result.result_source) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("identity" in parsed) ||
+      typeof parsed.identity !== "object" ||
+      parsed.identity === null ||
+      !("phase" in parsed.identity) ||
+      parsed.identity.phase !== artifact.mission.identity.phase
+    ) {
+      return null;
+    }
+    return parsed as ShapingResultSubmission;
+  } catch {
+    return null;
+  }
+}
+
+async function sha256Json(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+async function goalContractSha256(contract: GoalContract): Promise<string> {
+  return sha256Json({
+    schema_version: contract.schema_version,
+    goal_version: contract.goal_version,
+    purpose: contract.purpose,
+    acceptance_criteria: contract.acceptance_criteria,
+    non_goals: contract.non_goals,
+    allowed_scope: contract.allowed_scope,
+    review_ready: contract.review_ready,
+  });
+}
+
+async function shapingGoalContractHashes(
+  item: PortfolioWorkItem,
+  listing: ShapingArtifactListing,
+): Promise<{
+  currentGoalContractSha256: string | null;
+  derivedGoalContractSha256: string | null;
+}> {
+  const currentContract = item.work_item.goal.goal_contract;
+  const currentGoalContractSha256 =
+    currentContract === undefined
+      ? null
+      : await goalContractSha256(currentContract);
+  if (item.work_item.state.phase !== "spec") {
+    return { currentGoalContractSha256, derivedGoalContractSha256: null };
+  }
+  const tip = currentShapingTip("spec", listing.artifacts);
+  const result = tip === null ? null : parsedShapingResult(tip);
+  if (result === null || !isSpecResult(result)) {
+    return { currentGoalContractSha256, derivedGoalContractSha256: null };
+  }
+  const proposal = result.proposal;
+  const derivedContract: GoalContract = {
+    schema_version: 1,
+    goal_version: (currentContract?.goal_version ?? 0) + 1,
+    purpose: proposal.purpose,
+    acceptance_criteria: [...proposal.acceptance_criteria],
+    non_goals: [...proposal.non_goals],
+    allowed_scope: [...proposal.allowed_scope],
+    review_ready: [...proposal.review_ready],
+  };
+  return {
+    currentGoalContractSha256,
+    derivedGoalContractSha256: await goalContractSha256(derivedContract),
+  };
+}
+
+function shapingRevisionFromListing(
+  phase: ShapingPhase,
+  listing: ShapingArtifactListing,
+): ShapingRevisionProjectionInput | null {
+  const tip = currentShapingTip(phase, listing.artifacts);
+  if (tip === null) {
+    return null;
+  }
+  const planBinding =
+    tip.mission.input.phase === "plan"
+      ? {
+          plan_goal_contract_sha256:
+            tip.mission.input.goal_contract_sha256,
+          plan_goal_version: tip.mission.input.goal_version,
+        }
+      : {};
+  if (tip.result === null) {
+    return {
+      mission_content_sha256: tip.mission.content_sha256,
+      result: { status: "none" },
+      ...planBinding,
+    };
+  }
+  const result = parsedShapingResult(tip);
+  if (
+    result === null ||
+    tip.import_receipt?.outcome !== "applied" ||
+    tip.production_receipt === null ||
+    tip.applied_marker === null
+  ) {
+    return {
+      mission_content_sha256: tip.mission.content_sha256,
+      result: { status: "repair", failing_component: "applied bundle" },
+      ...planBinding,
+    };
+  }
+  return {
+    mission_content_sha256: tip.mission.content_sha256,
+    result: {
+      status: "applied",
+      result_content_sha256: tip.result.result_content_sha256,
+      result,
+    },
+    ...planBinding,
+  };
+}
+
+function shapingRunFromListing(
+  phase: ShapingPhase,
+  listing: ShapingArtifactListing,
+): ShapingSurfaceContext["run"] {
+  const tip = currentShapingTip(phase, listing.artifacts);
+  if (tip === null) {
+    return null;
+  }
+  const runs = listing.runs
+    .filter(
+      (run) =>
+        run.mission.phase === phase &&
+        run.mission.input_sha256 === tip.mission.identity.input_sha256 &&
+        run.mission.content_sha256 === tip.mission.content_sha256,
+    )
+    .sort((left, right) =>
+      left.lifecycle.started_at.localeCompare(right.lifecycle.started_at),
+    );
+  const run = runs.at(-1);
+  if (run === undefined) {
+    return null;
+  }
+  return {
+    shaping_run_id: run.shaping_run_id,
+    status: run.lifecycle.status,
+    terminal_outcome: run.lifecycle.terminal_outcome,
+    latest_update: null,
+    sanitized_reason: null,
+    denied_operation_kind: null,
+    timeout_limit: null,
+  };
+}
+
+function shapingSurfaceContext(
+  item: PortfolioWorkItem,
+  state: ShapingArtifactState,
+  launchFailure: ShapingLaunchFailureState | null,
+  newAttempt: ShapingNewAttemptState | null,
+): ShapingSurfaceContext | null {
+  const phase = item.work_item.state.phase;
+  const listing = state.listing;
+  if (
+    listing === null ||
+    (phase !== "brainstorm" && phase !== "spec" && phase !== "plan" && phase !== "idea")
+  ) {
+    return null;
+  }
+  const shapingPhase = phase === "idea" ? null : phase;
+  const localLaunchFailure =
+    launchFailure?.itemKey === state.itemKey ? launchFailure : null;
+  const durableLaunchFailure = listing.post_commit_launch_failure;
+  const run =
+    shapingPhase === null
+      ? null
+      : shapingRunFromListing(shapingPhase, listing);
+  const projectedLaunchFailure =
+    durableLaunchFailure === null
+      ? localLaunchFailure
+      : {
+          itemKey: state.itemKey,
+          decision_id: durableLaunchFailure.decision_id,
+          locked_model: durableLaunchFailure.locked_model,
+          reason:
+            localLaunchFailure?.decision_id ===
+            durableLaunchFailure.decision_id
+              ? localLaunchFailure.reason
+              : durableLaunchFailure.reason,
+        };
+  const selectingNewAttempt =
+    projectedLaunchFailure !== null &&
+    newAttempt?.itemKey === state.itemKey &&
+    newAttempt.decision_id === projectedLaunchFailure.decision_id;
+  const currentLaunchFailure =
+    run !== null || selectingNewAttempt
+      ? null
+      : projectedLaunchFailure;
+  return {
+    expected_shaping_state_sha256:
+      listing.expected_shaping_state_sha256,
+    revision:
+      shapingPhase === null
+        ? null
+        : shapingRevisionFromListing(shapingPhase, listing),
+    run,
+    models: {
+      status: listing.model_availability.status,
+      reason: listing.model_availability.reason,
+      available_model_ids: listing.model_availability.available_model_ids,
+      model_use: listing.model_use,
+      model_picker_options: listing.model_picker_options,
+    },
+    derived_goal_contract_sha256: state.derivedGoalContractSha256,
+    current_goal_contract_sha256: state.currentGoalContractSha256,
+    post_commit_launch_failure:
+      currentLaunchFailure === null
+        ? null
+        : {
+            manifest_outcome: "applied",
+            decision_id: currentLaunchFailure.decision_id,
+            locked_model: currentLaunchFailure.locked_model,
+            reason: currentLaunchFailure.reason,
+          },
+  };
+}
+
+function shapingItemStateKey(item: PortfolioWorkItem): string {
+  const { goal, state } = item.work_item;
+  return JSON.stringify([
+    item.source_id,
+    goal.work_item_id,
+    state.schema_version,
+    state.phase,
+    state.status,
+    state.goal_version ?? null,
+    state.input_revision ?? null,
+    goal.title,
+    goal.notes ?? null,
+    goal.goal_contract ?? null,
+  ]);
 }
 
 function formatDuration(durationMs: number): string {
@@ -775,11 +1081,12 @@ type ShapingMutation = "compiling" | "importing";
 type ShapingCopyTarget = "task" | "mission" | "workspace" | "content_sha256";
 type ShapingCompilation =
   | BrainstormMissionCompilation
-  | SpecMissionCompilation;
+  | SpecMissionCompilation
+  | PlanMissionCompilation;
 
 interface ShapingSectionProps {
   fieldId: string;
-  projection: ShapingHandoffProjection;
+  projection: Extract<ShapingHandoffProjection, { mode: "active" }>;
   artifacts: ShapingArtifactListing["artifacts"];
   loading: boolean;
   error: string | null;
@@ -794,6 +1101,24 @@ interface ShapingSectionProps {
   onCopy: (target: ShapingCopyTarget, value: string) => void;
   onUseProposal: (proposal: SpecResultSubmission["proposal"]) => void;
 }
+
+const SHAPING_PHASE_COPY = {
+  brainstorm: {
+    heading: "Brainstorm shaping",
+    description:
+      "Compile an external shaping brief, inspect its evidence, then explicitly select the input you want to carry forward.",
+  },
+  spec: {
+    heading: "Spec shaping",
+    description:
+      "Choose an accepted Brainstorm input, compile the Spec brief, and inspect its proposal before filling the editor.",
+  },
+  plan: {
+    heading: "Plan shaping",
+    description:
+      "Compile the exact approved contract into a Plan brief, then inspect the returned checklist.",
+  },
+} as const satisfies Record<ShapingPhase, { heading: string; description: string }>;
 
 interface AcceptedBrainstormChoice {
   artifact: StoredShapingArtifact;
@@ -1053,11 +1378,8 @@ export function ShapingSection({
   onCopy,
   onUseProposal,
 }: ShapingSectionProps) {
-  if (projection.mode === "hidden") {
-    return null;
-  }
-
   const busy = mutation !== null;
+  const phaseCopy = SHAPING_PHASE_COPY[projection.phase];
   const acceptedChoices = artifacts
     .map(acceptedBrainstormChoice)
     .filter((choice): choice is AcceptedBrainstormChoice => choice !== null);
@@ -1087,14 +1409,10 @@ export function ShapingSection({
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 id={`${fieldId}-shaping`} className="text-xs font-medium">
-            {projection.phase === "brainstorm"
-              ? "Brainstorm shaping"
-              : "Spec shaping"}
+            {phaseCopy.heading}
           </h3>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            {projection.phase === "brainstorm"
-              ? "Compile an external shaping brief, inspect its evidence, then explicitly select the input you want to carry forward."
-              : "Choose an accepted Brainstorm input, compile the Spec brief, and inspect its proposal before filling the editor."}
+            {phaseCopy.description}
           </p>
         </div>
         <span className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
@@ -1190,7 +1508,7 @@ export function ShapingSection({
         >
           {mutation === "compiling"
             ? "Compiling…"
-            : `Compile ${projection.phase === "brainstorm" ? "Brainstorm" : "Spec"} mission`}
+            : `Compile ${shapingPhaseLabel(projection.phase)} mission`}
         </button>
         <button
           type="button"
@@ -1230,6 +1548,705 @@ export function ShapingSection({
         />
       ) : null}
     </section>
+  );
+}
+
+function shapingPhaseLabel(phase: ShapingPhase): string {
+  return `${phase[0]?.toUpperCase()}${phase.slice(1)}`;
+}
+
+function projectionPicker(
+  projection: DecisionFirstShapingHandoffProjection,
+): ShapingModelPickerProjection | null {
+  if (
+    projection.mode === "idea" ||
+    projection.mode === "pre_ready" ||
+    projection.mode === "terminal_run_failure" ||
+    projection.mode === "plan_result_superseded"
+  ) {
+    return "model_picker" in projection
+      ? projection.model_picker ?? null
+      : null;
+  }
+  if (
+    projection.mode === "ready" &&
+    (projection.phase === "brainstorm" || projection.phase === "spec")
+  ) {
+    return projection.sections.next_step ?? null;
+  }
+  return null;
+}
+
+export function selectedModelForShapingPicker(
+  picker: ShapingModelPickerProjection | null,
+  storedModel: string | null,
+): string | null {
+  if (picker === null) {
+    return null;
+  }
+
+  const preferredModel = storedModel ?? picker.selected_model;
+  if (
+    preferredModel !== null &&
+    picker.options.some((option) => option.model_id === preferredModel)
+  ) {
+    return preferredModel;
+  }
+
+  return picker.options[0]?.model_id ?? null;
+}
+
+export function canEditGoalContractFromFullWorkItem(
+  phase: WorkItemPhase,
+  hasGoalContract: boolean,
+): boolean {
+  return (
+    canUpdateGoalContract(phase) &&
+    (phase !== "idea" || hasGoalContract)
+  );
+}
+
+function projectionRuntimeUnavailable(
+  projection: DecisionFirstShapingHandoffProjection,
+): string | null {
+  if (
+    projection.mode === "ready" &&
+    (projection.phase === "brainstorm" || projection.phase === "spec")
+  ) {
+    return projection.sections.runtime_unavailable ?? null;
+  }
+  return "runtime_unavailable" in projection
+    ? projection.runtime_unavailable ?? null
+    : null;
+}
+
+function projectionStatus(
+  projection: DecisionFirstShapingHandoffProjection,
+): { headline: string; copy: string; tone: "ready" | "active" | "error" } {
+  switch (projection.mode) {
+    case "ready":
+      return {
+        headline: projection.lifecycle.headline,
+        copy: projection.lifecycle.copy,
+        tone: "ready",
+      };
+    case "idea":
+      return {
+        headline: projection.headline,
+        copy: "Choose the Brainstorm seat, then start one exact shaping attempt.",
+        tone: "active",
+      };
+    case "pre_ready":
+      return {
+        headline: projection.headline,
+        copy: projection.copy,
+        tone: "active",
+      };
+    case "run_state":
+    case "terminal_run_failure":
+    case "repair":
+      return {
+        headline: projection.lifecycle.headline,
+        copy: projection.lifecycle.copy,
+        tone:
+          projection.mode === "run_state" ? "active" : "error",
+      };
+    case "post_commit_launch_failure":
+      return {
+        headline: `${shapingPhaseLabel(projection.phase)} launch failed`,
+        copy: projection.reason,
+        tone: "error",
+      };
+    case "manual_recovery":
+      return {
+        headline: `${shapingPhaseLabel(projection.phase)} manual recovery`,
+        copy: "Prepare or import the current revision through the bounded manual path.",
+        tone: "active",
+      };
+    case "plan_result_superseded":
+      return {
+        headline: "Plan result superseded",
+        copy: projection.reason,
+        tone: "error",
+      };
+    case "hidden":
+      return { headline: "", copy: "", tone: "active" };
+  }
+}
+
+function recoveryActions(
+  projection: DecisionFirstShapingHandoffProjection,
+): ShapingActionProjection[] {
+  if (projection.mode === "hidden") {
+    return [];
+  }
+  const candidates = [
+    ...projection.actions,
+    ...(projection.mode === "ready" ||
+    projection.mode === "plan_result_superseded"
+      ? projection.request_changes.actions
+      : []),
+    ...(projection.mode === "terminal_run_failure"
+      ? [projection.manual_recovery_action]
+      : []),
+  ].filter(
+    (action) =>
+      action.launch_mode === "manual" ||
+      action.kind === "prepare_manual_recovery",
+  );
+  const seen = new Set<string>();
+  return candidates.filter((action) => {
+    const key = `${action.kind}:${action.launch_mode}:${action.label}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function PreviewText({
+  preview,
+  expanded,
+  onExpand,
+}: {
+  preview: ShapingTextPreview;
+  expanded: boolean;
+  onExpand: () => void;
+}) {
+  return (
+    <>
+      <p className="mt-1 text-sm leading-6">
+        {expanded ? preview.full : preview.shown}
+      </p>
+      {preview.truncated ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={onExpand}
+          className="mt-2 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          {expanded ? "Show less" : preview.expander_label}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+function PreviewList({
+  preview,
+  expanded,
+  onExpand,
+  marker = "check",
+}: {
+  preview: ShapingListPreview;
+  expanded: boolean;
+  onExpand: () => void;
+  marker?: "check" | "question" | "plain";
+}) {
+  const values = expanded
+    ? preview.full
+    : preview.shown.map((value) => value.shown);
+  return (
+    <>
+      <ul className="mt-3 space-y-2.5 text-sm leading-5">
+        {values.map((value, index) => (
+          <li key={`${index}:${value}`} className="flex items-start gap-2.5">
+            <span
+              aria-hidden="true"
+              className={`mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border text-[10px] ${
+                marker === "question"
+                  ? "border-primary text-primary"
+                  : marker === "check"
+                    ? "border-success text-success"
+                    : "border-border text-muted-foreground"
+              }`}
+            >
+              {marker === "question" ? "?" : marker === "check" ? "✓" : "·"}
+            </span>
+            <span>{value}</span>
+          </li>
+        ))}
+      </ul>
+      {preview.truncated ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={onExpand}
+          className="mt-3 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          {expanded ? "Show less" : preview.expander_label}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+function PreviewChecklist({
+  preview,
+  expanded,
+  onExpand,
+}: {
+  preview: ShapingChecklistPreview;
+  expanded: boolean;
+  onExpand: () => void;
+}) {
+  const entries = expanded
+    ? preview.full.map((entry) => ({
+        id: entry.id,
+        step: entry.step,
+        verification_check: entry.verification_check,
+      }))
+    : preview.shown.map((entry) => ({
+        id: entry.id,
+        step: entry.step.shown,
+        verification_check: preview.truncated
+          ? null
+          : entry.verification_check.shown,
+      }));
+  return (
+    <>
+      <ol className="mt-3 space-y-3 text-sm">
+        {entries.map((entry) => (
+          <li key={entry.id} className="border-l-2 border-border pl-3">
+            <p className="leading-5">
+              <span className="font-medium">{entry.id}</span> · {entry.step}
+            </p>
+            {entry.verification_check === null ? null : (
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                Verification · {entry.verification_check}
+              </p>
+            )}
+          </li>
+        ))}
+      </ol>
+      {preview.truncated ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={onExpand}
+          className="mt-3 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          {expanded ? "Show less" : preview.expander_label}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+function DecisionRegion({
+  region,
+  heading,
+  children,
+}: {
+  region: string;
+  heading: string;
+  children: ReactNode;
+}) {
+  return (
+    <section data-region={region} className="border-t px-5 py-5">
+      <h3 className="text-[11px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
+        {heading}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+function ModelPicker({
+  picker,
+  selectedModel,
+  busy,
+  onSelectModel,
+}: {
+  picker: ShapingModelPickerProjection;
+  selectedModel: string;
+  busy: boolean;
+  onSelectModel: (model: string) => void;
+}) {
+  const selected = picker.options.find(
+    (option) => option.model_id === selectedModel,
+  );
+  return (
+    <>
+      <select
+        aria-label={`${shapingPhaseLabel(picker.seat)} model`}
+        value={selectedModel}
+        disabled={busy}
+        onChange={(event) => onSelectModel(event.target.value)}
+        className="mt-3 h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+      >
+        {picker.options.map((option) => (
+          <option key={option.model_id} value={option.model_id}>
+            {option.model_id}
+            {option.used_by_seats.length > 0
+              ? ` · used by ${option.used_by_seats.join(", ")}`
+              : " · unused"}
+          </option>
+        ))}
+      </select>
+      {picker.recommendation_note === null ? null : (
+        <p className="mt-2 text-xs leading-5 text-muted-foreground">
+          {picker.recommendation_note}
+        </p>
+      )}
+      {selected?.reuse_warning === null || selected?.reuse_warning === undefined ? null : (
+        <p className="mt-2 border-l-2 border-[#e4b93f] bg-[#e4b93f]/10 px-3 py-2 text-xs leading-5">
+          {selected.reuse_warning}
+        </p>
+      )}
+    </>
+  );
+}
+
+export interface ShapingDecisionViewProps {
+  fieldId: string;
+  projection: DecisionFirstShapingHandoffProjection;
+  selectedModel: string | null;
+  busy?: boolean;
+  error?: string | null;
+  onSelectModel: (model: string) => void;
+  onAction: (action: ShapingActionProjection) => void;
+  onShowFullWorkItem: () => void;
+}
+
+export function ShapingDecisionView({
+  fieldId,
+  projection,
+  selectedModel,
+  busy = false,
+  error = null,
+  onSelectModel,
+  onAction,
+  onShowFullWorkItem,
+}: ShapingDecisionViewProps) {
+  const [expandedFields, setExpandedFields] = useState<Set<string>>(
+    () => new Set(),
+  );
+  if (projection.mode === "hidden") {
+    return null;
+  }
+  const status = projectionStatus(projection);
+  const picker = projectionPicker(projection);
+  const runtimeUnavailable = projectionRuntimeUnavailable(projection);
+  const currentModel =
+    selectedModelForShapingPicker(picker, selectedModel) ?? "";
+  const primaryAction = projection.actions.find((action) => action.primary);
+  const requestChangesAction = projection.actions.find(
+    (action) =>
+      action.kind === "request_changes" && action.launch_mode === null,
+  );
+  const manualActions = recoveryActions(projection).filter(
+    (action) =>
+      projection.mode === "idea" ||
+      primaryAction === undefined ||
+      action.kind !== primaryAction.kind ||
+      action.launch_mode !== primaryAction.launch_mode ||
+      action.label !== primaryAction.label,
+  );
+  function toggleExpanded(key: string): void {
+    setExpandedFields((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
+  function previewExpanded(key: string): boolean {
+    return expandedFields.has(key);
+  }
+
+  return (
+    <div
+      data-shaping-decision-view="true"
+      data-shaping-mode={projection.mode}
+      aria-labelledby={`${fieldId}-shaping-decision`}
+      className="flex min-h-0 flex-1 flex-col"
+    >
+      <div
+        data-shaping-scroll-region="true"
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
+        <section data-region="status" className="px-5 py-5">
+          <div className="flex items-start gap-3">
+            <span
+              aria-hidden="true"
+              className={`mt-0.5 grid size-8 shrink-0 place-items-center rounded-full border text-sm ${
+                status.tone === "ready"
+                  ? "border-success text-success"
+                  : status.tone === "error"
+                    ? "border-destructive text-destructive"
+                    : "border-primary text-primary"
+              }`}
+            >
+              {status.tone === "ready" ? "✓" : status.tone === "error" ? "!" : "→"}
+            </span>
+            <div className="min-w-0 flex-1">
+              <h3
+                id={`${fieldId}-shaping-decision`}
+                className="text-base font-semibold"
+              >
+                {status.headline}
+              </h3>
+              <p className="mt-1 text-sm leading-5 text-muted-foreground">
+                {status.copy}
+              </p>
+              <button
+                type="button"
+                onClick={onShowFullWorkItem}
+                className="mt-2 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              >
+                View full work item
+              </button>
+            </div>
+          </div>
+          {error === null ? null : (
+            <p
+              className="mt-4 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs leading-5"
+              role="alert"
+            >
+              {error}
+            </p>
+          )}
+        </section>
+
+        {projection.mode === "ready" && projection.phase === "brainstorm" ? (
+          <>
+            <DecisionRegion region="summary" heading="Result summary">
+              <p className="mt-3 text-[11px] font-medium text-muted-foreground uppercase">
+                Problem statement
+              </p>
+              <PreviewText
+                preview={projection.sections.summary.problem_statement}
+                expanded={previewExpanded("brainstorm-problem")}
+                onExpand={() => toggleExpanded("brainstorm-problem")}
+              />
+              <p className="mt-4 text-[11px] font-medium text-muted-foreground uppercase">
+                Approach
+              </p>
+              <PreviewText
+                preview={projection.sections.summary.approach}
+                expanded={previewExpanded("brainstorm-approach")}
+                onExpand={() => toggleExpanded("brainstorm-approach")}
+              />
+            </DecisionRegion>
+            <DecisionRegion region="non-goals" heading="Non-goals">
+              <PreviewList
+                preview={projection.sections.non_goals}
+                expanded={previewExpanded("brainstorm-non-goals")}
+                onExpand={() => toggleExpanded("brainstorm-non-goals")}
+                marker="plain"
+              />
+            </DecisionRegion>
+            <DecisionRegion
+              region="unresolved-questions"
+              heading="Unresolved questions"
+            >
+              <PreviewList
+                preview={projection.sections.unresolved_questions}
+                expanded={previewExpanded("brainstorm-questions")}
+                onExpand={() => toggleExpanded("brainstorm-questions")}
+                marker="question"
+              />
+            </DecisionRegion>
+          </>
+        ) : null}
+
+        {projection.mode === "ready" && projection.phase === "spec" ? (
+          <>
+            <DecisionRegion region="summary" heading="Proposal summary">
+              <PreviewText
+                preview={projection.sections.summary.purpose}
+                expanded={previewExpanded("spec-purpose")}
+                onExpand={() => toggleExpanded("spec-purpose")}
+              />
+            </DecisionRegion>
+            <DecisionRegion
+              region="criteria"
+              heading="Acceptance criteria (observable)"
+            >
+              <PreviewList
+                preview={projection.sections.criteria}
+                expanded={previewExpanded("spec-criteria")}
+                onExpand={() => toggleExpanded("spec-criteria")}
+              />
+            </DecisionRegion>
+            <DecisionRegion region="governed-fields" heading="Governed fields">
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                {projection.sections.governed_fields.pointer}
+              </p>
+              {(
+                [
+                  ["Non-goals", "spec-non-goals", projection.sections.governed_fields.non_goals],
+                  ["Allowed scope", "spec-allowed-scope", projection.sections.governed_fields.allowed_scope],
+                  ["Review ready", "spec-review-ready", projection.sections.governed_fields.review_ready],
+                ] as const
+              ).map(([label, key, preview]) => (
+                <div key={key} className="mt-4">
+                  <h4 className="text-[11px] font-medium text-muted-foreground uppercase">
+                    {label}
+                  </h4>
+                  <PreviewList
+                    preview={preview}
+                    expanded={previewExpanded(key)}
+                    onExpand={() => toggleExpanded(key)}
+                    marker="plain"
+                  />
+                </div>
+              ))}
+            </DecisionRegion>
+          </>
+        ) : null}
+
+        {projection.mode === "ready" && projection.phase === "plan" ? (
+          <>
+            <DecisionRegion region="summary" heading="Plan summary">
+              <PreviewText
+                preview={projection.sections.summary.summary}
+                expanded={previewExpanded("plan-summary")}
+                onExpand={() => toggleExpanded("plan-summary")}
+              />
+            </DecisionRegion>
+            <DecisionRegion region="criteria" heading="Plan checklist">
+              <PreviewChecklist
+                preview={projection.sections.checklist}
+                expanded={previewExpanded("plan-checklist")}
+                onExpand={() => toggleExpanded("plan-checklist")}
+              />
+            </DecisionRegion>
+            <DecisionRegion
+              region="unresolved-questions"
+              heading="Unresolved questions"
+            >
+              <PreviewList
+                preview={projection.sections.unresolved_questions}
+                expanded={previewExpanded("plan-questions")}
+                onExpand={() => toggleExpanded("plan-questions")}
+                marker="question"
+              />
+            </DecisionRegion>
+            <p className="border-t px-5 py-4 text-xs leading-5 text-muted-foreground">
+              Execute approval is not part of this slice.
+            </p>
+          </>
+        ) : null}
+
+        {projection.mode === "post_commit_launch_failure" ? (
+          <DecisionRegion region="launch-failure" heading="Launch state">
+            <dl className="mt-3 space-y-2 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-muted-foreground">Locked model</dt>
+                <dd>{projection.locked_model}</dd>
+              </div>
+            </dl>
+            {projection.locked_model_unavailable ? (
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                The locked model is no longer available. Start a new attempt with another model.
+              </p>
+            ) : null}
+          </DecisionRegion>
+        ) : null}
+
+        {projection.mode === "plan_result_superseded" ? (
+          <DecisionRegion region="superseded-plan" heading="Superseded result">
+            <p className="mt-2 text-sm leading-6">{projection.result.summary}</p>
+          </DecisionRegion>
+        ) : null}
+
+        {"provenance" in projection && projection.provenance.length > 0 ? (
+          <DecisionRegion region="provenance" heading="Provenance">
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+              {projection.provenance.map((use, index) => (
+                <div key={use.seat} className="contents">
+                  {index === 0 ? null : (
+                    <span className="text-muted-foreground" aria-hidden="true">→</span>
+                  )}
+                  <span className="rounded-sm border bg-background px-2 py-1.5">
+                    {shapingPhaseLabel(use.seat)} · requested {use.requested_model} · effective {use.effective_model}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </DecisionRegion>
+        ) : null}
+
+        {picker === null ? (
+          runtimeUnavailable === null ? null : (
+            <DecisionRegion region="runtime" heading="Connected runtime">
+              <p className="mt-2 text-sm leading-5 text-muted-foreground">
+                {runtimeUnavailable}
+              </p>
+            </DecisionRegion>
+          )
+        ) : (
+          <DecisionRegion region="next-step" heading="Next step">
+            <ModelPicker
+              picker={picker}
+              selectedModel={currentModel}
+              busy={busy}
+              onSelectModel={onSelectModel}
+            />
+          </DecisionRegion>
+        )}
+
+        <details data-region="advanced-recovery" className="border-t px-5 py-4">
+          <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
+            Advanced recovery
+            <ChevronDown className="size-4 text-muted-foreground" strokeWidth={1.75} />
+          </summary>
+          <div className="mt-3 space-y-2">
+            {manualActions.length === 0 ? (
+              <p className="text-xs leading-5 text-muted-foreground">
+                Recovery details are available when this state has a safe manual path.
+              </p>
+            ) : (
+              manualActions.map((action) => (
+                <button
+                  key={`${action.kind}:${action.launch_mode}:${action.label}`}
+                  type="button"
+                  disabled={busy || !action.enabled}
+                  onClick={() => onAction(action)}
+                  className="block h-9 w-full rounded-md border bg-secondary px-3 text-left text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {action.label}
+                </button>
+              ))
+            )}
+          </div>
+        </details>
+      </div>
+
+      <footer
+        data-region="footer"
+        data-shaping-footer="persistent"
+        className="flex shrink-0 items-center justify-end gap-2 border-t bg-muted px-5 py-4"
+      >
+        {requestChangesAction === undefined ? null : (
+          <button
+            type="button"
+            disabled={busy || !requestChangesAction.enabled}
+            onClick={() => onAction(requestChangesAction)}
+            className="h-10 rounded-md border bg-secondary px-4 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {requestChangesAction.label}
+          </button>
+        )}
+        {primaryAction === undefined ? null : (
+          <button
+            type="button"
+            data-action-priority="primary"
+            disabled={busy || !primaryAction.enabled}
+            onClick={() => onAction(primaryAction)}
+            className="h-10 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {primaryAction.label}
+          </button>
+        )}
+      </footer>
+    </div>
   );
 }
 
@@ -1764,6 +2781,15 @@ export function DetailPanel({
     useState<ShapingCopiedState | null>(null);
   const [shapingMutation, setShapingMutation] =
     useState<ShapingMutation | null>(null);
+  const [shapingModelSelectionState, setShapingModelSelectionState] =
+    useState<ShapingModelSelectionState | null>(null);
+  const [shapingLaunchFailureState, setShapingLaunchFailureState] =
+    useState<ShapingLaunchFailureState | null>(null);
+  const [shapingNewAttemptState, setShapingNewAttemptState] =
+    useState<ShapingNewAttemptState | null>(null);
+  const [shapingDecisionBusy, setShapingDecisionBusy] = useState(false);
+  const shapingItemKeyRef = useRef("");
+  const [showFullWorkItem, setShowFullWorkItem] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const detailsDirty =
     title !== goal.title ||
@@ -1776,20 +2802,27 @@ export function DetailPanel({
   const nonGoalsValues = goalContractValues(nonGoals);
   const allowedScopeValues = goalContractValues(allowedScope);
   const reviewReadyValues = goalContractValues(reviewReady);
+  const canEditWorkItem = canUpdateGoalContract(state.phase);
+  const canEditGoalContract = canEditGoalContractFromFullWorkItem(
+    state.phase,
+    goalContract !== undefined,
+  );
   const contractDirty =
-    purpose !== (goalContract?.purpose ?? "") ||
-    acceptanceCriteria !== goalContractLines(goalContract?.acceptance_criteria) ||
-    nonGoals !== goalContractLines(goalContract?.non_goals) ||
-    allowedScope !== goalContractLines(goalContract?.allowed_scope) ||
-    reviewReady !== goalContractLines(goalContract?.review_ready);
-  const canEditGoalContract = canUpdateGoalContract(state.phase);
+    canEditGoalContract &&
+    (purpose !== (goalContract?.purpose ?? "") ||
+      acceptanceCriteria !==
+        goalContractLines(goalContract?.acceptance_criteria) ||
+      nonGoals !== goalContractLines(goalContract?.non_goals) ||
+      allowedScope !== goalContractLines(goalContract?.allowed_scope) ||
+      reviewReady !== goalContractLines(goalContract?.review_ready));
   const hasContractInput =
-    goalContract !== undefined ||
-    purpose.trim().length > 0 ||
-    acceptanceCriteriaValues.length > 0 ||
-    nonGoalsValues.length > 0 ||
-    allowedScopeValues.length > 0 ||
-    reviewReadyValues.length > 0;
+    canEditGoalContract &&
+    (goalContract !== undefined ||
+      purpose.trim().length > 0 ||
+      acceptanceCriteriaValues.length > 0 ||
+      nonGoalsValues.length > 0 ||
+      allowedScopeValues.length > 0 ||
+      reviewReadyValues.length > 0);
   const contractComplete =
     purpose.trim().length > 0 &&
     acceptanceCriteriaValues.length > 0 &&
@@ -1823,24 +2856,67 @@ export function DetailPanel({
   ].join(":");
   const missionHandoffMode = missionHandoffModeForItem(item);
   const connectedExecute = connectedExecuteForItem(item);
-  const shapingHandoff = shapingHandoffForItem(item);
-  const shapingItemKey = [
-    item.source_id,
-    goal.work_item_id,
-    state.phase,
-  ].join(":");
-  const shapingArtifacts =
+  const legacyShapingHandoff = shapingHandoffForItem(item);
+  const shapingItemKey = shapingItemStateKey(item);
+  useEffect(() => {
+    shapingItemKeyRef.current = shapingItemKey;
+  }, [shapingItemKey]);
+  const eligibleIdea =
+    state.phase !== "idea" ||
+    (state.schema_version === 2 &&
+      goal.goal_contract === undefined &&
+      state.goal_version === undefined &&
+      state.input_revision === undefined);
+  const shapingEligible =
+    item.source_id !== INBOX_SOURCE_ID &&
+    state.status === "active" &&
+    eligibleIdea &&
+    (state.phase === "idea" ||
+      state.phase === "brainstorm" ||
+      state.phase === "spec" ||
+      state.phase === "plan");
+  const currentShapingState =
     shapingArtifactState?.itemKey === shapingItemKey
-      ? shapingArtifactState.result
-      : [];
-  const shapingLoading =
-    shapingHandoff.mode === "active" &&
-    (shapingArtifactState?.itemKey !== shapingItemKey ||
-      shapingArtifactState.loading);
-  const shapingError =
-    shapingArtifactState?.itemKey === shapingItemKey
-      ? shapingArtifactState.error
+      ? shapingArtifactState
       : null;
+  const currentShapingContext =
+    currentShapingState === null
+      ? null
+      : shapingSurfaceContext(
+          item,
+          currentShapingState,
+          shapingLaunchFailureState,
+          shapingNewAttemptState,
+        );
+  const shapingDecisionProjection =
+    currentShapingContext === null
+      ? null
+      : shapingHandoffForItem(item, currentShapingContext);
+  const decisionPicker =
+    shapingDecisionProjection === null
+      ? null
+      : projectionPicker(shapingDecisionProjection);
+  const shapingPickerKey =
+    decisionPicker === null ||
+    shapingDecisionProjection === null ||
+    shapingDecisionProjection.mode === "hidden"
+      ? null
+      : `${shapingItemKey}:${shapingDecisionProjection.expected_shaping_state_sha256}:${decisionPicker.seat}:primary`;
+  const storedShapingModel =
+    shapingPickerKey !== null &&
+    shapingModelSelectionState?.pickerKey === shapingPickerKey
+      ? shapingModelSelectionState.model
+      : null;
+  const selectedShapingModel = selectedModelForShapingPicker(
+    decisionPicker,
+    storedShapingModel,
+  );
+  const shapingArtifacts =
+    currentShapingState?.listing?.artifacts ?? [];
+  const shapingLoading =
+    shapingEligible &&
+    (currentShapingState === null || currentShapingState.loading);
+  const shapingError = currentShapingState?.error ?? null;
   const shapingCompilation =
     shapingCompilationState?.itemKey === shapingItemKey
       ? shapingCompilationState.result
@@ -2027,7 +3103,7 @@ export function DetailPanel({
   }, [connectedRunItemKey]);
 
   const loadShapingArtifacts = useCallback(
-    async (signal?: AbortSignal) => {
+    async (signal?: AbortSignal, expectedItemKey = shapingItemKey) => {
       const loaded = await requestShapingArtifacts(
         item.source_id,
         goal.work_item_id,
@@ -2036,25 +3112,69 @@ export function DetailPanel({
       if (loaded === null) {
         return;
       }
-      setShapingArtifactState((current) => ({
-        itemKey: shapingItemKey,
-        result:
-          loaded.result ??
-          (current?.itemKey === shapingItemKey ? current.result : []),
-        loading: false,
-        error: loaded.error,
-      }));
+      const hashes =
+        loaded.result === null
+          ? null
+          : await shapingGoalContractHashes(item, loaded.result);
+      if (
+        signal?.aborted ||
+        shapingItemKeyRef.current !== expectedItemKey
+      ) {
+        return;
+      }
+      setShapingArtifactState((current) =>
+        shapingItemKeyRef.current !== expectedItemKey
+          ? current
+          : {
+              itemKey: expectedItemKey,
+              listing:
+                loaded.result ??
+                (current?.itemKey === expectedItemKey
+                  ? current.listing
+                  : null),
+              currentGoalContractSha256:
+                hashes === null
+                  ? current?.itemKey === expectedItemKey
+                    ? current.currentGoalContractSha256
+                    : null
+                  : hashes.currentGoalContractSha256,
+              derivedGoalContractSha256:
+                hashes === null
+                  ? current?.itemKey === expectedItemKey
+                    ? current.derivedGoalContractSha256
+                    : null
+                  : hashes.derivedGoalContractSha256,
+              loading: false,
+              error: loaded.error,
+            },
+      );
     },
-    [goal.work_item_id, item.source_id, shapingItemKey],
+    [goal.work_item_id, item, shapingItemKey],
   );
 
-  const markShapingArtifactsLoading = useCallback(() => {
-    setShapingArtifactState((current) => ({
-      itemKey: shapingItemKey,
-      result: current?.itemKey === shapingItemKey ? current.result : [],
-      loading: true,
-      error: null,
-    }));
+  const markShapingArtifactsLoading = useCallback((expectedItemKey = shapingItemKey) => {
+    if (shapingItemKeyRef.current !== expectedItemKey) {
+      return;
+    }
+    setShapingArtifactState((current) =>
+      shapingItemKeyRef.current !== expectedItemKey
+        ? current
+        : {
+            itemKey: expectedItemKey,
+            listing:
+              current?.itemKey === expectedItemKey ? current.listing : null,
+            currentGoalContractSha256:
+              current?.itemKey === expectedItemKey
+                ? current.currentGoalContractSha256
+                : null,
+            derivedGoalContractSha256:
+              current?.itemKey === expectedItemKey
+                ? current.derivedGoalContractSha256
+                : null,
+            loading: true,
+            error: null,
+          },
+    );
   }, [shapingItemKey]);
 
   const attemptClose = useCallback(() => {
@@ -2136,7 +3256,7 @@ export function DetailPanel({
   ]);
 
   useEffect(() => {
-    if (shapingHandoff.mode !== "active") {
+    if (!shapingEligible) {
       return;
     }
     const controller = new AbortController();
@@ -2144,15 +3264,50 @@ export function DetailPanel({
       item.source_id,
       goal.work_item_id,
       controller.signal,
-    ).then((loaded) => {
-      if (loaded === null) {
+    ).then(async (loaded) => {
+      if (loaded === null || controller.signal.aborted) {
+        return;
+      }
+      let hashes: Awaited<ReturnType<typeof shapingGoalContractHashes>> | null =
+        null;
+      try {
+        hashes =
+          loaded.result === null
+            ? null
+            : await shapingGoalContractHashes(item, loaded.result);
+      } catch {
+        if (!controller.signal.aborted) {
+          setShapingArtifactState({
+            itemKey: shapingItemKey,
+            listing: null,
+            currentGoalContractSha256: null,
+            derivedGoalContractSha256: null,
+            loading: false,
+            error: "The exact shaping contract binding could not be computed.",
+          });
+        }
+        return;
+      }
+      if (controller.signal.aborted) {
         return;
       }
       setShapingArtifactState((current) => ({
         itemKey: shapingItemKey,
-        result:
+        listing:
           loaded.result ??
-          (current?.itemKey === shapingItemKey ? current.result : []),
+          (current?.itemKey === shapingItemKey ? current.listing : null),
+        currentGoalContractSha256:
+          hashes === null
+            ? current?.itemKey === shapingItemKey
+              ? current.currentGoalContractSha256
+              : null
+            : hashes.currentGoalContractSha256,
+        derivedGoalContractSha256:
+          hashes === null
+            ? current?.itemKey === shapingItemKey
+              ? current.derivedGoalContractSha256
+              : null
+            : hashes.derivedGoalContractSha256,
         loading: false,
         error: loaded.error,
       }));
@@ -2160,14 +3315,15 @@ export function DetailPanel({
     return () => controller.abort();
   }, [
     goal.work_item_id,
+    item,
     item.source_id,
-    shapingHandoff.mode,
+    shapingEligible,
     shapingItemKey,
   ]);
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canEditGoalContract || title.trim().length === 0) {
+    if (!canEditWorkItem || title.trim().length === 0) {
       return;
     }
     if (hasContractInput && !contractComplete) {
@@ -2257,20 +3413,39 @@ export function DetailPanel({
     }
   }
 
-  function setShapingActionError(message: string | null): void {
-    setShapingArtifactState((current) => ({
-      itemKey: shapingItemKey,
-      result: current?.itemKey === shapingItemKey ? current.result : [],
-      loading: false,
-      error: message,
-    }));
+  function setShapingActionError(
+    message: string | null,
+    expectedItemKey = shapingItemKey,
+  ): void {
+    if (shapingItemKeyRef.current !== expectedItemKey) {
+      return;
+    }
+    setShapingArtifactState((current) =>
+      shapingItemKeyRef.current !== expectedItemKey
+        ? current
+        : {
+            itemKey: expectedItemKey,
+            listing:
+              current?.itemKey === expectedItemKey ? current.listing : null,
+            currentGoalContractSha256:
+              current?.itemKey === expectedItemKey
+                ? current.currentGoalContractSha256
+                : null,
+            derivedGoalContractSha256:
+              current?.itemKey === expectedItemKey
+                ? current.derivedGoalContractSha256
+                : null,
+            loading: false,
+            error: message,
+          },
+    );
   }
 
   async function handleCompileShapingMission(): Promise<void> {
-    if (shapingHandoff.mode !== "active") {
+    if (legacyShapingHandoff.mode !== "active") {
       return;
     }
-    const phase = shapingHandoff.phase;
+    const phase = legacyShapingHandoff.phase;
     if (phase === "spec" && selectedAcceptanceSha256.length === 0) {
       setShapingActionError(
         "Choose an accepted Brainstorm input before compiling the Spec mission.",
@@ -2319,10 +3494,10 @@ export function DetailPanel({
   }
 
   async function handleImportShapingResult(): Promise<void> {
-    if (shapingHandoff.mode !== "active") {
+    if (legacyShapingHandoff.mode !== "active") {
       return;
     }
-    const phase = shapingHandoff.phase;
+    const phase = legacyShapingHandoff.phase;
     if (phase === "spec" && selectedAcceptanceSha256.length === 0) {
       setShapingActionError(
         "Choose an accepted Brainstorm input before importing the Spec result.",
@@ -2392,6 +3567,143 @@ export function DetailPanel({
     setAllowedScope(draft.allowedScope);
     setReviewReady(draft.reviewReady);
     setShapingActionError(null);
+  }
+
+  async function handleShapingDecisionAction(
+    action: ShapingActionProjection,
+  ): Promise<void> {
+    if (shapingDecisionProjection === null) {
+      return;
+    }
+    const operationItemKey = shapingItemKey;
+    const request = shapingActionRequest({
+      source_id: item.source_id,
+      work_item_id: goal.work_item_id,
+      projection: shapingDecisionProjection,
+      action,
+      selected_model: selectedShapingModel,
+    });
+    if (request.status === "blocked") {
+      if (request.reason === "new_attempt_selection_required") {
+        if (shapingDecisionProjection.mode === "post_commit_launch_failure") {
+          setShapingNewAttemptState({
+            itemKey: shapingItemKey,
+            decision_id: shapingDecisionProjection.decision_id,
+          });
+        }
+        setShapingActionError(null);
+        return;
+      }
+      setShapingActionError(
+        request.reason === "feedback_required"
+          ? "Add feedback in the Request changes composer before submitting this action."
+          : request.reason === "missing_model"
+            ? "Choose a model before continuing."
+            : request.reason === "unsupported_action"
+              ? "This recovery action is completed in Advanced recovery."
+              : "This action is no longer available for the current shaping state.",
+      );
+      return;
+    }
+
+    setShapingDecisionBusy(true);
+    setShapingActionError(null);
+    try {
+      const response = await fetch(request.route, {
+        method: request.method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request.body),
+      });
+      const body = (await response.json()) as
+        | PortfolioShapingDecisionResult
+        | PortfolioShapingLaunchResult
+        | MutationErrorResponse;
+      if (shapingItemKeyRef.current !== operationItemKey) {
+        return;
+      }
+      if (!response.ok || "error" in body) {
+        setShapingActionError(
+          "error" in body
+            ? body.error?.message ?? "The shaping action could not be completed."
+            : "The shaping action could not be completed.",
+          operationItemKey,
+        );
+        return;
+      }
+
+      if ("work_item" in body) {
+        const decision = body as PortfolioShapingDecisionResult;
+        const decidedGoal = decision.work_item.goal;
+        const decidedContract = decidedGoal.goal_contract;
+        setTitle(decidedGoal.title);
+        setType(decidedGoal.type ?? "");
+        setPriority(decidedGoal.priority ?? "");
+        setTags(decidedGoal.tags?.join(", ") ?? "");
+        setNotes(decidedGoal.notes ?? "");
+        setTargetSourceId(decision.source_id);
+        setPurpose(decidedContract?.purpose ?? "");
+        setAcceptanceCriteria(
+          goalContractLines(decidedContract?.acceptance_criteria),
+        );
+        setNonGoals(goalContractLines(decidedContract?.non_goals));
+        setAllowedScope(goalContractLines(decidedContract?.allowed_scope));
+        setReviewReady(goalContractLines(decidedContract?.review_ready));
+        setShowFullWorkItem(false);
+        setShapingNewAttemptState(null);
+        if (
+          decision.next_launch.status === "failed" &&
+          decision.next_launch.shaping_run_id === null &&
+          action.launch_mode === "connected" &&
+          selectedShapingModel !== null
+        ) {
+          setShapingLaunchFailureState({
+            itemKey: shapingItemStateKey(decision),
+            decision_id: decision.decision_id,
+            locked_model: selectedShapingModel,
+            reason:
+              decision.next_launch.reason ??
+              "The committed shaping decision could not launch its next seat.",
+          });
+        } else {
+          setShapingLaunchFailureState(null);
+        }
+        onUpdated(
+          decision,
+          decision.next_launch.status === "manual"
+            ? "Shaping decision committed for manual recovery."
+            : decision.next_launch.status === "failed"
+              ? "Shaping decision committed; launch needs attention."
+              : "Shaping decision committed and the next seat started.",
+        );
+        return;
+      }
+
+      const launch = body as PortfolioShapingLaunchResult;
+      if (
+        shapingDecisionProjection.mode === "post_commit_launch_failure" &&
+        launch.next_launch.status === "failed" &&
+        launch.next_launch.shaping_run_id === null
+      ) {
+        setShapingLaunchFailureState({
+          itemKey: operationItemKey,
+          decision_id: shapingDecisionProjection.decision_id,
+          locked_model: shapingDecisionProjection.locked_model,
+          reason:
+            launch.next_launch.reason ?? shapingDecisionProjection.reason,
+        });
+      } else {
+        setShapingLaunchFailureState(null);
+      }
+      markShapingArtifactsLoading(operationItemKey);
+      await loadShapingArtifacts(undefined, operationItemKey);
+    } catch {
+      setShapingActionError(
+        "The shaping action could not be completed. Check the local server and try again.",
+        operationItemKey,
+      );
+    } finally {
+      setShapingDecisionBusy(false);
+    }
   }
 
   async function handleCompileMission() {
@@ -2900,7 +4212,7 @@ export function DetailPanel({
       </dl>
     </div>
   );
-  const workItemEditor = canEditGoalContract ? (
+  const workItemEditor = canEditWorkItem ? (
     <form onSubmit={(event) => void handleSave(event)} className="space-y-4 border-t pt-5">
       <div>
         <label htmlFor={`${fieldId}-project`} className="mb-2 block text-xs font-medium">
@@ -2949,32 +4261,37 @@ export function DetailPanel({
         <label htmlFor={`${fieldId}-notes`} className="mb-2 block text-xs font-medium">Context</label>
         <textarea id={`${fieldId}-notes`} value={notes} onChange={(event) => setNotes(event.target.value)} rows={5} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
       </div>
-      <section aria-labelledby={`${fieldId}-goal-contract`} className="space-y-4 border-t pt-5">
-        <div>
-          <h3 id={`${fieldId}-goal-contract`} className="text-xs font-medium">Goal contract</h3>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">Complete every field to govern this item. Keep list entries one per line.</p>
-        </div>
-        <div>
-          <label htmlFor={`${fieldId}-purpose`} className="mb-2 block text-xs font-medium">Purpose</label>
-          <input id={`${fieldId}-purpose`} value={purpose} onChange={(event) => setPurpose(event.target.value)} className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
-        </div>
-        <div>
-          <label htmlFor={`${fieldId}-acceptance-criteria`} className="mb-2 block text-xs font-medium">Acceptance criteria</label>
-          <textarea id={`${fieldId}-acceptance-criteria`} value={acceptanceCriteria} onChange={(event) => setAcceptanceCriteria(event.target.value)} rows={4} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
-        </div>
-        <div>
-          <label htmlFor={`${fieldId}-non-goals`} className="mb-2 block text-xs font-medium">Non-goals</label>
-          <textarea id={`${fieldId}-non-goals`} value={nonGoals} onChange={(event) => setNonGoals(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
-        </div>
-        <div>
-          <label htmlFor={`${fieldId}-allowed-scope`} className="mb-2 block text-xs font-medium">Allowed scope</label>
-          <textarea id={`${fieldId}-allowed-scope`} value={allowedScope} onChange={(event) => setAllowedScope(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
-        </div>
-        <div>
-          <label htmlFor={`${fieldId}-review-ready`} className="mb-2 block text-xs font-medium">Review-ready checks</label>
-          <textarea id={`${fieldId}-review-ready`} value={reviewReady} onChange={(event) => setReviewReady(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
-        </div>
-      </section>
+      {canEditGoalContract ? (
+        <section
+          aria-labelledby={`${fieldId}-goal-contract`}
+          className="space-y-4 border-t pt-5"
+        >
+          <div>
+            <h3 id={`${fieldId}-goal-contract`} className="text-xs font-medium">Goal contract</h3>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">Complete every field to govern this item. Keep list entries one per line.</p>
+          </div>
+          <div>
+            <label htmlFor={`${fieldId}-purpose`} className="mb-2 block text-xs font-medium">Purpose</label>
+            <input id={`${fieldId}-purpose`} value={purpose} onChange={(event) => setPurpose(event.target.value)} className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+          </div>
+          <div>
+            <label htmlFor={`${fieldId}-acceptance-criteria`} className="mb-2 block text-xs font-medium">Acceptance criteria</label>
+            <textarea id={`${fieldId}-acceptance-criteria`} value={acceptanceCriteria} onChange={(event) => setAcceptanceCriteria(event.target.value)} rows={4} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+          </div>
+          <div>
+            <label htmlFor={`${fieldId}-non-goals`} className="mb-2 block text-xs font-medium">Non-goals</label>
+            <textarea id={`${fieldId}-non-goals`} value={nonGoals} onChange={(event) => setNonGoals(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+          </div>
+          <div>
+            <label htmlFor={`${fieldId}-allowed-scope`} className="mb-2 block text-xs font-medium">Allowed scope</label>
+            <textarea id={`${fieldId}-allowed-scope`} value={allowedScope} onChange={(event) => setAllowedScope(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+          </div>
+          <div>
+            <label htmlFor={`${fieldId}-review-ready`} className="mb-2 block text-xs font-medium">Review-ready checks</label>
+            <textarea id={`${fieldId}-review-ready`} value={reviewReady} onChange={(event) => setReviewReady(event.target.value)} rows={3} className="w-full resize-y rounded-md border bg-background px-3 py-2.5 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+          </div>
+        </section>
+      ) : null}
       <div className="flex justify-end">
         <button type="submit" disabled={saving || (!detailsDirty && !assignmentDirty && !contractDirty) || title.trim().length === 0 || (hasContractInput && !contractComplete) || (goalContract === undefined && hasContractInput && targetSourceId === INBOX_SOURCE_ID)} className="h-9 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50">
           {saving ? "Saving…" : "Save changes"}
@@ -2983,10 +4300,10 @@ export function DetailPanel({
     </form>
   ) : null;
   const shapingSection =
-    shapingHandoff.mode === "active" ? (
+    legacyShapingHandoff.mode === "active" ? (
       <ShapingSection
         fieldId={fieldId}
-        projection={shapingHandoff}
+        projection={legacyShapingHandoff}
         artifacts={shapingArtifacts}
         loading={shapingLoading}
         error={shapingError}
@@ -3044,7 +4361,48 @@ export function DetailPanel({
           </button>
         </header>
 
-        {mode === "capture" ? (
+        {shapingEligible && !showFullWorkItem ? (
+          shapingDecisionProjection === null ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1 px-5 py-5" role="status">
+                <p className="text-sm font-medium">
+                  {shapingError === null
+                    ? "Loading shaping decision…"
+                    : "Shaping decision unavailable"}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {shapingError ??
+                    "Reading the current revision, model choices and exact state binding."}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowFullWorkItem(true)}
+                  className="mt-3 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                >
+                  View full work item
+                </button>
+              </div>
+            </div>
+          ) : (
+            <ShapingDecisionView
+              fieldId={fieldId}
+              projection={shapingDecisionProjection}
+              selectedModel={selectedShapingModel}
+              busy={shapingDecisionBusy}
+              error={shapingError}
+              onSelectModel={(model) => {
+                if (shapingPickerKey !== null) {
+                  setShapingModelSelectionState({
+                    pickerKey: shapingPickerKey,
+                    model,
+                  });
+                }
+              }}
+              onAction={(action) => void handleShapingDecisionAction(action)}
+              onShowFullWorkItem={() => setShowFullWorkItem(true)}
+            />
+          )
+        ) : mode === "capture" ? (
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
             <section aria-labelledby={`${fieldId}-provenance`}>
               <div className="mb-2 flex items-center gap-2">
@@ -3081,6 +4439,17 @@ export function DetailPanel({
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto">
+            {shapingDecisionProjection === null ? null : (
+              <div className="border-b px-4 py-2">
+                <button
+                  type="button"
+                  onClick={() => setShowFullWorkItem(false)}
+                  className="text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                >
+                  Back to shaping decision
+                </button>
+              </div>
+            )}
             <div className="flex border-b px-4" role="tablist" aria-label="Work item details">
               {(["overview", "activity", "files"] as const).map((tab) => (
                 <button

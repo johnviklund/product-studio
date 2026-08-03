@@ -6654,6 +6654,83 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         );
   }
 
+  async listShapingDecisionManifests(
+    workItemId: string,
+  ): Promise<ShapingDecisionManifestV1[]> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const directory = join(
+      this.workItemsDirectory,
+      validatedWorkItemId,
+      SHAPING_DECISIONS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(directory))) {
+      return [];
+    }
+    const manifests: ShapingDecisionManifestV1[] = [];
+    const intentIds = new Set<string>();
+    const manifestIds = new Set<string>();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const intentMatch = /^([0-9a-f]{64})\.intent\.json$/.exec(entry.name);
+      if (intentMatch !== null) {
+        if (!entry.isFile() || entry.isSymbolicLink()) {
+          throw this.invalid(
+            join(directory, entry.name),
+            "shaping decision intent must be a regular file",
+          );
+        }
+        intentIds.add(intentMatch[1]);
+        continue;
+      }
+      const match = /^([0-9a-f]{64})\.json$/.exec(entry.name);
+      if (match === null) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "shaping decision entry must use <decision_id>.json",
+        );
+      }
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "shaping decision manifest must be a regular file",
+        );
+      }
+      manifestIds.add(match[1]);
+      const manifest = await this.readShapingDecisionManifest(
+        validatedWorkItemId,
+        match[1],
+      );
+      if (
+        manifest === null ||
+        manifest.work_item_id !== validatedWorkItemId ||
+        manifest.decision_id !== match[1]
+      ) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "shaping decision manifest identity must match its durable path",
+        );
+      }
+      manifests.push(manifest);
+    }
+    const incompleteIds = new Set(
+      [...intentIds, ...manifestIds].filter(
+        (decisionId) =>
+          !intentIds.has(decisionId) || !manifestIds.has(decisionId),
+      ),
+    );
+    if (incompleteIds.size > 0) {
+      throw new ControllerConflictError(
+        "repair_required",
+        validatedWorkItemId,
+        `Shaping decision ${[...incompleteIds].sort()[0]} has incomplete durable evidence.`,
+      );
+    }
+    return manifests.sort((left, right) =>
+      left.started_at === right.started_at
+        ? left.decision_id.localeCompare(right.decision_id)
+        : left.started_at.localeCompare(right.started_at),
+    );
+  }
+
   private async findPendingShapingDecisionManifest(
     workItemId: string,
   ): Promise<ShapingDecisionManifestV1 | null> {
