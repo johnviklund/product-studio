@@ -433,6 +433,7 @@ function renderDecision(
       selectedModel={selectedModel}
       onSelectModel={noop}
       onAction={noop}
+      onRefreshStatus={noop}
       onShowFullWorkItem={noop}
     />,
   );
@@ -1240,6 +1241,248 @@ describe("detail panel decision-first shaping", () => {
     expect(exactButtonCount(manualHtml, "Copy manual task")).toBe(1);
     expect(visibleMarkup(manualHtml)).not.toContain("Brainstorm failed");
     expect(visibleMarkup(manualHtml)).not.toContain("launch failed");
+  });
+
+  it("renders all four bounded-refresh indicators and only offers an explicit refresh when needed", () => {
+    const renderRefresh = (
+      refresh: ShapingSurfaceContext["refresh"],
+    ): string => {
+      const projection = shapingHandoffForItem(
+        decisionItem("brainstorm"),
+        decisionSurfaceContext({
+          run: decisionRun("running"),
+          refresh,
+        }),
+      );
+      if (projection.mode !== "run_state") {
+        throw new Error("expected a running projection");
+      }
+      return visibleMarkup(renderDecision(projection));
+    };
+
+    const lastChecked = renderRefresh({
+      last_checked_at: "2026-08-03T12:00:00.000Z",
+      refreshing: false,
+      stale: false,
+      refresh_failure: null,
+    });
+    const refreshing = renderRefresh({
+      last_checked_at: null,
+      refreshing: true,
+      stale: false,
+      refresh_failure: null,
+    });
+    const stale = renderRefresh({
+      last_checked_at: null,
+      refreshing: false,
+      stale: true,
+      refresh_failure: null,
+    });
+    const failed = renderRefresh({
+      last_checked_at: null,
+      refreshing: false,
+      stale: false,
+      refresh_failure: { reason: "The local status endpoint did not respond." },
+    });
+
+    expect(lastChecked).toContain("Last checked");
+    expect(lastChecked).not.toContain("Refresh status");
+    expect(refreshing).toContain("Refreshing status");
+    expect(refreshing).not.toContain("Refresh status");
+    expect(stale).toContain("Status may be stale");
+    expect(exactButtonCount(stale, "Refresh status")).toBe(1);
+    expect(failed).toContain("Refresh failed");
+    expect(failed).toContain("The local status endpoint did not respond.");
+    expect(exactButtonCount(failed, "Refresh status")).toBe(1);
+  });
+
+  it("keeps the final successful check visible after the run becomes terminal", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        run: decisionRun("terminal", "cancelled"),
+        refresh: {
+          last_checked_at: "2026-08-03T12:00:00.000Z",
+          refreshing: true,
+          stale: true,
+          refresh_failure: { reason: "A prior refresh failed." },
+        },
+      }),
+    );
+    const html = renderDecision(projection);
+
+    expect(visibleMarkup(html)).toContain("Last checked");
+    expect(html).toContain('data-refresh-running="false"');
+    expect(visibleMarkup(html)).not.toContain("Refreshing status");
+    expect(visibleMarkup(html)).not.toContain("Status may be stale");
+    expect(visibleMarkup(html)).not.toContain("Refresh failed");
+    expect(exactButtonCount(html, "Refresh status")).toBe(0);
+  });
+
+  it("renders every lifecycle row with its exact copy, refresh behavior, and action set", () => {
+    const rows = [
+      {
+        name: "starting",
+        context: decisionSurfaceContext({ run: decisionRun("starting") }),
+        headline: "Brainstorm starting",
+        copy: "The agent is being launched.",
+        refreshRunning: true,
+        actions: ["Cancel"],
+        absent: ["Retry Brainstorm", "Prepare manual recovery"],
+      },
+      {
+        name: "running",
+        context: decisionSurfaceContext({ run: decisionRun("running") }),
+        headline: "Brainstorm running",
+        copy: "Inspecting the bounded mission.",
+        refreshRunning: true,
+        actions: ["Cancel"],
+        absent: ["Retry Brainstorm", "Prepare manual recovery"],
+      },
+      {
+        name: "blocked",
+        context: decisionSurfaceContext({
+          run: decisionRun("terminal", "missing_permission"),
+        }),
+        headline: "Brainstorm blocked",
+        copy:
+          "The agent requested an operation outside this run's write policy. Operation: url.",
+        refreshRunning: false,
+        actions: ["Retry Brainstorm"],
+        absent: ["Cancel", "Prepare manual recovery"],
+      },
+      {
+        name: "failed",
+        context: decisionSurfaceContext({
+          run: decisionRun("terminal", "failed"),
+        }),
+        headline: "Brainstorm failed",
+        copy: "The result failed validation.",
+        refreshRunning: false,
+        actions: ["Retry Brainstorm", "Prepare manual recovery"],
+        absent: ["Cancel"],
+      },
+      {
+        name: "timed out",
+        context: decisionSurfaceContext({
+          run: decisionRun("terminal", "timed_out"),
+        }),
+        headline: "Brainstorm timed out",
+        copy: "The 900 second wall-clock limit was reached.",
+        refreshRunning: false,
+        actions: ["Retry Brainstorm"],
+        absent: ["Cancel", "Prepare manual recovery"],
+      },
+      {
+        name: "cancelled",
+        context: decisionSurfaceContext({
+          run: decisionRun("terminal", "cancelled"),
+        }),
+        headline: "Brainstorm cancelled",
+        copy: "You cancelled this run.",
+        refreshRunning: false,
+        actions: ["Retry Brainstorm"],
+        absent: ["Cancel", "Prepare manual recovery"],
+      },
+      {
+        name: "interrupted",
+        context: decisionSurfaceContext({
+          run: decisionRun("terminal", "interrupted"),
+        }),
+        headline: "Brainstorm interrupted",
+        copy:
+          "The agent process was no longer running when Product Studio recovered this run.",
+        refreshRunning: false,
+        actions: ["Retry Brainstorm"],
+        absent: ["Cancel", "Prepare manual recovery"],
+      },
+      {
+        name: "ready",
+        context: appliedDecisionContext("brainstorm", brainstormResult),
+        headline: "Brainstorm result ready",
+        copy: "Choose the exact result to carry into Spec.",
+        refreshRunning: false,
+        actions: [
+          "Request changes",
+          "Use result & run Spec",
+          "Use result & prepare Spec",
+        ],
+        absent: ["Cancel", "Retry Brainstorm"],
+      },
+      {
+        name: "missing result",
+        context: decisionSurfaceContext({
+          run: decisionRun("terminal", "completed"),
+        }),
+        headline: "Brainstorm finished without a usable result",
+        copy: "The run reported success but published no valid result bundle.",
+        refreshRunning: false,
+        actions: ["Retry Brainstorm"],
+        absent: ["Cancel", "Prepare manual recovery"],
+      },
+      {
+        name: "finishing",
+        context: appliedDecisionContext("brainstorm", brainstormResult, {
+          run: decisionRun("running"),
+        }),
+        headline: "Brainstorm finishing",
+        copy: "Recovering this run's result.",
+        refreshRunning: true,
+        actions: [],
+        absent: [
+          "Cancel",
+          "Retry Brainstorm",
+          "Use result & run Spec",
+          "Request changes",
+        ],
+      },
+      {
+        name: "needs repair",
+        context: decisionSurfaceContext({
+          revision: {
+            mission_content_sha256: missionContentSha256,
+            result: {
+              status: "repair",
+              failing_component: "production receipt",
+            },
+          },
+        }),
+        headline: "Brainstorm result needs repair",
+        copy: "The applied marker disagrees with production receipt.",
+        refreshRunning: false,
+        actions: [],
+        absent: [
+          "Cancel",
+          "Retry Brainstorm",
+          "Use result & run Spec",
+          "Request changes",
+        ],
+      },
+    ] as const;
+
+    for (const row of rows) {
+      const projection = shapingHandoffForItem(
+        decisionItem("brainstorm"),
+        row.context,
+      );
+      const html = renderDecision(projection);
+      const visible = visibleMarkup(html);
+
+      expect(visible, row.name).toContain(row.headline);
+      expect(visible, row.name).toContain(row.copy);
+      expect(html, row.name).toContain(
+        `data-refresh-running="${String(row.refreshRunning)}"`,
+      );
+      for (const label of row.actions) {
+        expect(exactButtonCount(html, label), `${row.name}: ${label}`).toBe(1);
+      }
+      for (const label of row.absent) {
+        expect(exactButtonCount(html, label), `${row.name}: ${label}`).toBe(0);
+      }
+      expect(visible.toLowerCase(), row.name).not.toContain("transcript");
+      expect(visible, row.name).not.toMatch(/\bETA\b/iu);
+      expect(visible, row.name).not.toMatch(/\b\d+(?:\.\d+)?%\b/u);
+    }
   });
 
   it("renders unknown provenance, unused selection, and a non-blocking reuse warning", () => {

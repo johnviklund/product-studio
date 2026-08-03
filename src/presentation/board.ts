@@ -260,6 +260,7 @@ interface ShapingProjectionBase {
   expected_shaping_state_sha256: string;
   provenance: ShapingModelUseProjection[];
   actions: ShapingActionProjection[];
+  refresh?: ShapingRefreshProjection;
 }
 
 interface ShapingRequestChangesProjection {
@@ -1173,6 +1174,7 @@ function repairProjection(
       refresh_running: false,
       actions,
     },
+    ...(context.refresh === undefined ? {} : { refresh: context.refresh }),
   };
 }
 
@@ -1468,6 +1470,7 @@ export function shapingHandoffForItem(
         execute_approval_available: false,
         execute_approval_message:
           "Execute approval is not available in this slice",
+        ...(context.refresh === undefined ? {} : { refresh: context.refresh }),
       };
     }
 
@@ -1509,6 +1512,7 @@ export function shapingHandoffForItem(
             ? { runtime_unavailable: unavailableReason(context) }
             : { next_step: decision.picker }),
         },
+        ...(context.refresh === undefined ? {} : { refresh: context.refresh }),
       };
     }
 
@@ -1579,6 +1583,7 @@ export function shapingHandoffForItem(
           ? { runtime_unavailable: unavailableReason(context) }
           : { next_step: decision.picker }),
       },
+      ...(context.refresh === undefined ? {} : { refresh: context.refresh }),
     };
   }
 
@@ -1635,6 +1640,7 @@ export function shapingHandoffForItem(
       lifecycle: projectedLifecycle,
       run: context.run,
       manual_recovery_action: manualRecoveryAction,
+      ...(context.refresh === undefined ? {} : { refresh: context.refresh }),
       ...(picker === null
         ? { runtime_unavailable: unavailableReason(context) }
         : { model_picker: picker }),

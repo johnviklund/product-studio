@@ -50,6 +50,15 @@ function isSha256(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
 }
 
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value,
+    )
+  );
+}
+
 function projectedActions(
   projection: DecisionFirstShapingHandoffProjection,
 ): ShapingActionProjection[] {
@@ -201,6 +210,23 @@ export function shapingActionRequest(
       method: "POST",
       route: `${baseRoute}/${projection.phase}/connected/launch`,
       body: { requested_model: requestedModel },
+    };
+  }
+
+  if (action.kind === "cancel_run") {
+    if (
+      projection.mode !== "run_state" ||
+      projection.run.status === "terminal" ||
+      !isUuid(action.shaping_run_id) ||
+      action.shaping_run_id !== projection.run.shaping_run_id
+    ) {
+      return blocked("missing_binding");
+    }
+    return {
+      status: "ready",
+      method: "POST",
+      route: `${baseRoute}/${projection.phase}/connected/cancel`,
+      body: { shaping_run_id: action.shaping_run_id },
     };
   }
 
@@ -553,6 +579,9 @@ export interface ShapingRefreshController {
   update(input: ShapingRefreshControllerInput): ShapingRefreshControllerSnapshot;
   stop(): ShapingRefreshControllerSnapshot;
   snapshot(): ShapingRefreshControllerSnapshot;
+  subscribe(
+    listener: (snapshot: ShapingRefreshControllerSnapshot) => void,
+  ): () => void;
 }
 
 export interface ShapingRefreshControllerDependencies<TimeoutHandle> {
@@ -589,6 +618,9 @@ export function createShapingRefreshController<TimeoutHandle>(
   let timeoutHandle: TimeoutHandle | null = null;
   let refreshAbortController: AbortController | null = null;
   let generation = 0;
+  const listeners = new Set<
+    (snapshot: ShapingRefreshControllerSnapshot) => void
+  >();
   let state: ShapingRefreshControllerSnapshot = {
     active: false,
     work_item_id: null,
@@ -607,6 +639,13 @@ export function createShapingRefreshController<TimeoutHandle>(
       refresh_failure:
         state.refresh_failure === null ? null : { ...state.refresh_failure },
     };
+  }
+
+  function publishSnapshot(): void {
+    const snapshot = copySnapshot();
+    for (const listener of listeners) {
+      listener(snapshot);
+    }
   }
 
   function clearScheduledTimer(): void {
@@ -662,21 +701,22 @@ export function createShapingRefreshController<TimeoutHandle>(
       refresh_failure: decision.refresh_failure,
       refreshing: false,
     };
-    if (decision.kind !== "schedule") {
-      return;
+    if (decision.kind === "schedule") {
+      const scheduledGeneration = generation;
+      const scheduledDelay = decision.delay_ms;
+      state = { ...state, scheduled_delay_ms: scheduledDelay };
+      timeoutHandle = dependencies.setTimeout(() => {
+        timeoutHandle = null;
+        state = {
+          ...state,
+          scheduled_delay_ms: null,
+          refreshing: true,
+        };
+        publishSnapshot();
+        void executeRefresh(scheduledGeneration, scheduledDelay === 0);
+      }, scheduledDelay);
     }
-    const scheduledGeneration = generation;
-    const scheduledDelay = decision.delay_ms;
-    state = { ...state, scheduled_delay_ms: scheduledDelay };
-    timeoutHandle = dependencies.setTimeout(() => {
-      timeoutHandle = null;
-      state = {
-        ...state,
-        scheduled_delay_ms: null,
-        refreshing: true,
-      };
-      void executeRefresh(scheduledGeneration, scheduledDelay === 0);
-    }, scheduledDelay);
+    publishSnapshot();
   }
 
   function applyMachine(
@@ -838,7 +878,18 @@ export function createShapingRefreshController<TimeoutHandle>(
       refreshing: false,
       scheduled_delay_ms: null,
     };
+    publishSnapshot();
     return copySnapshot();
+  }
+
+  function subscribe(
+    listener: (snapshot: ShapingRefreshControllerSnapshot) => void,
+  ): () => void {
+    listeners.add(listener);
+    listener(copySnapshot());
+    return () => {
+      listeners.delete(listener);
+    };
   }
 
   return {
@@ -846,5 +897,6 @@ export function createShapingRefreshController<TimeoutHandle>(
     update,
     stop,
     snapshot: copySnapshot,
+    subscribe,
   };
 }

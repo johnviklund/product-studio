@@ -134,6 +134,27 @@ function preReadyProjection(
   });
 }
 
+function runStateProjection(
+  phase: ShapingPhase,
+  selectedAction: ShapingActionProjection,
+): DecisionFirstShapingHandoffProjection {
+  return projection({
+    mode: "run_state",
+    phase,
+    expected_shaping_state_sha256: SHA_C,
+    actions: [selectedAction],
+    run: {
+      shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+      status: "running",
+      terminal_outcome: null,
+      latest_update: "Inspecting the bounded mission.",
+      sanitized_reason: null,
+      denied_operation_kind: null,
+      timeout_limit: null,
+    },
+  });
+}
+
 function buildRequest(
   projected: DecisionFirstShapingHandoffProjection,
   selectedAction: ShapingActionProjection,
@@ -319,6 +340,47 @@ describe("shapingActionRequest", () => {
       });
     },
   );
+
+  it.each(["brainstorm", "spec", "plan"] as const)(
+    "builds an exact %s cancellation request without model or binding fields",
+    (phase) => {
+      const cancelAction = action("cancel_run", null, {
+        primary: false,
+        shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+      });
+      expect(
+        buildRequest(runStateProjection(phase, cancelAction), cancelAction, {
+          selected_model: "must-not-leak",
+        }),
+      ).toEqual({
+        status: "ready",
+        method: "POST",
+        route: `${BASE_ROUTE}/${phase}/connected/cancel`,
+        body: {
+          shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+        },
+      });
+    },
+  );
+
+  it("fails closed when cancellation is not bound to the visible run", () => {
+    const cancelAction = action("cancel_run", null, {
+      shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+    });
+    const projected = runStateProjection("brainstorm", cancelAction);
+    Object.assign(
+      (projected as Extract<
+        DecisionFirstShapingHandoffProjection,
+        { mode: "run_state" }
+      >).run,
+      { shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2" },
+    );
+
+    expect(buildRequest(projected, cancelAction)).toEqual({
+      status: "blocked",
+      reason: "missing_binding",
+    });
+  });
 
   it.each([null, "", "   \n\t"])(
     "blocks request_changes with empty feedback (%j)",
@@ -1228,5 +1290,67 @@ describe("createShapingRefreshController", () => {
       scheduled_delay_ms: 2_000,
     });
     expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("publishes timer-driven snapshots and supports clean unsubscription", async () => {
+    const snapshots: Array<ReturnType<
+      ReturnType<typeof makeController>["snapshot"]
+    >> = [];
+    const controller = makeController(
+      vi.fn(async () =>
+        observation({ updated_at: "2026-08-03T10:01:00.000Z" }),
+      ),
+    );
+    const unsubscribe = controller.subscribe((snapshot) => {
+      snapshots.push(snapshot);
+    });
+
+    controller.start(controllerInput());
+    expect(snapshots.at(-1)).toMatchObject({
+      refreshing: false,
+      scheduled_delay_ms: 2_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(snapshots).toContainEqual(
+      expect.objectContaining({ refreshing: true }),
+    );
+    expect(snapshots.at(-1)).toMatchObject({
+      refreshing: false,
+      last_checked_at: 3_000,
+      scheduled_delay_ms: 2_000,
+    });
+
+    unsubscribe();
+    const publishedCount = snapshots.length;
+    controller.stop();
+    expect(snapshots).toHaveLength(publishedCount);
+  });
+
+  it("publishes surfaced failures and stale visibility transitions", async () => {
+    const snapshots: Array<ReturnType<
+      ReturnType<typeof makeController>["snapshot"]
+    >> = [];
+    const controller = makeController(
+      vi.fn(async () => {
+        throw new Error("status endpoint unavailable");
+      }),
+    );
+    controller.subscribe((snapshot) => snapshots.push(snapshot));
+    controller.start(controllerInput());
+
+    await vi.advanceTimersByTimeAsync(2_000 + 3_000 + 4_500);
+    expect(snapshots.at(-1)).toMatchObject({
+      failures: 3,
+      refresh_failure: { reason: "status endpoint unavailable" },
+      stale: false,
+    });
+
+    controller.update(controllerInput({ visible: false }));
+    expect(snapshots.at(-1)).toMatchObject({
+      refresh_failure: { reason: "status endpoint unavailable" },
+      stale: true,
+      scheduled_delay_ms: null,
+    });
   });
 });

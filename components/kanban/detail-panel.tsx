@@ -46,6 +46,7 @@ import type {
   StoredImportEvidence,
 } from "@/src/domain/result";
 import type { ConnectedRunSummary } from "@/src/domain/connected-run";
+import type { ShapingRunSummary } from "@/src/domain/shaping-run";
 import type {
   BrainstormResultSubmission,
   ShapingPhase,
@@ -80,11 +81,19 @@ import {
   type ShapingHandoffProjection,
   type ShapingListPreview,
   type ShapingModelPickerProjection,
+  type ShapingRefreshProjection,
   type ShapingRevisionProjectionInput,
   type ShapingSurfaceContext,
   type ShapingTextPreview,
 } from "@/src/presentation/board";
-import { shapingActionRequest } from "@/src/presentation/shaping-interaction";
+import {
+  boundedRefreshMachine,
+  createShapingRefreshController,
+  shapingActionRequest,
+  type ShapingRefreshController,
+  type ShapingRefreshControllerSnapshot,
+  type ShapingRefreshObservation,
+} from "@/src/presentation/shaping-interaction";
 
 interface DetailPanelProps {
   item: PortfolioWorkItem;
@@ -167,6 +176,23 @@ interface ShapingArtifactState {
   derivedGoalContractSha256: string | null;
   loading: boolean;
   error: string | null;
+}
+
+interface ShapingRefreshBinding {
+  identity: string;
+  itemKey: string;
+  item: PortfolioWorkItem;
+  sourceId: string;
+  workItemId: string;
+  phase: ShapingPhase;
+  missionContentSha256: string;
+  shapingRunId: string;
+  observation: ShapingRefreshObservation;
+}
+
+interface ShapingRefreshUiState {
+  identity: string;
+  snapshot: ShapingRefreshControllerSnapshot;
 }
 
 interface ShapingModelSelectionState {
@@ -580,10 +606,10 @@ function shapingRevisionFromListing(
   };
 }
 
-function shapingRunFromListing(
+function shapingRunSummaryFromListing(
   phase: ShapingPhase,
   listing: ShapingArtifactListing,
-): ShapingSurfaceContext["run"] {
+): ShapingRunSummary | null {
   const tip = currentShapingTip(phase, listing.artifacts);
   if (tip === null) {
     return null;
@@ -599,7 +625,15 @@ function shapingRunFromListing(
       left.lifecycle.started_at.localeCompare(right.lifecycle.started_at),
     );
   const run = runs.at(-1);
-  if (run === undefined) {
+  return run ?? null;
+}
+
+function shapingRunFromListing(
+  phase: ShapingPhase,
+  listing: ShapingArtifactListing,
+): ShapingSurfaceContext["run"] {
+  const run = shapingRunSummaryFromListing(phase, listing);
+  if (run === null) {
     return null;
   }
   return {
@@ -613,11 +647,53 @@ function shapingRunFromListing(
   };
 }
 
+function shapingRefreshBindingForState(
+  item: PortfolioWorkItem,
+  state: ShapingArtifactState,
+): ShapingRefreshBinding | null {
+  const phase = item.work_item.state.phase;
+  if (phase !== "brainstorm" && phase !== "spec" && phase !== "plan") {
+    return null;
+  }
+  const tip = currentShapingTip(phase, state.listing?.artifacts ?? []);
+  const run =
+    state.listing === null
+      ? null
+      : shapingRunSummaryFromListing(phase, state.listing);
+  if (tip === null || run === null) {
+    return null;
+  }
+  const workItemId = item.work_item.goal.work_item_id;
+  const missionContentSha256 = tip.mission.content_sha256;
+  return {
+    identity: JSON.stringify([
+      item.source_id,
+      workItemId,
+      phase,
+      missionContentSha256,
+      run.shaping_run_id,
+    ]),
+    itemKey: state.itemKey,
+    item,
+    sourceId: item.source_id,
+    workItemId,
+    phase,
+    missionContentSha256,
+    shapingRunId: run.shaping_run_id,
+    observation: {
+      work_item_id: workItemId,
+      run_status: run.lifecycle.status,
+      updated_at: run.lifecycle.updated_at,
+    },
+  };
+}
+
 function shapingSurfaceContext(
   item: PortfolioWorkItem,
   state: ShapingArtifactState,
   launchFailure: ShapingLaunchFailureState | null,
   newAttempt: ShapingNewAttemptState | null,
+  refresh: ShapingRefreshProjection | null = null,
 ): ShapingSurfaceContext | null {
   const phase = item.work_item.state.phase;
   const listing = state.listing;
@@ -682,6 +758,7 @@ function shapingSurfaceContext(
             locked_model: currentLaunchFailure.locked_model,
             reason: currentLaunchFailure.reason,
           },
+    ...(refresh === null ? {} : { refresh }),
   };
 }
 
@@ -1686,9 +1763,6 @@ function recoveryActions(
     projection.mode === "plan_result_superseded"
       ? projection.request_changes.actions
       : []),
-    ...(projection.mode === "terminal_run_failure"
-      ? [projection.manual_recovery_action]
-      : []),
   ].filter(
     (action) =>
       action.launch_mode === "manual" ||
@@ -1907,6 +1981,7 @@ export interface ShapingDecisionViewProps {
   error?: string | null;
   onSelectModel: (model: string) => void;
   onAction: (action: ShapingActionProjection) => void;
+  onRefreshStatus: () => void;
   onShowFullWorkItem: () => void;
 }
 
@@ -1918,6 +1993,7 @@ export function ShapingDecisionView({
   error = null,
   onSelectModel,
   onAction,
+  onRefreshStatus,
   onShowFullWorkItem,
 }: ShapingDecisionViewProps) {
   const [expandedFields, setExpandedFields] = useState<Set<string>>(
@@ -1936,6 +2012,14 @@ export function ShapingDecisionView({
     (action) =>
       action.kind === "request_changes" && action.launch_mode === null,
   );
+  const cancelAction = projection.actions.find(
+    (action) => action.kind === "cancel_run",
+  );
+  const lifecycle =
+    "lifecycle" in projection ? projection.lifecycle : null;
+  const refresh: ShapingRefreshProjection | null =
+    "refresh" in projection ? projection.refresh ?? null : null;
+  const refreshRunning = lifecycle?.refresh_running === true;
   const manualActions = recoveryActions(projection).filter(
     (action) =>
       projection.mode === "idea" ||
@@ -1970,7 +2054,11 @@ export function ShapingDecisionView({
         data-shaping-scroll-region="true"
         className="min-h-0 flex-1 overflow-y-auto"
       >
-        <section data-region="status" className="px-5 py-5">
+        <section
+          data-region="status"
+          data-refresh-running={lifecycle?.refresh_running ?? false}
+          className="px-5 py-5"
+        >
           <div className="flex items-start gap-3">
             <span
               aria-hidden="true"
@@ -1985,6 +2073,11 @@ export function ShapingDecisionView({
               {status.tone === "ready" ? "✓" : status.tone === "error" ? "!" : "→"}
             </span>
             <div className="min-w-0 flex-1">
+              {lifecycle === null ? null : (
+                <p className="text-[11px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
+                  {lifecycle.card_label}
+                </p>
+              )}
               <h3
                 id={`${fieldId}-shaping-decision`}
                 className="text-base font-semibold"
@@ -2003,6 +2096,49 @@ export function ShapingDecisionView({
               </button>
             </div>
           </div>
+          {refresh === null ? null : (
+            <div
+              data-shaping-refresh-state="true"
+              className="mt-4 space-y-2 border-l-2 border-border pl-3 text-xs leading-5 text-muted-foreground"
+            >
+              {refresh.last_checked_at === null ? null : (
+                <p data-refresh-indicator="last-checked">
+                  Last checked{" "}
+                  <time dateTime={refresh.last_checked_at}>
+                    {runCompletedAtFormatter.format(
+                      new Date(refresh.last_checked_at),
+                    )}
+                  </time>
+                </p>
+              )}
+              {refreshRunning && refresh.refreshing ? (
+                <p data-refresh-indicator="refreshing" role="status">
+                  Refreshing status…
+                </p>
+              ) : null}
+              {refreshRunning && refresh.stale ? (
+                <p data-refresh-indicator="stale">
+                  Status may be stale. The bounded refresh budget has stopped.
+                </p>
+              ) : null}
+              {!refreshRunning || refresh.refresh_failure === null ? null : (
+                <p data-refresh-indicator="refresh-failure" role="alert">
+                  Refresh failed: {refresh.refresh_failure.reason}
+                </p>
+              )}
+              {refreshRunning &&
+              (refresh.stale || refresh.refresh_failure !== null) ? (
+                <button
+                  type="button"
+                  disabled={busy || refresh.refreshing}
+                  onClick={onRefreshStatus}
+                  className="h-8 rounded-md border bg-secondary px-3 text-xs font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Refresh status
+                </button>
+              ) : null}
+            </div>
+          )}
           {error === null ? null : (
             <p
               className="mt-4 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs leading-5"
@@ -2232,6 +2368,16 @@ export function ShapingDecisionView({
             className="h-10 rounded-md border bg-secondary px-4 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
           >
             {requestChangesAction.label}
+          </button>
+        )}
+        {cancelAction === undefined ? null : (
+          <button
+            type="button"
+            disabled={busy || !cancelAction.enabled}
+            onClick={() => onAction(cancelAction)}
+            className="h-10 rounded-md border bg-secondary px-4 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {cancelAction.label}
           </button>
         )}
         {primaryAction === undefined ? null : (
@@ -2787,7 +2933,23 @@ export function DetailPanel({
     useState<ShapingLaunchFailureState | null>(null);
   const [shapingNewAttemptState, setShapingNewAttemptState] =
     useState<ShapingNewAttemptState | null>(null);
-  const [shapingDecisionBusy, setShapingDecisionBusy] = useState(false);
+  const [shapingDecisionBusyIdentities, setShapingDecisionBusyIdentities] =
+    useState<Set<string>>(() => new Set());
+  const shapingDecisionBusyRef = useRef<Set<string>>(new Set());
+  const [shapingRefreshUiState, setShapingRefreshUiState] =
+    useState<ShapingRefreshUiState | null>(null);
+  const [shapingRefreshRestartVersion, setShapingRefreshRestartVersion] =
+    useState(0);
+  const [pageVisible, setPageVisible] = useState(
+    () =>
+      typeof document === "undefined" ||
+      document.visibilityState === "visible",
+  );
+  const shapingRefreshControllerRef =
+    useRef<ShapingRefreshController | null>(null);
+  const shapingRefreshControllerIdentityRef = useRef<string | null>(null);
+  const shapingRefreshBindingRef = useRef<ShapingRefreshBinding | null>(null);
+  const shapingRefreshAppliedRestartVersionRef = useRef(0);
   const shapingItemKeyRef = useRef("");
   const [showFullWorkItem, setShowFullWorkItem] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
@@ -2879,6 +3041,34 @@ export function DetailPanel({
     shapingArtifactState?.itemKey === shapingItemKey
       ? shapingArtifactState
       : null;
+  const currentShapingRefreshBinding =
+    currentShapingState === null
+      ? null
+      : shapingRefreshBindingForState(item, currentShapingState);
+  useEffect(() => {
+    shapingRefreshBindingRef.current = currentShapingRefreshBinding;
+  }, [currentShapingRefreshBinding]);
+  const currentShapingRefreshIdentity =
+    currentShapingRefreshBinding?.identity ?? null;
+  const currentShapingRefreshRunStatus =
+    currentShapingRefreshBinding?.observation.run_status ?? null;
+  const currentShapingRefreshUpdatedAt =
+    currentShapingRefreshBinding?.observation.updated_at ?? null;
+  const currentShapingRefresh =
+    currentShapingRefreshBinding !== null &&
+    shapingRefreshUiState?.identity === currentShapingRefreshBinding.identity
+      ? {
+          last_checked_at:
+            shapingRefreshUiState.snapshot.last_checked_at === null
+              ? null
+              : new Date(
+                  shapingRefreshUiState.snapshot.last_checked_at,
+                ).toISOString(),
+          refreshing: shapingRefreshUiState.snapshot.refreshing,
+          stale: shapingRefreshUiState.snapshot.stale,
+          refresh_failure: shapingRefreshUiState.snapshot.refresh_failure,
+        }
+      : null;
   const currentShapingContext =
     currentShapingState === null
       ? null
@@ -2887,11 +3077,32 @@ export function DetailPanel({
           currentShapingState,
           shapingLaunchFailureState,
           shapingNewAttemptState,
+          currentShapingRefresh,
         );
   const shapingDecisionProjection =
     currentShapingContext === null
       ? null
       : shapingHandoffForItem(item, currentShapingContext);
+  const shapingDecisionIdentity =
+    shapingDecisionProjection === null ||
+    shapingDecisionProjection.mode === "hidden"
+      ? null
+      : JSON.stringify([
+          item.source_id,
+          goal.work_item_id,
+          shapingDecisionProjection.mode === "idea"
+            ? shapingDecisionProjection.target_phase
+            : shapingDecisionProjection.phase,
+          currentShapingRefreshBinding?.missionContentSha256 ??
+            currentShapingContext?.revision?.mission_content_sha256 ??
+            (shapingDecisionProjection.mode === "pre_ready"
+              ? shapingDecisionProjection.mission_content_sha256
+              : null),
+          currentShapingRefreshBinding?.shapingRunId ?? null,
+        ]);
+  const shapingDecisionBusy =
+    shapingDecisionIdentity !== null &&
+    shapingDecisionBusyIdentities.has(shapingDecisionIdentity);
   const decisionPicker =
     shapingDecisionProjection === null
       ? null
@@ -3176,6 +3387,206 @@ export function DetailPanel({
           },
     );
   }, [shapingItemKey]);
+
+  const refreshShapingRun = useCallback(
+    async (
+      observation: ShapingRefreshObservation,
+      signal: AbortSignal,
+    ): Promise<ShapingRefreshObservation> => {
+      const binding = shapingRefreshBindingRef.current;
+      if (
+        binding === null ||
+        binding.observation.work_item_id !== observation.work_item_id ||
+        binding.observation.run_status !== observation.run_status ||
+        binding.observation.updated_at !== observation.updated_at
+      ) {
+        throw new Error("The visible shaping run changed before refresh.");
+      }
+      const loaded = await requestShapingArtifacts(
+        binding.sourceId,
+        binding.workItemId,
+        signal,
+      );
+      if (signal.aborted) {
+        throw new Error("The shaping refresh was aborted.");
+      }
+      if (loaded === null || loaded.result === null) {
+        throw new Error(
+          loaded?.error ?? "Shaping run status could not be refreshed.",
+        );
+      }
+      const listing = loaded.result;
+      if (
+        listing.source_id !== binding.sourceId ||
+        listing.work_item_id !== binding.workItemId
+      ) {
+        throw new Error("The shaping refresh returned a different work item.");
+      }
+      const run = listing.runs.find(
+        (candidate) =>
+          candidate.shaping_run_id === binding.shapingRunId &&
+          candidate.mission.phase === binding.phase &&
+          candidate.mission.content_sha256 === binding.missionContentSha256,
+      );
+      if (run === undefined) {
+        throw new Error("The visible shaping run was absent from refresh.");
+      }
+      const hashes = await shapingGoalContractHashes(binding.item, listing);
+      const currentBinding = shapingRefreshBindingRef.current;
+      if (
+        signal.aborted ||
+        currentBinding?.identity !== binding.identity ||
+        currentBinding.itemKey !== binding.itemKey ||
+        shapingItemKeyRef.current !== binding.itemKey
+      ) {
+        throw new Error("The shaping refresh no longer matches this panel.");
+      }
+      setShapingArtifactState((current) =>
+        shapingRefreshBindingRef.current?.identity !== binding.identity ||
+        shapingItemKeyRef.current !== binding.itemKey
+          ? current
+          : {
+              itemKey: binding.itemKey,
+              listing,
+              currentGoalContractSha256: hashes.currentGoalContractSha256,
+              derivedGoalContractSha256: hashes.derivedGoalContractSha256,
+              loading: false,
+              error: null,
+            },
+      );
+      return {
+        work_item_id: binding.workItemId,
+        run_status: run.lifecycle.status,
+        updated_at: run.lifecycle.updated_at,
+      };
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const controller = createShapingRefreshController({
+      machine: boundedRefreshMachine,
+      setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimeout: (handle) => window.clearTimeout(handle),
+      now: () => Date.now(),
+      refresh: refreshShapingRun,
+    });
+    shapingRefreshControllerRef.current = controller;
+    const unsubscribe = controller.subscribe((snapshot) => {
+      const identity = shapingRefreshControllerIdentityRef.current;
+      if (identity !== null) {
+        setShapingRefreshUiState({ identity, snapshot });
+      }
+    });
+    return () => {
+      unsubscribe();
+      controller.stop();
+      if (shapingRefreshControllerRef.current === controller) {
+        shapingRefreshControllerRef.current = null;
+      }
+      shapingRefreshControllerIdentityRef.current = null;
+    };
+  }, [refreshShapingRun]);
+
+  useEffect(() => {
+    function handleVisibilityChange(): void {
+      const visible = document.visibilityState === "visible";
+      setPageVisible(visible);
+      if (visible) {
+        setShapingRefreshRestartVersion((current) => current + 1);
+      }
+    }
+
+    function handleFocus(): void {
+      if (document.visibilityState === "visible") {
+        setPageVisible(true);
+        setShapingRefreshRestartVersion((current) => current + 1);
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = shapingRefreshControllerRef.current;
+    if (controller === null) {
+      return;
+    }
+    const binding = shapingRefreshBindingRef.current;
+    const nextIdentity = currentShapingRefreshIdentity;
+    if (
+      (binding?.identity ?? null) !== nextIdentity ||
+      (binding?.observation.run_status ?? null) !==
+        currentShapingRefreshRunStatus ||
+      (binding?.observation.updated_at ?? null) !==
+        currentShapingRefreshUpdatedAt
+    ) {
+      return;
+    }
+    const previousIdentity = shapingRefreshControllerIdentityRef.current;
+    if (previousIdentity !== null && previousIdentity !== nextIdentity) {
+      controller.stop();
+    }
+    shapingRefreshControllerIdentityRef.current = nextIdentity;
+
+    if (
+      binding !== null &&
+      binding.observation.run_status === "terminal"
+    ) {
+      if (controller.snapshot().active) {
+        controller.update({
+          ...binding.observation,
+          visible: pageVisible,
+        });
+        controller.stop();
+      }
+      return;
+    }
+
+    if (binding !== null && shapingDecisionBusy) {
+      controller.update({
+        ...binding.observation,
+        visible: false,
+      });
+      return;
+    }
+
+    if (
+      binding === null ||
+      !shapingEligible ||
+      showFullWorkItem
+    ) {
+      if (previousIdentity === nextIdentity && controller.snapshot().active) {
+        controller.stop();
+      }
+      return;
+    }
+
+    const explicitRefresh =
+      shapingRefreshAppliedRestartVersionRef.current !==
+      shapingRefreshRestartVersion;
+    shapingRefreshAppliedRestartVersionRef.current =
+      shapingRefreshRestartVersion;
+    controller.update({
+      ...binding.observation,
+      visible: pageVisible,
+      ...(explicitRefresh ? { explicit_refresh: true } : {}),
+    });
+  }, [
+    currentShapingRefreshIdentity,
+    currentShapingRefreshRunStatus,
+    currentShapingRefreshUpdatedAt,
+    pageVisible,
+    shapingDecisionBusy,
+    shapingEligible,
+    shapingRefreshRestartVersion,
+    showFullWorkItem,
+  ]);
 
   const attemptClose = useCallback(() => {
     if (
@@ -3572,9 +3983,14 @@ export function DetailPanel({
   async function handleShapingDecisionAction(
     action: ShapingActionProjection,
   ): Promise<void> {
-    if (shapingDecisionProjection === null) {
+    if (
+      shapingDecisionProjection === null ||
+      shapingDecisionIdentity === null ||
+      shapingDecisionBusyRef.current.has(shapingDecisionIdentity)
+    ) {
       return;
     }
+    const operationIdentity = shapingDecisionIdentity;
     const operationItemKey = shapingItemKey;
     const request = shapingActionRequest({
       source_id: item.source_id,
@@ -3606,7 +4022,19 @@ export function DetailPanel({
       return;
     }
 
-    setShapingDecisionBusy(true);
+    shapingDecisionBusyRef.current.add(operationIdentity);
+    setShapingDecisionBusyIdentities(
+      new Set(shapingDecisionBusyRef.current),
+    );
+    if (shapingDecisionProjection.mode === "run_state") {
+      const binding = shapingRefreshBindingRef.current;
+      if (binding !== null) {
+        shapingRefreshControllerRef.current?.update({
+          ...binding.observation,
+          visible: false,
+        });
+      }
+    }
     setShapingActionError(null);
     try {
       const response = await fetch(request.route, {
@@ -3702,7 +4130,13 @@ export function DetailPanel({
         operationItemKey,
       );
     } finally {
-      setShapingDecisionBusy(false);
+      shapingDecisionBusyRef.current.delete(operationIdentity);
+      setShapingDecisionBusyIdentities(
+        new Set(shapingDecisionBusyRef.current),
+      );
+      if (shapingItemKeyRef.current === operationItemKey) {
+        setShapingRefreshRestartVersion((current) => current + 1);
+      }
     }
   }
 
@@ -4399,6 +4833,9 @@ export function DetailPanel({
                 }
               }}
               onAction={(action) => void handleShapingDecisionAction(action)}
+              onRefreshStatus={() =>
+                setShapingRefreshRestartVersion((current) => current + 1)
+              }
               onShowFullWorkItem={() => setShowFullWorkItem(true)}
             />
           )
