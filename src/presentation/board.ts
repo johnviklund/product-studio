@@ -2,13 +2,26 @@ import { z } from "zod";
 
 import {
   workItemIdSchema,
+  type GoalContract,
   type WorkItemCapture,
   type WorkItemAttention,
   type WorkItemPhase,
   type WorkItemStatus,
 } from "../domain/work-item";
 import { INBOX_SOURCE_ID } from "../domain/portfolio-source";
+import type {
+  ShapingModelPickerOption,
+  WorkflowModelUse,
+} from "../domain/portfolio-preferences";
 import type { ExternalResultSubmission } from "../domain/result";
+import type {
+  BrainstormResultSubmission,
+  PlanChecklistEntry,
+  PlanResultSubmission,
+  ShapingPhase,
+  ShapingResultSubmission,
+  SpecResultSubmission,
+} from "../domain/shaping";
 import {
   ALLOWED_PHASE_TRANSITIONS,
   validatePhaseTransition as validateDomainPhaseTransition,
@@ -55,6 +68,284 @@ export type BoardColumnId = BoardColumn["id"];
 export type DetailPanelMode = "capture" | "governed";
 export type MissionHandoffMode = "active" | "repair" | "hidden";
 
+export const PREVIEW_PROSE_MAX_CHARS = 320 as const;
+export const PREVIEW_LIST_MAX_ITEMS = 4 as const;
+export const PREVIEW_LIST_ITEM_MAX_CHARS = 160 as const;
+export const PREVIEW_CHECKLIST_MAX_ENTRIES = 6 as const;
+export const PREVIEW_EXPANDER_LABEL = {
+  prose: "Show full text",
+  collection_prefix: "Show all",
+} as const;
+
+export interface ShapingTextPreview {
+  full: string;
+  shown: string;
+  total: number;
+  truncated: boolean;
+  expander_label: string | null;
+}
+
+export interface ShapingListPreview {
+  full: string[];
+  shown: ShapingTextPreview[];
+  total: number;
+  truncated: boolean;
+  expander_label: string | null;
+}
+
+export interface ShapingChecklistPreview {
+  full: PlanChecklistEntry[];
+  shown: Array<{
+    id: string;
+    step: ShapingTextPreview;
+    verification_check: ShapingTextPreview;
+  }>;
+  total: number;
+  truncated: boolean;
+  expander_label: string | null;
+}
+
+export type ShapingProjectionActionKind =
+  | "start_brainstorm"
+  | "launch_phase"
+  | "cancel_run"
+  | "use_brainstorm_result"
+  | "approve_spec"
+  | "request_changes"
+  | "replan_with_updated_contract"
+  | "retry_launch"
+  | "open_new_attempt"
+  | "prepare_manual_recovery"
+  | "open_advanced_recovery"
+  | "retry_manual_recovery"
+  | "copy_manual_task"
+  | "import_manual_result";
+
+export interface ShapingActionProjection {
+  kind: ShapingProjectionActionKind;
+  label: string;
+  launch_mode: "connected" | "manual" | null;
+  primary: boolean;
+  enabled: boolean;
+  shaping_run_id?: string;
+}
+
+export interface ShapingProjectedModelOption
+  extends ShapingModelPickerOption {
+  current_revision: boolean;
+}
+
+export interface ShapingModelPickerProjection {
+  seat: ShapingPhase;
+  options: ShapingProjectedModelOption[];
+  selected_model: string | null;
+  recommendation_note: string | null;
+  reuse_warning: string | null;
+}
+
+export interface ShapingModelUseProjection {
+  seat: ShapingPhase;
+  requested_model: string;
+  effective_model: string;
+}
+
+export interface ShapingRefreshProjection {
+  last_checked_at: string | null;
+  refreshing: boolean;
+  stale: boolean;
+  refresh_failure: { reason: string } | null;
+}
+
+export interface ShapingRunProjectionInput {
+  shaping_run_id: string;
+  status: "starting" | "running" | "terminal";
+  terminal_outcome:
+    | "completed"
+    | "missing_permission"
+    | "failed"
+    | "cancelled"
+    | "timed_out"
+    | "interrupted"
+    | null;
+  latest_update: string | null;
+  sanitized_reason: string | null;
+  denied_operation_kind: string | null;
+  timeout_limit: string | null;
+}
+
+export type ShapingManualRecoveryProjectionInput =
+  | { state: "loading" }
+  | {
+      state: "ready";
+      task: string;
+      instruction_path: string;
+      ingress_path: string;
+    }
+  | { state: "failure"; reason: string }
+  | { state: "retry"; reason: string }
+  | {
+      state: "copy";
+      copied_target: "task" | "instruction" | "ingress";
+      task: string;
+      instruction_path: string;
+      ingress_path: string;
+    };
+
+export type ShapingRevisionResultProjectionInput =
+  | { status: "none" }
+  | {
+      status: "applied";
+      result_content_sha256: string;
+      result: ShapingResultSubmission;
+    }
+  | { status: "repair"; failing_component: string };
+
+export interface ShapingRevisionProjectionInput {
+  mission_content_sha256: string;
+  result: ShapingRevisionResultProjectionInput;
+  plan_goal_contract_sha256?: string;
+  plan_goal_version?: number;
+}
+
+export interface ShapingSurfaceContext {
+  expected_shaping_state_sha256: string;
+  revision: ShapingRevisionProjectionInput | null;
+  run: ShapingRunProjectionInput | null;
+  models: {
+    status: "available" | "unavailable";
+    reason: string | null;
+    available_model_ids: readonly string[];
+    model_use: readonly WorkflowModelUse[];
+    model_picker_options: Record<
+      ShapingPhase,
+      readonly ShapingModelPickerOption[]
+    >;
+  };
+  refresh?: ShapingRefreshProjection;
+  derived_goal_contract_sha256?: string | null;
+  current_goal_contract_sha256?: string | null;
+  post_commit_launch_failure?: {
+    manifest_outcome: "applied";
+    decision_id: string;
+    locked_model: string;
+    reason: string;
+  } | null;
+  manual_recovery?: ShapingManualRecoveryProjectionInput | null;
+}
+
+export type ShapingLifecycleState =
+  | "starting"
+  | "running"
+  | "blocked"
+  | "failed"
+  | "timed_out"
+  | "cancelled"
+  | "interrupted"
+  | "ready"
+  | "missing_result"
+  | "finishing"
+  | "needs_repair";
+
+export interface ShapingLifecycleProjection {
+  state: ShapingLifecycleState;
+  card_label: string;
+  headline: string;
+  copy: string;
+  refresh_running: boolean;
+  actions: ShapingActionProjection[];
+}
+
+interface ShapingProjectionBase {
+  phase: ShapingPhase;
+  expected_shaping_state_sha256: string;
+  provenance: ShapingModelUseProjection[];
+  actions: ShapingActionProjection[];
+}
+
+interface ShapingRequestChangesProjection {
+  feedback_required: true;
+  model_picker?: ShapingModelPickerProjection;
+  runtime_unavailable?: string;
+  actions: ShapingActionProjection[];
+}
+
+interface ShapingReadyProjectionBase extends ShapingProjectionBase {
+  mode: "ready";
+  lifecycle: ShapingLifecycleProjection;
+  bindings: {
+    expected_mission_content_sha256: string;
+    expected_result_content_sha256: string;
+    expected_shaping_state_sha256: string;
+  };
+  request_changes: ShapingRequestChangesProjection;
+}
+
+export type BrainstormReadyProjection = ShapingReadyProjectionBase & {
+  phase: "brainstorm";
+  result: BrainstormResultSubmission;
+  sections: {
+    summary: {
+      problem_statement: ShapingTextPreview;
+      approach: ShapingTextPreview;
+    };
+    non_goals: ShapingListPreview;
+    unresolved_questions: ShapingListPreview;
+    provenance: ShapingModelUseProjection[];
+    next_step?: ShapingModelPickerProjection;
+    runtime_unavailable?: string;
+  };
+};
+
+export type SpecReadyProjection = ShapingReadyProjectionBase & {
+  phase: "spec";
+  result: SpecResultSubmission;
+  bindings: ShapingReadyProjectionBase["bindings"] & {
+    goal_contract_sha256: string;
+  };
+  governed_contract: {
+    contract: GoalContract;
+    goal_contract_sha256: string;
+    truncation: {
+      purpose: boolean;
+      acceptance_criteria: boolean;
+      non_goals: boolean;
+      allowed_scope: boolean;
+      review_ready: boolean;
+    };
+  };
+  sections: {
+    summary: { purpose: ShapingTextPreview };
+    criteria: ShapingListPreview;
+    governed_fields: {
+      pointer: string;
+      non_goals: ShapingListPreview;
+      allowed_scope: ShapingListPreview;
+      review_ready: ShapingListPreview;
+    };
+    provenance: ShapingModelUseProjection[];
+    next_step?: ShapingModelPickerProjection;
+    runtime_unavailable?: string;
+  };
+};
+
+export type PlanReadyProjection = ShapingReadyProjectionBase & {
+  phase: "plan";
+  result: PlanResultSubmission;
+  sections: {
+    summary: { summary: ShapingTextPreview };
+    checklist: ShapingChecklistPreview;
+    unresolved_questions: ShapingListPreview;
+    provenance: ShapingModelUseProjection[];
+    advanced_recovery: {
+      relevant_skills: string[];
+      product_doc_impacts: string[];
+      todo_impacts: string[];
+    };
+  };
+  execute_approval_available: false;
+  execute_approval_message: "Execute approval is not available in this slice";
+};
+
 export type ShapingHandoffProjection =
   | {
       mode: "active";
@@ -71,12 +362,110 @@ export type ShapingHandoffProjection =
       can_import: true;
     }
   | {
+      mode: "idea";
+      phase: "idea";
+      target_phase: "brainstorm";
+      expected_shaping_state_sha256: string | null;
+      card_label: "Idea";
+      headline: "Start Brainstorm";
+      model_picker?: ShapingModelPickerProjection;
+      runtime_unavailable?: string;
+      actions: ShapingActionProjection[];
+    }
+  | (ShapingProjectionBase & {
+      mode: "pre_ready";
+      lifecycle: null;
+      mission_content_sha256: string | null;
+      card_label: string;
+      headline: string;
+      copy: string;
+      model_picker?: ShapingModelPickerProjection;
+      runtime_unavailable?: string;
+    })
+  | (ShapingProjectionBase & {
+      mode: "run_state";
+      lifecycle: ShapingLifecycleProjection;
+      run: ShapingRunProjectionInput;
+      refresh: ShapingRefreshProjection;
+    })
+  | BrainstormReadyProjection
+  | SpecReadyProjection
+  | PlanReadyProjection
+  | (ShapingProjectionBase & {
+      mode: "post_commit_launch_failure";
+      decision_id: string;
+      locked_model: string;
+      locked_model_unavailable: boolean;
+      reason: string;
+      runtime_unavailable?: string;
+      bindings: {
+        decision_id: string;
+        expected_shaping_state_sha256: string;
+      };
+    })
+  | (ShapingProjectionBase & {
+      mode: "terminal_run_failure";
+      lifecycle: ShapingLifecycleProjection;
+      run: ShapingRunProjectionInput;
+      model_picker?: ShapingModelPickerProjection;
+      runtime_unavailable?: string;
+      manual_recovery_action: ShapingActionProjection;
+    })
+  | (ShapingProjectionBase & {
+      mode: "manual_recovery";
+      recovery: ShapingManualRecoveryProjectionInput;
+    })
+  | (ShapingProjectionBase & {
+      mode: "plan_result_superseded";
+      phase: "plan";
+      result: PlanResultSubmission;
+      reason: string;
+      bindings: {
+        expected_mission_content_sha256: string;
+        expected_result_content_sha256: string;
+        expected_shaping_state_sha256: string;
+        goal_contract_sha256: string;
+      };
+      model_picker?: ShapingModelPickerProjection;
+      runtime_unavailable?: string;
+      request_changes: ShapingRequestChangesProjection;
+    })
+  | (ShapingProjectionBase & {
+      mode: "repair";
+      lifecycle: ShapingLifecycleProjection;
+      failing_component: string;
+    })
+  | {
       mode: "hidden";
       phase: null;
       required_input: null;
       can_compile: false;
       can_import: false;
     };
+
+export type LegacyShapingHandoffProjection = Extract<
+  ShapingHandoffProjection,
+  { mode: "active" | "idea" | "hidden" }
+>;
+
+export type DecisionFirstShapingHandoffProjection = Exclude<
+  ShapingHandoffProjection,
+  { mode: "active" }
+>;
+
+export interface ShapingHandoffItemProjectionInput {
+  source_id: string;
+  work_item: {
+    goal?: {
+      capture?: WorkItemCapture;
+      goal_contract?: GoalContract;
+    };
+    state: {
+      phase: WorkItemPhase;
+      status: WorkItemStatus;
+    };
+  };
+}
 
 export type ConnectedExecuteProjection =
   | {
@@ -345,20 +734,505 @@ export function detailPanelModeForItem(item: {
     : "governed";
 }
 
-export function shapingHandoffForItem(item: {
-  source_id: string;
-  work_item: {
-    state: {
-      phase: WorkItemPhase;
-      status: WorkItemStatus;
-    };
+const SHAPING_PHASE_ORDER = ["brainstorm", "spec", "plan"] as const;
+const DEFAULT_SHAPING_REFRESH: ShapingRefreshProjection = {
+  last_checked_at: null,
+  refreshing: false,
+  stale: false,
+  refresh_failure: null,
+};
+
+function phaseLabel(phase: ShapingPhase): string {
+  return `${phase[0]!.toUpperCase()}${phase.slice(1)}`;
+}
+
+function clampAtWordBoundary(value: string, maximum: number): string {
+  if (value.length <= maximum) {
+    return value;
+  }
+  const prefix = value.slice(0, maximum);
+  const boundary = prefix.search(/\s+\S*$/u);
+  const clamped = boundary > 0 ? prefix.slice(0, boundary) : prefix;
+  return `${clamped.trimEnd()}…`;
+}
+
+export function previewShapingText(
+  value: string,
+  maximum: number = PREVIEW_PROSE_MAX_CHARS,
+): ShapingTextPreview {
+  const truncated = value.length > maximum;
+  return {
+    full: value,
+    shown: truncated ? clampAtWordBoundary(value, maximum) : value,
+    total: value.length,
+    truncated,
+    expander_label: truncated ? PREVIEW_EXPANDER_LABEL.prose : null,
   };
-}): ShapingHandoffProjection {
+}
+
+export function previewShapingList(
+  values: readonly string[],
+): ShapingListPreview {
+  const shown = values
+    .slice(0, PREVIEW_LIST_MAX_ITEMS)
+    .map((value) => previewShapingText(value, PREVIEW_LIST_ITEM_MAX_CHARS));
+  const truncated =
+    values.length > PREVIEW_LIST_MAX_ITEMS ||
+    shown.some((value) => value.truncated);
+  return {
+    full: [...values],
+    shown,
+    total: values.length,
+    truncated,
+    expander_label: truncated
+      ? `${PREVIEW_EXPANDER_LABEL.collection_prefix} ${values.length}`
+      : null,
+  };
+}
+
+export function previewShapingChecklist(
+  entries: readonly PlanChecklistEntry[],
+): ShapingChecklistPreview {
+  const shown = entries
+    .slice(0, PREVIEW_CHECKLIST_MAX_ENTRIES)
+    .map((entry) => ({
+      id: entry.id,
+      step: previewShapingText(entry.step, PREVIEW_LIST_ITEM_MAX_CHARS),
+      verification_check: previewShapingText(
+        entry.verification_check,
+        PREVIEW_LIST_ITEM_MAX_CHARS,
+      ),
+    }));
+  const truncated =
+    entries.length > PREVIEW_CHECKLIST_MAX_ENTRIES ||
+    shown.some(
+      (entry) => entry.step.truncated || entry.verification_check.truncated,
+    );
+  return {
+    full: entries.map((entry) => ({ ...entry })),
+    shown,
+    total: entries.length,
+    truncated,
+    expander_label: truncated
+      ? `${PREVIEW_EXPANDER_LABEL.collection_prefix} ${entries.length}`
+      : null,
+  };
+}
+
+function shapingAction(
+  kind: ShapingProjectionActionKind,
+  label: string,
+  input: {
+    launch_mode?: "connected" | "manual" | null;
+    primary?: boolean;
+    enabled?: boolean;
+    shaping_run_id?: string;
+  } = {},
+): ShapingActionProjection {
+  return {
+    kind,
+    label,
+    launch_mode: input.launch_mode ?? null,
+    primary: input.primary ?? false,
+    enabled: input.enabled ?? true,
+    ...(input.shaping_run_id === undefined
+      ? {}
+      : { shaping_run_id: input.shaping_run_id }),
+  };
+}
+
+function currentRevisionModel(
+  phase: ShapingPhase,
+  uses: readonly WorkflowModelUse[],
+): string | null {
+  const current = uses.find((use) => use.seat === phase);
+  return current?.effective_model ?? current?.requested_model ?? null;
+}
+
+function projectedPicker(
+  context: ShapingSurfaceContext,
+  seat: ShapingPhase,
+  currentModel: string | null = null,
+): ShapingModelPickerProjection | null {
+  if (
+    context.models.status !== "available" ||
+    context.models.available_model_ids.length === 0
+  ) {
+    return null;
+  }
+  const source = [...context.models.model_picker_options[seat]];
+  if (source.length === 0) {
+    return null;
+  }
+  const configuredOrder = new Map(
+    source.map((option, index) => [option.model_id, index]),
+  );
+  const saved = source.find((option) => option.saved_preference);
+  const recommended = source.find((option) => option.recommended);
+  const selected =
+    currentModel !== null && source.some((option) => option.model_id === currentModel)
+      ? currentModel
+      : saved !== undefined && saved.used_by_seats.length === 0
+        ? saved.model_id
+        : recommended?.model_id ?? saved?.model_id ?? null;
+  const options = source
+    .map((option): ShapingProjectedModelOption => ({
+      ...option,
+      preselected: option.model_id === selected,
+      current_revision:
+        currentModel !== null && option.model_id === currentModel,
+    }))
+    .sort((left, right) => {
+      const usedOrder = Number(left.used_by_seats.length > 0) -
+        Number(right.used_by_seats.length > 0);
+      return usedOrder !== 0
+        ? usedOrder
+        : (configuredOrder.get(left.model_id) ?? Number.MAX_SAFE_INTEGER) -
+            (configuredOrder.get(right.model_id) ?? Number.MAX_SAFE_INTEGER);
+    });
+  const selectedOption = options.find((option) => option.preselected);
+  const everyModelUsed = options.every(
+    (option) => option.used_by_seats.length > 0,
+  );
+  return {
+    seat,
+    options,
+    selected_model: selectedOption?.model_id ?? null,
+    recommendation_note: everyModelUsed
+      ? "Every available model has already been used in this workflow."
+      : null,
+    reuse_warning: selectedOption?.reuse_warning ?? null,
+  };
+}
+
+function projectedProvenance(
+  phase: ShapingPhase,
+  uses: readonly WorkflowModelUse[],
+): ShapingModelUseProjection[] {
+  const maximumSeat = SHAPING_PHASE_ORDER.indexOf(phase);
+  return SHAPING_PHASE_ORDER.slice(0, maximumSeat + 1).map((seat) => {
+    const use = uses.find((candidate) => candidate.seat === seat);
+    return {
+      seat,
+      requested_model: use?.requested_model ?? "unknown",
+      effective_model: use?.effective_model ?? "unknown",
+    };
+  });
+}
+
+function unavailableReason(context: ShapingSurfaceContext): string {
+  return context.models.reason ?? "No connected shaping models are available.";
+}
+
+function requestChangesProjection(
+  context: ShapingSurfaceContext,
+  phase: ShapingPhase,
+): ShapingRequestChangesProjection {
+  const picker = projectedPicker(
+    context,
+    phase,
+    currentRevisionModel(phase, context.models.model_use),
+  );
+  const unavailable = picker === null;
+  return {
+    feedback_required: true,
+    ...(picker === null
+      ? { runtime_unavailable: unavailableReason(context) }
+      : { model_picker: picker }),
+    actions: [
+      shapingAction("request_changes", "Request changes & rerun", {
+        launch_mode: "connected",
+        primary: !unavailable,
+        enabled: !unavailable,
+      }),
+      shapingAction("request_changes", "Request changes & prepare rerun", {
+        launch_mode: "manual",
+        primary: unavailable,
+      }),
+    ],
+  };
+}
+
+function phaseDecisionActions(
+  context: ShapingSurfaceContext,
+  phase: "brainstorm" | "spec",
+): {
+  actions: ShapingActionProjection[];
+  picker: ShapingModelPickerProjection | null;
+} {
+  const nextSeat = phase === "brainstorm" ? "spec" : "plan";
+  const picker = projectedPicker(context, nextSeat);
+  const unavailable = picker === null;
+  const connected =
+    phase === "brainstorm"
+      ? shapingAction("use_brainstorm_result", "Use result & run Spec", {
+          launch_mode: "connected",
+          primary: !unavailable,
+          enabled: !unavailable,
+        })
+      : shapingAction("approve_spec", "Approve & run Plan", {
+          launch_mode: "connected",
+          primary: !unavailable,
+          enabled: !unavailable,
+        });
+  const manual =
+    phase === "brainstorm"
+      ? shapingAction("use_brainstorm_result", "Use result & prepare Spec", {
+          launch_mode: "manual",
+          primary: unavailable,
+        })
+      : shapingAction("approve_spec", "Approve & prepare Plan", {
+          launch_mode: "manual",
+          primary: unavailable,
+        });
+  return {
+    picker,
+    actions: [
+      shapingAction("request_changes", "Request changes"),
+      connected,
+      manual,
+    ],
+  };
+}
+
+function preReadyProjection(
+  phase: ShapingPhase,
+  context: ShapingSurfaceContext,
+): Extract<ShapingHandoffProjection, { mode: "pre_ready" }> {
+  const picker = projectedPicker(context, phase);
+  const unavailable = picker === null;
+  const label = phaseLabel(phase);
+  const actions = [
+    shapingAction("launch_phase", `Start ${label}`, {
+      launch_mode: "connected",
+      primary: !unavailable,
+      enabled: !unavailable,
+    }),
+    shapingAction("prepare_manual_recovery", "Prepare manual recovery", {
+      launch_mode: "manual",
+      primary: unavailable,
+      enabled: context.revision !== null,
+    }),
+  ];
+  return {
+    mode: "pre_ready",
+    phase,
+    expected_shaping_state_sha256:
+      context.expected_shaping_state_sha256,
+    provenance: projectedProvenance(phase, context.models.model_use),
+    actions,
+    lifecycle: null,
+    mission_content_sha256:
+      context.revision?.mission_content_sha256 ?? null,
+    card_label: label,
+    headline: `Start ${label}`,
+    copy: `Run the current ${label} mission to produce one applied result.`,
+    ...(picker === null
+      ? { runtime_unavailable: unavailableReason(context) }
+      : { model_picker: picker }),
+  };
+}
+
+function runLifecycleProjection(
+  phase: ShapingPhase,
+  run: ShapingRunProjectionInput,
+): ShapingLifecycleProjection {
+  const label = phaseLabel(phase);
+  if (run.status === "starting") {
+    return {
+      state: "starting",
+      card_label: `${label} · Active`,
+      headline: `${label} starting`,
+      copy: "The agent is being launched.",
+      refresh_running: true,
+      actions: [
+        shapingAction("cancel_run", "Cancel", {
+          shaping_run_id: run.shaping_run_id,
+        }),
+      ],
+    };
+  }
+  if (run.status === "running") {
+    return {
+      state: "running",
+      card_label: `${label} · Active`,
+      headline: `${label} running`,
+      copy: run.latest_update ?? "The agent is working on this shaping mission.",
+      refresh_running: true,
+      actions: [
+        shapingAction("cancel_run", "Cancel", {
+          shaping_run_id: run.shaping_run_id,
+        }),
+      ],
+    };
+  }
+
+  const retry = shapingAction("launch_phase", `Retry ${label}`, {
+    launch_mode: "connected",
+    primary: true,
+  });
+  switch (run.terminal_outcome) {
+    case "missing_permission":
+      return {
+        state: "blocked",
+        card_label: `${label} · Blocked`,
+        headline: `${label} blocked`,
+        copy: `The agent requested an operation outside this run's write policy.${
+          run.denied_operation_kind === null
+            ? ""
+            : ` Operation: ${run.denied_operation_kind}.`
+        }`,
+        refresh_running: false,
+        actions: [retry],
+      };
+    case "failed":
+      return {
+        state: "failed",
+        card_label: `${label} · Failed`,
+        headline: `${label} failed`,
+        copy: run.sanitized_reason ?? "The agent or result validation failed.",
+        refresh_running: false,
+        actions: [
+          retry,
+          shapingAction("prepare_manual_recovery", "Prepare manual recovery", {
+            launch_mode: "manual",
+          }),
+        ],
+      };
+    case "timed_out":
+      return {
+        state: "timed_out",
+        card_label: `${label} · Failed`,
+        headline: `${label} timed out`,
+        copy: `${run.timeout_limit ?? "The configured limit"} was reached.`,
+        refresh_running: false,
+        actions: [retry],
+      };
+    case "cancelled":
+      return {
+        state: "cancelled",
+        card_label: `${label} · Failed`,
+        headline: `${label} cancelled`,
+        copy: "You cancelled this run.",
+        refresh_running: false,
+        actions: [retry],
+      };
+    case "interrupted":
+      return {
+        state: "interrupted",
+        card_label: `${label} · Failed`,
+        headline: `${label} interrupted`,
+        copy:
+          "The agent process was no longer running when Product Studio recovered this run.",
+        refresh_running: false,
+        actions: [retry],
+      };
+    case "completed":
+      return {
+        state: "missing_result",
+        card_label: `${label} · Failed`,
+        headline: `${label} finished without a usable result`,
+        copy: "The run reported success but published no valid result bundle.",
+        refresh_running: false,
+        actions: [retry],
+      };
+    case null:
+      return {
+        state: "needs_repair",
+        card_label: `${label} · Needs repair`,
+        headline: `${label} result needs repair`,
+        copy: "The terminal run has no terminal outcome.",
+        refresh_running: false,
+        actions: [shapingAction("open_advanced_recovery", "Advanced recovery")],
+      };
+  }
+}
+
+function repairProjection(
+  phase: ShapingPhase,
+  context: ShapingSurfaceContext,
+  failingComponent: string,
+): Extract<ShapingHandoffProjection, { mode: "repair" }> {
+  const label = phaseLabel(phase);
+  const actions = [
+    shapingAction("open_advanced_recovery", "Advanced recovery"),
+  ];
+  return {
+    mode: "repair",
+    phase,
+    expected_shaping_state_sha256:
+      context.expected_shaping_state_sha256,
+    provenance: projectedProvenance(phase, context.models.model_use),
+    actions,
+    failing_component: failingComponent,
+    lifecycle: {
+      state: "needs_repair",
+      card_label: `${label} · Needs repair`,
+      headline: `${label} result needs repair`,
+      copy: `The applied marker disagrees with ${failingComponent}.`,
+      refresh_running: false,
+      actions,
+    },
+  };
+}
+
+function manualRecoveryActions(
+  recovery: ShapingManualRecoveryProjectionInput,
+): ShapingActionProjection[] {
+  switch (recovery.state) {
+    case "loading":
+      return [];
+    case "failure":
+    case "retry":
+      return [
+        shapingAction("retry_manual_recovery", "Retry manual recovery", {
+          primary: true,
+        }),
+      ];
+    case "ready":
+    case "copy":
+      return [
+        shapingAction("copy_manual_task", "Copy manual task", {
+          primary: true,
+        }),
+        shapingAction("import_manual_result", "Import result"),
+      ];
+  }
+}
+
+function isBrainstormResult(
+  result: ShapingResultSubmission,
+): result is BrainstormResultSubmission {
+  return result.identity.phase === "brainstorm";
+}
+
+function isSpecResult(
+  result: ShapingResultSubmission,
+): result is SpecResultSubmission {
+  return result.identity.phase === "spec";
+}
+
+function isPlanResult(
+  result: ShapingResultSubmission,
+): result is PlanResultSubmission {
+  return result.identity.phase === "plan";
+}
+
+export function shapingHandoffForItem(
+  item: ShapingHandoffItemProjectionInput,
+): LegacyShapingHandoffProjection;
+export function shapingHandoffForItem(
+  item: ShapingHandoffItemProjectionInput,
+  context: ShapingSurfaceContext,
+): DecisionFirstShapingHandoffProjection;
+export function shapingHandoffForItem(
+  item: ShapingHandoffItemProjectionInput,
+  context?: ShapingSurfaceContext,
+): ShapingHandoffProjection {
   const { phase, status } = item.work_item.state;
   if (
     item.source_id === INBOX_SOURCE_ID ||
-    status !== "active" ||
-    (phase !== "brainstorm" && phase !== "spec")
+    status !== "active"
   ) {
     return {
       mode: "hidden",
@@ -369,21 +1243,451 @@ export function shapingHandoffForItem(item: {
     };
   }
 
-  return phase === "brainstorm"
-    ? {
+  if (phase === "idea") {
+    const picker = context === undefined
+      ? null
+      : projectedPicker(context, "brainstorm");
+    const unavailable = picker === null;
+    return {
+      mode: "idea",
+      phase: "idea",
+      target_phase: "brainstorm",
+      expected_shaping_state_sha256:
+        context?.expected_shaping_state_sha256 ?? null,
+      card_label: "Idea",
+      headline: "Start Brainstorm",
+      actions: [
+        shapingAction("start_brainstorm", "Start Brainstorm", {
+          launch_mode: "connected",
+          primary: !unavailable,
+          enabled: !unavailable,
+        }),
+        shapingAction(
+          "start_brainstorm",
+          "Start Brainstorm without a model",
+          { launch_mode: "manual", primary: unavailable },
+        ),
+      ],
+      ...(picker === null
+        ? {
+            runtime_unavailable:
+              context === undefined
+                ? "Shaping availability has not loaded."
+                : unavailableReason(context),
+          }
+        : { model_picker: picker }),
+    };
+  }
+
+  if (phase !== "brainstorm" && phase !== "spec" && phase !== "plan") {
+    return {
+      mode: "hidden",
+      phase: null,
+      required_input: null,
+      can_compile: false,
+      can_import: false,
+    };
+  }
+
+  if (context === undefined) {
+    if (phase === "brainstorm") {
+      return {
         mode: "active",
         phase,
         required_input: "none",
         can_compile: true,
         can_import: true,
-      }
-    : {
+      };
+    }
+    if (phase === "spec") {
+      return {
         mode: "active",
         phase,
         required_input: "brainstorm_acceptance_sha256",
         can_compile: true,
         can_import: true,
       };
+    }
+    return {
+      mode: "hidden",
+      phase: null,
+      required_input: null,
+      can_compile: false,
+      can_import: false,
+    };
+  }
+
+  const provenance = projectedProvenance(
+    phase,
+    context.models.model_use,
+  );
+  const common = {
+    phase,
+    expected_shaping_state_sha256:
+      context.expected_shaping_state_sha256,
+    provenance,
+  };
+
+  if (context.revision?.result.status === "repair") {
+    return repairProjection(
+      phase,
+      context,
+      context.revision.result.failing_component,
+    );
+  }
+
+  if (context.manual_recovery !== null && context.manual_recovery !== undefined) {
+    const actions = manualRecoveryActions(context.manual_recovery);
+    return {
+      ...common,
+      mode: "manual_recovery",
+      recovery: context.manual_recovery,
+      actions,
+    };
+  }
+
+  const applied =
+    context.revision?.result.status === "applied"
+      ? context.revision.result
+      : null;
+  if (applied !== null && context.run?.status !== "terminal" && context.run !== null) {
+    const actions: ShapingActionProjection[] = [];
+    const label = phaseLabel(phase);
+    return {
+      ...common,
+      mode: "run_state",
+      actions,
+      run: context.run,
+      refresh: context.refresh ?? DEFAULT_SHAPING_REFRESH,
+      lifecycle: {
+        state: "finishing",
+        card_label: `${label} · Active`,
+        headline: `${label} finishing`,
+        copy: "Recovering this run's result.",
+        refresh_running: true,
+        actions,
+      },
+    };
+  }
+
+  if (applied !== null) {
+    const bindings = {
+      expected_mission_content_sha256:
+        context.revision!.mission_content_sha256,
+      expected_result_content_sha256: applied.result_content_sha256,
+      expected_shaping_state_sha256:
+        context.expected_shaping_state_sha256,
+    };
+    const requestChanges = requestChangesProjection(context, phase);
+
+    if (phase === "plan") {
+      if (!isPlanResult(applied.result)) {
+        return repairProjection(phase, context, "result.identity.phase");
+      }
+      const currentContract = item.work_item.goal?.goal_contract;
+      const currentContractSha256 = context.current_goal_contract_sha256;
+      if (currentContract === undefined || currentContractSha256 == null) {
+        return repairProjection(phase, context, "current goal contract");
+      }
+      if (
+        context.revision!.plan_goal_contract_sha256 !==
+          currentContractSha256 ||
+        context.revision!.plan_goal_version !== currentContract.goal_version
+      ) {
+        const picker = projectedPicker(context, "plan");
+        const unavailable = picker === null;
+        const actions = [
+          shapingAction(
+            "replan_with_updated_contract",
+            "Replan with updated contract",
+            {
+              launch_mode: "connected",
+              primary: !unavailable,
+              enabled: !unavailable,
+            },
+          ),
+          shapingAction("request_changes", "Request changes"),
+          shapingAction(
+            "replan_with_updated_contract",
+            "Replan & prepare Plan",
+            { launch_mode: "manual", primary: unavailable },
+          ),
+        ];
+        return {
+          ...common,
+          mode: "plan_result_superseded",
+          phase: "plan",
+          result: applied.result,
+          reason:
+            "The governed contract changed after this plan was produced.",
+          bindings: {
+            ...bindings,
+            goal_contract_sha256: currentContractSha256,
+          },
+          actions,
+          request_changes: requestChanges,
+          ...(picker === null
+            ? { runtime_unavailable: unavailableReason(context) }
+            : { model_picker: picker }),
+        };
+      }
+
+      const actions = [
+        shapingAction("request_changes", "Request changes"),
+      ];
+      const lifecycle: ShapingLifecycleProjection = {
+        state: "ready",
+        card_label: "Plan · Ready",
+        headline: "Plan result ready",
+        copy: "Review the plan result. Execute approval is not available in this slice.",
+        refresh_running: false,
+        actions,
+      };
+      return {
+        ...common,
+        mode: "ready",
+        phase: "plan",
+        result: applied.result,
+        bindings,
+        actions,
+        lifecycle,
+        request_changes: requestChanges,
+        sections: {
+          summary: { summary: previewShapingText(applied.result.summary) },
+          checklist: previewShapingChecklist(applied.result.checklist),
+          unresolved_questions: previewShapingList(
+            applied.result.open_questions,
+          ),
+          provenance,
+          advanced_recovery: {
+            relevant_skills: [...applied.result.relevant_skills],
+            product_doc_impacts: [...applied.result.product_doc_impacts],
+            todo_impacts: [...applied.result.todo_impacts],
+          },
+        },
+        execute_approval_available: false,
+        execute_approval_message:
+          "Execute approval is not available in this slice",
+      };
+    }
+
+    if (phase === "brainstorm") {
+      if (!isBrainstormResult(applied.result)) {
+        return repairProjection(phase, context, "result.identity.phase");
+      }
+      const decision = phaseDecisionActions(context, phase);
+      const lifecycle: ShapingLifecycleProjection = {
+        state: "ready",
+        card_label: "Brainstorm · Ready",
+        headline: "Brainstorm result ready",
+        copy: "Choose the exact result to carry into Spec.",
+        refresh_running: false,
+        actions: decision.actions,
+      };
+      return {
+        ...common,
+        mode: "ready",
+        phase,
+        result: applied.result,
+        bindings,
+        actions: decision.actions,
+        lifecycle,
+        request_changes: requestChanges,
+        sections: {
+          summary: {
+            problem_statement: previewShapingText(
+              applied.result.problem_statement,
+            ),
+            approach: previewShapingText(applied.result.approach),
+          },
+          non_goals: previewShapingList(applied.result.non_goals),
+          unresolved_questions: previewShapingList(
+            applied.result.open_questions,
+          ),
+          provenance,
+          ...(decision.picker === null
+            ? { runtime_unavailable: unavailableReason(context) }
+            : { next_step: decision.picker }),
+        },
+      };
+    }
+
+    if (!isSpecResult(applied.result)) {
+      return repairProjection(phase, context, "result.identity.phase");
+    }
+    const goalContractSha256 = context.derived_goal_contract_sha256;
+    if (goalContractSha256 == null) {
+      return repairProjection(phase, context, "derived goal contract hash");
+    }
+    const proposal = applied.result.proposal;
+    const contract: GoalContract = {
+      schema_version: 1,
+      goal_version:
+        (item.work_item.goal?.goal_contract?.goal_version ?? 0) + 1,
+      purpose: proposal.purpose,
+      acceptance_criteria: [...proposal.acceptance_criteria],
+      non_goals: [...proposal.non_goals],
+      allowed_scope: [...proposal.allowed_scope],
+      review_ready: [...proposal.review_ready],
+    };
+    const purpose = previewShapingText(contract.purpose);
+    const criteria = previewShapingList(contract.acceptance_criteria);
+    const nonGoals = previewShapingList(contract.non_goals);
+    const allowedScope = previewShapingList(contract.allowed_scope);
+    const reviewReady = previewShapingList(contract.review_ready);
+    const decision = phaseDecisionActions(context, phase);
+    const lifecycle: ShapingLifecycleProjection = {
+      state: "ready",
+      card_label: "Spec · Ready",
+      headline: "Spec ready for approval",
+      copy: "Approve the exact derived contract and prepare Plan.",
+      refresh_running: false,
+      actions: decision.actions,
+    };
+    return {
+      ...common,
+      mode: "ready",
+      phase,
+      result: applied.result,
+      bindings: { ...bindings, goal_contract_sha256: goalContractSha256 },
+      actions: decision.actions,
+      lifecycle,
+      request_changes: requestChanges,
+      governed_contract: {
+        contract,
+        goal_contract_sha256: goalContractSha256,
+        truncation: {
+          purpose: purpose.truncated,
+          acceptance_criteria: criteria.truncated,
+          non_goals: nonGoals.truncated,
+          allowed_scope: allowedScope.truncated,
+          review_ready: reviewReady.truncated,
+        },
+      },
+      sections: {
+        summary: { purpose },
+        criteria,
+        governed_fields: {
+          pointer:
+            "Purpose and acceptance criteria appear in the sections above.",
+          non_goals: nonGoals,
+          allowed_scope: allowedScope,
+          review_ready: reviewReady,
+        },
+        provenance,
+        ...(decision.picker === null
+          ? { runtime_unavailable: unavailableReason(context) }
+          : { next_step: decision.picker }),
+      },
+    };
+  }
+
+  if (context.run !== null) {
+    const lifecycle = runLifecycleProjection(phase, context.run);
+    if (context.run.status !== "terminal") {
+      return {
+        ...common,
+        mode: "run_state",
+        actions: lifecycle.actions,
+        lifecycle,
+        run: context.run,
+        refresh: context.refresh ?? DEFAULT_SHAPING_REFRESH,
+      };
+    }
+    if (lifecycle.state === "needs_repair") {
+      return repairProjection(phase, context, "terminal run outcome");
+    }
+    const picker = projectedPicker(context, phase);
+    const connectedAvailable = picker !== null;
+    const manualRecoveryAction = shapingAction(
+      "prepare_manual_recovery",
+      "Prepare manual recovery",
+      {
+        launch_mode: "manual",
+        primary: !connectedAvailable,
+      },
+    );
+    const actions = lifecycle.actions.map((action) => {
+      if (action.kind === "launch_phase") {
+        return {
+          ...action,
+          primary: connectedAvailable,
+          enabled: connectedAvailable,
+        };
+      }
+      if (action.kind === "prepare_manual_recovery") {
+        return manualRecoveryAction;
+      }
+      return action;
+    });
+    if (
+      !connectedAvailable &&
+      actions.some((action) => action.kind === "launch_phase") &&
+      !actions.some((action) => action.kind === "prepare_manual_recovery")
+    ) {
+      actions.push(manualRecoveryAction);
+    }
+    const projectedLifecycle = { ...lifecycle, actions };
+    return {
+      ...common,
+      mode: "terminal_run_failure",
+      actions,
+      lifecycle: projectedLifecycle,
+      run: context.run,
+      manual_recovery_action: manualRecoveryAction,
+      ...(picker === null
+        ? { runtime_unavailable: unavailableReason(context) }
+        : { model_picker: picker }),
+    };
+  }
+
+  const launchFailure = context.post_commit_launch_failure;
+  if (launchFailure !== null && launchFailure !== undefined) {
+    const lockedModelUnavailable =
+      context.models.status !== "available" ||
+      !context.models.available_model_ids.includes(
+        launchFailure.locked_model,
+      );
+    const newAttemptAvailable = projectedPicker(context, phase) !== null;
+    const actions = lockedModelUnavailable
+      ? newAttemptAvailable
+        ? [
+          shapingAction("open_new_attempt", `Start ${phaseLabel(phase)}`, {
+            primary: true,
+          }),
+        ]
+        : [
+            shapingAction(
+              "prepare_manual_recovery",
+              "Prepare manual recovery",
+              { launch_mode: "manual", primary: true },
+            ),
+          ]
+      : [
+          shapingAction("retry_launch", "Retry launch", {
+            primary: true,
+          }),
+        ];
+    return {
+      ...common,
+      mode: "post_commit_launch_failure",
+      actions,
+      decision_id: launchFailure.decision_id,
+      locked_model: launchFailure.locked_model,
+      locked_model_unavailable: lockedModelUnavailable,
+      reason: launchFailure.reason,
+      bindings: {
+        decision_id: launchFailure.decision_id,
+        expected_shaping_state_sha256:
+          context.expected_shaping_state_sha256,
+      },
+      ...(!lockedModelUnavailable || newAttemptAvailable
+        ? {}
+        : { runtime_unavailable: unavailableReason(context) }),
+    };
+  }
+
+  return preReadyProjection(phase, context);
 }
 
 export function missionHandoffModeForItem(item: {
