@@ -19,7 +19,6 @@ import {
   revealBoardItem,
   resolveBoardDrop,
   shapingHandoffForItem,
-  startBrainstormActionForItem,
   targetPhaseForColumn,
   validatePhaseTransition,
 } from "../src/presentation/board";
@@ -209,18 +208,6 @@ describe("board projection", () => {
       }),
     ).toMatchObject({ mode: "hidden" });
 
-    const idea = {
-      source_id: "ws_product",
-      work_item: {
-        state: { phase: "idea" as const, status: "active" as const },
-      },
-    };
-    expect(startBrainstormActionForItem(idea)).toEqual({
-      target_column_id: "todo",
-      target_phase: "brainstorm",
-      label: "Start brainstorm",
-    });
-    expect(startBrainstormActionForItem({ ...idea, source_id: "inbox" })).toBeNull();
   });
 
   it("derives active, repair, and hidden mission handoff states", () => {

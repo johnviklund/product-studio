@@ -386,31 +386,6 @@ export function shapingHandoffForItem(item: {
       };
 }
 
-export function startBrainstormActionForItem(item: {
-  source_id: string;
-  work_item: {
-    state: {
-      phase: WorkItemPhase;
-      status: WorkItemStatus;
-    };
-  };
-}): BoardTransitionAction | null {
-  const { phase, status } = item.work_item.state;
-  if (
-    item.source_id === INBOX_SOURCE_ID ||
-    phase !== "idea" ||
-    status !== "active"
-  ) {
-    return null;
-  }
-
-  return {
-    target_column_id: "todo",
-    target_phase: "brainstorm",
-    label: "Start brainstorm",
-  };
-}
-
 export function missionHandoffModeForItem(item: {
   source_id: string;
   work_item: {

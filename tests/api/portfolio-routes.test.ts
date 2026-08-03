@@ -53,7 +53,6 @@ import * as portfolioConnectedPermissionRoute from "../../app/api/portfolio/work
 import * as portfolioShapingRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/route";
 import * as portfolioBrainstormMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/mission/route";
 import * as portfolioBrainstormImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/import/route";
-import * as portfolioBrainstormAcceptRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/accept/route";
 import * as portfolioSpecMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/mission/route";
 import * as portfolioSpecImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/import/route";
 import { GET as getPortfolioRunEvidence } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/run-evidence/route";
@@ -82,7 +81,6 @@ const decidePortfolioConnectedPermission = portfolioConnectedPermissionRoute.POS
 const listPortfolioShaping = portfolioShapingRoute.GET;
 const compilePortfolioBrainstormMission = portfolioBrainstormMissionRoute.POST;
 const importPortfolioBrainstormResult = portfolioBrainstormImportRoute.POST;
-const acceptPortfolioBrainstormResult = portfolioBrainstormAcceptRoute.POST;
 const compilePortfolioSpecMission = portfolioSpecMissionRoute.POST;
 const importPortfolioSpecResult = portfolioSpecImportRoute.POST;
 
@@ -980,7 +978,6 @@ describe("portfolio API routes", () => {
       listing: { source_id: sourceId, work_item_id: workItemId, artifacts: [] },
       brainstormMission: { kind: "brainstorm-mission" },
       brainstormImport: { kind: "brainstorm-import" },
-      brainstormAcceptance: { kind: "brainstorm-acceptance" },
       specMission: { kind: "spec-mission" },
       specImport: { kind: "spec-import" },
     };
@@ -991,16 +988,12 @@ describe("portfolio API routes", () => {
     const importBrainstormResult = vi
       .fn()
       .mockResolvedValue(payloads.brainstormImport);
-    const acceptBrainstormResult = vi
-      .fn()
-      .mockResolvedValue(payloads.brainstormAcceptance);
     const compileSpecMission = vi.fn().mockResolvedValue(payloads.specMission);
     const importSpecResult = vi.fn().mockResolvedValue(payloads.specImport);
     getService.mockResolvedValue({
       listShapingArtifacts,
       compileBrainstormMission,
       importBrainstormResult,
-      acceptBrainstormResult,
       compileSpecMission,
       importSpecResult,
     });
@@ -1014,10 +1007,6 @@ describe("portfolio API routes", () => {
       ),
       importPortfolioBrainstormResult(
         shapingRequest("/brainstorm/import"),
-        context,
-      ),
-      acceptPortfolioBrainstormResult(
-        shapingRequest("/brainstorm/accept"),
         context,
       ),
       compilePortfolioSpecMission(
@@ -1035,7 +1024,7 @@ describe("portfolio API routes", () => {
     ]);
 
     expect(responses.map(({ status }) => status)).toEqual([
-      200, 200, 200, 200, 200, 200,
+      200, 200, 200, 200, 200,
     ]);
     expect(await Promise.all(responses.map((response) => response.json()))).toEqual(
       Object.values(payloads),
@@ -1043,7 +1032,6 @@ describe("portfolio API routes", () => {
     expect(listShapingArtifacts).toHaveBeenCalledWith(sourceId, workItemId);
     expect(compileBrainstormMission).toHaveBeenCalledWith(sourceId, workItemId);
     expect(importBrainstormResult).toHaveBeenCalledWith(sourceId, workItemId);
-    expect(acceptBrainstormResult).toHaveBeenCalledWith(sourceId, workItemId);
     expect(compileSpecMission).toHaveBeenCalledWith(sourceId, workItemId, {
       brainstorm_acceptance_sha256: acceptanceSha256,
     });
@@ -1054,10 +1042,9 @@ describe("portfolio API routes", () => {
       portfolioShapingRoute.runtime,
       portfolioBrainstormMissionRoute.runtime,
       portfolioBrainstormImportRoute.runtime,
-      portfolioBrainstormAcceptRoute.runtime,
       portfolioSpecMissionRoute.runtime,
       portfolioSpecImportRoute.runtime,
-    ]).toEqual(Array.from({ length: 6 }, () => "nodejs"));
+    ]).toEqual(Array.from({ length: 5 }, () => "nodejs"));
   });
 
   it("maps malformed and unavailable shaping requests through established errors", async () => {

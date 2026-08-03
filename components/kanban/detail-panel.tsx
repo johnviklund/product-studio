@@ -26,7 +26,6 @@ import type {
   PortfolioReviewImportResult,
   PortfolioRetryResult,
   ReviewMissionCompilation,
-  ShapingAcceptanceResult,
   ShapingArtifactListing,
   ShapingImportResult,
   SpecMissionCompilation,
@@ -45,6 +44,7 @@ import type {
 import type { ConnectedRunSummary } from "@/src/domain/connected-run";
 import type {
   BrainstormResultSubmission,
+  ShapingResultSubmission,
   SpecResultSubmission,
   StoredShapingArtifact,
 } from "@/src/domain/shaping";
@@ -64,7 +64,6 @@ import {
   patchAttentionForItem,
   reviewHandoffForItem,
   shapingHandoffForItem,
-  startBrainstormActionForItem,
   type BoardColumnId,
   type ConnectedExecuteProjection,
   type PatchAttentionProjection,
@@ -160,11 +159,6 @@ interface ShapingCompilationState {
 interface ShapingImportState {
   itemKey: string;
   result: ShapingImportResult;
-}
-
-interface ShapingAcceptanceState {
-  itemKey: string;
-  result: ShapingAcceptanceResult;
 }
 
 interface ShapingSelectionState {
@@ -777,7 +771,7 @@ export function RunEvidenceSection({
   );
 }
 
-type ShapingMutation = "compiling" | "importing" | "accepting";
+type ShapingMutation = "compiling" | "importing";
 type ShapingCopyTarget = "task" | "mission" | "workspace" | "content_sha256";
 type ShapingCompilation =
   | BrainstormMissionCompilation
@@ -793,12 +787,10 @@ interface ShapingSectionProps {
   mutation: ShapingMutation | null;
   compilation: ShapingCompilation | null;
   imported: ShapingImportResult | null;
-  acceptance: ShapingAcceptanceResult | null;
   copiedTarget: ShapingCopyTarget | null;
   onSelectAcceptance: (acceptanceContentSha256: string) => void;
   onCompile: () => void;
   onImport: () => void;
-  onAccept: () => void;
   onCopy: (target: ShapingCopyTarget, value: string) => void;
   onUseProposal: (proposal: SpecResultSubmission["proposal"]) => void;
 }
@@ -810,13 +802,13 @@ interface AcceptedBrainstormChoice {
 }
 
 function isBrainstormResult(
-  result: ShapingImportResult["result"],
+  result: ShapingResultSubmission | undefined,
 ): result is BrainstormResultSubmission {
   return result?.identity.phase === "brainstorm";
 }
 
 function isSpecResult(
-  result: ShapingImportResult["result"],
+  result: ShapingResultSubmission | undefined,
 ): result is SpecResultSubmission {
   return result?.identity.phase === "spec";
 }
@@ -828,7 +820,9 @@ function acceptedBrainstormChoice(
     artifact.mission.identity.phase !== "brainstorm" ||
     artifact.result === null ||
     artifact.import_receipt?.outcome !== "applied" ||
-    artifact.acceptance === null
+    artifact.decision === null ||
+    artifact.decision.receipt.identity.phase !== "brainstorm" ||
+    !("selected_at" in artifact.decision.receipt)
   ) {
     return null;
   }
@@ -859,7 +853,7 @@ function acceptedBrainstormChoice(
       artifact,
       result: result as BrainstormResultSubmission,
       acceptanceContentSha256:
-        artifact.acceptance.acceptance_content_sha256,
+        artifact.decision.decision_content_sha256,
     };
   } catch {
     return null;
@@ -1052,12 +1046,10 @@ export function ShapingSection({
   mutation,
   compilation,
   imported,
-  acceptance,
   copiedTarget,
   onSelectAcceptance,
   onCompile,
   onImport,
-  onAccept,
   onCopy,
   onUseProposal,
 }: ShapingSectionProps) {
@@ -1077,11 +1069,13 @@ export function ShapingSection({
     projection.phase === "spec" &&
     selectedAcceptanceSha256.length > 0 &&
     selectedChoice === undefined;
-  const brainstormResult = isBrainstormResult(imported?.result)
-    ? imported.result
+  const importedResult =
+    imported?.outcome === "applied" ? imported.result : undefined;
+  const brainstormResult = isBrainstormResult(importedResult)
+    ? importedResult
     : null;
-  const specResult = isSpecResult(imported?.result) ? imported.result : null;
-  const rejectedImport = imported?.receipt.outcome === "rejected";
+  const specResult = isSpecResult(importedResult) ? importedResult : null;
+  const rejectedImport = imported?.outcome === "rejected" ? imported : null;
   const canCompileSpec =
     projection.phase !== "spec" || selectedChoice !== undefined;
 
@@ -1208,14 +1202,16 @@ export function ShapingSection({
         </button>
       </div>
 
-      {rejectedImport ? (
+      {rejectedImport !== null ? (
         <div
           className="mt-4 border-l-2 border-destructive bg-destructive/10 px-3 py-3 text-xs"
           role="alert"
         >
           <p className="font-medium">Imported result rejected</p>
           <ShapingStringList
-            values={imported.receipt.reasons}
+            values={rejectedImport.rejection.reasons.map(
+              (reason) => `${reason.field_path}: ${reason.code}`,
+            )}
             emptyLabel="The result did not satisfy the shaping contract."
           />
         </div>
@@ -1224,32 +1220,6 @@ export function ShapingSection({
       {brainstormResult ? <BrainstormEvidence result={brainstormResult} /> : null}
       {specResult ? (
         <SpecProposal result={specResult} onUseProposal={onUseProposal} />
-      ) : null}
-
-      {projection.phase === "brainstorm" && brainstormResult ? (
-        <div className="mt-4 border-l-2 border-primary bg-background px-3 py-3">
-          <p className="text-xs font-medium">
-            {acceptance === null
-              ? "Select this imported evidence as Spec input"
-              : "Selected as Spec input"}
-          </p>
-          {acceptance ? (
-            <p className="mt-1 break-all text-[11px] leading-5 text-muted-foreground">
-              Acceptance · {acceptance.acceptance_content_sha256}
-            </p>
-          ) : (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onAccept}
-              className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {mutation === "accepting"
-                ? "Selecting…"
-                : "Use Brainstorm as Spec input"}
-            </button>
-          )}
-        </div>
       ) : null}
 
       {compilation ? (
@@ -1788,15 +1758,12 @@ export function DetailPanel({
     useState<ShapingCompilationState | null>(null);
   const [shapingImportState, setShapingImportState] =
     useState<ShapingImportState | null>(null);
-  const [shapingAcceptanceState, setShapingAcceptanceState] =
-    useState<ShapingAcceptanceState | null>(null);
   const [shapingSelectionState, setShapingSelectionState] =
     useState<ShapingSelectionState | null>(null);
   const [shapingCopiedState, setShapingCopiedState] =
     useState<ShapingCopiedState | null>(null);
   const [shapingMutation, setShapingMutation] =
     useState<ShapingMutation | null>(null);
-  const [startingBrainstorm, setStartingBrainstorm] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const detailsDirty =
     title !== goal.title ||
@@ -1857,7 +1824,6 @@ export function DetailPanel({
   const missionHandoffMode = missionHandoffModeForItem(item);
   const connectedExecute = connectedExecuteForItem(item);
   const shapingHandoff = shapingHandoffForItem(item);
-  const startBrainstormAction = startBrainstormActionForItem(item);
   const shapingItemKey = [
     item.source_id,
     goal.work_item_id,
@@ -1882,10 +1848,6 @@ export function DetailPanel({
   const shapingImport =
     shapingImportState?.itemKey === shapingItemKey
       ? shapingImportState.result
-      : null;
-  const shapingAcceptance =
-    shapingAcceptanceState?.itemKey === shapingItemKey
-      ? shapingAcceptanceState.result
       : null;
   const selectedAcceptanceSha256 =
     shapingSelectionState?.itemKey === shapingItemKey
@@ -2304,54 +2266,6 @@ export function DetailPanel({
     }));
   }
 
-  async function handleStartBrainstorm(): Promise<void> {
-    if (
-      startBrainstormAction === null ||
-      startingBrainstorm ||
-      detailsDirty ||
-      assignmentDirty ||
-      contractDirty
-    ) {
-      return;
-    }
-
-    setStartingBrainstorm(true);
-    setError(null);
-    try {
-      const response = await fetch(
-        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}`,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            target_phase: startBrainstormAction.target_phase,
-          }),
-        },
-      );
-      const body = (await response.json()) as
-        | PortfolioWorkItem
-        | MutationErrorResponse;
-      if (!response.ok || "error" in body) {
-        setError(
-          "error" in body
-            ? body.error?.message ?? "Brainstorm could not be started."
-            : "Brainstorm could not be started.",
-        );
-        return;
-      }
-      onUpdated(
-        body as PortfolioWorkItem,
-        "Brainstorm started; shaping input is ready.",
-      );
-    } catch {
-      setError(
-        "Brainstorm could not be started. Check the local server and try again.",
-      );
-    } finally {
-      setStartingBrainstorm(false);
-    }
-  }
-
   async function handleCompileShapingMission(): Promise<void> {
     if (shapingHandoff.mode !== "active") {
       return;
@@ -2450,46 +2364,6 @@ export function DetailPanel({
     } catch {
       setShapingActionError(
         "The shaping result could not be imported. Check the local server and try again.",
-      );
-    } finally {
-      setShapingMutation(null);
-    }
-  }
-
-  async function handleAcceptBrainstormInput(): Promise<void> {
-    if (
-      shapingHandoff.mode !== "active" ||
-      shapingHandoff.phase !== "brainstorm"
-    ) {
-      return;
-    }
-    setShapingMutation("accepting");
-    setShapingActionError(null);
-    try {
-      const response = await fetch(
-        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/brainstorm/accept`,
-        { method: "POST" },
-      );
-      const body = (await response.json()) as
-        | ShapingAcceptanceResult
-        | MutationErrorResponse;
-      if (!response.ok || "error" in body) {
-        setShapingActionError(
-          "error" in body
-            ? body.error?.message ?? "The Brainstorm input could not be selected."
-            : "The Brainstorm input could not be selected.",
-        );
-        return;
-      }
-      setShapingAcceptanceState({
-        itemKey: shapingItemKey,
-        result: body as ShapingAcceptanceResult,
-      });
-      markShapingArtifactsLoading();
-      await loadShapingArtifacts();
-    } catch {
-      setShapingActionError(
-        "The Brainstorm input could not be selected. Check the local server and try again.",
       );
     } finally {
       setShapingMutation(null);
@@ -3108,38 +2982,6 @@ export function DetailPanel({
       </div>
     </form>
   ) : null;
-  const hasUnsavedEditorChanges =
-    detailsDirty || assignmentDirty || contractDirty;
-  const startBrainstormControl = startBrainstormAction ? (
-    <section
-      aria-labelledby={`${fieldId}-start-brainstorm`}
-      className="border-l-2 border-primary bg-background px-3 py-3"
-    >
-      <h3 id={`${fieldId}-start-brainstorm`} className="text-xs font-medium">
-        Brainstorm
-      </h3>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground">
-        Open a shaping cycle for this idea without changing its board column.
-      </p>
-      <button
-        type="button"
-        disabled={
-          transitionPending || startingBrainstorm || hasUnsavedEditorChanges
-        }
-        onClick={() => void handleStartBrainstorm()}
-        className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {startingBrainstorm
-          ? "Starting…"
-          : startBrainstormAction.label}
-      </button>
-      {hasUnsavedEditorChanges ? (
-        <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
-          Save the current editor changes before starting Brainstorm.
-        </p>
-      ) : null}
-    </section>
-  ) : null;
   const shapingSection =
     shapingHandoff.mode === "active" ? (
       <ShapingSection
@@ -3152,7 +2994,6 @@ export function DetailPanel({
         mutation={shapingMutation}
         compilation={shapingCompilation}
         imported={shapingImport}
-        acceptance={shapingAcceptance}
         copiedTarget={shapingCopiedTarget}
         onSelectAcceptance={(acceptanceContentSha256) =>
           setShapingSelectionState({
@@ -3162,7 +3003,6 @@ export function DetailPanel({
         }
         onCompile={() => void handleCompileShapingMission()}
         onImport={() => void handleImportShapingResult()}
-        onAccept={() => void handleAcceptBrainstormInput()}
         onCopy={(target, value) =>
           void handleCopyShapingValue(target, value)
         }
@@ -3228,8 +3068,6 @@ export function DetailPanel({
 
             {workItemEditor}
 
-            {startBrainstormControl}
-
             {shapingSection}
 
             {error ? (
@@ -3274,7 +3112,6 @@ export function DetailPanel({
               {activeTab === "overview" ? (
                 <>
                   {workItemEditor}
-                  {startBrainstormControl}
                   <section aria-labelledby={`${fieldId}-summary`}>
                     <h3 id={`${fieldId}-summary`} className="text-xs font-medium text-muted-foreground">
                       Summary

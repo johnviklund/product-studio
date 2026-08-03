@@ -12,7 +12,6 @@ import {
 import { nextActionForCardState } from "../components/kanban/board-card";
 import type {
   BrainstormMissionCompilation,
-  ShapingAcceptanceResult,
   ShapingImportResult,
   SpecMissionCompilation,
 } from "../src/application/portfolio";
@@ -123,6 +122,7 @@ const brainstormCompilation: BrainstormMissionCompilation = {
 const brainstormImport: ShapingImportResult = {
   source_id: "source-1",
   work_item_id: workItemId,
+  outcome: "applied",
   receipt: {
     shaping_schema_version: 2,
     identity: brainstormIdentity,
@@ -135,18 +135,12 @@ const brainstormImport: ShapingImportResult = {
   result: brainstormResult,
 };
 const acceptanceContentSha256 = "3".repeat(64);
-const brainstormAcceptance: ShapingAcceptanceResult = {
-  source_id: "source-1",
-  work_item_id: workItemId,
-  acceptance: {
-    shaping_schema_version: 2,
-    identity: brainstormIdentity,
-    mission_content_sha256: missionContentSha256,
-    result_content_sha256: resultContentSha256,
-    selected_at: "2026-07-29T10:01:00.000Z",
-  },
-  acceptance_path: `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}/acceptance.json`,
-  acceptance_content_sha256: acceptanceContentSha256,
+const brainstormSelection = {
+  shaping_schema_version: 2 as const,
+  identity: brainstormIdentity,
+  mission_content_sha256: missionContentSha256,
+  result_content_sha256: resultContentSha256,
+  selected_at: "2026-07-29T10:01:00.000Z",
 };
 const acceptedBrainstormArtifact: StoredShapingArtifact = {
   mission: brainstormMission,
@@ -159,10 +153,14 @@ const acceptedBrainstormArtifact: StoredShapingArtifact = {
   },
   import_receipt: brainstormImport.receipt,
   import_path: `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}/import.json`,
-  acceptance: {
-    receipt: brainstormAcceptance.acceptance,
-    acceptance_path: brainstormAcceptance.acceptance_path,
-    acceptance_content_sha256: acceptanceContentSha256,
+  production_receipt: null,
+  production_path: null,
+  applied_marker: null,
+  applied_marker_path: null,
+  decision: {
+    receipt: brainstormSelection,
+    decision_path: `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}/decision.json`,
+    decision_content_sha256: acceptanceContentSha256,
   },
 };
 const specIdentity = {
@@ -179,7 +177,7 @@ const specMission: SpecMissionPackage = {
     phase: "spec",
     title: brainstormMission.input.title,
     brainstorm_selection_sha256: acceptanceContentSha256,
-    brainstorm_selection: brainstormAcceptance.acceptance,
+    brainstorm_selection: brainstormSelection,
     brainstorm_result: brainstormResult,
   },
   result_contract: {
@@ -216,6 +214,7 @@ const specResult: SpecResultSubmission = {
 const specImport: ShapingImportResult = {
   source_id: "source-1",
   work_item_id: workItemId,
+  outcome: "applied",
   receipt: {
     shaping_schema_version: 2,
     identity: specIdentity,
@@ -247,12 +246,10 @@ function renderShaping(overrides: Partial<ShapingProps> = {}): string {
     mutation: null,
     compilation: null,
     imported: null,
-    acceptance: null,
     copiedTarget: null,
     onSelectAcceptance: noop,
     onCompile: noop,
     onImport: noop,
-    onAccept: noop,
     onCopy: noop,
     onUseProposal: noop,
     ...overrides,
@@ -345,18 +342,24 @@ describe("detail panel shaping workflow", () => {
     expect(html).toContain("Mission JSON");
     expect(html).toContain("Workspace");
     expect(html).toContain("Content SHA");
-    expect(html).toContain("Use Brainstorm as Spec input");
+    expect(html).not.toContain("Use Brainstorm as Spec input");
     expect(html).toContain("Copied");
   });
 
-  it("labels an accepted Brainstorm result as the selected Spec input", () => {
+  it("exposes a durable Brainstorm selection to the Spec surface", () => {
     const html = renderShaping({
+      projection: {
+        mode: "active",
+        phase: "spec",
+        required_input: "brainstorm_acceptance_sha256",
+        can_compile: true,
+        can_import: true,
+      },
       artifacts: [acceptedBrainstormArtifact],
-      imported: brainstormImport,
-      acceptance: brainstormAcceptance,
+      selectedAcceptanceSha256: acceptanceContentSha256,
     });
 
-    expect(html).toContain("Selected as Spec input");
+    expect(html).toContain("Accepted Brainstorm input");
     expect(html).toContain(acceptanceContentSha256);
     expect(html).not.toContain("Use Brainstorm as Spec input");
   });
@@ -426,13 +429,19 @@ describe("detail panel shaping workflow", () => {
     const failure = renderShaping({ error: "Shaping history could not be loaded." });
     const rejected = renderShaping({
       imported: {
-        ...brainstormImport,
-        receipt: {
-          ...brainstormImport.receipt,
-          outcome: "rejected",
-          reasons: ["identity.input_sha256 does not match the mission"],
+        source_id: "source-1",
+        work_item_id: workItemId,
+        outcome: "rejected",
+        rejection: {
+          raw_result_sha256: "7".repeat(64),
+          byte_length: 128,
+          reasons: [
+            {
+              code: "schema_violation",
+              field_path: "identity.input_sha256",
+            },
+          ],
         },
-        result: undefined,
       },
     });
     const stale = renderShaping({
@@ -449,7 +458,7 @@ describe("detail panel shaping workflow", () => {
 
     expect(failure).toContain("Shaping history could not be loaded.");
     expect(rejected).toContain("Imported result rejected");
-    expect(rejected).toContain("identity.input_sha256 does not match the mission");
+    expect(rejected).toContain("identity.input_sha256: schema_violation");
     expect(stale).toContain("stale or unavailable");
   });
 

@@ -17,7 +17,9 @@ import {
   CopilotConnectedExecuteRuntime,
   PortfolioService,
   type ConnectedExecuteRuntime,
+  type ConnectedShapingRuntime,
   type PreparedConnectedRuntime,
+  type PreparedShapingRuntime,
 } from "../../src/application/portfolio";
 import { WorkItemController } from "../../src/application/work-item-controller";
 import {
@@ -34,6 +36,14 @@ import {
   UnknownPortfolioSourceError,
   type PortfolioWorkItemIndex,
 } from "../../src/domain/portfolio";
+import {
+  hashGoalContract,
+  hashGoalInput,
+  hashShapingDecisionState,
+  goalContractFromSpecProposal,
+  type ShapingMissionPackage,
+  type ShapingPhase,
+} from "../../src/domain/shaping";
 import {
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
@@ -143,6 +153,64 @@ function preparedRuntime(
   return { runtime: { prepare }, prepare };
 }
 
+function preparedShapingRuntime(
+  initialModels = ["brainstorm-model", "spec-model", "plan-model"],
+) {
+  let availableModels = [...initialModels];
+  let prepareFailure: Error | null = null;
+  const prepare = vi.fn(
+    async (input: {
+      mission: ShapingMissionPackage;
+      requested_model: string;
+    }): Promise<PreparedShapingRuntime> => {
+      if (prepareFailure !== null) {
+        throw prepareFailure;
+      }
+      return {
+        requested_model: input.requested_model,
+        reasoning_effort: "high",
+        sanitized_profile: {
+          adapter_id: "fake-shaping-acp",
+          adapter_version: "1.0.0",
+          profile_id: "artifact-only-shaping-v1",
+          executable: "fake-acp",
+          argv: ["--stdio", "--model", input.requested_model],
+          requested_model: input.requested_model,
+          reasoning_effort: "high",
+          available_tools: ["edit"],
+          excluded_tools: ["shell", "url", "mcp"],
+          authentication: "noninteractive_authenticated",
+          execution_mode: "permission_mediated_local",
+          containment_assurance: "not_independently_enforced",
+          machine_authority: "launching_user",
+          requested_mcp_server_count: 0,
+          credential_environment:
+            "explicit_allowlist_without_credential_values",
+        },
+      };
+    },
+  );
+  const runtime: ConnectedShapingRuntime = {
+    configuration: () => ({
+      adapter_id: "fake-shaping-acp",
+      adapter_version: "1.0.0",
+      profile_id: "artifact-only-shaping-v1",
+      available_model_ids: availableModels,
+    }),
+    prepare,
+  };
+  return {
+    runtime,
+    prepare,
+    setAvailableModels(models: string[]) {
+      availableModels = [...models];
+    },
+    setPrepareFailure(error: Error | null) {
+      prepareFailure = error;
+    },
+  };
+}
+
 function createMemoryIndex() {
   let items: Parameters<PortfolioWorkItemIndex["rebuild"]>[0] = [];
   return {
@@ -191,6 +259,7 @@ async function createService(
   index: PortfolioWorkItemIndex = new SQLitePortfolioIndex(":memory:"),
   makeWorkspace?: (workspacePath: string) => ProductWorkspace,
   connectedRuntime?: ConnectedExecuteRuntime,
+  shapingRuntime?: ConnectedShapingRuntime,
 ) {
   const applicationRoot = await createRoot("product-studio-service-app-");
   const registry = new PortfolioRegistry(
@@ -208,6 +277,7 @@ async function createService(
           verificationRunner: controllerRunner,
         })),
     connectedRuntime,
+    shapingRuntime,
   );
   const legacyService = Object.assign(service, {
     async updateWorkItemDetails(
@@ -281,6 +351,134 @@ async function createService(
     transfersRoot: service.transfersRoot,
     service: legacyService,
   };
+}
+
+function ideaShapingStateSha256(workItem: WorkItem): string {
+  return hashShapingDecisionState({
+    work_item_id: workItem.goal.work_item_id,
+    phase: workItem.state.phase,
+    status: workItem.state.status,
+    goal_input_sha256: hashGoalInput({
+      title: workItem.goal.title,
+      notes: workItem.goal.notes,
+    }),
+    goal_version: workItem.state.goal_version ?? null,
+    input_revision: workItem.state.input_revision ?? null,
+    goal_contract_sha256:
+      workItem.goal.goal_contract === undefined
+        ? null
+        : hashGoalContract(workItem.goal.goal_contract),
+    current_mission_input_sha256: null,
+    current_mission_content_sha256: null,
+    applied_result_content_sha256: null,
+    decision_receipt_sha256: null,
+    active_shaping_run_id: null,
+  });
+}
+
+function currentPhaseArtifact(
+  artifacts: Awaited<
+    ReturnType<PortfolioService["listShapingArtifacts"]>
+  >["artifacts"],
+  phase: ShapingPhase,
+) {
+  const phaseArtifacts = artifacts.filter(
+    (artifact) => artifact.mission.identity.phase === phase,
+  );
+  const superseded = new Set(
+    phaseArtifacts.flatMap((artifact) =>
+      artifact.mission.input.revision === undefined
+        ? []
+        : [artifact.mission.input.revision.supersedes_input_sha256],
+    ),
+  );
+  const tips = phaseArtifacts.filter(
+    (artifact) => !superseded.has(artifact.mission.identity.input_sha256),
+  );
+  if (tips.length !== 1) {
+    throw new Error(`Expected one ${phase} shaping tip, found ${tips.length}.`);
+  }
+  return tips[0]!;
+}
+
+function shapingResultForMission(mission: ShapingMissionPackage) {
+  switch (mission.identity.phase) {
+    case "brainstorm":
+      return {
+        result_schema_version: 1 as const,
+        brainstorm_mission_content_sha256: mission.content_sha256,
+        identity: mission.identity,
+        problem_statement: "The shaping handoff needs one durable path.",
+        approach: "Use an immutable mission and one applied result.",
+        non_goals: ["Do not authorize Execute."],
+        open_questions: ["Which model should the next seat use?"],
+      };
+    case "spec":
+      return {
+        result_schema_version: 1 as const,
+        spec_mission_content_sha256: mission.content_sha256,
+        identity: mission.identity,
+        proposal: {
+          purpose: "Make the shaping handoff durable.",
+          acceptance_criteria: ["Each phase publishes one applied result."],
+          non_goals: ["Do not launch Execute."],
+          allowed_scope: ["src/application", "tests/application"],
+          review_ready: ["The exact deterministic check passes."],
+        },
+      };
+    case "plan":
+      return {
+        result_schema_version: 1 as const,
+        plan_mission_content_sha256: mission.content_sha256,
+        identity: mission.identity,
+        summary: "Implement the approved shaping handoff.",
+        checklist: [
+          {
+            id: "step-1",
+            step: "Implement the service boundary.",
+            verification_check: "Run the focused service suite.",
+          },
+        ],
+        relevant_skills: [],
+        product_doc_impacts: [],
+        todo_impacts: [],
+        open_questions: [],
+      };
+  }
+}
+
+async function applyManualShapingResult(
+  service: PortfolioService,
+  workspaceRoot: string,
+  sourceId: string,
+  workItemId: string,
+  phase: ShapingPhase,
+) {
+  const listing = await service.listShapingArtifacts(sourceId, workItemId);
+  const artifact = currentPhaseArtifact(listing.artifacts, phase);
+  const binding = {
+    expected_mission_content_sha256: artifact.mission.content_sha256,
+    expected_shaping_state_sha256: listing.expected_shaping_state_sha256,
+  };
+  const manual = await service.openManualIngress(
+    sourceId,
+    workItemId,
+    phase,
+    binding,
+  );
+  const result = shapingResultForMission(artifact.mission);
+  await writeFile(
+    join(workspaceRoot, manual.instruction.ingress_path),
+    `${JSON.stringify(result, null, 2)}\n`,
+    "utf8",
+  );
+  const imported =
+    phase === "brainstorm"
+      ? await service.importBrainstormResult(sourceId, workItemId, binding)
+      : phase === "spec"
+        ? await service.importSpecResult(sourceId, workItemId, binding)
+        : await service.importPlanResult(sourceId, workItemId, binding);
+  return { artifact, binding, imported, manual, result };
 }
 
 async function governWorkItemThrough(
@@ -538,15 +736,18 @@ describe("PortfolioService", () => {
       },
     ]);
 
+    await inbox.updatePhase(created.goal.work_item_id, {
+      target_phase: "execute",
+    });
     const updated = await service.updateWorkItemPhase(
       INBOX_SOURCE_ID,
       created.goal.work_item_id,
-      { target_phase: "spec" },
+      { target_phase: "review" },
     );
     expect(updated).toMatchObject({
       source_id: INBOX_SOURCE_ID,
       project: null,
-      work_item: { state: { phase: "spec" } },
+      work_item: { state: { phase: "review" } },
     });
     await expect(service.list()).resolves.toEqual([updated]);
     index.close();
@@ -995,9 +1196,13 @@ describe("PortfolioService", () => {
 
   it("enforces transitions and refreshes the index after an accepted move", async () => {
     const root = await createWorkspace("Transition Workspace");
-    const created = await new ProductWorkspace(root).create({
+    const repository = new ProductWorkspace(root);
+    const created = await repository.create({
       title: "Move through the board",
       type: "Feature",
+    });
+    await repository.updatePhase(created.goal.work_item_id, {
+      target_phase: "execute",
     });
     const statePath = join(
       root,
@@ -1013,16 +1218,16 @@ describe("PortfolioService", () => {
     const updated = await service.updateWorkItemPhase(
       sourceId,
       created.goal.work_item_id,
-      { target_phase: "spec" },
+      { target_phase: "review" },
     );
 
     expect(updated).toMatchObject({
       source_id: sourceId,
       project: { workspace_path: root },
-      work_item: { state: { phase: "spec", status: "active" } },
+      work_item: { state: { phase: "review", status: "active" } },
     });
     expect(JSON.parse(await readFile(statePath, "utf8"))).toMatchObject({
-      phase: "spec",
+      phase: "review",
       status: "active",
     });
     await expect(service.list()).resolves.toEqual([updated]);
@@ -1116,480 +1321,788 @@ describe("PortfolioService", () => {
     restartedIndex.close();
   });
 
-  it("runs the full manual Brainstorm-to-Spec shaping loop without mutating indexed work-item state", async () => {
-    const root = await createWorkspace("Shaping Workspace");
+  it("keeps compilation available without a runtime and makes manual Start Brainstorm the only model-free path", async () => {
+    const root = await createWorkspace("Manual Shaping Workspace");
     const repository = new ProductWorkspace(root, {
       git: controllerGit,
       verificationRunner: controllerRunner,
     });
     const created = await repository.create({
-      title: "Shape an immutable mission loop",
-      type: "Feature",
-    });
-    const index = new SQLitePortfolioIndex(":memory:");
-    const { service } = await createService(index);
-    const registration = await service.register({ workspace_path: root });
-    const sourceId = registration.workspace.workspace_id;
-    await service.updateWorkItemPhase(sourceId, created.goal.work_item_id, {
-      target_phase: "brainstorm",
-    });
-
-    const workItemDirectory = join(
-      root,
-      ".founder",
-      "work-items",
-      created.goal.work_item_id,
-    );
-    const goalPath = join(workItemDirectory, "goal.yaml");
-    const statePath = join(workItemDirectory, "state.json");
-    const rebuildSpy = vi.spyOn(index, "rebuild");
-    rebuildSpy.mockClear();
-    const brainstormGoalBefore = await readFile(goalPath, "utf8");
-    const brainstormStateBefore = await readFile(statePath, "utf8");
-    const brainstormIndexBefore = await service.list();
-
-    const brainstormMission = await service.compileBrainstormMission(
-      sourceId,
-      created.goal.work_item_id,
-    );
-    const brainstormResult = {
-      result_schema_version: 1 as const,
-      brainstorm_mission_content_sha256:
-        brainstormMission.mission.content_sha256,
-      identity: brainstormMission.mission.identity,
-      problem_statement: "Shaping has no durable manual handoff.",
-      approach: "Use immutable phase-specific artifacts.",
-      non_goals: ["Do not change Execute missions."],
-      open_questions: ["How should Plan shaping work later?"],
-    };
-    await writeFile(
-      join(dirname(brainstormMission.task_path), "result.json"),
-      `${JSON.stringify(brainstormResult, null, 2)}\n`,
-      "utf8",
-    );
-    const brainstormImport = await service.importBrainstormResult(
-      sourceId,
-      created.goal.work_item_id,
-    );
-    const accepted = await service.acceptBrainstormResult(
-      sourceId,
-      created.goal.work_item_id,
-    );
-    const brainstormListing = await service.listShapingArtifacts(
-      sourceId,
-      created.goal.work_item_id,
-    );
-
-    expect(brainstormImport).toMatchObject({
-      source_id: sourceId,
-      receipt: { outcome: "applied" },
-      result: { problem_statement: brainstormResult.problem_statement },
-    });
-    expect(brainstormListing.artifacts).toHaveLength(1);
-    expect(await readFile(goalPath, "utf8")).toBe(brainstormGoalBefore);
-    expect(await readFile(statePath, "utf8")).toBe(brainstormStateBefore);
-    expect(await service.list()).toEqual(brainstormIndexBefore);
-    expect(rebuildSpy).not.toHaveBeenCalled();
-
-    await service.updateWorkItemPhase(sourceId, created.goal.work_item_id, {
-      target_phase: "spec",
-    });
-    rebuildSpy.mockClear();
-    const specGoalBefore = await readFile(goalPath, "utf8");
-    const specStateBefore = await readFile(statePath, "utf8");
-    const specIndexBefore = await service.list();
-    const specMission = await service.compileSpecMission(
-      sourceId,
-      created.goal.work_item_id,
-      {
-        brainstorm_acceptance_sha256: accepted.acceptance_content_sha256,
-      },
-    );
-    const specResult = {
-      result_schema_version: 1 as const,
-      spec_mission_content_sha256: specMission.mission.content_sha256,
-      identity: specMission.mission.identity,
-      proposal: {
-        purpose: "Make manual shaping durable.",
-        acceptance_criteria: ["Brainstorm and Spec imports are immutable."],
-        non_goals: ["Do not launch a connected agent."],
-        allowed_scope: ["src/domain", "src/application"],
-        review_ready: ["Deterministic checks pass."],
-      },
-    };
-    await writeFile(
-      join(dirname(specMission.task_path), "result.json"),
-      `${JSON.stringify(specResult, null, 2)}\n`,
-      "utf8",
-    );
-    const specImport = await service.importSpecResult(
-      sourceId,
-      created.goal.work_item_id,
-      {
-        brainstorm_acceptance_sha256: accepted.acceptance_content_sha256,
-      },
-    );
-    const completeListing = await service.listShapingArtifacts(
-      sourceId,
-      created.goal.work_item_id,
-    );
-
-    expect(specImport).toMatchObject({
-      source_id: sourceId,
-      receipt: { outcome: "applied" },
-      result: { proposal: specResult.proposal },
-    });
-    expect(completeListing.artifacts).toHaveLength(2);
-    expect(await readFile(goalPath, "utf8")).toBe(specGoalBefore);
-    expect(await readFile(statePath, "utf8")).toBe(specStateBefore);
-    expect(await service.list()).toEqual(specIndexBefore);
-    expect(rebuildSpy).not.toHaveBeenCalled();
-    index.close();
-  });
-
-  it("imports each Spec artifact by its explicit Brainstorm acceptance", async () => {
-    const root = await createWorkspace("Explicit Spec Selection Workspace");
-    const { index, service } = await createService();
-    const registration = await service.register({ workspace_path: root });
-    const sourceId = registration.workspace.workspace_id;
-    const captured = await service.createCapture({
-      title: "Compare accepted Brainstorm directions",
-      capture_kind: "idea",
-      source_id: sourceId,
-    });
-    const workItemId = captured.work_item.goal.work_item_id;
-    await service.updateWorkItemPhase(sourceId, workItemId, {
-      target_phase: "brainstorm",
-    });
-
-    async function importAndAcceptBrainstorm(label: string) {
-      const mission = await service.compileBrainstormMission(
-        sourceId,
-        workItemId,
-      );
-      const result = {
-        result_schema_version: 1 as const,
-        brainstorm_mission_content_sha256: mission.mission.content_sha256,
-        identity: mission.mission.identity,
-        problem_statement: `${label} problem`,
-        approach: `${label} approach`,
-        non_goals: [`${label} non-goal`],
-        open_questions: [`${label} question`],
-      };
-      await writeFile(
-        join(dirname(mission.task_path), "result.json"),
-        `${JSON.stringify(result, null, 2)}\n`,
-        "utf8",
-      );
-      await expect(
-        service.importBrainstormResult(sourceId, workItemId),
-      ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
-      return service.acceptBrainstormResult(sourceId, workItemId);
-    }
-
-    const acceptedA = await importAndAcceptBrainstorm("Direction A");
-    await service.saveWorkItem(sourceId, workItemId, {
-      target_source_id: sourceId,
-      title: "Compare a second accepted direction",
-      type: captured.work_item.goal.type ?? null,
-      priority: captured.work_item.goal.priority ?? null,
-      tags: captured.work_item.goal.tags ?? [],
-      notes: captured.work_item.goal.notes ?? null,
-    });
-    const acceptedB = await importAndAcceptBrainstorm("Direction B");
-    await service.updateWorkItemPhase(sourceId, workItemId, {
-      target_phase: "spec",
-    });
-
-    async function compileSpecResult(
-      brainstormAcceptanceSha256: string,
-      label: string,
-    ) {
-      const mission = await service.compileSpecMission(sourceId, workItemId, {
-        brainstorm_acceptance_sha256: brainstormAcceptanceSha256,
-      });
-      const result = {
-        result_schema_version: 1 as const,
-        spec_mission_content_sha256: mission.mission.content_sha256,
-        identity: mission.mission.identity,
-        proposal: {
-          purpose: `${label} purpose`,
-          acceptance_criteria: [`${label} acceptance`],
-          non_goals: [`${label} non-goal`],
-          allowed_scope: ["src/application"],
-          review_ready: [`${label} review ready`],
-        },
-      };
-      await writeFile(
-        join(dirname(mission.task_path), "result.json"),
-        `${JSON.stringify(result, null, 2)}\n`,
-        "utf8",
-      );
-      return result;
-    }
-
-    const inputA = {
-      brainstorm_acceptance_sha256: acceptedA.acceptance_content_sha256,
-    };
-    const specA = await compileSpecResult(
-      inputA.brainstorm_acceptance_sha256,
-      "Spec A",
-    );
-    const importedA = await service.importSpecResult(
-      sourceId,
-      workItemId,
-      inputA,
-    );
-    expect(importedA).toMatchObject({
-      receipt: { outcome: "applied" },
-      result: { proposal: specA.proposal },
-    });
-
-    const inputB = {
-      brainstorm_acceptance_sha256: acceptedB.acceptance_content_sha256,
-    };
-    const specB = await compileSpecResult(
-      inputB.brainstorm_acceptance_sha256,
-      "Spec B",
-    );
-    const importedB = await service.importSpecResult(
-      sourceId,
-      workItemId,
-      inputB,
-    );
-    expect(importedB).toMatchObject({
-      receipt: { outcome: "applied" },
-      result: { proposal: specB.proposal },
-    });
-    await expect(
-      service.importSpecResult(sourceId, workItemId, inputA),
-    ).resolves.toEqual(importedA);
-    index.close();
-  });
-
-  it("normalizes legal goal whitespace across the Brainstorm-to-Spec loop", async () => {
-    const root = await createWorkspace("Whitespace Shaping Workspace");
-    const { index, service } = await createService();
-    const registration = await service.register({ workspace_path: root });
-    const sourceId = registration.workspace.workspace_id;
-    const created = await service.createCapture({
-      title: "Normalize shaping input",
-      capture_kind: "idea",
-      source_id: sourceId,
-    });
-    const workItemId = created.work_item.goal.work_item_id;
-    const saved = await service.saveWorkItem(sourceId, workItemId, {
-      target_source_id: sourceId,
-      title: created.work_item.goal.title,
-      type: created.work_item.goal.type ?? null,
-      priority: created.work_item.goal.priority ?? null,
-      tags: created.work_item.goal.tags ?? [],
-      notes: "Some context typed in the textarea\n",
-    });
-    expect(saved.work_item.goal.notes).toBe(
-      "Some context typed in the textarea\n",
-    );
-    await service.updateWorkItemPhase(sourceId, workItemId, {
-      target_phase: "brainstorm",
-    });
-
-    const brainstormMission = await service.compileBrainstormMission(
-      sourceId,
-      workItemId,
-    );
-    const brainstormResult = {
-      result_schema_version: 1 as const,
-      brainstorm_mission_content_sha256:
-        brainstormMission.mission.content_sha256,
-      identity: brainstormMission.mission.identity,
-      problem_statement: "Legal card whitespace blocked shaping.",
-      approach: "Normalize the mission input at the service boundary.",
-      non_goals: ["Do not rewrite the saved card."],
-      open_questions: ["None."],
-    };
-    await writeFile(
-      join(dirname(brainstormMission.task_path), "result.json"),
-      `${JSON.stringify(brainstormResult, null, 2)}\n`,
-      "utf8",
-    );
-    await expect(
-      service.importBrainstormResult(sourceId, workItemId),
-    ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
-    const accepted = await service.acceptBrainstormResult(sourceId, workItemId);
-    await service.updateWorkItemPhase(sourceId, workItemId, {
-      target_phase: "spec",
-    });
-    await expect(
-      service.compileSpecMission(sourceId, workItemId, {
-        brainstorm_acceptance_sha256: accepted.acceptance_content_sha256,
-      }),
-    ).resolves.toMatchObject({ mission: { identity: { phase: "spec" } } });
-
-    const whitespaceEdit = await service.createCapture({
-      title: "Keep shaping identity stable",
-      capture_kind: "idea",
-      source_id: sourceId,
-    });
-    const whitespaceEditId = whitespaceEdit.work_item.goal.work_item_id;
-    await service.saveWorkItem(sourceId, whitespaceEditId, {
-      target_source_id: sourceId,
-      title: whitespaceEdit.work_item.goal.title,
-      type: whitespaceEdit.work_item.goal.type ?? null,
-      priority: whitespaceEdit.work_item.goal.priority ?? null,
-      tags: whitespaceEdit.work_item.goal.tags ?? [],
-      notes: "abc",
-    });
-    await service.updateWorkItemPhase(sourceId, whitespaceEditId, {
-      target_phase: "brainstorm",
-    });
-    const beforeEdit = await service.compileBrainstormMission(
-      sourceId,
-      whitespaceEditId,
-    );
-    const beforeEditResult = {
-      result_schema_version: 1 as const,
-      brainstorm_mission_content_sha256: beforeEdit.mission.content_sha256,
-      identity: beforeEdit.mission.identity,
-      problem_statement: "Whitespace-only edits fork shaping identity.",
-      approach: "Compare normalized goal input.",
-      non_goals: ["Do not mutate durable notes."],
-      open_questions: ["None."],
-    };
-    await writeFile(
-      join(dirname(beforeEdit.task_path), "result.json"),
-      `${JSON.stringify(beforeEditResult, null, 2)}\n`,
-      "utf8",
-    );
-    const afterSave = await service.saveWorkItem(sourceId, whitespaceEditId, {
-      target_source_id: sourceId,
-      title: whitespaceEdit.work_item.goal.title,
-      type: whitespaceEdit.work_item.goal.type ?? null,
-      priority: whitespaceEdit.work_item.goal.priority ?? null,
-      tags: whitespaceEdit.work_item.goal.tags ?? [],
-      notes: "abc\n",
-    });
-    expect(afterSave.work_item.goal.notes).toBe("abc\n");
-    const afterEdit = await service.compileBrainstormMission(
-      sourceId,
-      whitespaceEditId,
-    );
-    expect(afterEdit.mission.identity.input_sha256).toBe(
-      beforeEdit.mission.identity.input_sha256,
-    );
-    await expect(
-      service.importBrainstormResult(sourceId, whitespaceEditId),
-    ).resolves.toMatchObject({ receipt: { outcome: "applied" } });
-    const artifacts = await service.listShapingArtifacts(
-      sourceId,
-      whitespaceEditId,
-    );
-    expect(artifacts.artifacts).toHaveLength(1);
-    index.close();
-  });
-
-  it("fails shaping closed for Inbox, wrong phase, missing items, and unaccepted Spec input", async () => {
-    const root = await createWorkspace("Shaping failure Workspace");
-    const repository = new ProductWorkspace(root);
-    const created = await repository.create({
-      title: "Reject invalid shaping",
+      title: "Shape without a connected runtime",
       type: "Feature",
     });
     const { service } = await createService();
     const registration = await service.register({ workspace_path: root });
     const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const expectedState = ideaShapingStateSha256(created);
 
     await expect(
-      service.compileBrainstormMission(sourceId, created.goal.work_item_id),
-    ).rejects.toMatchObject({ kind: "mission_not_ready" });
-    await expect(
-      service.compileBrainstormMission(
-        sourceId,
-        "wi_123e4567-e89b-12d3-a456-426614174000",
-      ),
-    ).rejects.toBeInstanceOf(PortfolioWorkItemNotFoundError);
-
-    const inbox = await service.createCapture({
-      title: "Inbox shaping must stay hidden",
-      capture_kind: "idea",
-    });
-    await service.updateWorkItemPhase(
-      INBOX_SOURCE_ID,
-      inbox.work_item.goal.work_item_id,
-      { target_phase: "brainstorm" },
-    );
-    await expect(
-      service.compileBrainstormMission(
-        INBOX_SOURCE_ID,
-        inbox.work_item.goal.work_item_id,
-      ),
-    ).rejects.toMatchObject({ kind: "mission_not_ready" });
-
-    const rejectedItem = await service.createCapture({
-      title: "Reject malformed Brainstorm output",
-      capture_kind: "idea",
-      source_id: sourceId,
-    });
-    await service.updateWorkItemPhase(
-      sourceId,
-      rejectedItem.work_item.goal.work_item_id,
-      { target_phase: "brainstorm" },
-    );
-    const rejectedMission = await service.compileBrainstormMission(
-      sourceId,
-      rejectedItem.work_item.goal.work_item_id,
-    );
-    await writeFile(
-      join(dirname(rejectedMission.task_path), "result.json"),
-      "{invalid",
-      "utf8",
-    );
-    const rejectedImport = await service.importBrainstormResult(
-      sourceId,
-      rejectedItem.work_item.goal.work_item_id,
-    );
-    expect(rejectedImport).toMatchObject({ receipt: { outcome: "rejected" } });
-    await expect(
-      service.acceptBrainstormResult(
-        sourceId,
-        rejectedItem.work_item.goal.work_item_id,
-      ),
-    ).rejects.toMatchObject({ kind: "mission_not_ready" });
-    const rejectedListing = await service.listShapingArtifacts(
-      sourceId,
-      rejectedItem.work_item.goal.work_item_id,
-    );
-    const rejectedImportPath = rejectedListing.artifacts[0]?.import_path;
-    if (rejectedImportPath === null || rejectedImportPath === undefined) {
-      throw new Error("Expected rejected import receipt path");
-    }
-    const rejectedReceiptSha256 = hashResultContent(
-      await readFile(join(root, rejectedImportPath), "utf8"),
-    );
-    await service.updateWorkItemPhase(
-      sourceId,
-      rejectedItem.work_item.goal.work_item_id,
-      { target_phase: "spec" },
-    );
-    await expect(
-      service.compileSpecMission(
-        sourceId,
-        rejectedItem.work_item.goal.work_item_id,
-        { brainstorm_acceptance_sha256: rejectedReceiptSha256 },
-      ),
-    ).rejects.toMatchObject({ kind: "mission_not_ready" });
-
-    await service.updateWorkItemPhase(sourceId, created.goal.work_item_id, {
-      target_phase: "spec",
-    });
-    await expect(
-      service.compileSpecMission(sourceId, created.goal.work_item_id, {
-        brainstorm_acceptance_sha256: "a".repeat(64),
+      service.startBrainstorm(sourceId, workItemId, {
+        launch_mode: "connected",
+        next_requested_model: "missing-model",
+        expected_mission_content_sha256: null,
+        expected_result_content_sha256: null,
+        expected_shaping_state_sha256: expectedState,
       }),
     ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    expect((await repository.read(workItemId))?.state.phase).toBe("idea");
+    expect(await repository.listShapingArtifacts(workItemId)).toEqual([]);
+
+    const started = await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "manual",
+      next_requested_model: null,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: expectedState,
+    });
+    expect(started).toMatchObject({
+      work_item: { state: { phase: "brainstorm" } },
+      next_launch: {
+        status: "manual",
+        shaping_run_id: null,
+        reason: "runtime_unavailable",
+      },
+    });
+    expect(await repository.listShapingRuns(workItemId)).toEqual([]);
+
+    const compiled = await service.compileBrainstormMission(
+      sourceId,
+      workItemId,
+    );
+    expect(compiled.mission.identity.phase).toBe("brainstorm");
+    expect(service.getShapingModelAvailability()).toEqual({
+      status: "unavailable",
+      adapter_id: null,
+      adapter_version: null,
+      profile_id: null,
+      available_model_ids: [],
+      distinct_model_count: 0,
+      has_three_distinct_models: false,
+      reason: "runtime_unavailable",
+    });
     await expect(
-      service.importBrainstormResult(sourceId, created.goal.work_item_id),
+      service.launchShapingRun(sourceId, workItemId, "brainstorm", {
+        requested_model: "missing-model",
+      }),
     ).rejects.toMatchObject({ kind: "mission_not_ready" });
   });
+
+  it("runs the connected Brainstorm, Spec, and Plan handoffs with one commit-then-launch action each", async () => {
+    const root = await createWorkspace("Connected Shaping Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Run the guided shaping path",
+      type: "Feature",
+    });
+    const fake = preparedShapingRuntime();
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+
+    const started = await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "brainstorm-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    expect(started).toMatchObject({
+      work_item: { state: { phase: "brainstorm" } },
+      next_launch: { status: "launched", created: true },
+    });
+    const brainstormRunId = started.next_launch.shaping_run_id;
+    if (brainstormRunId === null) {
+      throw new Error("Expected a Brainstorm shaping run.");
+    }
+    await repository.completeShapingRun(workItemId, brainstormRunId, {
+      outcome: "failed",
+      partial: true,
+      reason: "Deterministic fixture hands output to manual ingress.",
+    });
+    const brainstormApplied = await applyManualShapingResult(
+      service,
+      root,
+      sourceId,
+      workItemId,
+      "brainstorm",
+    );
+    expect(brainstormApplied.imported).toMatchObject({
+      outcome: "applied",
+      receipt: { outcome: "applied" },
+    });
+
+    const brainstormReady = await service.listShapingArtifacts(
+      sourceId,
+      workItemId,
+    );
+    const brainstormTip = currentPhaseArtifact(
+      brainstormReady.artifacts,
+      "brainstorm",
+    );
+    const used = await service.useBrainstormResult(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "spec-model",
+      expected_mission_content_sha256:
+        brainstormTip.mission.content_sha256,
+      expected_result_content_sha256:
+        brainstormTip.result!.result_content_sha256,
+      expected_shaping_state_sha256:
+        brainstormReady.expected_shaping_state_sha256,
+    });
+    expect(used).toMatchObject({
+      work_item: { state: { phase: "spec" } },
+      next_launch: { status: "launched", created: true },
+    });
+    const replayedUse = await service.useBrainstormResult(
+      sourceId,
+      workItemId,
+      {
+        launch_mode: "connected",
+        next_requested_model: "spec-model",
+        expected_mission_content_sha256:
+          brainstormTip.mission.content_sha256,
+        expected_result_content_sha256:
+          brainstormTip.result!.result_content_sha256,
+        expected_shaping_state_sha256:
+          brainstormReady.expected_shaping_state_sha256,
+      },
+    );
+    expect(replayedUse.decision_id).toBe(used.decision_id);
+    expect(replayedUse.next_launch).toEqual({
+      status: "launched",
+      shaping_run_id: used.next_launch.shaping_run_id,
+      reason: null,
+      created: false,
+    });
+
+    const specRunId = used.next_launch.shaping_run_id;
+    if (specRunId === null) {
+      throw new Error("Expected a Spec shaping run.");
+    }
+    await repository.completeShapingRun(workItemId, specRunId, {
+      outcome: "failed",
+      partial: true,
+      reason: "Deterministic fixture hands output to manual ingress.",
+    });
+    const specApplied = await applyManualShapingResult(
+      service,
+      root,
+      sourceId,
+      workItemId,
+      "spec",
+    );
+    if (
+      specApplied.imported.outcome !== "applied" ||
+      !("proposal" in specApplied.imported.result)
+    ) {
+      throw new Error("Expected one applied Spec result.");
+    }
+    const specReady = await service.listShapingArtifacts(sourceId, workItemId);
+    const specTip = currentPhaseArtifact(specReady.artifacts, "spec");
+    const derivedContract = goalContractFromSpecProposal(
+      specApplied.imported.result.proposal,
+      1,
+    );
+    const approved = await service.approveSpecResult(
+      sourceId,
+      workItemId,
+      {
+        launch_mode: "connected",
+        next_requested_model: "plan-model",
+        expected_mission_content_sha256: specTip.mission.content_sha256,
+        expected_result_content_sha256:
+          specTip.result!.result_content_sha256,
+        expected_shaping_state_sha256:
+          specReady.expected_shaping_state_sha256,
+        goal_contract_sha256: hashGoalContract(derivedContract),
+      },
+    );
+    expect(approved).toMatchObject({
+      work_item: {
+        goal: { goal_contract: derivedContract },
+        state: {
+          phase: "plan",
+          goal_version: 1,
+          input_revision: 1,
+        },
+      },
+      next_launch: { status: "launched", created: true },
+    });
+    await expect(
+      service.compilePlanMission(sourceId, workItemId),
+    ).resolves.toMatchObject({
+      mission: { identity: { phase: "plan" } },
+    });
+
+    const planRunId = approved.next_launch.shaping_run_id;
+    if (planRunId === null) {
+      throw new Error("Expected a Plan shaping run.");
+    }
+    await repository.completeShapingRun(workItemId, planRunId, {
+      outcome: "failed",
+      partial: true,
+      reason: "Deterministic fixture hands output to manual ingress.",
+    });
+    const planApplied = await applyManualShapingResult(
+      service,
+      root,
+      sourceId,
+      workItemId,
+      "plan",
+    );
+    expect(planApplied.imported).toMatchObject({
+      outcome: "applied",
+      receipt: { outcome: "applied" },
+    });
+    const complete = await service.listShapingArtifacts(sourceId, workItemId);
+    expect(complete.model_use).toEqual([
+      expect.objectContaining({
+        seat: "brainstorm",
+        requested_model: null,
+        effective_model: null,
+      }),
+      expect.objectContaining({
+        seat: "spec",
+        requested_model: null,
+        effective_model: null,
+      }),
+      expect.objectContaining({
+        seat: "plan",
+        requested_model: null,
+        effective_model: null,
+      }),
+    ]);
+    expect(complete.artifacts).toHaveLength(3);
+    await expect(
+      service.launchShapingRun(sourceId, workItemId, "plan", {
+        requested_model: "plan-model",
+      }),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    expect(fake.prepare).toHaveBeenCalledTimes(3);
+  });
+
+  it("creates an immutable feedback revision and reports fewer than three configured models without blocking launch", async () => {
+    const root = await createWorkspace("Feedback Shaping Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Revise one shaping result",
+      type: "Feature",
+    });
+    const fake = preparedShapingRuntime(["model-a", "model-b"]);
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "manual",
+      next_requested_model: null,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    await applyManualShapingResult(
+      service,
+      root,
+      sourceId,
+      workItemId,
+      "brainstorm",
+    );
+    const ready = await service.listShapingArtifacts(sourceId, workItemId);
+    expect(ready.model_availability).toMatchObject({
+      status: "available",
+      distinct_model_count: 2,
+      has_three_distinct_models: false,
+    });
+    const predecessor = currentPhaseArtifact(ready.artifacts, "brainstorm");
+    const predecessorMissionSource = await readFile(
+      join(root, predecessor.mission_path),
+      "utf8",
+    );
+    const changed = await service.requestShapingChanges(
+      sourceId,
+      workItemId,
+      {
+        launch_mode: "connected",
+        next_requested_model: "model-a",
+        expected_mission_content_sha256:
+          predecessor.mission.content_sha256,
+        expected_result_content_sha256:
+          predecessor.result!.result_content_sha256,
+        expected_shaping_state_sha256:
+          ready.expected_shaping_state_sha256,
+        feedback: "Keep the problem statement and narrow the approach.",
+      },
+    );
+    expect(changed.next_launch).toMatchObject({
+      status: "launched",
+      created: true,
+    });
+    const revised = await service.listShapingArtifacts(sourceId, workItemId);
+    const tip = currentPhaseArtifact(revised.artifacts, "brainstorm");
+    expect(tip.mission.input.revision).toMatchObject({
+      ordinal: 1,
+      supersedes_input_sha256:
+        predecessor.mission.identity.input_sha256,
+      superseded_result_sha256:
+        predecessor.result!.result_content_sha256,
+      feedback: "Keep the problem statement and narrow the approach.",
+    });
+    expect(await readFile(join(root, predecessor.mission_path), "utf8")).toBe(
+      predecessorMissionSource,
+    );
+    expect(await readFile(join(root, tip.task_path), "utf8")).toContain(
+      "Keep the problem statement and narrow the approach.",
+    );
+    expect(revised.artifacts).toHaveLength(2);
+  });
+
+  it("keeps a committed decision after launch failure and applies Retry launch's ordered gates", async () => {
+    const root = await createWorkspace("Retry Shaping Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Recover a post-commit launch",
+      type: "Feature",
+    });
+    const fake = preparedShapingRuntime(["locked-model", "new-model"]);
+    fake.setPrepareFailure(new Error("simulated prepare failure"));
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const decision = await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "locked-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    expect(decision).toMatchObject({
+      work_item: { state: { phase: "brainstorm" } },
+      next_launch: {
+        status: "failed",
+        shaping_run_id: null,
+      },
+    });
+    expect(await repository.listShapingRuns(workItemId)).toEqual([]);
+
+    const decisionDirectory = join(
+      root,
+      ".founder",
+      "work-items",
+      workItemId,
+      "shaping-decisions",
+    );
+    const manifestPath = join(
+      decisionDirectory,
+      decision.decision_id + ".json",
+    );
+    const intentPath = join(
+      decisionDirectory,
+      decision.decision_id + ".intent.json",
+    );
+    const manifestSource = await readFile(manifestPath, "utf8");
+    const intentSource = await readFile(intentPath, "utf8");
+    const intent = JSON.parse(intentSource) as {
+      previous_state_bytes: string;
+      next_state_bytes: string;
+    };
+    const retryInput = {
+      decision_id: decision.decision_id,
+      expected_shaping_state_sha256: (
+        await service.listShapingArtifacts(sourceId, workItemId)
+      ).expected_shaping_state_sha256,
+    };
+
+    const pendingManifest = JSON.parse(manifestSource) as Record<
+      string,
+      unknown
+    >;
+    pendingManifest.outcome = "pending";
+    delete pendingManifest.completed_at;
+    await writeFile(
+      manifestPath,
+      JSON.stringify(pendingManifest, null, 2) + "\n",
+      "utf8",
+    );
+    await expect(
+      service.retryShapingLaunch(
+        sourceId,
+        workItemId,
+        "brainstorm",
+        retryInput,
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+    expect(await repository.listShapingRuns(workItemId)).toEqual([]);
+    await writeFile(manifestPath, manifestSource, "utf8");
+
+    const statePath = join(
+      root,
+      ".founder",
+      "work-items",
+      workItemId,
+      "state.json",
+    );
+    await writeFile(statePath, intent.previous_state_bytes, "utf8");
+    await expect(
+      service.retryShapingLaunch(
+        sourceId,
+        workItemId,
+        "brainstorm",
+        retryInput,
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+    expect(await repository.listShapingRuns(workItemId)).toEqual([]);
+    await writeFile(statePath, intent.next_state_bytes, "utf8");
+
+    fake.setPrepareFailure(null);
+    const launched = await service.retryShapingLaunch(
+      sourceId,
+      workItemId,
+      "brainstorm",
+      retryInput,
+    );
+    expect(launched.next_launch).toMatchObject({
+      status: "launched",
+      created: true,
+    });
+    expect(await readFile(intentPath, "utf8")).toBe(intentSource);
+    expect(await readFile(manifestPath, "utf8")).toBe(manifestSource);
+
+    fake.setAvailableModels(["new-model"]);
+    const replayInput = {
+      ...retryInput,
+      expected_shaping_state_sha256: (
+        await service.listShapingArtifacts(sourceId, workItemId)
+      ).expected_shaping_state_sha256,
+    };
+    const replayed = await service.retryShapingLaunch(
+      sourceId,
+      workItemId,
+      "brainstorm",
+      replayInput,
+    );
+    expect(replayed.next_launch).toEqual({
+      status: "launched",
+      shaping_run_id: launched.next_launch.shaping_run_id,
+      reason: null,
+      created: false,
+    });
+
+    const second = await repository.create({
+      title: "Use a new attempt when the locked model disappeared",
+      type: "Feature",
+    });
+    fake.setAvailableModels(["locked-model", "new-model"]);
+    fake.setPrepareFailure(new Error("simulated second prepare failure"));
+    const failed = await service.startBrainstorm(
+      sourceId,
+      second.goal.work_item_id,
+      {
+        launch_mode: "connected",
+        next_requested_model: "locked-model",
+        expected_mission_content_sha256: null,
+        expected_result_content_sha256: null,
+        expected_shaping_state_sha256: ideaShapingStateSha256(second),
+      },
+    );
+    fake.setPrepareFailure(null);
+    fake.setAvailableModels(["new-model"]);
+    const secondListing = await service.listShapingArtifacts(
+      sourceId,
+      second.goal.work_item_id,
+    );
+    const secondRetryInput = {
+      decision_id: failed.decision_id,
+      expected_shaping_state_sha256:
+        secondListing.expected_shaping_state_sha256,
+    };
+    await expect(
+      service.retryShapingLaunch(
+        sourceId,
+        second.goal.work_item_id,
+        "brainstorm",
+        secondRetryInput,
+      ),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      message: expect.stringContaining("locked-model"),
+    });
+    const secondDecisionDirectory = join(
+      root,
+      ".founder",
+      "work-items",
+      second.goal.work_item_id,
+      "shaping-decisions",
+    );
+    const secondIntentPath = join(
+      secondDecisionDirectory,
+      failed.decision_id + ".intent.json",
+    );
+    const secondManifestPath = join(
+      secondDecisionDirectory,
+      failed.decision_id + ".json",
+    );
+    const secondIntentBefore = await readFile(secondIntentPath, "utf8");
+    const secondManifestBefore = await readFile(secondManifestPath, "utf8");
+    const newAttempt = await service.launchShapingRun(
+      sourceId,
+      second.goal.work_item_id,
+      "brainstorm",
+      { requested_model: "new-model" },
+    );
+    expect(newAttempt.next_launch).toMatchObject({
+      status: "launched",
+      created: true,
+    });
+    expect(await readFile(secondIntentPath, "utf8")).toBe(secondIntentBefore);
+    expect(await readFile(secondManifestPath, "utf8")).toBe(
+      secondManifestBefore,
+    );
+    const secondAttemptRetryInput = {
+      ...secondRetryInput,
+      expected_shaping_state_sha256: (
+        await service.listShapingArtifacts(
+          sourceId,
+          second.goal.work_item_id,
+        )
+      ).expected_shaping_state_sha256,
+    };
+    await expect(
+      service.retryShapingLaunch(
+        sourceId,
+        second.goal.work_item_id,
+        "brainstorm",
+        secondAttemptRetryInput,
+      ),
+    ).rejects.toMatchObject({ kind: "lease_held" });
+  });
+
+  it("returns sanitized manual-import rejection evidence and records unknown model provenance on apply", async () => {
+    const root = await createWorkspace("Manual Import Validation Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Validate manual shaping ingress",
+      type: "Feature",
+    });
+    const fake = preparedShapingRuntime();
+    const { service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "manual",
+      next_requested_model: null,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    const listing = await service.listShapingArtifacts(sourceId, workItemId);
+    const artifact = currentPhaseArtifact(listing.artifacts, "brainstorm");
+    const binding = {
+      expected_mission_content_sha256: artifact.mission.content_sha256,
+      expected_shaping_state_sha256:
+        listing.expected_shaping_state_sha256,
+    };
+    const manual = await service.openManualIngress(
+      sourceId,
+      workItemId,
+      "brainstorm",
+      binding,
+    );
+    expect(manual.task).toContain(manual.instruction.ingress_path);
+    expect(manual.task).toContain(artifact.mission.content_sha256);
+    await writeFile(
+      join(root, manual.instruction.ingress_path),
+      "{invalid raw founder content",
+      "utf8",
+    );
+    const rejected = await service.importBrainstormResult(
+      sourceId,
+      workItemId,
+      binding,
+    );
+    expect(rejected).toEqual({
+      source_id: sourceId,
+      work_item_id: workItemId,
+      outcome: "rejected",
+      rejection: {
+        raw_result_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        byte_length: 28,
+        reasons: [{ code: "invalid_json", field_path: "$" }],
+      },
+    });
+    expect(JSON.stringify(rejected)).not.toContain("raw founder content");
+    const missionDirectory = dirname(join(root, artifact.mission_path));
+    expect(await readdir(missionDirectory)).toEqual([
+      "TASK.md",
+      "mission.json",
+    ]);
+
+    const validResult = shapingResultForMission(artifact.mission);
+    await writeFile(
+      join(root, manual.instruction.ingress_path),
+      JSON.stringify(validResult, null, 2) + "\n",
+      "utf8",
+    );
+    const applied = await service.importBrainstormResult(
+      sourceId,
+      workItemId,
+      binding,
+    );
+    expect(applied).toMatchObject({
+      outcome: "applied",
+      receipt: { outcome: "applied" },
+    });
+    const appliedArtifact = currentPhaseArtifact(
+      (await service.listShapingArtifacts(sourceId, workItemId)).artifacts,
+      "brainstorm",
+    );
+    expect(appliedArtifact.production_receipt).toMatchObject({
+      origin: "manual_import",
+      shaping_run_id: null,
+      requested_model: { value: null, assurance: "unknown" },
+      effective_model: {
+        assurance: "unknown",
+        model_id: null,
+        deployment_id: null,
+        observed_event_sha256: null,
+      },
+    });
+    await expect(
+      readdir(join(missionDirectory, "rejected-imports")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects every dedicated or closed shaping arrow through generic phase update and leaves post-Execute movement generic", async () => {
+    const root = await createWorkspace("Closed Shaping Transition Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const idea = await repository.create({
+      title: "Idea arrows",
+      type: "Feature",
+    });
+    const brainstorm = await repository.create({
+      title: "Brainstorm arrows",
+      type: "Feature",
+    });
+    await repository.updatePhase(brainstorm.goal.work_item_id, {
+      target_phase: "brainstorm",
+    });
+    const spec = await repository.create({
+      title: "Spec arrows",
+      type: "Feature",
+    });
+    await repository.updatePhase(spec.goal.work_item_id, {
+      target_phase: "spec",
+    });
+    const plan = await repository.create({
+      title: "Plan arrows",
+      type: "Feature",
+    });
+    await repository.updatePhase(plan.goal.work_item_id, {
+      target_phase: "spec",
+    });
+    await repository.updatePhase(plan.goal.work_item_id, {
+      target_phase: "plan",
+    });
+    const execute = await repository.create({
+      title: "Post Execute arrows",
+      type: "Feature",
+    });
+    await repository.updatePhase(execute.goal.work_item_id, {
+      target_phase: "spec",
+    });
+    await repository.updatePhase(execute.goal.work_item_id, {
+      target_phase: "plan",
+    });
+    await repository.updatePhase(execute.goal.work_item_id, {
+      target_phase: "execute",
+    });
+
+    const { service } = await createService();
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const cases = [
+      [idea.goal.work_item_id, "brainstorm", "Start Brainstorm"],
+      [idea.goal.work_item_id, "spec", "Spec requires a Brainstorm selection"],
+      [
+        brainstorm.goal.work_item_id,
+        "spec",
+        "Use result & run Spec",
+      ],
+      [spec.goal.work_item_id, "brainstorm", "Request changes"],
+      [spec.goal.work_item_id, "plan", "Approve & run Plan"],
+      [plan.goal.work_item_id, "spec", "Request changes"],
+      [
+        plan.goal.work_item_id,
+        "execute",
+        "Execute approval is not part of this slice",
+      ],
+    ] as const;
+    for (const [workItemId, targetPhase, message] of cases) {
+      await expect(
+        service.updateWorkItemPhase(sourceId, workItemId, {
+          target_phase: targetPhase,
+        }),
+      ).rejects.toMatchObject({
+        kind: "invalid_transition",
+        message: expect.stringContaining(message),
+      });
+    }
+    await expect(
+      service.updateWorkItemPhase(sourceId, execute.goal.work_item_id, {
+        target_phase: "review",
+      }),
+    ).resolves.toMatchObject({
+      work_item: { state: { phase: "review" } },
+    });
+    await expect(
+      readFile(
+        join(
+          process.cwd(),
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/accept/route.ts",
+        ),
+        "utf8",
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
 
   it("launches one connected run, imports its completed result, and never spawns a duplicate", async () => {
     const root = await createWorkspace("Connected Execute Workspace");

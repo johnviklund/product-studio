@@ -16,6 +16,12 @@ import { z } from "zod";
 
 import {
   deriveControllerIdempotencyKey,
+  type ApproveSpecDecisionInput,
+  type ReplanWithUpdatedContractInput,
+  type RequestShapingChangesInput,
+  type ShapingDecisionControllerResult,
+  type ShapingResultDecisionInput,
+  type StartBrainstormDecisionInput,
   WorkItemController,
 } from "./work-item-controller";
 import {
@@ -81,6 +87,7 @@ import {
 } from "../domain/work-item";
 import {
   canUpdateGoalContract,
+  dedicatedTransitionPolicy,
   validatePhaseTransition,
 } from "../domain/workflow-policy";
 import {
@@ -97,22 +104,41 @@ import {
 import {
   brainstormResultSubmissionSchema,
   compileBrainstormMission as compileBrainstormMissionPackage,
+  compilePlanMission as compilePlanMissionPackage,
   compileSpecMission as compileSpecMissionPackage,
-  hashShapingInput,
+  hashGoalContract,
+  hashGoalInput,
+  hashShapingDecisionState,
   normalizeShapingGoalInput,
-  shapingImportReceiptSchema,
+  planResultSubmissionSchema,
+  renderShapingTaskMd,
+  shapingMissionPackageSchema,
   specResultSubmissionSchema,
   type BrainstormMissionPackage,
-  type BrainstormResultSubmission,
+  type PlanMissionPackage,
   type ShapingArtifactWriteResult,
-  type ShapingIdentity,
+  type ShapingDecisionIntentV1,
+  type ShapingDecisionState,
   type ShapingImportReceipt,
+  type ShapingIngressInstructionV1,
+  type ShapingMissionPackage,
+  type ShapingPhase,
   type ShapingResultSubmission,
-  type ShapingSelectionReceipt,
   type SpecMissionPackage,
-  type SpecResultSubmission,
   type StoredShapingArtifact,
 } from "../domain/shaping";
+import {
+  shapingRunLaunchFingerprint,
+  summarizeShapingRun,
+  type ShapingRunRecordV1,
+  type ShapingRunSummary,
+} from "../domain/shaping-run";
+import {
+  shapingModelPickerOptions,
+  summarizeWorkflowModelUse,
+  type ShapingModelPickerOption,
+  type WorkflowModelUse,
+} from "../domain/portfolio-preferences";
 import type {
   AcpClientAdapter,
   AcpEventSink,
@@ -125,6 +151,10 @@ import {
   type CopilotSanitizedProfileEvidence,
 } from "../infrastructure/acp/copilot-runtime-profile";
 import { ProductWorkspace } from "../workspace/product-workspace";
+import type {
+  ShapingRunCreateResult,
+} from "../workspace/product-workspace";
+import { PortfolioPreferencesStore } from "../workspace/portfolio-preferences";
 import { PortfolioRegistry } from "../workspace/portfolio-registry";
 
 type WorkspaceGateway = Pick<
@@ -155,10 +185,22 @@ type WorkspaceGateway = Pick<
   | "readMissionResult"
   | "writeShapingMissionPackage"
   | "readShapingMissionPackage"
-  | "readShapingResult"
-  | "writeShapingImportReceipt"
-  | "writeShapingAcceptance"
   | "listShapingArtifacts"
+  | "writeShapingIngressInstruction"
+  | "readShapingIngressBytes"
+  | "publishAppliedShapingResult"
+  | "createShapingRun"
+  | "readShapingRun"
+  | "readShapingRunInstruction"
+  | "listShapingRuns"
+  | "readShapingDecisionIntent"
+  | "readShapingDecisionManifest"
+  | "writeShapingDecisionReceipt"
+  | "writeShapingDecisionIntent"
+  | "publishLeasedShapingMission"
+  | "commitShapingDecision"
+  | "reconcileShapingDecisionCommit"
+  | "repairRetainedControllerLease"
   | "createConnectedRun"
   | "readConnectedRun"
   | "listConnectedRuns"
@@ -297,26 +339,123 @@ export type BrainstormMissionCompilation =
   ShapingArtifactWriteResult<BrainstormMissionPackage>;
 export type SpecMissionCompilation =
   ShapingArtifactWriteResult<SpecMissionPackage>;
+export type PlanMissionCompilation =
+  ShapingArtifactWriteResult<PlanMissionPackage>;
 
-export interface ShapingImportResult {
-  source_id: string;
-  work_item_id: string;
-  receipt: ShapingImportReceipt;
-  result?: ShapingResultSubmission;
+export interface ShapingManualImportBinding {
+  expected_mission_content_sha256: string;
+  expected_shaping_state_sha256: string;
 }
 
-export interface ShapingAcceptanceResult {
+export interface ShapingValidationReason {
+  code:
+    | "invalid_json"
+    | "invalid_utf8"
+    | "schema_violation"
+    | "mission_hash_mismatch"
+    | "missing_required_field";
+  field_path: string;
+}
+
+export interface ShapingRejectedImportEvidence {
+  raw_result_sha256: string;
+  byte_length: number;
+  reasons: ShapingValidationReason[];
+}
+
+export type ShapingImportResult =
+  | {
+      source_id: string;
+      work_item_id: string;
+      outcome: "applied";
+      receipt: ShapingImportReceipt;
+      result: ShapingResultSubmission;
+    }
+  | {
+      source_id: string;
+      work_item_id: string;
+      outcome: "rejected";
+      rejection: ShapingRejectedImportEvidence;
+    };
+
+export interface ManualShapingIngressResult {
   source_id: string;
   work_item_id: string;
-  acceptance: ShapingSelectionReceipt;
-  acceptance_path: string;
-  acceptance_content_sha256: string;
+  task: string;
+  instruction: ShapingIngressInstructionV1;
+  instruction_path: string;
+}
+
+export interface ShapingRuntimeConfiguration {
+  adapter_id: string;
+  adapter_version: string;
+  profile_id: string;
+  available_model_ids: readonly string[];
+}
+
+export interface ShapingModelAvailability {
+  status: "available" | "unavailable";
+  adapter_id: string | null;
+  adapter_version: string | null;
+  profile_id: string | null;
+  available_model_ids: string[];
+  distinct_model_count: number;
+  has_three_distinct_models: boolean;
+  reason: string | null;
+}
+
+export interface ShapingRuntimePrepareInput {
+  workspace_cwd: string;
+  mission: ShapingMissionPackage;
+  requested_model: string;
+  limits: ShapingRunRecordV1["limits"];
+}
+
+export interface PreparedShapingRuntime {
+  requested_model: string;
+  reasoning_effort: string;
+  sanitized_profile: CopilotSanitizedProfileEvidence;
+}
+
+export interface ConnectedShapingRuntime {
+  configuration(): ShapingRuntimeConfiguration;
+  prepare(input: ShapingRuntimePrepareInput): Promise<PreparedShapingRuntime>;
+}
+
+export interface ShapingNextLaunch {
+  status: "launched" | "failed" | "manual";
+  shaping_run_id: string | null;
+  reason: string | null;
+  created?: boolean;
+}
+
+export interface PortfolioShapingLaunchResult {
+  source_id: string;
+  work_item_id: string;
+  next_launch: ShapingNextLaunch;
+  shaping_run: ShapingRunSummary | null;
+}
+
+export interface PortfolioShapingDecisionResult extends PortfolioWorkItem {
+  decision_id: string;
+  next_mission: ShapingDecisionControllerResult["next_mission"];
+  next_launch: ShapingNextLaunch;
+}
+
+export interface ShapingRetryLaunchInput {
+  decision_id: string;
+  expected_shaping_state_sha256: string;
 }
 
 export interface ShapingArtifactListing {
   source_id: string;
   work_item_id: string;
   artifacts: StoredShapingArtifact[];
+  runs: ShapingRunSummary[];
+  expected_shaping_state_sha256: string;
+  model_availability: ShapingModelAvailability;
+  model_use: WorkflowModelUse[];
+  model_picker_options: Record<ShapingPhase, ShapingModelPickerOption[]>;
 }
 
 export interface PortfolioImportResult extends PortfolioWorkItem {
@@ -431,6 +570,10 @@ const CONNECTED_RUN_LIMITS: ConnectedRunRecordV1["limits"] = {
   drain_grace_ms: 1_000,
 };
 
+const SHAPING_RUN_LIMITS: ShapingRunRecordV1["limits"] = {
+  ...CONNECTED_RUN_LIMITS,
+};
+
 const launchConnectedExecuteRequestSchema: z.ZodType<LaunchConnectedExecuteRequest> =
   z.strictObject({
     model_override: z.string().trim().min(1).max(200).optional(),
@@ -462,14 +605,43 @@ export const compileReviewMissionInputSchema = z.strictObject({
   independence_attested: z.literal(true),
 });
 
-const shapingAcceptanceSha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const shapingSha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const shapingRequestedModelSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine((value) => value === value.trim(), "must not have surrounding whitespace")
+  .refine(
+    (value) => !/[\u0000-\u001f\u007f]/u.test(value),
+    "must not contain control characters",
+  );
 
 export const compileSpecMissionInputSchema = z.strictObject({
-  brainstorm_acceptance_sha256: shapingAcceptanceSha256Schema,
+  brainstorm_acceptance_sha256: shapingSha256Schema,
 });
 
-export const importSpecResultInputSchema = z.strictObject({
-  brainstorm_acceptance_sha256: shapingAcceptanceSha256Schema,
+const shapingManualImportBindingSchema: z.ZodType<ShapingManualImportBinding> =
+  z.strictObject({
+    expected_mission_content_sha256: shapingSha256Schema,
+    expected_shaping_state_sha256: shapingSha256Schema,
+  });
+
+const shapingRetryLaunchInputSchema: z.ZodType<ShapingRetryLaunchInput> =
+  z.strictObject({
+    decision_id: shapingSha256Schema,
+    expected_shaping_state_sha256: shapingSha256Schema,
+  });
+
+const shapingRuntimeConfigurationSchema: z.ZodType<ShapingRuntimeConfiguration> =
+  z.strictObject({
+    adapter_id: shapingRequestedModelSchema,
+    adapter_version: shapingRequestedModelSchema,
+    profile_id: shapingRequestedModelSchema,
+    available_model_ids: z.array(shapingRequestedModelSchema),
+  });
+
+const launchShapingRunRequestSchema = z.strictObject({
+  requested_model: shapingRequestedModelSchema,
 });
 
 const portfolioAttentionItemSchema: z.ZodType<PortfolioAttentionItem> =
@@ -529,13 +701,19 @@ export class PortfolioService {
     private readonly makeWorkspace: WorkspaceFactory = (workspacePath) =>
       new ProductWorkspace(workspacePath),
     private readonly connectedRuntime?: ConnectedExecuteRuntime,
+    private readonly shapingRuntime?: ConnectedShapingRuntime,
+    preferencesStore?: PortfolioPreferencesStore,
   ) {
     this.inboxRoot = resolve(inboxRoot);
     this.transfersRoot = join(dirname(this.inboxRoot), "transfers");
+    this.preferencesStore =
+      preferencesStore ??
+      new PortfolioPreferencesStore(dirname(dirname(this.inboxRoot)));
   }
 
   readonly inboxRoot: string;
   readonly transfersRoot: string;
+  private readonly preferencesStore: PortfolioPreferencesStore;
   private readonly liveConnectedSessions = new Map<string, AcpSession>();
 
   listWorkspaces(): Promise<RegisteredWorkspace[]> {
@@ -683,6 +861,20 @@ export class PortfolioService {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
 
+    const dedicatedPolicy = dedicatedTransitionPolicy(
+      current.state.phase,
+      validatedInput.target_phase,
+    );
+    if (dedicatedPolicy.kind !== "generic_allowed") {
+      throw new InvalidWorkItemTransitionError(
+        current.state.phase,
+        validatedInput.target_phase,
+        dedicatedPolicy.kind === "dedicated_operation_required"
+          ? `${dedicatedPolicy.action_label} — ${dedicatedPolicy.explanation}`
+          : dedicatedPolicy.explanation,
+      );
+    }
+
     const transition = validatePhaseTransition(
       current.state.phase,
       validatedInput.target_phase,
@@ -766,162 +958,81 @@ export class PortfolioService {
       workItemId,
       "brainstorm",
     );
-    const goalInput = this.shapingGoalInput(workItem);
-    const shapingInput = {
-      phase: "brainstorm" as const,
-      ...goalInput,
-    };
-    const identity: ShapingIdentity<"brainstorm"> = {
-      phase: "brainstorm",
-      work_item_id: workItemId,
-      input_sha256: hashShapingInput(shapingInput),
-    };
-    return source.workspace.writeShapingMissionPackage(identity, (paths) =>
-      compileBrainstormMissionPackage({
-        work_item_id: workItemId,
-        shaping_input: shapingInput,
-        paths,
-      }),
+    return this.currentShapingCompilation(
+      source,
+      workItem,
+      "brainstorm",
     ) as Promise<BrainstormMissionCompilation>;
   }
 
   async importBrainstormResult(
     sourceId: string,
     workItemId: string,
+    input?: ShapingManualImportBinding,
   ): Promise<ShapingImportResult> {
     const { source, workItem } = await this.requireActiveShapingItem(
       sourceId,
       workItemId,
       "brainstorm",
     );
-    return this.importShapingResult(source, workItem, "brainstorm");
-  }
-
-  async acceptBrainstormResult(
-    sourceId: string,
-    workItemId: string,
-  ): Promise<ShapingAcceptanceResult> {
-    const { source, workItem } = await this.requireActiveShapingItem(
-      sourceId,
-      workItemId,
-      "brainstorm",
-    );
-    const artifact = await this.currentShapingArtifact(
+    return this.importShapingResult(
       source,
       workItem,
       "brainstorm",
+      shapingManualImportBindingSchema.parse(input),
     );
-    if (
-      artifact.result === null ||
-      artifact.import_receipt?.outcome !== "applied"
-    ) {
-      throw this.missionNotReady(
-        workItemId,
-        "Brainstorm acceptance requires one applied imported result.",
-      );
-    }
-    if (artifact.acceptance !== null) {
-      return {
-        source_id: source.source_id,
-        work_item_id: workItemId,
-        acceptance: artifact.acceptance.receipt,
-        acceptance_path: artifact.acceptance.acceptance_path,
-        acceptance_content_sha256:
-          artifact.acceptance.acceptance_content_sha256,
-      };
-    }
-
-    const acceptance: ShapingSelectionReceipt = {
-      shaping_schema_version: 2,
-      identity: {
-        phase: "brainstorm",
-        work_item_id: artifact.mission.identity.work_item_id,
-        input_sha256: artifact.mission.identity.input_sha256,
-      },
-      mission_content_sha256: artifact.mission.content_sha256,
-      result_content_sha256: artifact.result.result_content_sha256,
-      selected_at: new Date().toISOString(),
-    };
-    const stored = await source.workspace.writeShapingAcceptance(acceptance);
-    return {
-      source_id: source.source_id,
-      work_item_id: workItemId,
-      acceptance: stored.receipt,
-      acceptance_path: stored.receipt_path,
-      acceptance_content_sha256: stored.receipt_content_sha256,
-    };
   }
 
   async compileSpecMission(
     sourceId: string,
     workItemId: string,
-    input: { brainstorm_acceptance_sha256: string },
+    input?: { brainstorm_acceptance_sha256: string },
   ): Promise<SpecMissionCompilation> {
-    const validatedInput = compileSpecMissionInputSchema.parse(input);
     const { source, workItem } = await this.requireActiveShapingItem(
       sourceId,
       workItemId,
       "spec",
     );
-    const matches = (await source.workspace.listShapingArtifacts(workItemId))
-      .filter(
-        (artifact) =>
-          artifact.acceptance?.acceptance_content_sha256 ===
-          validatedInput.brainstorm_acceptance_sha256,
-      );
-    if (matches.length !== 1) {
-      throw this.missionNotReady(
-        workItemId,
-        matches.length === 0
-          ? "The selected Brainstorm acceptance does not exist."
-          : "More than one Brainstorm acceptance matches the selected SHA.",
-      );
-    }
-    const selected = matches[0];
+    const compilation = (await this.currentShapingCompilation(
+      source,
+      workItem,
+      "spec",
+    )) as SpecMissionCompilation;
     if (
-      selected.mission.identity.phase !== "brainstorm" ||
-      selected.acceptance === null ||
-      selected.result === null ||
-      selected.import_receipt?.outcome !== "applied"
+      input !== undefined &&
+      compilation.mission.input.brainstorm_selection_sha256 !==
+        compileSpecMissionInputSchema.parse(input)
+          .brainstorm_acceptance_sha256
     ) {
       throw this.missionNotReady(
         workItemId,
-        "Spec compilation requires one applied and accepted Brainstorm result.",
+        "The selected Brainstorm decision does not match the current Spec mission.",
       );
     }
-    const brainstormResult = this.parseAppliedBrainstormResult(
-      selected,
+    return compilation;
+  }
+
+  async compilePlanMission(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PlanMissionCompilation> {
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
       workItemId,
+      "plan",
     );
-    const goalInput = this.shapingGoalInput(workItem);
-    const shapingInput = {
-      phase: "spec" as const,
-      ...goalInput,
-      brainstorm_selection_sha256:
-        validatedInput.brainstorm_acceptance_sha256,
-      brainstorm_selection: selected.acceptance.receipt,
-      brainstorm_result: brainstormResult,
-    };
-    const identity: ShapingIdentity<"spec"> = {
-      phase: "spec",
-      work_item_id: workItemId,
-      input_sha256: hashShapingInput(shapingInput),
-    };
-    return source.workspace.writeShapingMissionPackage(identity, (paths) =>
-      compileSpecMissionPackage({
-        work_item_id: workItemId,
-        shaping_input: shapingInput,
-        paths,
-      }),
-    ) as Promise<SpecMissionCompilation>;
+    return this.currentShapingCompilation(
+      source,
+      workItem,
+      "plan",
+    ) as Promise<PlanMissionCompilation>;
   }
 
   async importSpecResult(
     sourceId: string,
     workItemId: string,
-    input: { brainstorm_acceptance_sha256: string },
+    input?: ShapingManualImportBinding,
   ): Promise<ShapingImportResult> {
-    const validatedInput = importSpecResultInputSchema.parse(input);
     const { source, workItem } = await this.requireActiveShapingItem(
       sourceId,
       workItemId,
@@ -931,23 +1042,326 @@ export class PortfolioService {
       source,
       workItem,
       "spec",
-      validatedInput.brainstorm_acceptance_sha256,
+      shapingManualImportBindingSchema.parse(input),
     );
+  }
+
+  async importPlanResult(
+    sourceId: string,
+    workItemId: string,
+    input?: ShapingManualImportBinding,
+  ): Promise<ShapingImportResult> {
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      "plan",
+    );
+    return this.importShapingResult(
+      source,
+      workItem,
+      "plan",
+      shapingManualImportBindingSchema.parse(input),
+    );
+  }
+
+  async openManualIngress(
+    sourceId: string,
+    workItemId: string,
+    phase: ShapingPhase,
+    input: ShapingManualImportBinding,
+  ): Promise<ManualShapingIngressResult> {
+    const validated = shapingManualImportBindingSchema.parse(input);
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      phase,
+    );
+    const artifacts = await source.workspace.listShapingArtifacts(workItemId);
+    const runs = await source.workspace.listShapingRuns(workItemId);
+    const artifact = this.requireCurrentShapingArtifact(
+      workItem,
+      phase,
+      artifacts,
+      validated.expected_mission_content_sha256,
+    );
+    this.assertExpectedShapingState(
+      workItem,
+      artifacts,
+      runs,
+      validated.expected_shaping_state_sha256,
+    );
+    const written = await source.workspace.writeShapingIngressInstruction({
+      origin: "manual_import",
+      shaping_run_id: null,
+      mission: artifact.mission,
+    });
+    return {
+      source_id: source.source_id,
+      work_item_id: workItemId,
+      task: this.renderManualRecoveryTask(
+        artifact.mission,
+        written.instruction,
+      ),
+      instruction: written.instruction,
+      instruction_path: written.instruction_path,
+    };
+  }
+
+  async launchShapingRun(
+    sourceId: string,
+    workItemId: string,
+    phase: ShapingPhase,
+    input: { requested_model: string },
+  ): Promise<PortfolioShapingLaunchResult> {
+    const validated = launchShapingRunRequestSchema.parse(input);
+    const { source, workItem } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      phase,
+    );
+    const artifacts = await source.workspace.listShapingArtifacts(workItemId);
+    const mission = this.requireCurrentShapingArtifact(
+      workItem,
+      phase,
+      artifacts,
+    ).mission;
+    const launched = await this.launchPreparedShapingMission(
+      source,
+      mission,
+      validated.requested_model,
+    );
+    return this.portfolioShapingLaunchResult(source, workItemId, launched);
+  }
+
+  async startBrainstorm(
+    sourceId: string,
+    workItemId: string,
+    input: StartBrainstormDecisionInput,
+  ): Promise<PortfolioShapingDecisionResult> {
+    const source = await this.requireDecisionSource(sourceId, workItemId);
+    this.preflightDecisionLaunch(workItemId, input);
+    const decided = await this.workItemController(
+      source.workspace,
+    ).startBrainstorm(workItemId, input);
+    return this.finishShapingDecision(source, decided);
+  }
+
+  async requestShapingChanges(
+    sourceId: string,
+    workItemId: string,
+    input: RequestShapingChangesInput,
+  ): Promise<PortfolioShapingDecisionResult> {
+    const source = await this.requireDecisionSource(sourceId, workItemId);
+    this.preflightDecisionLaunch(workItemId, input);
+    const decided = await this.workItemController(
+      source.workspace,
+    ).requestShapingChanges(workItemId, input);
+    return this.finishShapingDecision(source, decided);
+  }
+
+  async useBrainstormResult(
+    sourceId: string,
+    workItemId: string,
+    input: ShapingResultDecisionInput,
+  ): Promise<PortfolioShapingDecisionResult> {
+    const source = await this.requireDecisionSource(sourceId, workItemId);
+    this.preflightDecisionLaunch(workItemId, input);
+    const decided = await this.workItemController(
+      source.workspace,
+    ).useBrainstormResult(workItemId, input);
+    return this.finishShapingDecision(source, decided);
+  }
+
+  async approveSpecResult(
+    sourceId: string,
+    workItemId: string,
+    input: ApproveSpecDecisionInput,
+  ): Promise<PortfolioShapingDecisionResult> {
+    const source = await this.requireDecisionSource(sourceId, workItemId);
+    this.preflightDecisionLaunch(workItemId, input);
+    const decided = await this.workItemController(
+      source.workspace,
+    ).approveSpecResult(workItemId, input);
+    return this.finishShapingDecision(source, decided);
+  }
+
+  async replanWithUpdatedContract(
+    sourceId: string,
+    workItemId: string,
+    input: ReplanWithUpdatedContractInput,
+  ): Promise<PortfolioShapingDecisionResult> {
+    const source = await this.requireDecisionSource(sourceId, workItemId);
+    this.preflightDecisionLaunch(workItemId, input);
+    const decided = await this.workItemController(
+      source.workspace,
+    ).replanWithUpdatedContract(workItemId, input);
+    return this.finishShapingDecision(source, decided);
+  }
+
+  async retryShapingLaunch(
+    sourceId: string,
+    workItemId: string,
+    phase: ShapingPhase,
+    input: ShapingRetryLaunchInput,
+  ): Promise<PortfolioShapingLaunchResult> {
+    const validated = shapingRetryLaunchInputSchema.parse(input);
+    const source = await this.requireDecisionSource(sourceId, workItemId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const manifest = await source.workspace.readShapingDecisionManifest(
+      workItemId,
+      validated.decision_id,
+    );
+    if (
+      manifest === null ||
+      manifest.work_item_id !== workItemId ||
+      manifest.phase_to !== phase
+    ) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItemId,
+        `Applied shaping decision ${validated.decision_id} was not found for ${phase}.`,
+      );
+    }
+    if (manifest.outcome === "pending") {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Shaping decision ${validated.decision_id} is pending; replay the leased decision before retrying launch.`,
+      );
+    }
+    if (manifest.outcome !== "applied") {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItemId,
+        `Shaping decision ${validated.decision_id} is not applied.`,
+      );
+    }
+    const intent = await source.workspace.readShapingDecisionIntent(
+      workItemId,
+      validated.decision_id,
+    );
+    if (
+      intent === null ||
+      intent.launch_mode !== "connected" ||
+      intent.next_requested_model === null ||
+      intent.launch_fingerprint === null
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "This shaping decision has no connected launch to retry.",
+      );
+    }
+    this.assertCommittedShapingIntentState(workItem, intent);
+
+    const artifacts = await source.workspace.listShapingArtifacts(workItemId);
+    const runs = await source.workspace.listShapingRuns(workItemId);
+    const shapingState = this.shapingDecisionState(workItem, artifacts, runs);
+    if (
+      hashShapingDecisionState(shapingState) !==
+      validated.expected_shaping_state_sha256
+    ) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItemId,
+        "Expected shaping state does not match the durable launch state.",
+      );
+    }
+    const artifact = artifacts.find(
+      (candidate) =>
+        candidate.mission.content_sha256 ===
+        intent.next_mission_content_sha256,
+    );
+    if (
+      artifact === undefined ||
+      artifact.mission.identity.phase !== phase ||
+      artifact.mission.identity.input_sha256 !==
+        intent.next_mission_input_sha256
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "The decision intent's target mission is missing or inconsistent.",
+      );
+    }
+    if (artifact.result !== null) {
+      throw this.missionNotReady(
+        workItemId,
+        "This shaping mission revision already has an applied result.",
+      );
+    }
+
+    const nonTerminalRuns = runs.filter(
+      (run) => run.lifecycle.status !== "terminal",
+    );
+    const matching = nonTerminalRuns.find(
+      (run) => this.shapingRunFingerprint(run) === intent.launch_fingerprint,
+    );
+    if (matching !== undefined) {
+      return this.portfolioShapingLaunchResult(source, workItemId, {
+        record: matching,
+        instruction: await source.workspace.readShapingRunInstruction(
+          workItemId,
+          matching.shaping_run_id,
+        ),
+        created: false,
+      });
+    }
+    if (nonTerminalRuns.length > 0) {
+      throw new ControllerConflictError(
+        "lease_held",
+        workItemId,
+        `Shaping run ${nonTerminalRuns[0]!.shaping_run_id} is already active with a different launch fingerprint.`,
+      );
+    }
+
+    this.assertShapingModelAvailable(
+      workItemId,
+      intent.next_requested_model,
+    );
+    const launched = await this.launchPreparedShapingMission(
+      source,
+      artifact.mission,
+      intent.next_requested_model,
+      intent.launch_fingerprint,
+    );
+    return this.portfolioShapingLaunchResult(source, workItemId, launched);
   }
 
   async listShapingArtifacts(
     sourceId: string,
     workItemId: string,
   ): Promise<ShapingArtifactListing> {
-    const { source } = await this.requireActiveShapingItem(
+    const { source, workItem } = await this.requireActiveShapingItem(
       sourceId,
       workItemId,
+    );
+    const artifacts = await source.workspace.listShapingArtifacts(workItemId);
+    const runs = await source.workspace.listShapingRuns(workItemId);
+    const modelAvailability = this.shapingModelAvailability();
+    const modelUse = this.workflowModelUse(workItemId, artifacts, runs);
+    const modelPickerOptions = await this.modelPickerOptions(
+      modelAvailability,
+      modelUse,
     );
     return {
       source_id: source.source_id,
       work_item_id: workItemId,
-      artifacts: await source.workspace.listShapingArtifacts(workItemId),
+      artifacts,
+      runs: runs.map(summarizeShapingRun),
+      expected_shaping_state_sha256: hashShapingDecisionState(
+        this.shapingDecisionState(workItem, artifacts, runs),
+      ),
+      model_availability: modelAvailability,
+      model_use: modelUse,
+      model_picker_options: modelPickerOptions,
     };
+  }
+
+  getShapingModelAvailability(): ShapingModelAvailability {
+    return this.shapingModelAvailability();
   }
 
   async launchConnectedExecute(
@@ -2060,15 +2474,14 @@ export class PortfolioService {
   private async requireActiveShapingItem(
     sourceId: string,
     workItemId: string,
-    phase?: "brainstorm" | "spec",
+    phase?: ShapingPhase,
   ): Promise<{ source: ResolvedSource; workItem: WorkItem }> {
     const source = await this.resolveSource(sourceId);
     const workItem = await source.workspace.read(workItemId);
     if (workItem === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
-    const shapingPhase =
-      workItem.state.phase === "brainstorm" || workItem.state.phase === "spec";
+    const shapingPhase = this.isShapingPhase(workItem.state.phase);
     if (
       source.source_id === INBOX_SOURCE_ID ||
       workItem.state.status !== "active" ||
@@ -2078,161 +2491,235 @@ export class PortfolioService {
       throw this.missionNotReady(
         workItemId,
         phase === undefined
-          ? "Shaping operations require an assigned item in active Brainstorm or Spec."
+          ? "Shaping operations require an assigned item in active Brainstorm, Spec, or Plan."
           : `Shaping operations require an assigned item in active ${phase}.`,
       );
     }
     return { source, workItem };
   }
 
-  private shapingGoalInput(
-    workItem: WorkItem,
-  ): { title: string; notes?: string } {
-    return normalizeShapingGoalInput(workItem.goal);
+  private async requireDecisionSource(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<ResolvedSource> {
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    if (
+      source.source_id === INBOX_SOURCE_ID ||
+      workItem.state.status !== "active"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Shaping decisions require an assigned, active work item.",
+      );
+    }
+    return source;
   }
 
-  private async currentShapingArtifact(
+  private async currentShapingCompilation(
     source: ResolvedSource,
     workItem: WorkItem,
-    phase: "brainstorm" | "spec",
-    brainstormAcceptanceSha256?: string,
-  ): Promise<StoredShapingArtifact> {
+    phase: ShapingPhase,
+  ): Promise<ShapingArtifactWriteResult> {
     const artifacts = await source.workspace.listShapingArtifacts(
       workItem.goal.work_item_id,
     );
-    const goalInput = this.shapingGoalInput(workItem);
-    const matches =
-      phase === "brainstorm"
-        ? artifacts.filter((artifact) => {
-            if (artifact.mission.identity.phase !== "brainstorm") {
-              return false;
-            }
-            const input = {
-              phase: "brainstorm" as const,
-              ...goalInput,
-            };
-            return (
-              artifact.mission.identity.input_sha256 ===
-              hashShapingInput(input)
-            );
-          })
-        : artifacts.filter(
-          (artifact) =>
-            artifact.mission.identity.phase === "spec" &&
-              artifact.mission.input.phase === "spec" &&
-              artifact.mission.input.title === goalInput.title &&
-              artifact.mission.input.notes === goalInput.notes &&
-              artifact.mission.input.brainstorm_selection_sha256 ===
-                brainstormAcceptanceSha256,
-          );
-    if (matches.length !== 1) {
-      throw this.missionNotReady(
-        workItem.goal.work_item_id,
-        matches.length === 0
-          ? `No current ${phase} shaping artifact exists.`
-          : `More than one current ${phase} shaping artifact exists; select one exact mission before importing.`,
-      );
+    const artifact = this.requireCurrentShapingArtifact(
+      workItem,
+      phase,
+      artifacts,
+    );
+    switch (phase) {
+      case "brainstorm": {
+        const mission = artifact.mission as BrainstormMissionPackage;
+        return source.workspace.writeShapingMissionPackage(
+          mission.identity,
+          (paths) =>
+            compileBrainstormMissionPackage({
+              work_item_id: workItem.goal.work_item_id,
+              shaping_input: mission.input,
+              paths,
+            }),
+        );
+      }
+      case "spec": {
+        const mission = artifact.mission as SpecMissionPackage;
+        return source.workspace.writeShapingMissionPackage(
+          mission.identity,
+          (paths) =>
+            compileSpecMissionPackage({
+              work_item_id: workItem.goal.work_item_id,
+              shaping_input: mission.input,
+              paths,
+            }),
+        );
+      }
+      case "plan": {
+        const mission = artifact.mission as PlanMissionPackage;
+        return source.workspace.writeShapingMissionPackage(
+          mission.identity,
+          (paths) =>
+            compilePlanMissionPackage({
+              work_item_id: workItem.goal.work_item_id,
+              shaping_input: mission.input,
+              paths,
+            }),
+        );
+      }
     }
-    return matches[0];
   }
 
   private async importShapingResult(
     source: ResolvedSource,
     workItem: WorkItem,
-    phase: "brainstorm" | "spec",
-    brainstormAcceptanceSha256?: string,
+    phase: ShapingPhase,
+    input: ShapingManualImportBinding,
   ): Promise<ShapingImportResult> {
-    const artifact = await this.currentShapingArtifact(
-      source,
+    const artifacts = await source.workspace.listShapingArtifacts(
+      workItem.goal.work_item_id,
+    );
+    const runs = await source.workspace.listShapingRuns(
+      workItem.goal.work_item_id,
+    );
+    const artifact = this.requireCurrentShapingArtifact(
       workItem,
       phase,
-      brainstormAcceptanceSha256,
+      artifacts,
+      input.expected_mission_content_sha256,
     );
-    if (artifact.result === null) {
-      throw this.missionNotReady(
-        workItem.goal.work_item_id,
-        "Shaping import requires result.json for the current mission.",
-      );
-    }
-    if (artifact.import_receipt !== null) {
-      const replayResult =
-        artifact.import_receipt.outcome === "applied"
-          ? this.parseAppliedShapingResult(
-              artifact,
-              workItem.goal.work_item_id,
-              phase,
-            )
-          : undefined;
+    this.assertExpectedShapingState(
+      workItem,
+      artifacts,
+      runs,
+      input.expected_shaping_state_sha256,
+    );
+    if (artifact.result !== null && artifact.import_receipt?.outcome === "applied") {
       return {
         source_id: source.source_id,
         work_item_id: workItem.goal.work_item_id,
+        outcome: "applied",
         receipt: artifact.import_receipt,
-        ...(replayResult === undefined ? {} : { result: replayResult }),
+        result: this.parseAppliedShapingResult(
+          artifact,
+          workItem.goal.work_item_id,
+          phase,
+        ),
       };
     }
 
-    let parsedJson: unknown;
-    let result:
-      | BrainstormResultSubmission
-      | SpecResultSubmission
-      | undefined;
-    let reasons: string[] = [];
-    try {
-      parsedJson = JSON.parse(artifact.result.result_source) as unknown;
-      const parsed =
-        phase === "brainstorm"
-          ? brainstormResultSubmissionSchema.safeParse(parsedJson)
-          : specResultSubmissionSchema.safeParse(parsedJson);
-      if (parsed.success) {
-        result = parsed.data;
-      } else {
-        reasons = this.boundedShapingReasons(parsed.error);
-      }
-    } catch {
-      reasons = ["result.json is not valid JSON."];
-    }
-    if (result !== undefined) {
-      const missionContentSha256 =
-        "brainstorm_mission_content_sha256" in result
-          ? result.brainstorm_mission_content_sha256
-          : result.spec_mission_content_sha256;
-      if (
-        JSON.stringify(result.identity) !==
-          JSON.stringify(artifact.mission.identity) ||
-        missionContentSha256 !== artifact.mission.content_sha256
-      ) {
-        reasons = [
-          "The shaping result does not match the current mission identity and content SHA.",
-        ];
-        result = undefined;
-      }
-    }
-
-    const receipt = shapingImportReceiptSchema.parse({
-      shaping_schema_version: 2,
-      identity: artifact.mission.identity,
-      shaping_mission_content_sha256: artifact.mission.content_sha256,
-      result_content_sha256: artifact.result.result_content_sha256,
-      outcome: result === undefined ? "rejected" : "applied",
-      first_published_at: new Date().toISOString(),
-      reasons,
+    const instruction = await source.workspace.writeShapingIngressInstruction({
+      origin: "manual_import",
+      shaping_run_id: null,
+      mission: artifact.mission,
     });
-    const stored = await source.workspace.writeShapingImportReceipt({
-      result_source: artifact.result.result_source,
-      receipt,
-    });
+    const bytes = await source.workspace.readShapingIngressBytes(
+      instruction.instruction,
+    );
+    const parsed = this.parseManualShapingBytes(bytes, artifact.mission);
+    if (parsed.result === null) {
+      return {
+        source_id: source.source_id,
+        work_item_id: workItem.goal.work_item_id,
+        outcome: "rejected",
+        rejection: parsed.rejection,
+      };
+    }
+    const published = await source.workspace.publishAppliedShapingResult(
+      instruction.instruction,
+      artifact.mission,
+      { origin: "manual_import", shaping_run_id: null },
+    );
+    const result = this.parseShapingResultSource(
+      published.result_source,
+      artifact.mission,
+      workItem.goal.work_item_id,
+    );
     return {
       source_id: source.source_id,
       work_item_id: workItem.goal.work_item_id,
-      receipt: stored.receipt,
-      ...(result === undefined ? {} : { result }),
+      outcome: "applied",
+      receipt: published.import_receipt,
+      result,
     };
+  }
+
+  private parseManualShapingBytes(
+    bytes: Buffer,
+    mission: ShapingMissionPackage,
+  ):
+    | { result: ShapingResultSubmission; rejection: null }
+    | { result: null; rejection: ShapingRejectedImportEvidence } {
+    const reject = (
+      reasons: ShapingValidationReason[],
+    ): { result: null; rejection: ShapingRejectedImportEvidence } => ({
+      result: null,
+      rejection: {
+        raw_result_sha256: createHash("sha256").update(bytes).digest("hex"),
+        byte_length: bytes.byteLength,
+        reasons: reasons.slice(0, 20),
+      },
+    });
+    let source: string;
+    try {
+      source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return reject([{ code: "invalid_utf8", field_path: "$" }]);
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(source) as unknown;
+    } catch {
+      return reject([{ code: "invalid_json", field_path: "$" }]);
+    }
+    const missing =
+      typeof value === "object" && value !== null && !Array.isArray(value)
+        ? mission.result_contract.required_fields
+            .filter((field) => !(field in value))
+            .map(
+              (field): ShapingValidationReason => ({
+                code: "missing_required_field",
+                field_path: field,
+              }),
+            )
+        : [];
+    const schema = this.shapingResultSchema(mission.identity.phase);
+    const validated = schema.safeParse(value);
+    if (!validated.success) {
+      const missingPaths = new Set(missing.map(({ field_path }) => field_path));
+      const schemaReasons = validated.error.issues
+        .map(
+          ({ path }): ShapingValidationReason => ({
+            code: "schema_violation",
+            field_path: path.length === 0 ? "$" : path.map(String).join("."),
+          }),
+        )
+        .filter(({ field_path }) => !missingPaths.has(field_path));
+      return reject([...missing, ...schemaReasons]);
+    }
+    const result = validated.data;
+    const reasons: ShapingValidationReason[] = [];
+    if (JSON.stringify(result.identity) !== JSON.stringify(mission.identity)) {
+      reasons.push({ code: "mission_hash_mismatch", field_path: "identity" });
+    }
+    const missionHashField = this.missionHashField(mission.identity.phase);
+    if (this.resultMissionContentSha256(result) !== mission.content_sha256) {
+      reasons.push({
+        code: "mission_hash_mismatch",
+        field_path: missionHashField,
+      });
+    }
+    return reasons.length === 0
+      ? { result, rejection: null }
+      : reject(reasons);
   }
 
   private parseAppliedShapingResult(
     artifact: StoredShapingArtifact,
     workItemId: string,
-    phase: "brainstorm" | "spec",
+    phase: ShapingPhase,
   ): ShapingResultSubmission {
     if (artifact.result === null) {
       throw this.missionNotReady(
@@ -2240,51 +2727,706 @@ export class PortfolioService {
         "Applied shaping evidence is missing result.json.",
       );
     }
+    if (artifact.mission.identity.phase !== phase) {
+      throw this.missionNotReady(
+        workItemId,
+        "Applied shaping evidence does not match its requested phase.",
+      );
+    }
+    return this.parseShapingResultSource(
+      artifact.result.result_source,
+      artifact.mission,
+      workItemId,
+    );
+  }
+
+  private parseShapingResultSource(
+    source: string,
+    mission: ShapingMissionPackage,
+    workItemId: string,
+  ): ShapingResultSubmission {
     let parsedJson: unknown;
     try {
-      parsedJson = JSON.parse(artifact.result.result_source) as unknown;
+      parsedJson = JSON.parse(source) as unknown;
     } catch {
       throw this.missionNotReady(
         workItemId,
         "Applied shaping result is not valid JSON.",
       );
     }
-    const parsed =
-      phase === "brainstorm"
-        ? brainstormResultSubmissionSchema.safeParse(parsedJson)
-        : specResultSubmissionSchema.safeParse(parsedJson);
+    const parsed = this.shapingResultSchema(
+      mission.identity.phase,
+    ).safeParse(parsedJson);
     if (!parsed.success) {
       throw this.missionNotReady(
         workItemId,
         "Applied shaping result no longer satisfies its structural contract.",
       );
     }
+    if (
+      JSON.stringify(parsed.data.identity) !== JSON.stringify(mission.identity) ||
+      this.resultMissionContentSha256(parsed.data) !== mission.content_sha256
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Applied shaping result no longer matches its immutable mission.",
+      );
+    }
     return parsed.data;
   }
 
-  private parseAppliedBrainstormResult(
-    artifact: StoredShapingArtifact,
-    workItemId: string,
-  ): BrainstormResultSubmission {
-    const result = this.parseAppliedShapingResult(
-      artifact,
-      workItemId,
-      "brainstorm",
-    );
-    if (!("brainstorm_mission_content_sha256" in result)) {
-      throw this.missionNotReady(
-        workItemId,
-        "Selected acceptance must reference a Brainstorm result.",
-      );
+  private shapingResultSchema(phase: ShapingPhase) {
+    switch (phase) {
+      case "brainstorm":
+        return brainstormResultSubmissionSchema;
+      case "spec":
+        return specResultSubmissionSchema;
+      case "plan":
+        return planResultSubmissionSchema;
     }
-    return result;
   }
 
-  private boundedShapingReasons(error: z.ZodError): string[] {
-    return error.issues.slice(0, 20).map(({ path, message }) =>
-      (path.length > 0 ? `${path.map(String).join(".")}: ${message}` : message)
-        .slice(0, 500),
+  private missionHashField(
+    phase: ShapingPhase,
+  ):
+    | "brainstorm_mission_content_sha256"
+    | "spec_mission_content_sha256"
+    | "plan_mission_content_sha256" {
+    switch (phase) {
+      case "brainstorm":
+        return "brainstorm_mission_content_sha256";
+      case "spec":
+        return "spec_mission_content_sha256";
+      case "plan":
+        return "plan_mission_content_sha256";
+    }
+  }
+
+  private resultMissionContentSha256(
+    result: ShapingResultSubmission,
+  ): string {
+    if ("brainstorm_mission_content_sha256" in result) {
+      return result.brainstorm_mission_content_sha256;
+    }
+    if ("spec_mission_content_sha256" in result) {
+      return result.spec_mission_content_sha256;
+    }
+    return result.plan_mission_content_sha256;
+  }
+
+  private isShapingPhase(phase: WorkItem["state"]["phase"]): phase is ShapingPhase {
+    return phase === "brainstorm" || phase === "spec" || phase === "plan";
+  }
+
+  private requireCurrentShapingArtifact(
+    workItem: WorkItem,
+    phase: ShapingPhase,
+    artifacts: StoredShapingArtifact[],
+    expectedMissionContentSha256?: string,
+  ): StoredShapingArtifact {
+    const artifact = this.resolveShapingTip(
+      workItem.goal.work_item_id,
+      phase,
+      artifacts,
     );
+    const goalInput = normalizeShapingGoalInput(workItem.goal);
+    if (
+      artifact === null ||
+      artifact.mission.input.title !== goalInput.title ||
+      artifact.mission.input.notes !== goalInput.notes ||
+      (expectedMissionContentSha256 !== undefined &&
+        artifact.mission.content_sha256 !== expectedMissionContentSha256)
+    ) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        `No current ${phase} shaping mission matches the durable work item and requested binding.`,
+      );
+    }
+    return artifact;
+  }
+
+  private resolveShapingTip(
+    workItemId: string,
+    phase: ShapingPhase,
+    artifacts: StoredShapingArtifact[],
+  ): StoredShapingArtifact | null {
+    const phaseArtifacts = artifacts.filter(
+      (artifact) => artifact.mission.identity.phase === phase,
+    );
+    if (phaseArtifacts.length === 0) {
+      return null;
+    }
+    const byInput = new Map<string, StoredShapingArtifact>();
+    for (const artifact of phaseArtifacts) {
+      const inputSha256 = artifact.mission.identity.input_sha256;
+      if (byInput.has(inputSha256)) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItemId,
+          `Shaping phase ${phase} contains duplicate mission identity ${inputSha256}.`,
+        );
+      }
+      byInput.set(inputSha256, artifact);
+    }
+    const superseded = new Set<string>();
+    for (const artifact of phaseArtifacts) {
+      const revision = artifact.mission.input.revision;
+      if (revision === undefined) {
+        continue;
+      }
+      const predecessor = byInput.get(revision.supersedes_input_sha256);
+      const expectedOrdinal =
+        (predecessor?.mission.input.revision?.ordinal ?? 0) + 1;
+      if (
+        predecessor === undefined ||
+        revision.ordinal !== expectedOrdinal ||
+        predecessor.result === null ||
+        predecessor.result.result_content_sha256 !==
+          revision.superseded_result_sha256
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItemId,
+          `Shaping revision ${artifact.mission.identity.input_sha256} has an invalid predecessor.`,
+        );
+      }
+      superseded.add(revision.supersedes_input_sha256);
+    }
+    const tips = phaseArtifacts.filter(
+      (artifact) =>
+        !superseded.has(artifact.mission.identity.input_sha256),
+    );
+    if (tips.length !== 1) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Shaping phase ${phase} must have exactly one revision tip; found ${tips.length}.`,
+      );
+    }
+    return tips[0]!;
+  }
+
+  private shapingDecisionState(
+    workItem: WorkItem,
+    artifacts: StoredShapingArtifact[],
+    runs: ShapingRunRecordV1[],
+  ): ShapingDecisionState {
+    const phase = workItem.state.phase;
+    const tip = this.isShapingPhase(phase)
+      ? this.resolveShapingTip(
+          workItem.goal.work_item_id,
+          phase,
+          artifacts,
+        )
+      : null;
+    const nonTerminalRuns = runs.filter(
+      (run) => run.lifecycle.status !== "terminal",
+    );
+    const currentRuns =
+      tip === null
+        ? []
+        : nonTerminalRuns.filter(
+            (run) =>
+              run.mission.phase === tip.mission.identity.phase &&
+              run.mission.input_sha256 ===
+                tip.mission.identity.input_sha256 &&
+              run.mission.content_sha256 === tip.mission.content_sha256,
+          );
+    if (
+      currentRuns.length > 1 ||
+      nonTerminalRuns.length !== currentRuns.length
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItem.goal.work_item_id,
+        "Shaping state has an ambiguous non-terminal run.",
+      );
+    }
+    return {
+      work_item_id: workItem.goal.work_item_id,
+      phase,
+      status: workItem.state.status,
+      goal_input_sha256: hashGoalInput({
+        title: workItem.goal.title,
+        notes: workItem.goal.notes,
+      }),
+      goal_version: workItem.state.goal_version ?? null,
+      input_revision: workItem.state.input_revision ?? null,
+      goal_contract_sha256:
+        workItem.goal.goal_contract === undefined
+          ? null
+          : hashGoalContract(workItem.goal.goal_contract),
+      current_mission_input_sha256:
+        tip?.mission.identity.input_sha256 ?? null,
+      current_mission_content_sha256: tip?.mission.content_sha256 ?? null,
+      applied_result_content_sha256:
+        tip?.result?.result_content_sha256 ?? null,
+      decision_receipt_sha256:
+        tip?.decision?.decision_content_sha256 ?? null,
+      active_shaping_run_id: currentRuns[0]?.shaping_run_id ?? null,
+    };
+  }
+
+  private assertExpectedShapingState(
+    workItem: WorkItem,
+    artifacts: StoredShapingArtifact[],
+    runs: ShapingRunRecordV1[],
+    expectedSha256: string,
+  ): void {
+    if (
+      hashShapingDecisionState(
+        this.shapingDecisionState(workItem, artifacts, runs),
+      ) !== expectedSha256
+    ) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItem.goal.work_item_id,
+        "Expected shaping state does not match the durable work item and artifact tip.",
+      );
+    }
+  }
+
+  private renderManualRecoveryTask(
+    mission: ShapingMissionPackage,
+    instruction: ShapingIngressInstructionV1,
+  ): string {
+    return `${renderShapingTaskMd(mission)}
+## Manual recovery
+
+- Published task: \`${instruction.task_path}\`
+- Write the result to: \`${instruction.ingress_path}\`
+- Result schema version: \`${instruction.result_schema_version}\`
+- Maximum result bytes: \`${instruction.max_result_bytes}\`
+- Mission content SHA-256 to echo: \`${instruction.mission_content_sha256}\`
+
+Required fields:
+${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
+`;
+  }
+
+  private preflightDecisionLaunch(
+    workItemId: string,
+    input: {
+      launch_mode: "connected" | "manual";
+      next_requested_model: string | null;
+    },
+  ): void {
+    if (input.launch_mode === "manual") {
+      return;
+    }
+    if (input.next_requested_model === null) {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected shaping launch requires one requested model.",
+      );
+    }
+    this.assertShapingModelAvailable(workItemId, input.next_requested_model);
+  }
+
+  private shapingModelAvailability(): ShapingModelAvailability {
+    if (this.shapingRuntime === undefined) {
+      return {
+        status: "unavailable",
+        adapter_id: null,
+        adapter_version: null,
+        profile_id: null,
+        available_model_ids: [],
+        distinct_model_count: 0,
+        has_three_distinct_models: false,
+        reason: "runtime_unavailable",
+      };
+    }
+    let configuration: ShapingRuntimeConfiguration;
+    try {
+      configuration = shapingRuntimeConfigurationSchema.parse(
+        this.shapingRuntime.configuration(),
+      );
+    } catch {
+      return {
+        status: "unavailable",
+        adapter_id: null,
+        adapter_version: null,
+        profile_id: null,
+        available_model_ids: [],
+        distinct_model_count: 0,
+        has_three_distinct_models: false,
+        reason: "runtime_configuration_invalid",
+      };
+    }
+    const availableModelIds = [
+      ...new Set(configuration.available_model_ids),
+    ];
+    return {
+      status: availableModelIds.length === 0 ? "unavailable" : "available",
+      adapter_id: configuration.adapter_id,
+      adapter_version: configuration.adapter_version,
+      profile_id: configuration.profile_id,
+      available_model_ids: availableModelIds,
+      distinct_model_count: availableModelIds.length,
+      has_three_distinct_models: availableModelIds.length >= 3,
+      reason: availableModelIds.length === 0 ? "no_models_configured" : null,
+    };
+  }
+
+  private assertShapingModelAvailable(
+    workItemId: string,
+    requestedModel: string,
+  ): void {
+    const validatedModel = shapingRequestedModelSchema.parse(requestedModel);
+    const availability = this.shapingModelAvailability();
+    if (
+      availability.status !== "available" ||
+      !availability.available_model_ids.includes(validatedModel)
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        availability.status === "unavailable"
+          ? "Connected shaping is not configured with any available model."
+          : `Requested shaping model ${validatedModel} is not in available_model_ids.`,
+      );
+    }
+  }
+
+  private async launchPreparedShapingMission(
+    source: ResolvedSource,
+    missionInput: ShapingMissionPackage,
+    requestedModelInput: string,
+    expectedLaunchFingerprint?: string,
+  ): Promise<ShapingRunCreateResult> {
+    const mission = shapingMissionPackageSchema.parse(missionInput);
+    const workItemId = mission.identity.work_item_id;
+    const requestedModel = shapingRequestedModelSchema.parse(
+      requestedModelInput,
+    );
+    const launchFingerprint = shapingRunLaunchFingerprint(
+      mission.content_sha256,
+      requestedModel,
+    );
+    if (
+      expectedLaunchFingerprint !== undefined &&
+      launchFingerprint !== expectedLaunchFingerprint
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "The stored shaping launch fingerprint does not match its mission and model.",
+      );
+    }
+
+    const runs = await source.workspace.listShapingRuns(workItemId);
+    const nonTerminalRuns = runs.filter(
+      (run) => run.lifecycle.status !== "terminal",
+    );
+    const matching = nonTerminalRuns.find(
+      (run) => this.shapingRunFingerprint(run) === launchFingerprint,
+    );
+    if (matching !== undefined) {
+      return {
+        record: matching,
+        instruction: await source.workspace.readShapingRunInstruction(
+          workItemId,
+          matching.shaping_run_id,
+        ),
+        created: false,
+      };
+    }
+    if (nonTerminalRuns.length > 0) {
+      throw new ControllerConflictError(
+        "lease_held",
+        workItemId,
+        `Shaping run ${nonTerminalRuns[0]!.shaping_run_id} is already active for this work item.`,
+      );
+    }
+    const artifact = (
+      await source.workspace.listShapingArtifacts(workItemId)
+    ).find(
+      (candidate) =>
+        candidate.mission.content_sha256 === mission.content_sha256,
+    );
+    if (artifact === undefined) {
+      throw this.missionNotReady(
+        workItemId,
+        "The requested shaping mission is not durable.",
+      );
+    }
+    if (artifact.result !== null) {
+      throw this.missionNotReady(
+        workItemId,
+        "This shaping mission revision already has an applied result.",
+      );
+    }
+
+    this.assertShapingModelAvailable(workItemId, requestedModel);
+    const runtime = this.shapingRuntime!;
+    const prepared = await runtime.prepare({
+      workspace_cwd: source.workspace.workspaceRoot,
+      mission,
+      requested_model: requestedModel,
+      limits: SHAPING_RUN_LIMITS,
+    });
+    const configuration = shapingRuntimeConfigurationSchema.parse(
+      runtime.configuration(),
+    );
+    if (
+      prepared.requested_model !== requestedModel ||
+      prepared.sanitized_profile.requested_model !== requestedModel ||
+      prepared.sanitized_profile.adapter_id !== configuration.adapter_id ||
+      prepared.sanitized_profile.adapter_version !==
+        configuration.adapter_version ||
+      prepared.sanitized_profile.profile_id !== configuration.profile_id
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Prepared shaping runtime provenance does not match the validated launch request.",
+      );
+    }
+    this.assertShapingModelAvailable(workItemId, requestedModel);
+
+    const timestamp = new Date().toISOString();
+    const record: Omit<ShapingRunRecordV1, "write_policy"> = {
+      schema_version: 1,
+      shaping_run_id: randomUUID(),
+      mission: {
+        phase: mission.identity.phase,
+        work_item_id: workItemId,
+        input_sha256: mission.identity.input_sha256,
+        content_sha256: mission.content_sha256,
+      },
+      provenance: {
+        role: { value: "writer", assurance: "controller_observed" },
+        seat: {
+          value: mission.identity.phase,
+          assurance: "controller_observed",
+        },
+        requested_model: {
+          value: requestedModel,
+          assurance: "user_declared",
+        },
+        effective_model: {
+          assurance: "unknown",
+          model_id: null,
+          deployment_id: null,
+          observed_event_sha256: null,
+        },
+        effort: {
+          value: prepared.reasoning_effort,
+          assurance: "user_declared",
+        },
+        harness: {
+          value: {
+            id: prepared.sanitized_profile.adapter_id,
+            version: prepared.sanitized_profile.adapter_version,
+          },
+          assurance: "adapter_attested",
+        },
+        adapter_profile: {
+          value: {
+            adapter_id: prepared.sanitized_profile.adapter_id,
+            adapter_version: prepared.sanitized_profile.adapter_version,
+            profile_id: prepared.sanitized_profile.profile_id,
+          },
+          assurance: "adapter_attested",
+        },
+        resolved_profile_sha256: {
+          value: this.hashConnectedValue(prepared.sanitized_profile),
+          assurance: "controller_observed",
+        },
+        resolved_skill_set_sha256: { value: null, assurance: "unknown" },
+      },
+      lifecycle: {
+        status: "starting",
+        started_at: timestamp,
+        updated_at: timestamp,
+        completed_at: null,
+        terminal: null,
+      },
+      limits: SHAPING_RUN_LIMITS,
+      process: null,
+      diagnostics: { entries: [], truncated: false },
+    };
+    const launched = await source.workspace.createShapingRun({
+      record,
+      mission,
+    });
+    if (
+      this.shapingRunFingerprint(launched.record) !== launchFingerprint
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "The created shaping run does not match its validated launch fingerprint.",
+      );
+    }
+    await this.preferencesStore.setPreference({
+      adapter_id: configuration.adapter_id,
+      seat: mission.identity.phase,
+      requested_model: requestedModel,
+    });
+    return launched;
+  }
+
+  private shapingRunFingerprint(run: ShapingRunRecordV1): string {
+    const requestedModel = run.provenance.requested_model.value;
+    if (requestedModel === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        run.mission.work_item_id,
+        `Shaping run ${run.shaping_run_id} is missing its requested model.`,
+      );
+    }
+    return shapingRunLaunchFingerprint(
+      run.mission.content_sha256,
+      requestedModel,
+    );
+  }
+
+  private async finishShapingDecision(
+    source: ResolvedSource,
+    decided: ShapingDecisionControllerResult,
+  ): Promise<PortfolioShapingDecisionResult> {
+    let nextLaunch: ShapingNextLaunch;
+    if (decided.launch_mode === "manual") {
+      const mission = shapingMissionPackageSchema.parse(
+        JSON.parse(decided.intent.next_mission_package_bytes) as unknown,
+      );
+      await source.workspace.writeShapingIngressInstruction({
+        origin: "manual_import",
+        shaping_run_id: null,
+        mission,
+      });
+      nextLaunch = {
+        status: "manual",
+        shaping_run_id: null,
+        reason:
+          this.shapingModelAvailability().status === "unavailable"
+            ? "runtime_unavailable"
+            : "founder_selected_manual",
+      };
+    } else {
+      try {
+        const mission = shapingMissionPackageSchema.parse(
+          JSON.parse(decided.intent.next_mission_package_bytes) as unknown,
+        );
+        const launched = await this.launchPreparedShapingMission(
+          source,
+          mission,
+          decided.intent.next_requested_model!,
+          decided.intent.launch_fingerprint!,
+        );
+        nextLaunch = {
+          status: "launched",
+          shaping_run_id: launched.record.shaping_run_id,
+          reason: null,
+          created: launched.created,
+        };
+      } catch (error) {
+        nextLaunch = {
+          status: "failed",
+          shaping_run_id: null,
+          reason: errorMessage(error).slice(0, 500),
+        };
+      }
+    }
+    await this.rebuild();
+    return {
+      ...this.toPortfolioItem(source, decided.work_item),
+      decision_id: decided.decision_id,
+      next_mission: decided.next_mission,
+      next_launch: nextLaunch,
+    };
+  }
+
+  private portfolioShapingLaunchResult(
+    source: ResolvedSource,
+    workItemId: string,
+    launched: ShapingRunCreateResult,
+  ): PortfolioShapingLaunchResult {
+    return {
+      source_id: source.source_id,
+      work_item_id: workItemId,
+      next_launch: {
+        status: "launched",
+        shaping_run_id: launched.record.shaping_run_id,
+        reason: null,
+        created: launched.created,
+      },
+      shaping_run: summarizeShapingRun(launched.record),
+    };
+  }
+
+  private assertCommittedShapingIntentState(
+    workItem: WorkItem,
+    intent: ShapingDecisionIntentV1,
+  ): void {
+    const goalBytes = stringify(workItem.goal);
+    const stateBytes = `${JSON.stringify(workItem.state, null, 2)}\n`;
+    const goalSha256 = createHash("sha256").update(goalBytes).digest("hex");
+    const stateSha256 = createHash("sha256").update(stateBytes).digest("hex");
+    if (
+      goalBytes !== intent.next_goal_bytes ||
+      stateBytes !== intent.next_state_bytes ||
+      goalSha256 !== intent.next_goal_sha256 ||
+      stateSha256 !== intent.next_state_sha256
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItem.goal.work_item_id,
+        "Durable goal/state do not equal the applied shaping decision intent.",
+      );
+    }
+  }
+
+  private workflowModelUse(
+    workItemId: string,
+    artifacts: StoredShapingArtifact[],
+    runs: ShapingRunRecordV1[],
+  ): WorkflowModelUse[] {
+    const productions = (["brainstorm", "spec", "plan"] as const).flatMap(
+      (seat) => {
+        const tip = this.resolveShapingTip(workItemId, seat, artifacts);
+        return tip?.production_receipt === null ||
+          tip?.production_receipt === undefined
+          ? []
+          : [{ seat, receipt: tip.production_receipt }];
+      },
+    );
+    return summarizeWorkflowModelUse(runs, productions);
+  }
+
+  private async modelPickerOptions(
+    availability: ShapingModelAvailability,
+    modelUse: WorkflowModelUse[],
+  ): Promise<Record<ShapingPhase, ShapingModelPickerOption[]>> {
+    if (
+      availability.status === "unavailable" ||
+      availability.adapter_id === null
+    ) {
+      return { brainstorm: [], spec: [], plan: [] };
+    }
+    const seats = ["brainstorm", "spec", "plan"] as const;
+    const options = await Promise.all(
+      seats.map(async (seat, seatIndex) => {
+        const saved = await this.preferencesStore.getPreference(
+          availability.adapter_id!,
+          seat,
+        );
+        const priorUses = modelUse.filter(
+          (use) => seats.indexOf(use.seat) < seatIndex,
+        );
+        return [
+          seat,
+          shapingModelPickerOptions(
+            availability.available_model_ids,
+            priorUses,
+            saved,
+          ),
+        ] as const;
+      }),
+    );
+    return Object.fromEntries(options) as Record<
+      ShapingPhase,
+      ShapingModelPickerOption[]
+    >;
   }
 
   private async readAppliedReviewResult(
