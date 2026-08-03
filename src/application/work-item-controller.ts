@@ -88,6 +88,7 @@ import {
   retryExecuteAttemptInputSchema,
   recordConnectedPermissionDenialInputSchema,
   saveWorkItemInputSchema,
+  parseWorkItemStateForRead,
   workItemIdSchema,
   workItemGoalSchema,
   workItemSchema,
@@ -4368,7 +4369,7 @@ export class WorkItemController {
     currentItem: WorkItem,
     intent: ShapingDecisionIntentV1,
   ): Promise<void> {
-    const previousItem = this.workItemFromShapingBytes(
+    const previousItem = this.workItemFromPreviousShapingBytes(
       intent.previous_goal_bytes,
       intent.previous_state_bytes,
     );
@@ -4636,6 +4637,16 @@ export class WorkItemController {
     return workItemSchema.parse({
       goal: workItemGoalSchema.parse(parseYaml(goalBytes) as unknown),
       state: workItemStateSchema.parse(JSON.parse(stateBytes) as unknown),
+    });
+  }
+
+  private workItemFromPreviousShapingBytes(
+    goalBytes: string,
+    stateBytes: string,
+  ): WorkItem {
+    return workItemSchema.parse({
+      goal: workItemGoalSchema.parse(parseYaml(goalBytes) as unknown),
+      state: parseWorkItemStateForRead(JSON.parse(stateBytes) as unknown),
     });
   }
 

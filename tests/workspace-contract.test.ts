@@ -326,7 +326,7 @@ const connectedShapingProduction = {
 async function prepareStartShapingDecision(
   root: string,
   workspace: ProductWorkspace,
-  options: { contracted?: boolean } = {},
+  options: { contracted?: boolean; legacyState?: boolean } = {},
 ) {
   let item: WorkItem;
   if (options.contracted === true) {
@@ -334,6 +334,12 @@ async function prepareStartShapingDecision(
     const stored = await workspace.read(firstId);
     if (stored === null) {
       throw new Error("Expected contracted shaping work item");
+    }
+    item = stored;
+  } else if (options.legacyState === true) {
+    const stored = await workspace.read(firstId);
+    if (stored === null) {
+      throw new Error("Expected legacy shaping work item");
     }
     item = stored;
   } else {
@@ -1587,6 +1593,79 @@ describe("ProductWorkspace", () => {
     await expect(
       readFile(drift.writtenIntent.intent_path, "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("captures exact legacy-v1 pre-contract bytes before a shaping decision", async () => {
+    const root = await createWorkspace();
+    await writeWorkItem(
+      root,
+      firstId,
+      "2026-07-17T12:00:00.000Z",
+    );
+    const workspace = new ProductWorkspace(root);
+    const itemDirectory = join(
+      root,
+      ".founder",
+      "work-items",
+      firstId,
+    );
+    const goalPath = join(itemDirectory, "goal.yaml");
+    const previousGoalBytes = `# Preserve this valid noncanonical YAML.\n${await readFile(
+      goalPath,
+      "utf8",
+    )}`;
+    await writeFile(goalPath, previousGoalBytes, "utf8");
+    const previousStateBytes = await readFile(
+      join(itemDirectory, "state.json"),
+      "utf8",
+    );
+
+    expect(JSON.parse(previousStateBytes)).toMatchObject({
+      schema_version: 1,
+      phase: "idea",
+      status: "active",
+    });
+
+    const prepared = await prepareStartShapingDecision(root, workspace, {
+      legacyState: true,
+    });
+
+    expect(prepared.writtenIntent.intent.previous_state_bytes).toBe(
+      previousStateBytes,
+    );
+    expect(prepared.writtenIntent.intent.previous_goal_bytes).toBe(
+      previousGoalBytes,
+    );
+    expect(prepared.writtenIntent.intent.next_goal_bytes).toBe(
+      previousGoalBytes,
+    );
+    expect(
+      JSON.parse(prepared.writtenIntent.intent.next_state_bytes),
+    ).toMatchObject({
+      schema_version: 2,
+      phase: "brainstorm",
+      status: "active",
+    });
+
+    await workspace.publishLeasedShapingMission(
+      prepared.lease,
+      prepared.identity,
+      prepared.missionBytes,
+      { decision_id: prepared.writtenIntent.intent.decision_id },
+    );
+    await expect(
+      workspace.commitShapingDecision(prepared.lease, {
+        state: prepared.nextState,
+        manifest: prepared.manifest,
+      }),
+    ).resolves.toMatchObject({
+      work_item: { state: { schema_version: 2, phase: "brainstorm" } },
+      manifest: { outcome: "applied" },
+    });
+    expect(await readFile(goalPath, "utf8")).toBe(previousGoalBytes);
+
+    await workspace.releaseControllerLease(prepared.lease);
+    expect(await readdir(itemDirectory)).not.toContain(".controller.lock");
   });
 
   it("captures all decision operations and makes approve_spec the only goal-changing commit", async () => {

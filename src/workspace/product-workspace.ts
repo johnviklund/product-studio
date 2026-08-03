@@ -2421,15 +2421,38 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         );
       }
 
+      const goalPath = join(workItemDirectory, GOAL_FILE);
+      const statePath = join(workItemDirectory, STATE_FILE);
+      const acquiredGoalBytes = await this.readRequiredFile(goalPath);
+      let acquiredStateBytes = await this.readRequiredFile(statePath);
+      const acquiredItem = this.parseReadableWorkItemBytes(
+        acquiredGoalBytes,
+        acquiredStateBytes,
+        validatedId,
+      );
+      if (!isDeepStrictEqual(acquiredItem, current)) {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedId,
+          "Durable goal/state bytes changed while the controller lease was being acquired.",
+        );
+      }
+
       if (current.goal.goal_contract !== undefined) {
         const leasedState = workItemStateSchema.parse({
           ...current.state,
           active_run: validatedRun,
         });
         await this.replaceStateAtomically(validatedId, leasedState);
+        acquiredStateBytes = `${JSON.stringify(leasedState, null, 2)}\n`;
       }
 
-      return { work_item: current, active_run: validatedRun };
+      return {
+        work_item: current,
+        active_run: validatedRun,
+        acquired_goal_bytes: acquiredGoalBytes,
+        acquired_state_bytes: acquiredStateBytes,
+      };
     } catch (error) {
       try {
         await this.unlinkIfPresent(lockPath);
@@ -4165,6 +4188,25 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
+    const goalChanged = !isDeepStrictEqual(
+      nextGoal,
+      validatedLease.work_item.goal,
+    );
+    const stateChanged = !isDeepStrictEqual(
+      nextState,
+      validatedLease.work_item.state,
+    );
+    if (
+      goalChanged !== (input.intent.operation === "approve_spec") ||
+      !stateChanged
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Only approve_spec may change the goal and every shaping decision must change state.",
+      );
+    }
+
     const decisionId = deriveShapingDecisionId({
       operation: input.intent.operation,
       work_item_id: input.intent.work_item_id,
@@ -4175,7 +4217,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       expected_shaping_state_sha256:
         input.intent.expected_shaping_state_sha256,
     });
-    const nextGoalBytes = stringify(nextGoal);
+    const nextGoalBytes = goalChanged
+      ? stringify(nextGoal)
+      : validatedLease.acquired_goal_bytes;
     const nextStateBytes = `${JSON.stringify(nextState, null, 2)}\n`;
     await this.assertControllerLeaseOwnership(validatedLease);
     const replay = await this.readMatchingShapingDecisionIntent(
@@ -4208,22 +4252,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const workItemDirectory = join(this.workItemsDirectory, workItemId);
     const goalPath = join(workItemDirectory, GOAL_FILE);
     const statePath = join(workItemDirectory, STATE_FILE);
-    const previousGoalBytes = await this.readRequiredFile(goalPath);
-    const previousStateBytes = await this.readRequiredFile(statePath);
-    const expectedGoalBytes = stringify(validatedLease.work_item.goal);
-    const expectedStateBytes = `${JSON.stringify(
-      validatedLease.work_item.goal.goal_contract === undefined
-        ? validatedLease.work_item.state
-        : {
-            ...validatedLease.work_item.state,
-            active_run: validatedLease.active_run,
-          },
-      null,
-      2,
-    )}\n`;
+    const durableGoalBytes = await this.readRequiredFile(goalPath);
+    const durableStateBytes = await this.readRequiredFile(statePath);
     if (
-      previousGoalBytes !== expectedGoalBytes ||
-      previousStateBytes !== expectedStateBytes
+      durableGoalBytes !== validatedLease.acquired_goal_bytes ||
+      durableStateBytes !== validatedLease.acquired_state_bytes
     ) {
       throw new ControllerConflictError(
         "repair_required",
@@ -4232,26 +4265,19 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
-    const goalChanged = nextGoalBytes !== previousGoalBytes;
-    if (
-      goalChanged !== (input.intent.operation === "approve_spec") ||
-      nextStateBytes === previousStateBytes
-    ) {
-      throw new ControllerConflictError(
-        "idempotency_conflict",
-        workItemId,
-        "Only approve_spec may change goal bytes and every shaping decision must change state bytes.",
-      );
-    }
     this.assertIntentMissionBytes(input.intent, workItemId);
 
     const intent = shapingDecisionIntentSchema.parse({
       ...input.intent,
       decision_id: decisionId,
-      previous_goal_bytes: previousGoalBytes,
-      previous_goal_sha256: this.hashArtifactSource(previousGoalBytes),
-      previous_state_bytes: previousStateBytes,
-      previous_state_sha256: this.hashArtifactSource(previousStateBytes),
+      previous_goal_bytes: validatedLease.acquired_goal_bytes,
+      previous_goal_sha256: this.hashArtifactSource(
+        validatedLease.acquired_goal_bytes,
+      ),
+      previous_state_bytes: validatedLease.acquired_state_bytes,
+      previous_state_sha256: this.hashArtifactSource(
+        validatedLease.acquired_state_bytes,
+      ),
       next_goal_bytes: nextGoalBytes,
       next_goal_sha256: this.hashArtifactSource(nextGoalBytes),
       next_state_bytes: nextStateBytes,
@@ -4382,6 +4408,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       input.goal ?? validatedLease.work_item.goal,
     );
     const nextState = workItemStateSchema.parse(input.state);
+    const goalWasSupplied = input.goal !== undefined;
+    const nextGoalBytes = goalWasSupplied
+      ? stringify(nextGoal)
+      : validatedLease.acquired_goal_bytes;
     const workItemId = validatedLease.work_item.goal.work_item_id;
     await this.assertControllerLeaseOwnership(validatedLease);
 
@@ -4435,7 +4465,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       validatedLease,
       nextGoal,
       nextState,
-      input.goal !== undefined,
+      goalWasSupplied,
       manifest,
     );
 
@@ -4453,7 +4483,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     );
     this.assertShapingManifestMatchesIntent(manifest, intent);
     if (
-      stringify(nextGoal) !== intent.next_goal_bytes ||
+      nextGoalBytes !== intent.next_goal_bytes ||
       `${JSON.stringify(nextState, null, 2)}\n` !== intent.next_state_bytes
     ) {
       throw new ControllerConflictError(
@@ -6813,6 +6843,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     manifest: ShapingDecisionManifestV1,
   ): void {
     const workItemId = lease.work_item.goal.work_item_id;
+    const nextGoalBytes = goalWasSupplied
+      ? stringify(nextGoal)
+      : lease.acquired_goal_bytes;
     if (
       nextGoal.work_item_id !== workItemId ||
       nextState.work_item_id !== workItemId ||
@@ -6823,7 +6856,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       manifest.work_item_id !== workItemId ||
       manifest.phase_from !== lease.work_item.state.phase ||
       manifest.phase_to !== nextState.phase ||
-      manifest.goal_sha256 !== this.hashArtifactSource(stringify(nextGoal)) ||
+      manifest.goal_sha256 !== this.hashArtifactSource(nextGoalBytes) ||
       manifest.state_sha256 !==
         this.hashArtifactSource(`${JSON.stringify(nextState, null, 2)}\n`)
     ) {
@@ -7001,10 +7034,41 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
   }
 
+  private parseReadableWorkItemBytes(
+    goalBytes: string,
+    stateBytes: string,
+    workItemId: string,
+  ): WorkItem {
+    let stateValue: unknown;
+    try {
+      stateValue = JSON.parse(stateBytes);
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Controller lease state bytes are invalid JSON: ${errorMessage(error)}`,
+      );
+    }
+    try {
+      return workItemSchema.parse({
+        goal: workItemGoalSchema.parse(parse(goalBytes)),
+        state: parseWorkItemStateForRead(stateValue),
+      });
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Controller lease goal/state bytes are invalid: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   private validateControllerLease(lease: ControllerLease): ControllerLease {
     return {
       work_item: workItemSchema.parse(lease.work_item),
       active_run: activeRunSchema.parse(lease.active_run),
+      acquired_goal_bytes: z.string().min(1).parse(lease.acquired_goal_bytes),
+      acquired_state_bytes: z.string().min(1).parse(lease.acquired_state_bytes),
     };
   }
 

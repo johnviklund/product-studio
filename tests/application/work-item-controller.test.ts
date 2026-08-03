@@ -3037,6 +3037,67 @@ describe("WorkItemController", () => {
     ).toHaveLength(1);
   });
 
+  it("recovers Start Brainstorm from a legacy-v1 intent after response loss", async () => {
+    const { repository } = await createWorkspace();
+    const item = await createUncontractedItem(repository);
+    const itemDirectory = join(
+      repository.workspaceRoot,
+      ".founder",
+      "work-items",
+      item.goal.work_item_id,
+    );
+    const previousStateBytes = `${JSON.stringify(
+      {
+        schema_version: 1,
+        work_item_id: item.state.work_item_id,
+        phase: item.state.phase,
+        status: item.state.status,
+        updated_at: item.state.updated_at,
+      },
+      null,
+      2,
+    )}\n`;
+    await writeFile(
+      join(itemDirectory, "state.json"),
+      previousStateBytes,
+      "utf8",
+    );
+    const legacyItem = await repository.read(item.goal.work_item_id);
+    if (legacyItem === null) {
+      throw new Error("Expected the legacy-v1 work item");
+    }
+    const input = {
+      launch_mode: "manual" as const,
+      next_requested_model: null,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        legacyItem,
+      ),
+    };
+    injectShapingResponseLoss(repository, "after_intent");
+
+    await expect(
+      createController(repository).startBrainstorm(
+        item.goal.work_item_id,
+        input,
+      ),
+    ).rejects.toThrow(/injected response loss after shaping intent/u);
+
+    const recovered = await createControllerAt(
+      repository,
+      "2026-08-04T01:00:00.000Z",
+    ).startBrainstorm(item.goal.work_item_id, input);
+
+    expect(recovered).toMatchObject({
+      work_item: { state: { schema_version: 2, phase: "brainstorm" } },
+      manifest: { operation: "start_brainstorm", outcome: "applied" },
+    });
+    expect(recovered.intent.previous_state_bytes).toBe(previousStateBytes);
+    expect(await readdir(itemDirectory)).not.toContain(".controller.lock");
+  });
+
   it("runs all five decisions in manual mode with immutable replay and no process", async () => {
     const { repository } = await createWorkspace();
     const commit = repository.commitShapingDecision.bind(repository);

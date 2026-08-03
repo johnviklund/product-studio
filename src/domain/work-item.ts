@@ -362,6 +362,8 @@ export interface ControllerRunManifest {
 export interface ControllerLease {
   work_item: WorkItem;
   active_run: ActiveRun;
+  acquired_goal_bytes: string;
+  acquired_state_bytes: string;
 }
 
 export interface ControllerMutationInput {
