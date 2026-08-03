@@ -11,6 +11,7 @@ import {
   ShapingDecisionView,
   ShapingSection,
   specProposalToGoalContractDraft,
+  updateShapingRequestChangesComposer,
 } from "../components/kanban/detail-panel";
 import { nextActionForCardState } from "../components/kanban/board-card";
 import type {
@@ -425,14 +426,28 @@ function appliedDecisionContext(
 function renderDecision(
   projection: DecisionFirstShapingHandoffProjection,
   selectedModel: string | null = null,
+  requestChangesComposer: {
+    launchMode: "connected" | "manual";
+    feedback: string;
+    selectedModel: string | null;
+    error: string | null;
+  } | null = null,
+  busy = false,
 ): string {
   return renderToStaticMarkup(
     <ShapingDecisionView
       fieldId="decision"
       projection={projection}
       selectedModel={selectedModel}
+      requestChangesComposer={requestChangesComposer}
+      busy={busy}
       onSelectModel={noop}
       onAction={noop}
+      onOpenRequestChanges={noop}
+      onCloseRequestChanges={noop}
+      onChangeRequestChangesFeedback={noop}
+      onSelectRequestChangesModel={noop}
+      onSubmitRequestChanges={noop}
       onRefreshStatus={noop}
       onShowFullWorkItem={noop}
     />,
@@ -1124,6 +1139,381 @@ describe("detail panel decision-first shaping", () => {
       "Verification · The short verification stays visible",
     );
     expect(shortVisible).not.toContain("Show all");
+  });
+
+  it.each([
+    {
+      phase: "brainstorm" as const,
+      result: brainstormResult,
+      contract: undefined,
+      currentModel: "model-a",
+      currentAction: "Use result & run Spec",
+    },
+    {
+      phase: "spec" as const,
+      result: specResult,
+      contract: undefined,
+      currentModel: "model-b",
+      currentAction: "Approve & run Plan",
+    },
+    {
+      phase: "plan" as const,
+      result: planResult,
+      contract: decisionGoalContract,
+      currentModel: "model-c",
+      currentAction: null,
+    },
+  ])(
+    "renders the required current-seat request-changes composer on ready $phase",
+    ({ phase, result, contract, currentModel, currentAction }) => {
+      const projection = shapingHandoffForItem(
+        decisionItem(phase, contract),
+        appliedDecisionContext(phase, result, {
+          models: {
+            model_use: [
+              {
+                seat: "brainstorm",
+                production_id: "prod-brainstorm",
+                shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+                requested_model: "model-a",
+                effective_model: "model-a",
+              },
+              ...(phase === "brainstorm"
+                ? []
+                : [
+                    {
+                      seat: "spec" as const,
+                      production_id: "prod-spec",
+                      shaping_run_id:
+                        "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2",
+                      requested_model: "model-b",
+                      effective_model: "model-b",
+                    },
+                  ]),
+              ...(phase === "plan"
+                ? [
+                    {
+                      seat: "plan" as const,
+                      production_id: "prod-plan",
+                      shaping_run_id:
+                        "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b3",
+                      requested_model: "model-c",
+                      effective_model: "model-c",
+                    },
+                  ]
+                : []),
+            ],
+          },
+        }),
+      );
+      if (projection.mode !== "ready" || projection.phase !== phase) {
+        throw new Error(`expected a ready ${phase} projection`);
+      }
+
+      const html = renderDecision(projection, null, {
+        launchMode: "connected",
+        feedback: "",
+        selectedModel: null,
+        error: null,
+      });
+      const visible = visibleMarkup(html);
+
+      expect(html).toContain('data-region="request-changes"');
+      expect(html).toContain('<textarea aria-label="Required feedback"');
+      expect(html).toContain('required=""');
+      expect(html).toContain(
+        `<select aria-label="${phase[0]!.toUpperCase()}${phase.slice(1)} model"`,
+      );
+      expect(visible).toContain(`${currentModel} · current revision`);
+      expect(html).toContain(
+        `<option value="${currentModel}" selected="">${currentModel} · current revision`,
+      );
+      expect(buttonAttributes(html, "Request changes & rerun")).toContain(
+        ' disabled=""',
+      );
+      expect(countOccurrences(html, 'data-action-priority="primary"')).toBe(1);
+      if (currentAction !== null) {
+        expect(exactButtonCount(html, currentAction)).toBe(0);
+      }
+      if (phase === "plan") {
+        expect(visible).not.toContain("Execute the plan");
+      }
+    },
+  );
+
+  it("keeps request changes disabled for whitespace-only feedback and builds no request", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      appliedDecisionContext("brainstorm", brainstormResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "brainstorm") {
+      throw new Error("expected a ready Brainstorm projection");
+    }
+    const action = projection.request_changes.actions.find(
+      (candidate) =>
+        candidate.kind === "request_changes" &&
+        candidate.launch_mode === "connected",
+    );
+    if (action === undefined) {
+      throw new Error("expected a connected request-changes action");
+    }
+
+    const html = renderDecision(projection, null, {
+      launchMode: "connected",
+      feedback: "   \n\t",
+      selectedModel: "model-a",
+      error: null,
+    });
+    expect(buttonAttributes(html, "Request changes & rerun")).toContain(
+      ' disabled=""',
+    );
+    expect(
+      shapingActionRequest({
+        source_id: "source-1",
+        work_item_id: workItemId,
+        projection,
+        action,
+        selected_model: "model-a",
+        feedback: "   \n\t",
+      }),
+    ).toEqual({ status: "blocked", reason: "feedback_required" });
+  });
+
+  it("uses one feedback-bound manual request path when connected models are unavailable", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      appliedDecisionContext("brainstorm", brainstormResult, {
+        models: {
+          status: "unavailable",
+          reason: "The connected shaping runtime is unavailable.",
+          available_model_ids: [],
+          model_picker_options: { brainstorm: [], spec: [], plan: [] },
+        },
+      }),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "brainstorm") {
+      throw new Error("expected a ready Brainstorm projection");
+    }
+    const action = projection.request_changes.actions.find(
+      (candidate) =>
+        candidate.kind === "request_changes" &&
+        candidate.launch_mode === "manual",
+    );
+    if (action === undefined) {
+      throw new Error("expected a manual request-changes action");
+    }
+
+    const html = renderDecision(projection, null, {
+      launchMode: "manual",
+      feedback: "Prepare the corrected Brainstorm revision.",
+      selectedModel: null,
+      error: null,
+    });
+    expect(visibleMarkup(html)).toContain(
+      "The connected shaping runtime is unavailable.",
+    );
+    expect(html).not.toContain("<select");
+    expect(exactButtonCount(html, "Request changes & prepare rerun")).toBe(1);
+    expect(
+      buttonAttributes(html, "Request changes & prepare rerun"),
+    ).not.toContain(' disabled=""');
+    expect(advancedRecoveryMarkup(html)).not.toContain(
+      "Request changes & prepare rerun",
+    );
+    const request = shapingActionRequest({
+      source_id: "source-1",
+      work_item_id: workItemId,
+      projection,
+      action,
+      selected_model: "must-not-leak",
+      feedback: "Prepare the corrected Brainstorm revision.",
+    });
+    expect(request).toMatchObject({
+      status: "ready",
+      body: {
+        launch_mode: "manual",
+        feedback: "Prepare the corrected Brainstorm revision.",
+      },
+    });
+    if (request.status === "ready") {
+      expect(request.body).not.toHaveProperty("requested_model");
+    }
+  });
+
+  it("retains request-changes feedback, model and inline failure while re-enabling submission", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      appliedDecisionContext("brainstorm", brainstormResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "brainstorm") {
+      throw new Error("expected a ready Brainstorm projection");
+    }
+
+    const html = renderDecision(projection, null, {
+      launchMode: "connected",
+      feedback: "Keep the evidence local and narrow the proposal.",
+      selectedModel: "model-b",
+      error: "The shaping action returned a bounded conflict.",
+    });
+
+    expect(visibleMarkup(html)).toContain(
+      "Keep the evidence local and narrow the proposal.",
+    );
+    expect(html).toContain('<option value="model-b" selected="">');
+    expect(visibleMarkup(html)).toContain(
+      "The shaping action returned a bounded conflict.",
+    );
+    expect(html).toContain('data-request-changes-error="true"');
+    expect(buttonAttributes(html, "Request changes & rerun")).not.toContain(
+      ' disabled=""',
+    );
+  });
+
+  it("keeps composer input across failure and clears it only for the matching success", () => {
+    const identity = JSON.stringify([
+      "source-1",
+      workItemId,
+      "brainstorm",
+      missionContentSha256,
+      resultContentSha256,
+      shapingStateSha256,
+    ]);
+    let state = updateShapingRequestChangesComposer(null, {
+      type: "open",
+      identity,
+      launchMode: "connected",
+      selectedModel: "model-a",
+    });
+    state = updateShapingRequestChangesComposer(state, {
+      type: "feedback_changed",
+      identity,
+      feedback: "Keep the bounded evidence and retry.",
+    });
+    state = updateShapingRequestChangesComposer(state, {
+      type: "model_selected",
+      identity,
+      model: "model-b",
+    });
+    state = updateShapingRequestChangesComposer(state, {
+      type: "request_started",
+      identity,
+    });
+    state = updateShapingRequestChangesComposer(state, {
+      type: "request_failed",
+      identity,
+      reason: "The request returned 409.",
+    });
+
+    expect(state).toEqual({
+      identity,
+      open: true,
+      launchMode: "connected",
+      feedback: "Keep the bounded evidence and retry.",
+      selectedModel: "model-b",
+      error: "The request returned 409.",
+    });
+    expect(
+      updateShapingRequestChangesComposer(state, {
+        type: "request_succeeded",
+        identity: `${identity}:stale`,
+      }),
+    ).toEqual(state);
+
+    state = updateShapingRequestChangesComposer(state, {
+      type: "request_started",
+      identity,
+    });
+    expect(state).toMatchObject({
+      feedback: "Keep the bounded evidence and retry.",
+      selectedModel: "model-b",
+      error: null,
+    });
+    expect(
+      updateShapingRequestChangesComposer(state, {
+        type: "request_succeeded",
+        identity,
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps the preserved ready projection inert while its replacement artifacts load", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      appliedDecisionContext("brainstorm", brainstormResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "brainstorm") {
+      throw new Error("expected a ready Brainstorm projection");
+    }
+
+    const closedHtml = renderDecision(projection, null, null, true);
+    expect(buttonAttributes(closedHtml, "Request changes")).toContain(
+      ' disabled=""',
+    );
+    expect(buttonAttributes(closedHtml, "Use result & run Spec")).toContain(
+      ' disabled=""',
+    );
+
+    const openHtml = renderDecision(
+      projection,
+      null,
+      {
+        launchMode: "connected",
+        feedback: "Retry with the bounded correction.",
+        selectedModel: "model-a",
+        error: null,
+      },
+      true,
+    );
+    expect(openHtml).toMatch(
+      /<textarea aria-label="Required feedback"[^>]* disabled=""/u,
+    );
+    expect(openHtml).toContain(
+      '<select aria-label="Brainstorm model" disabled=""',
+    );
+    expect(buttonAttributes(openHtml, "Request changes & rerun")).toContain(
+      ' disabled=""',
+    );
+  });
+
+  it("submits request changes through the builder with feedback, model and exact bindings", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      appliedDecisionContext("brainstorm", brainstormResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "brainstorm") {
+      throw new Error("expected a ready Brainstorm projection");
+    }
+    const action = projection.request_changes.actions.find(
+      (candidate) =>
+        candidate.kind === "request_changes" &&
+        candidate.launch_mode === "connected",
+    );
+    if (action === undefined) {
+      throw new Error("expected a connected request-changes action");
+    }
+
+    expect(
+      shapingActionRequest({
+        source_id: "source-1",
+        work_item_id: workItemId,
+        projection,
+        action,
+        selected_model: "model-b",
+        feedback: "  Tighten the acceptance boundary.  ",
+      }),
+    ).toEqual({
+      status: "ready",
+      method: "POST",
+      route: `/api/portfolio/work-items/source-1/${workItemId}/shaping/brainstorm/request-changes`,
+      body: {
+        launch_mode: "connected",
+        requested_model: "model-b",
+        expected_mission_content_sha256: missionContentSha256,
+        expected_result_content_sha256: resultContentSha256,
+        expected_shaping_state_sha256: shapingStateSha256,
+        feedback: "Tighten the acceptance boundary.",
+      },
+    });
   });
 
   it("renders superseded Plan as a replan decision and never offers Start Plan", () => {

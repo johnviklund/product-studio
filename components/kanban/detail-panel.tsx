@@ -200,6 +200,64 @@ interface ShapingModelSelectionState {
   model: string;
 }
 
+export interface ShapingRequestChangesComposerState {
+  identity: string;
+  open: boolean;
+  launchMode: "connected" | "manual";
+  feedback: string;
+  selectedModel: string | null;
+  error: string | null;
+}
+
+export type ShapingRequestChangesComposerEvent =
+  | {
+      type: "open";
+      identity: string;
+      launchMode: "connected" | "manual";
+      selectedModel: string | null;
+    }
+  | { type: "close"; identity: string }
+  | { type: "feedback_changed"; identity: string; feedback: string }
+  | { type: "model_selected"; identity: string; model: string }
+  | { type: "request_started"; identity: string }
+  | { type: "request_failed"; identity: string; reason: string }
+  | { type: "request_succeeded"; identity: string };
+
+export function updateShapingRequestChangesComposer(
+  current: ShapingRequestChangesComposerState | null,
+  event: ShapingRequestChangesComposerEvent,
+): ShapingRequestChangesComposerState | null {
+  if (event.type === "open") {
+    return current?.identity === event.identity
+      ? { ...current, open: true, launchMode: event.launchMode }
+      : {
+          identity: event.identity,
+          open: true,
+          launchMode: event.launchMode,
+          feedback: "",
+          selectedModel: event.selectedModel,
+          error: null,
+        };
+  }
+  if (current?.identity !== event.identity) {
+    return current;
+  }
+  switch (event.type) {
+    case "close":
+      return { ...current, open: false };
+    case "feedback_changed":
+      return { ...current, feedback: event.feedback };
+    case "model_selected":
+      return { ...current, selectedModel: event.model };
+    case "request_started":
+      return { ...current, error: null };
+    case "request_failed":
+      return { ...current, open: true, error: event.reason };
+    case "request_succeeded":
+      return null;
+  }
+}
+
 interface ShapingLaunchFailureState {
   itemKey: string;
   decision_id: string;
@@ -1953,6 +2011,7 @@ function ModelPicker({
         {picker.options.map((option) => (
           <option key={option.model_id} value={option.model_id}>
             {option.model_id}
+            {option.current_revision ? " · current revision" : ""}
             {option.used_by_seats.length > 0
               ? ` · used by ${option.used_by_seats.join(", ")}`
               : " · unused"}
@@ -1977,10 +2036,25 @@ export interface ShapingDecisionViewProps {
   fieldId: string;
   projection: DecisionFirstShapingHandoffProjection;
   selectedModel: string | null;
+  requestChangesComposer: {
+    launchMode: "connected" | "manual";
+    feedback: string;
+    selectedModel: string | null;
+    error: string | null;
+  } | null;
   busy?: boolean;
   error?: string | null;
   onSelectModel: (model: string) => void;
   onAction: (action: ShapingActionProjection) => void;
+  onOpenRequestChanges: (launchMode: "connected" | "manual") => void;
+  onCloseRequestChanges: () => void;
+  onChangeRequestChangesFeedback: (feedback: string) => void;
+  onSelectRequestChangesModel: (model: string) => void;
+  onSubmitRequestChanges: (
+    action: ShapingActionProjection,
+    feedback: string,
+    selectedModel: string | null,
+  ) => void;
   onRefreshStatus: () => void;
   onShowFullWorkItem: () => void;
 }
@@ -1989,10 +2063,16 @@ export function ShapingDecisionView({
   fieldId,
   projection,
   selectedModel,
+  requestChangesComposer,
   busy = false,
   error = null,
   onSelectModel,
   onAction,
+  onOpenRequestChanges,
+  onCloseRequestChanges,
+  onChangeRequestChangesFeedback,
+  onSelectRequestChangesModel,
+  onSubmitRequestChanges,
   onRefreshStatus,
   onShowFullWorkItem,
 }: ShapingDecisionViewProps) {
@@ -2012,6 +2092,37 @@ export function ShapingDecisionView({
     (action) =>
       action.kind === "request_changes" && action.launch_mode === null,
   );
+  const requestChangesProjection =
+    projection.mode === "ready" ||
+    projection.mode === "plan_result_superseded"
+      ? projection.request_changes
+      : null;
+  const requestChangesPicker =
+    requestChangesProjection?.model_picker ?? null;
+  const requestChangesModel =
+    selectedModelForShapingPicker(
+      requestChangesPicker,
+      requestChangesComposer?.selectedModel ?? null,
+    ) ?? "";
+  const requestChangesLaunchMode =
+    requestChangesPicker === null
+      ? "manual"
+      : requestChangesComposer?.launchMode;
+  const requestChangesSubmitAction = requestChangesProjection?.actions.find(
+    (action) =>
+      action.kind === "request_changes" &&
+      action.launch_mode === requestChangesLaunchMode,
+  );
+  const requestChangesOpen =
+    requestChangesComposer !== null && requestChangesProjection !== null;
+  const requestChangesSubmitDisabled =
+    requestChangesComposer === null ||
+    requestChangesSubmitAction === undefined ||
+    busy ||
+    !requestChangesSubmitAction.enabled ||
+    requestChangesComposer.feedback.trim().length === 0 ||
+    (requestChangesSubmitAction.launch_mode === "connected" &&
+      requestChangesModel.length === 0);
   const cancelAction = projection.actions.find(
     (action) => action.kind === "cancel_run",
   );
@@ -2022,11 +2133,16 @@ export function ShapingDecisionView({
   const refreshRunning = lifecycle?.refresh_running === true;
   const manualActions = recoveryActions(projection).filter(
     (action) =>
-      projection.mode === "idea" ||
-      primaryAction === undefined ||
-      action.kind !== primaryAction.kind ||
-      action.launch_mode !== primaryAction.launch_mode ||
-      action.label !== primaryAction.label,
+      (projection.mode === "idea" ||
+        primaryAction === undefined ||
+        action.kind !== primaryAction.kind ||
+        action.launch_mode !== primaryAction.launch_mode ||
+        action.label !== primaryAction.label) &&
+      !(
+        requestChangesOpen &&
+        action.kind === "request_changes" &&
+        action.launch_mode === "manual"
+      ),
   );
   function toggleExpanded(key: string): void {
     setExpandedFields((current) => {
@@ -2328,6 +2444,74 @@ export function ShapingDecisionView({
           </DecisionRegion>
         )}
 
+        {!requestChangesOpen ? null : (
+          <section
+            data-region="request-changes"
+            aria-labelledby={`${fieldId}-request-changes-heading`}
+            className="border-t px-5 py-5"
+          >
+            <h3
+              id={`${fieldId}-request-changes-heading`}
+              className="text-sm font-semibold"
+            >
+              Request changes
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Describe what should change, then rerun this shaping seat against
+              the same exact result binding.
+            </p>
+            <label className="mt-4 block">
+              <span className="text-[11px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
+                Required feedback
+              </span>
+              <textarea
+                aria-label="Required feedback"
+                autoFocus
+                required
+                rows={4}
+                value={requestChangesComposer.feedback}
+                disabled={busy}
+                onChange={(event) =>
+                  onChangeRequestChangesFeedback(event.target.value)
+                }
+                className="mt-2 w-full resize-y rounded-md border bg-background px-3 py-2 text-sm leading-5 outline-none focus:border-primary focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-50"
+              />
+            </label>
+            {requestChangesPicker === null ? (
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                {requestChangesProjection?.runtime_unavailable ??
+                  "No connected shaping models are available."}
+              </p>
+            ) : requestChangesSubmitAction?.launch_mode === "manual" ? (
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                This prepares the revision for manual recovery without
+                selecting a connected model.
+              </p>
+            ) : (
+              <div className="mt-4">
+                <p className="text-[11px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
+                  Current-seat model
+                </p>
+                <ModelPicker
+                  picker={requestChangesPicker}
+                  selectedModel={requestChangesModel}
+                  busy={busy}
+                  onSelectModel={onSelectRequestChangesModel}
+                />
+              </div>
+            )}
+            {requestChangesComposer.error === null ? null : (
+              <p
+                data-request-changes-error="true"
+                className="mt-4 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs leading-5"
+                role="alert"
+              >
+                {requestChangesComposer.error}
+              </p>
+            )}
+          </section>
+        )}
+
         <details data-region="advanced-recovery" className="border-t px-5 py-4">
           <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
             Advanced recovery
@@ -2344,7 +2528,12 @@ export function ShapingDecisionView({
                   key={`${action.kind}:${action.launch_mode}:${action.label}`}
                   type="button"
                   disabled={busy || !action.enabled}
-                  onClick={() => onAction(action)}
+                  onClick={() =>
+                    action.kind === "request_changes" &&
+                    action.launch_mode === "manual"
+                      ? onOpenRequestChanges("manual")
+                      : onAction(action)
+                  }
                   className="block h-9 w-full rounded-md border bg-secondary px-3 text-left text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {action.label}
@@ -2360,17 +2549,30 @@ export function ShapingDecisionView({
         data-shaping-footer="persistent"
         className="flex shrink-0 items-center justify-end gap-2 border-t bg-muted px-5 py-4"
       >
-        {requestChangesAction === undefined ? null : (
+        {requestChangesOpen ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCloseRequestChanges}
+            className="h-10 rounded-md border bg-secondary px-4 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Close
+          </button>
+        ) : requestChangesAction === undefined ? null : (
           <button
             type="button"
             disabled={busy || !requestChangesAction.enabled}
-            onClick={() => onAction(requestChangesAction)}
+            onClick={() =>
+              onOpenRequestChanges(
+                requestChangesPicker === null ? "manual" : "connected",
+              )
+            }
             className="h-10 rounded-md border bg-secondary px-4 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
           >
             {requestChangesAction.label}
           </button>
         )}
-        {cancelAction === undefined ? null : (
+        {requestChangesOpen || cancelAction === undefined ? null : (
           <button
             type="button"
             disabled={busy || !cancelAction.enabled}
@@ -2380,7 +2582,27 @@ export function ShapingDecisionView({
             {cancelAction.label}
           </button>
         )}
-        {primaryAction === undefined ? null : (
+        {requestChangesOpen ? (
+          requestChangesSubmitAction === undefined ? null : (
+            <button
+              type="button"
+              data-action-priority="primary"
+              disabled={requestChangesSubmitDisabled}
+              onClick={() =>
+                onSubmitRequestChanges(
+                  requestChangesSubmitAction,
+                  requestChangesComposer.feedback,
+                  requestChangesModel.length === 0
+                    ? null
+                    : requestChangesModel,
+                )
+              }
+              className="h-10 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {requestChangesSubmitAction.label}
+            </button>
+          )
+        ) : primaryAction === undefined ? null : (
           <button
             type="button"
             data-action-priority="primary"
@@ -2929,6 +3151,8 @@ export function DetailPanel({
     useState<ShapingMutation | null>(null);
   const [shapingModelSelectionState, setShapingModelSelectionState] =
     useState<ShapingModelSelectionState | null>(null);
+  const [shapingRequestChangesComposerState, setShapingRequestChangesComposerState] =
+    useState<ShapingRequestChangesComposerState | null>(null);
   const [shapingLaunchFailureState, setShapingLaunchFailureState] =
     useState<ShapingLaunchFailureState | null>(null);
   const [shapingNewAttemptState, setShapingNewAttemptState] =
@@ -3122,6 +3346,44 @@ export function DetailPanel({
     decisionPicker,
     storedShapingModel,
   );
+  const shapingRequestChangesProjection =
+    shapingDecisionProjection?.mode === "ready" ||
+    shapingDecisionProjection?.mode === "plan_result_superseded"
+      ? shapingDecisionProjection.request_changes
+      : null;
+  const shapingRequestChangesIdentity =
+    shapingRequestChangesProjection === null ||
+    shapingDecisionProjection === null ||
+    (shapingDecisionProjection.mode !== "ready" &&
+      shapingDecisionProjection.mode !== "plan_result_superseded")
+      ? null
+      : JSON.stringify([
+          item.source_id,
+          goal.work_item_id,
+          shapingDecisionProjection.phase,
+          shapingDecisionProjection.bindings.expected_mission_content_sha256,
+          shapingDecisionProjection.bindings.expected_result_content_sha256,
+          shapingDecisionProjection.bindings.expected_shaping_state_sha256,
+        ]);
+  const currentShapingRequestChangesComposer =
+    shapingRequestChangesIdentity !== null &&
+    shapingRequestChangesComposerState?.identity ===
+      shapingRequestChangesIdentity
+      ? shapingRequestChangesComposerState
+      : null;
+  const selectedShapingRequestChangesModel = selectedModelForShapingPicker(
+    shapingRequestChangesProjection?.model_picker ?? null,
+    currentShapingRequestChangesComposer?.selectedModel ?? null,
+  );
+  const shapingRequestChangesComposer =
+    currentShapingRequestChangesComposer?.open === true
+      ? {
+          launchMode: currentShapingRequestChangesComposer.launchMode,
+          feedback: currentShapingRequestChangesComposer.feedback,
+          selectedModel: selectedShapingRequestChangesModel,
+          error: currentShapingRequestChangesComposer.error,
+        }
+      : null;
   const shapingArtifacts =
     currentShapingState?.listing?.artifacts ?? [];
   const shapingLoading =
@@ -3363,30 +3625,35 @@ export function DetailPanel({
     [goal.work_item_id, item, shapingItemKey],
   );
 
-  const markShapingArtifactsLoading = useCallback((expectedItemKey = shapingItemKey) => {
-    if (shapingItemKeyRef.current !== expectedItemKey) {
-      return;
-    }
-    setShapingArtifactState((current) =>
-      shapingItemKeyRef.current !== expectedItemKey
-        ? current
-        : {
-            itemKey: expectedItemKey,
-            listing:
-              current?.itemKey === expectedItemKey ? current.listing : null,
-            currentGoalContractSha256:
-              current?.itemKey === expectedItemKey
-                ? current.currentGoalContractSha256
+  const markShapingArtifactsLoading = useCallback(
+    (
+      expectedItemKey = shapingItemKey,
+      preserveCurrentListing = true,
+    ) => {
+      if (shapingItemKeyRef.current !== expectedItemKey) {
+        return;
+      }
+      setShapingArtifactState((current) => {
+        const preserve =
+          preserveCurrentListing && current?.itemKey === expectedItemKey;
+        return shapingItemKeyRef.current !== expectedItemKey
+          ? current
+          : {
+              itemKey: expectedItemKey,
+              listing: preserve ? current?.listing ?? null : null,
+              currentGoalContractSha256: preserve
+                ? current?.currentGoalContractSha256 ?? null
                 : null,
-            derivedGoalContractSha256:
-              current?.itemKey === expectedItemKey
-                ? current.derivedGoalContractSha256
+              derivedGoalContractSha256: preserve
+                ? current?.derivedGoalContractSha256 ?? null
                 : null,
-            loading: true,
-            error: null,
-          },
-    );
-  }, [shapingItemKey]);
+              loading: true,
+              error: null,
+            };
+      });
+    },
+    [shapingItemKey],
+  );
 
   const refreshShapingRun = useCallback(
     async (
@@ -3980,24 +4247,118 @@ export function DetailPanel({
     setShapingActionError(null);
   }
 
+  function handleOpenShapingRequestChanges(
+    launchMode: "connected" | "manual",
+  ): void {
+    if (
+      shapingRequestChangesIdentity === null ||
+      shapingRequestChangesProjection === null
+    ) {
+      return;
+    }
+    const defaultModel = selectedModelForShapingPicker(
+      shapingRequestChangesProjection.model_picker ?? null,
+      null,
+    );
+    setShapingRequestChangesComposerState((current) =>
+      updateShapingRequestChangesComposer(current, {
+        type: "open",
+        identity: shapingRequestChangesIdentity,
+        launchMode,
+        selectedModel: defaultModel,
+      }),
+    );
+  }
+
+  function handleCloseShapingRequestChanges(): void {
+    if (shapingRequestChangesIdentity === null) {
+      return;
+    }
+    setShapingRequestChangesComposerState((current) =>
+      updateShapingRequestChangesComposer(current, {
+        type: "close",
+        identity: shapingRequestChangesIdentity,
+      }),
+    );
+  }
+
+  function handleChangeShapingRequestFeedback(feedback: string): void {
+    if (shapingRequestChangesIdentity === null) {
+      return;
+    }
+    setShapingRequestChangesComposerState((current) =>
+      updateShapingRequestChangesComposer(current, {
+        type: "feedback_changed",
+        identity: shapingRequestChangesIdentity,
+        feedback,
+      }),
+    );
+  }
+
+  function handleSelectShapingRequestModel(model: string): void {
+    if (shapingRequestChangesIdentity === null) {
+      return;
+    }
+    setShapingRequestChangesComposerState((current) =>
+      updateShapingRequestChangesComposer(current, {
+        type: "model_selected",
+        identity: shapingRequestChangesIdentity,
+        model,
+      }),
+    );
+  }
+
   async function handleShapingDecisionAction(
     action: ShapingActionProjection,
+    requestChanges?: {
+      identity: string;
+      feedback: string;
+      selectedModel: string | null;
+    },
   ): Promise<void> {
     if (
       shapingDecisionProjection === null ||
       shapingDecisionIdentity === null ||
+      (requestChanges !== undefined &&
+        requestChanges.identity !== shapingRequestChangesIdentity) ||
       shapingDecisionBusyRef.current.has(shapingDecisionIdentity)
     ) {
       return;
     }
     const operationIdentity = shapingDecisionIdentity;
     const operationItemKey = shapingItemKey;
+    const operationSelectedModel =
+      requestChanges === undefined
+        ? selectedShapingModel
+        : requestChanges.selectedModel;
+    const setActionFailure = (message: string): void => {
+      if (requestChanges === undefined) {
+        setShapingActionError(message, operationItemKey);
+        return;
+      }
+      setShapingRequestChangesComposerState((current) =>
+        updateShapingRequestChangesComposer(current, {
+          type: "request_failed",
+          identity: requestChanges.identity,
+          reason: message,
+        }),
+      );
+    };
+    if (requestChanges !== undefined) {
+      setShapingRequestChangesComposerState((current) =>
+        updateShapingRequestChangesComposer(current, {
+          type: "request_started",
+          identity: requestChanges.identity,
+        }),
+      );
+    }
     const request = shapingActionRequest({
       source_id: item.source_id,
       work_item_id: goal.work_item_id,
       projection: shapingDecisionProjection,
       action,
-      selected_model: selectedShapingModel,
+      selected_model: operationSelectedModel,
+      feedback: requestChanges?.feedback,
     });
     if (request.status === "blocked") {
       if (request.reason === "new_attempt_selection_required") {
@@ -4010,7 +4371,7 @@ export function DetailPanel({
         setShapingActionError(null);
         return;
       }
-      setShapingActionError(
+      setActionFailure(
         request.reason === "feedback_required"
           ? "Add feedback in the Request changes composer before submitting this action."
           : request.reason === "missing_model"
@@ -4050,13 +4411,21 @@ export function DetailPanel({
         return;
       }
       if (!response.ok || "error" in body) {
-        setShapingActionError(
+        setActionFailure(
           "error" in body
             ? body.error?.message ?? "The shaping action could not be completed."
             : "The shaping action could not be completed.",
-          operationItemKey,
         );
         return;
+      }
+
+      if (requestChanges !== undefined) {
+        setShapingRequestChangesComposerState((current) =>
+          updateShapingRequestChangesComposer(current, {
+            type: "request_succeeded",
+            identity: requestChanges.identity,
+          }),
+        );
       }
 
       if ("work_item" in body) {
@@ -4082,18 +4451,23 @@ export function DetailPanel({
           decision.next_launch.status === "failed" &&
           decision.next_launch.shaping_run_id === null &&
           action.launch_mode === "connected" &&
-          selectedShapingModel !== null
+          operationSelectedModel !== null
         ) {
           setShapingLaunchFailureState({
             itemKey: shapingItemStateKey(decision),
             decision_id: decision.decision_id,
-            locked_model: selectedShapingModel,
+            locked_model: operationSelectedModel,
             reason:
               decision.next_launch.reason ??
               "The committed shaping decision could not launch its next seat.",
           });
         } else {
           setShapingLaunchFailureState(null);
+        }
+        if (action.kind === "request_changes") {
+          // onUpdated replaces the item; its abortable effect owns the sole
+          // artifact reload so an older parallel GET cannot win afterward.
+          markShapingArtifactsLoading(operationItemKey, false);
         }
         onUpdated(
           decision,
@@ -4125,9 +4499,8 @@ export function DetailPanel({
       markShapingArtifactsLoading(operationItemKey);
       await loadShapingArtifacts(undefined, operationItemKey);
     } catch {
-      setShapingActionError(
+      setActionFailure(
         "The shaping action could not be completed. Check the local server and try again.",
-        operationItemKey,
       );
     } finally {
       shapingDecisionBusyRef.current.delete(operationIdentity);
@@ -4822,7 +5195,8 @@ export function DetailPanel({
               fieldId={fieldId}
               projection={shapingDecisionProjection}
               selectedModel={selectedShapingModel}
-              busy={shapingDecisionBusy}
+              requestChangesComposer={shapingRequestChangesComposer}
+              busy={shapingDecisionBusy || shapingLoading}
               error={shapingError}
               onSelectModel={(model) => {
                 if (shapingPickerKey !== null) {
@@ -4833,6 +5207,21 @@ export function DetailPanel({
                 }
               }}
               onAction={(action) => void handleShapingDecisionAction(action)}
+              onOpenRequestChanges={handleOpenShapingRequestChanges}
+              onCloseRequestChanges={handleCloseShapingRequestChanges}
+              onChangeRequestChangesFeedback={
+                handleChangeShapingRequestFeedback
+              }
+              onSelectRequestChangesModel={handleSelectShapingRequestModel}
+              onSubmitRequestChanges={(action, feedback, selectedModel) => {
+                if (shapingRequestChangesIdentity !== null) {
+                  void handleShapingDecisionAction(action, {
+                    identity: shapingRequestChangesIdentity,
+                    feedback,
+                    selectedModel,
+                  });
+                }
+              }}
               onRefreshStatus={() =>
                 setShapingRefreshRestartVersion((current) => current + 1)
               }
