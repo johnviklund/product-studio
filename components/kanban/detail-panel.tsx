@@ -19,6 +19,7 @@ import {
 
 import type {
   BrainstormMissionCompilation,
+  ManualShapingIngressResult,
   MissionCompilation,
   PatchMissionCompilation,
   PlanMissionCompilation,
@@ -80,6 +81,7 @@ import {
   type ShapingChecklistPreview,
   type ShapingHandoffProjection,
   type ShapingListPreview,
+  type ShapingManualRecoveryProjectionInput,
   type ShapingModelPickerProjection,
   type ShapingRefreshProjection,
   type ShapingRevisionProjectionInput,
@@ -195,6 +197,13 @@ interface ShapingRefreshUiState {
   snapshot: ShapingRefreshControllerSnapshot;
 }
 
+interface ShapingManualRecoveryBinding {
+  identity: string;
+  phase: ShapingPhase;
+  expectedMissionContentSha256: string;
+  expectedShapingStateSha256: string;
+}
+
 interface ShapingModelSelectionState {
   pickerKey: string;
   model: string;
@@ -278,6 +287,124 @@ interface ShapingCompilationState {
 interface ShapingImportState {
   itemKey: string;
   result: ShapingImportResult;
+}
+
+export interface ShapingManualRecoveryUiState {
+  identity: string;
+  recovery: ShapingManualRecoveryProjectionInput;
+  prepared: ManualShapingIngressResult | null;
+  imported: ShapingImportResult | null;
+  error: string | null;
+  importing: boolean;
+}
+
+export type ShapingManualRecoveryUiEvent =
+  | { type: "prepare_started"; identity: string }
+  | {
+      type: "prepare_succeeded";
+      identity: string;
+      result: ManualShapingIngressResult;
+    }
+  | {
+      type: "prepare_failed";
+      identity: string;
+      reason: string;
+      retried: boolean;
+    }
+  | {
+      type: "copied";
+      identity: string;
+      target: "task" | "instruction" | "ingress";
+    }
+  | { type: "import_started"; identity: string }
+  | {
+      type: "import_failed";
+      identity: string;
+      reason: string;
+    }
+  | {
+      type: "copy_failed";
+      identity: string;
+      reason: string;
+    }
+  | {
+      type: "import_succeeded";
+      identity: string;
+      result: ShapingImportResult;
+    };
+
+export function updateShapingManualRecovery(
+  current: ShapingManualRecoveryUiState | null,
+  event: ShapingManualRecoveryUiEvent,
+): ShapingManualRecoveryUiState | null {
+  if (event.type === "prepare_started") {
+    return {
+      identity: event.identity,
+      recovery: { state: "loading" },
+      prepared:
+        current?.identity === event.identity ? current.prepared : null,
+      imported: null,
+      error: null,
+      importing: false,
+    };
+  }
+  if (current?.identity !== event.identity) {
+    return current;
+  }
+  switch (event.type) {
+    case "prepare_succeeded":
+      return {
+        ...current,
+        recovery: {
+          state: "ready",
+          task: event.result.task,
+          instruction_path: event.result.instruction_path,
+          ingress_path: event.result.instruction.ingress_path,
+        },
+        prepared: event.result,
+        imported: null,
+        error: null,
+      };
+    case "prepare_failed":
+      return {
+        ...current,
+        recovery: {
+          state: event.retried ? "retry" : "failure",
+          reason: event.reason,
+        },
+        prepared: null,
+        imported: null,
+        error: null,
+      };
+    case "copied":
+      if (current.prepared === null) {
+        return current;
+      }
+      return {
+        ...current,
+        recovery: {
+          state: "copy",
+          copied_target: event.target,
+          task: current.prepared.task,
+          instruction_path: current.prepared.instruction_path,
+          ingress_path: current.prepared.instruction.ingress_path,
+        },
+        error: null,
+      };
+    case "import_started":
+      return { ...current, importing: true, error: null };
+    case "import_failed":
+      return { ...current, importing: false, error: event.reason };
+    case "copy_failed":
+      return { ...current, error: event.reason };
+    case "import_succeeded":
+      return {
+        ...current,
+        imported: event.result,
+        importing: false,
+        error: null,
+      };
+  }
 }
 
 interface ShapingSelectionState {
@@ -1219,6 +1346,18 @@ type ShapingCompilation =
   | SpecMissionCompilation
   | PlanMissionCompilation;
 
+export interface ShapingAdvancedRecoveryViewState {
+  identity: string;
+  phase: ShapingPhase | null;
+  preparationEnabled: boolean;
+  currentTaskPath: string | null;
+  compilation: ShapingCompilation | null;
+  copiedCompilationTarget: ShapingCopyTarget | null;
+  manualRecovery: ShapingManualRecoveryUiState | null;
+  run: ShapingRunSummary | null;
+  compiling: boolean;
+}
+
 interface ShapingSectionProps {
   fieldId: string;
   projection: Extract<ShapingHandoffProjection, { mode: "active" }>;
@@ -1369,7 +1508,7 @@ function ShapingMissionHandoff({
                 type="button"
                 onClick={() => onCopy(row.target, row.value)}
                 aria-label={`Copy ${row.label}`}
-                className="h-7 shrink-0 rounded-md border bg-secondary px-2 text-[11px] font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                className="h-9 shrink-0 rounded-md border bg-secondary px-3 text-[11px] font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
               >
                 {copiedTarget === row.target ? "Copied" : "Copy"}
               </button>
@@ -2036,6 +2175,7 @@ export interface ShapingDecisionViewProps {
   fieldId: string;
   projection: DecisionFirstShapingHandoffProjection;
   selectedModel: string | null;
+  advancedRecovery?: ShapingAdvancedRecoveryViewState;
   requestChangesComposer: {
     launchMode: "connected" | "manual";
     feedback: string;
@@ -2055,14 +2195,60 @@ export interface ShapingDecisionViewProps {
     feedback: string,
     selectedModel: string | null,
   ) => void;
+  onCompileManualMission?: () => void;
+  onPrepareManualRecovery?: () => void;
+  onRetryManualRecovery?: () => void;
+  onCopyManualRecovery?: (
+    target: "task" | "instruction" | "ingress",
+    value: string,
+  ) => void;
+  onImportManualResult?: () => void;
+  onCopyManualCompilation?: (
+    target: ShapingCopyTarget,
+    value: string,
+  ) => void;
   onRefreshStatus: () => void;
   onShowFullWorkItem: () => void;
+}
+
+export interface ShapingManualRecoveryActionCallbacks {
+  prepare: (() => void) | undefined;
+  retry: (() => void) | undefined;
+  copyTask: ((value: string) => void) | undefined;
+  importResult: (() => void) | undefined;
+}
+
+export function dispatchShapingManualRecoveryAction(
+  action: ShapingActionProjection,
+  task: string | null,
+  callbacks: ShapingManualRecoveryActionCallbacks,
+): boolean {
+  switch (action.kind) {
+    case "prepare_manual_recovery":
+      callbacks.prepare?.();
+      return callbacks.prepare !== undefined;
+    case "retry_manual_recovery":
+      callbacks.retry?.();
+      return callbacks.retry !== undefined;
+    case "copy_manual_task":
+      if (task === null || callbacks.copyTask === undefined) {
+        return false;
+      }
+      callbacks.copyTask(task);
+      return true;
+    case "import_manual_result":
+      callbacks.importResult?.();
+      return callbacks.importResult !== undefined;
+    default:
+      return false;
+  }
 }
 
 export function ShapingDecisionView({
   fieldId,
   projection,
   selectedModel,
+  advancedRecovery,
   requestChangesComposer,
   busy = false,
   error = null,
@@ -2073,6 +2259,12 @@ export function ShapingDecisionView({
   onChangeRequestChangesFeedback,
   onSelectRequestChangesModel,
   onSubmitRequestChanges,
+  onCompileManualMission,
+  onPrepareManualRecovery,
+  onRetryManualRecovery,
+  onCopyManualRecovery,
+  onImportManualResult,
+  onCopyManualCompilation,
   onRefreshStatus,
   onShowFullWorkItem,
 }: ShapingDecisionViewProps) {
@@ -2133,6 +2325,7 @@ export function ShapingDecisionView({
   const refreshRunning = lifecycle?.refresh_running === true;
   const manualActions = recoveryActions(projection).filter(
     (action) =>
+      action.kind !== "prepare_manual_recovery" &&
       (projection.mode === "idea" ||
         primaryAction === undefined ||
         action.kind !== primaryAction.kind ||
@@ -2144,6 +2337,61 @@ export function ShapingDecisionView({
         action.launch_mode === "manual"
       ),
   );
+  const manualRecovery =
+    advancedRecovery?.manualRecovery?.recovery ??
+    (projection.mode === "manual_recovery" ? projection.recovery : null);
+  const preparePromoted =
+    primaryAction?.kind === "prepare_manual_recovery";
+  const footerPrimaryAction =
+    preparePromoted && manualRecovery !== null ? undefined : primaryAction;
+  const advancedRecoveryPhase =
+    advancedRecovery?.phase ??
+    (projection.mode === "idea" ? null : projection.phase);
+  const prepareManualAction = recoveryActions(projection).find(
+    (action) => action.kind === "prepare_manual_recovery",
+  );
+  const retryManualAction = projection.actions.find(
+    (action) => action.kind === "retry_manual_recovery",
+  );
+  const copyManualAction = projection.actions.find(
+    (action) => action.kind === "copy_manual_task",
+  );
+  const importManualAction = projection.actions.find(
+    (action) => action.kind === "import_manual_result",
+  );
+  const preparedRecovery =
+    advancedRecovery?.manualRecovery?.prepared ?? null;
+  const importedRecovery =
+    advancedRecovery?.manualRecovery?.imported ?? null;
+  const recoveryError =
+    advancedRecovery?.manualRecovery?.error ?? null;
+  const recoveryImporting =
+    advancedRecovery?.manualRecovery?.importing ?? false;
+  const projectedRecoveryValues =
+    manualRecovery?.state === "ready" || manualRecovery?.state === "copy"
+      ? {
+          task: manualRecovery.task,
+          instructionPath: manualRecovery.instruction_path,
+          ingressPath: manualRecovery.ingress_path,
+        }
+      : null;
+  const planRecovery =
+    projection.mode === "ready" && projection.phase === "plan"
+      ? projection.sections.advanced_recovery
+      : projection.mode === "plan_result_superseded"
+        ? {
+            relevant_skills: projection.result.relevant_skills,
+            product_doc_impacts: projection.result.product_doc_impacts,
+            todo_impacts: projection.result.todo_impacts,
+          }
+        : null;
+  const rejectedRecoveryImport =
+    importedRecovery?.outcome === "rejected" ? importedRecovery : null;
+  const showManualIngress =
+    advancedRecoveryPhase !== null &&
+    (advancedRecovery !== undefined ||
+      manualRecovery !== null ||
+      prepareManualAction !== undefined);
   function toggleExpanded(key: string): void {
     setExpandedFields((current) => {
       const next = new Set(current);
@@ -2157,6 +2405,24 @@ export function ShapingDecisionView({
   }
   function previewExpanded(key: string): boolean {
     return expandedFields.has(key);
+  }
+  function dispatchAction(action: ShapingActionProjection): void {
+    const handled = dispatchShapingManualRecoveryAction(
+      action,
+      projectedRecoveryValues?.task ?? null,
+      {
+        prepare: onPrepareManualRecovery,
+        retry: onRetryManualRecovery,
+        copyTask:
+          onCopyManualRecovery === undefined
+            ? undefined
+            : (value) => onCopyManualRecovery("task", value),
+        importResult: onImportManualResult,
+      },
+    );
+    if (!handled) {
+      onAction(action);
+    }
   }
 
   return (
@@ -2512,18 +2778,358 @@ export function ShapingDecisionView({
           </section>
         )}
 
-        <details data-region="advanced-recovery" className="border-t px-5 py-4">
+        <details
+          key={advancedRecovery?.identity}
+          data-region="advanced-recovery"
+          data-recovery-identity={advancedRecovery?.identity}
+          data-manual-recovery-state={manualRecovery?.state ?? "idle"}
+          className="border-t px-5 py-4"
+        >
           <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
             Advanced recovery
             <ChevronDown className="size-4 text-muted-foreground" strokeWidth={1.75} />
           </summary>
-          <div className="mt-3 space-y-2">
-            {manualActions.length === 0 ? (
-              <p className="text-xs leading-5 text-muted-foreground">
-                Recovery details are available when this state has a safe manual path.
-              </p>
-            ) : (
-              manualActions.map((action) => (
+          <div className="mt-4 space-y-5">
+            <p className="border-l-2 border-border pl-3 text-xs leading-5 text-muted-foreground">
+              Permission requests are mediated locally. Product Studio accepts
+              only the exact result-ingress path and validates that result scope
+              before publication. The run uses the founder&apos;s own user
+              authority and can read the workspace and repository. Operating-system
+              separation is not independently enforced.
+            </p>
+
+            {advancedRecovery === undefined ||
+            advancedRecoveryPhase === null ? null : (
+              <section data-recovery-section="mission" className="space-y-3">
+                <h4 className="text-xs font-medium">External mission handoff</h4>
+                <button
+                  type="button"
+                  disabled={busy || advancedRecovery.compiling}
+                  onClick={onCompileManualMission}
+                  className="h-9 w-full rounded-md border bg-secondary px-3 text-left text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {advancedRecovery.compiling
+                    ? "Compiling…"
+                    : `Compile ${shapingPhaseLabel(advancedRecoveryPhase)} mission`}
+                </button>
+                {advancedRecovery.compilation !== null ? (
+                  <ShapingMissionHandoff
+                    compilation={advancedRecovery.compilation}
+                    copiedTarget={advancedRecovery.copiedCompilationTarget}
+                    onCopy={(target, value) =>
+                      onCopyManualCompilation?.(target, value)
+                    }
+                  />
+                ) : advancedRecovery.currentTaskPath === null ? null : (
+                  <dl className="border-l-2 border-border bg-background px-3 py-3 text-xs">
+                    <div>
+                      <dt className="text-muted-foreground">TASK.md</dt>
+                      <dd className="mt-1 flex items-start justify-between gap-3">
+                        <span className="min-w-0 break-all text-[11px] leading-5">
+                          {advancedRecovery.currentTaskPath}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onCopyManualCompilation?.(
+                              "task",
+                              advancedRecovery.currentTaskPath!,
+                            )
+                          }
+                          className="h-9 shrink-0 rounded-md border bg-secondary px-3 text-[11px] font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                        >
+                          Copy TASK.md
+                        </button>
+                      </dd>
+                    </div>
+                  </dl>
+                )}
+              </section>
+            )}
+
+            {!showManualIngress ? null : (
+              <section data-recovery-section="manual-ingress" className="space-y-3">
+                <h4 className="text-xs font-medium">Manual result ingress</h4>
+                {manualRecovery === null && preparePromoted ? (
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    Use the primary Prepare manual recovery action below.
+                  </p>
+                ) : manualRecovery === null ? (
+                  <button
+                    type="button"
+                    disabled={
+                      busy ||
+                      !(advancedRecovery?.preparationEnabled ??
+                        prepareManualAction?.enabled ??
+                        false)
+                    }
+                    onClick={() => {
+                      if (onPrepareManualRecovery !== undefined) {
+                        onPrepareManualRecovery();
+                      } else if (prepareManualAction !== undefined) {
+                        onAction(prepareManualAction);
+                      }
+                    }}
+                    className="h-9 w-full rounded-md border bg-secondary px-3 text-left text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Prepare manual recovery
+                  </button>
+                ) : manualRecovery.state === "loading" ? (
+                  <p className="text-xs leading-5 text-muted-foreground" role="status">
+                    Publishing the manual recovery instruction…
+                  </p>
+                ) : manualRecovery.state === "failure" ||
+                  manualRecovery.state === "retry" ? (
+                  <div
+                    className="border-l-2 border-destructive bg-destructive/10 px-3 py-3 text-xs leading-5"
+                    role="alert"
+                  >
+                    <p className="font-medium">
+                      {manualRecovery.state === "failure"
+                        ? "Manual recovery preparation failed"
+                        : "Manual recovery retry failed"}
+                    </p>
+                    <p className="mt-1 text-muted-foreground">
+                      {manualRecovery.reason}
+                    </p>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        if (onRetryManualRecovery !== undefined) {
+                          onRetryManualRecovery();
+                        } else if (retryManualAction !== undefined) {
+                          onAction(retryManualAction);
+                        }
+                      }}
+                      className="mt-3 h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Retry manual recovery
+                    </button>
+                  </div>
+                ) : projectedRecoveryValues === null ? null : (
+                  <div className="space-y-4">
+                    <p className="text-xs font-medium text-success">
+                      Manual recovery ready
+                    </p>
+                    {manualRecovery.state === "copy" ? (
+                      <p className="text-xs text-muted-foreground" role="status">
+                        Copied {manualRecovery.copied_target}.
+                      </p>
+                    ) : null}
+                    <dl className="space-y-3 text-xs">
+                      {(
+                        [
+                          ["Instruction path", "instruction", projectedRecoveryValues.instructionPath],
+                          ["Exact ingress path", "ingress", projectedRecoveryValues.ingressPath],
+                        ] as const
+                      ).map(([label, target, value]) =>
+                        value === null ? null : (
+                          <div key={target}>
+                            <dt className="text-muted-foreground">{label}</dt>
+                            <dd className="mt-1 flex items-start justify-between gap-3">
+                              <span className="min-w-0 break-all text-[11px] leading-5">
+                                {value}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (onCopyManualRecovery !== undefined) {
+                                    onCopyManualRecovery(target, value);
+                                  }
+                                }}
+                                className="h-9 shrink-0 rounded-md border bg-secondary px-3 text-[11px] font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                              >
+                                Copy {label}
+                              </button>
+                            </dd>
+                          </div>
+                        ),
+                      )}
+                    </dl>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Rendered recovery task</p>
+                      <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words border bg-background p-3 text-[11px] leading-5">
+                        {projectedRecoveryValues.task}
+                      </pre>
+                      {advancedRecovery === undefined ? null : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onCopyManualRecovery !== undefined) {
+                              onCopyManualRecovery(
+                                "task",
+                                projectedRecoveryValues.task,
+                              );
+                            } else if (copyManualAction !== undefined) {
+                              onAction(copyManualAction);
+                            }
+                          }}
+                          className="mt-2 h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                        >
+                          Copy manual task
+                        </button>
+                      )}
+                    </div>
+                    {preparedRecovery === null ? null : (
+                      <dl className="grid grid-cols-1 gap-3 border-y py-3 text-xs">
+                        <div>
+                          <dt className="text-muted-foreground">Result schema version</dt>
+                          <dd>{preparedRecovery.instruction.result_schema_version}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted-foreground">Maximum result bytes</dt>
+                          <dd>{preparedRecovery.instruction.max_result_bytes}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted-foreground">Mission content SHA-256</dt>
+                          <dd className="break-all text-[11px]">
+                            {preparedRecovery.instruction.mission_content_sha256}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted-foreground">Required result fields</dt>
+                          <dd>
+                            <ShapingStringList
+                              values={preparedRecovery.instruction.required_fields}
+                              emptyLabel="No required fields were recorded."
+                            />
+                          </dd>
+                        </div>
+                      </dl>
+                    )}
+                    <button
+                      type="button"
+                      disabled={busy || recoveryImporting}
+                      onClick={() => {
+                        if (onImportManualResult !== undefined) {
+                          onImportManualResult();
+                        } else if (importManualAction !== undefined) {
+                          onAction(importManualAction);
+                        }
+                      }}
+                      className="h-9 w-full rounded-md border bg-secondary px-3 text-left text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {recoveryImporting ? "Importing…" : "Import result"}
+                    </button>
+                  </div>
+                )}
+                {manualRecovery === null ||
+                manualRecovery.state === "loading" ||
+                manualRecovery.state === "failure" ||
+                manualRecovery.state === "retry" ? (
+                  <button
+                    type="button"
+                    disabled
+                    className="h-9 w-full rounded-md border bg-secondary px-3 text-left text-xs font-medium opacity-50"
+                  >
+                    Import result
+                  </button>
+                ) : null}
+                {recoveryError === null ? null : (
+                  <p
+                    className="border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs leading-5"
+                    role="alert"
+                  >
+                    {recoveryError}
+                  </p>
+                )}
+                {rejectedRecoveryImport === null ? null : (
+                  <div
+                    data-recovery-rejection="sanitized"
+                    className="border-l-2 border-destructive bg-destructive/10 px-3 py-3 text-xs"
+                    role="alert"
+                  >
+                    <p className="font-medium">Imported result rejected</p>
+                    <dl className="mt-2 space-y-2">
+                      <div>
+                        <dt className="text-muted-foreground">Raw result SHA-256</dt>
+                        <dd className="break-all text-[11px]">
+                          {rejectedRecoveryImport.rejection.raw_result_sha256}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-muted-foreground">Byte length</dt>
+                        <dd>{rejectedRecoveryImport.rejection.byte_length}</dd>
+                      </div>
+                    </dl>
+                    <ShapingStringList
+                      values={rejectedRecoveryImport.rejection.reasons.map(
+                        (reason) => `${reason.field_path}: ${reason.code}`,
+                      )}
+                      emptyLabel="The result did not satisfy the shaping contract."
+                    />
+                  </div>
+                )}
+              </section>
+            )}
+
+            {advancedRecovery?.run === null ||
+            advancedRecovery?.run === undefined ? null : (
+              <section data-recovery-section="run-diagnostics" className="space-y-3">
+                <h4 className="text-xs font-medium">Connected run diagnostics</h4>
+                <dl className="space-y-2 border-l-2 border-border bg-background px-3 py-3 text-xs">
+                  <div>
+                    <dt className="text-muted-foreground">Run</dt>
+                    <dd className="break-all text-[11px]">
+                      {advancedRecovery.run.shaping_run_id}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Outcome</dt>
+                    <dd>{advancedRecovery.run.lifecycle.terminal_outcome ?? advancedRecovery.run.lifecycle.status}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Partial</dt>
+                    <dd>{advancedRecovery.run.lifecycle.partial ? "yes" : "no"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Requested model</dt>
+                    <dd>{advancedRecovery.run.provenance.requested_model.value ?? "unknown"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Effective model</dt>
+                    <dd>{advancedRecovery.run.provenance.effective_model.model_id ?? "unknown"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Exact run ingress</dt>
+                    <dd className="break-all text-[11px]">
+                      {advancedRecovery.run.write_policy.ingress_path}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Bounded diagnostics</dt>
+                    <dd>
+                      {advancedRecovery.run.diagnostics.count} recorded · {advancedRecovery.run.diagnostics.truncated ? "truncated" : "complete"}
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+            )}
+
+            {planRecovery === null ? null : (
+              <section data-recovery-section="plan-impacts" className="space-y-4">
+                <h4 className="text-xs font-medium">Plan implementation context</h4>
+                {(
+                  [
+                    ["Relevant skills", planRecovery.relevant_skills, "No relevant skills recorded."],
+                    ["Product doc impacts", planRecovery.product_doc_impacts, "No product doc impacts recorded."],
+                    ["Todo impacts", planRecovery.todo_impacts, "No todo impacts recorded."],
+                  ] as const
+                ).map(([label, values, emptyLabel]) => (
+                  <div key={label}>
+                    <p className="text-[11px] font-medium text-muted-foreground uppercase">
+                      {label}
+                    </p>
+                    <ShapingStringList values={values} emptyLabel={emptyLabel} />
+                  </div>
+                ))}
+              </section>
+            )}
+
+            {manualActions.length === 0 ? null : (
+              <section data-recovery-section="decision-actions" className="space-y-2">
+                {manualActions.map((action) => (
                 <button
                   key={`${action.kind}:${action.launch_mode}:${action.label}`}
                   type="button"
@@ -2538,7 +3144,8 @@ export function ShapingDecisionView({
                 >
                   {action.label}
                 </button>
-              ))
+                ))}
+              </section>
             )}
           </div>
         </details>
@@ -2602,15 +3209,15 @@ export function ShapingDecisionView({
               {requestChangesSubmitAction.label}
             </button>
           )
-        ) : primaryAction === undefined ? null : (
+        ) : footerPrimaryAction === undefined ? null : (
           <button
             type="button"
             data-action-priority="primary"
-            disabled={busy || !primaryAction.enabled}
-            onClick={() => onAction(primaryAction)}
+            disabled={busy || !footerPrimaryAction.enabled}
+            onClick={() => dispatchAction(footerPrimaryAction)}
             className="h-10 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {primaryAction.label}
+            {footerPrimaryAction.label}
           </button>
         )}
       </footer>
@@ -3153,6 +3760,8 @@ export function DetailPanel({
     useState<ShapingModelSelectionState | null>(null);
   const [shapingRequestChangesComposerState, setShapingRequestChangesComposerState] =
     useState<ShapingRequestChangesComposerState | null>(null);
+  const [shapingManualRecoveryUiState, setShapingManualRecoveryUiState] =
+    useState<ShapingManualRecoveryUiState | null>(null);
   const [shapingLaunchFailureState, setShapingLaunchFailureState] =
     useState<ShapingLaunchFailureState | null>(null);
   const [shapingNewAttemptState, setShapingNewAttemptState] =
@@ -3174,6 +3783,9 @@ export function DetailPanel({
   const shapingRefreshControllerIdentityRef = useRef<string | null>(null);
   const shapingRefreshBindingRef = useRef<ShapingRefreshBinding | null>(null);
   const shapingRefreshAppliedRestartVersionRef = useRef(0);
+  const shapingArtifactRequestEpochRef = useRef(0);
+  const shapingManualRecoveryIdentityRef = useRef<string | null>(null);
+  const shapingManualRecoveryOperationsRef = useRef<Set<string>>(new Set());
   const shapingItemKeyRef = useRef("");
   const [showFullWorkItem, setShowFullWorkItem] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
@@ -3303,6 +3915,45 @@ export function DetailPanel({
           shapingNewAttemptState,
           currentShapingRefresh,
         );
+  const currentDecisionShapingPhase =
+    state.phase === "brainstorm" ||
+    state.phase === "spec" ||
+    state.phase === "plan"
+      ? state.phase
+      : null;
+  const currentDecisionShapingTip =
+    currentDecisionShapingPhase === null ||
+    currentShapingState?.listing === null ||
+    currentShapingState?.listing === undefined
+      ? null
+      : currentShapingTip(
+          currentDecisionShapingPhase,
+          currentShapingState.listing.artifacts,
+        );
+  const currentShapingManualRecoveryBinding: ShapingManualRecoveryBinding | null =
+    currentDecisionShapingPhase === null ||
+    currentDecisionShapingTip === null ||
+    currentShapingContext?.revision === null ||
+    currentShapingContext?.revision === undefined
+      ? null
+      : {
+          identity: JSON.stringify([
+            item.source_id,
+            goal.work_item_id,
+            currentDecisionShapingPhase,
+            currentDecisionShapingTip.mission.content_sha256,
+            currentShapingContext.expected_shaping_state_sha256,
+          ]),
+          phase: currentDecisionShapingPhase,
+          expectedMissionContentSha256:
+            currentDecisionShapingTip.mission.content_sha256,
+          expectedShapingStateSha256:
+            currentShapingContext.expected_shaping_state_sha256,
+        };
+  useEffect(() => {
+    shapingManualRecoveryIdentityRef.current =
+      currentShapingManualRecoveryBinding?.identity ?? null;
+  }, [currentShapingManualRecoveryBinding?.identity]);
   const shapingDecisionProjection =
     currentShapingContext === null
       ? null
@@ -3406,6 +4057,52 @@ export function DetailPanel({
     shapingCopiedState?.itemKey === shapingItemKey
       ? shapingCopiedState.target
       : null;
+  const currentShapingManualRecovery =
+    currentShapingManualRecoveryBinding !== null &&
+    shapingManualRecoveryUiState?.identity ===
+      currentShapingManualRecoveryBinding.identity
+      ? shapingManualRecoveryUiState
+      : null;
+  const currentRecoveryCompilation =
+    shapingCompilation !== null &&
+    currentDecisionShapingTip !== null &&
+    shapingCompilation.mission.identity.phase ===
+      currentDecisionShapingTip.mission.identity.phase &&
+    shapingCompilation.mission.content_sha256 ===
+      currentDecisionShapingTip.mission.content_sha256
+      ? shapingCompilation
+      : null;
+  const currentShapingRunSummary =
+    currentDecisionShapingPhase === null ||
+    currentShapingState?.listing === null ||
+    currentShapingState?.listing === undefined
+      ? null
+      : shapingRunSummaryFromListing(
+          currentDecisionShapingPhase,
+          currentShapingState.listing,
+        );
+  const failedShapingRunSummary =
+    currentShapingRunSummary?.lifecycle.status === "terminal" &&
+    (currentShapingRunSummary.lifecycle.terminal_outcome !== "completed" ||
+      shapingDecisionProjection?.mode === "terminal_run_failure" ||
+      shapingDecisionProjection?.mode === "repair")
+      ? currentShapingRunSummary
+      : null;
+  const shapingAdvancedRecovery: ShapingAdvancedRecoveryViewState = {
+    identity:
+      currentShapingManualRecoveryBinding?.identity ??
+      shapingDecisionIdentity ??
+      shapingItemKey,
+    phase: currentDecisionShapingPhase,
+    preparationEnabled: currentShapingManualRecoveryBinding !== null,
+    currentTaskPath: currentDecisionShapingTip?.task_path ?? null,
+    compilation: currentRecoveryCompilation,
+    copiedCompilationTarget:
+      currentRecoveryCompilation === null ? null : shapingCopiedTarget,
+    manualRecovery: currentShapingManualRecovery,
+    run: failedShapingRunSummary,
+    compiling: shapingMutation === "compiling",
+  };
   const missionEligible = missionHandoffMode === "active";
   const repairEligible = missionHandoffMode === "repair";
   const missionBusy = compilingMission || importingResult || startingRepair;
@@ -3577,6 +4274,7 @@ export function DetailPanel({
 
   const loadShapingArtifacts = useCallback(
     async (signal?: AbortSignal, expectedItemKey = shapingItemKey) => {
+      const requestEpoch = ++shapingArtifactRequestEpochRef.current;
       const loaded = await requestShapingArtifacts(
         item.source_id,
         goal.work_item_id,
@@ -3591,11 +4289,13 @@ export function DetailPanel({
           : await shapingGoalContractHashes(item, loaded.result);
       if (
         signal?.aborted ||
+        shapingArtifactRequestEpochRef.current !== requestEpoch ||
         shapingItemKeyRef.current !== expectedItemKey
       ) {
         return;
       }
       setShapingArtifactState((current) =>
+        shapingArtifactRequestEpochRef.current !== requestEpoch ||
         shapingItemKeyRef.current !== expectedItemKey
           ? current
           : {
@@ -3669,6 +4369,7 @@ export function DetailPanel({
       ) {
         throw new Error("The visible shaping run changed before refresh.");
       }
+      const requestEpoch = ++shapingArtifactRequestEpochRef.current;
       const loaded = await requestShapingArtifacts(
         binding.sourceId,
         binding.workItemId,
@@ -3702,6 +4403,7 @@ export function DetailPanel({
       const currentBinding = shapingRefreshBindingRef.current;
       if (
         signal.aborted ||
+        shapingArtifactRequestEpochRef.current !== requestEpoch ||
         currentBinding?.identity !== binding.identity ||
         currentBinding.itemKey !== binding.itemKey ||
         shapingItemKeyRef.current !== binding.itemKey
@@ -3709,6 +4411,7 @@ export function DetailPanel({
         throw new Error("The shaping refresh no longer matches this panel.");
       }
       setShapingArtifactState((current) =>
+        shapingArtifactRequestEpochRef.current !== requestEpoch ||
         shapingRefreshBindingRef.current?.identity !== binding.identity ||
         shapingItemKeyRef.current !== binding.itemKey
           ? current
@@ -3938,12 +4641,17 @@ export function DetailPanel({
       return;
     }
     const controller = new AbortController();
+    const requestEpoch = ++shapingArtifactRequestEpochRef.current;
     void requestShapingArtifacts(
       item.source_id,
       goal.work_item_id,
       controller.signal,
     ).then(async (loaded) => {
-      if (loaded === null || controller.signal.aborted) {
+      if (
+        loaded === null ||
+        controller.signal.aborted ||
+        shapingArtifactRequestEpochRef.current !== requestEpoch
+      ) {
         return;
       }
       let hashes: Awaited<ReturnType<typeof shapingGoalContractHashes>> | null =
@@ -3954,41 +4662,62 @@ export function DetailPanel({
             ? null
             : await shapingGoalContractHashes(item, loaded.result);
       } catch {
-        if (!controller.signal.aborted) {
-          setShapingArtifactState({
-            itemKey: shapingItemKey,
-            listing: null,
-            currentGoalContractSha256: null,
-            derivedGoalContractSha256: null,
-            loading: false,
-            error: "The exact shaping contract binding could not be computed.",
-          });
+        if (
+          !controller.signal.aborted &&
+          shapingArtifactRequestEpochRef.current === requestEpoch &&
+          shapingItemKeyRef.current === shapingItemKey
+        ) {
+          setShapingArtifactState((current) =>
+            shapingArtifactRequestEpochRef.current !== requestEpoch ||
+            shapingItemKeyRef.current !== shapingItemKey
+              ? current
+              : {
+                  itemKey: shapingItemKey,
+                  listing: null,
+                  currentGoalContractSha256: null,
+                  derivedGoalContractSha256: null,
+                  loading: false,
+                  error:
+                    "The exact shaping contract binding could not be computed.",
+                },
+          );
         }
         return;
       }
-      if (controller.signal.aborted) {
+      if (
+        controller.signal.aborted ||
+        shapingArtifactRequestEpochRef.current !== requestEpoch ||
+        shapingItemKeyRef.current !== shapingItemKey
+      ) {
         return;
       }
-      setShapingArtifactState((current) => ({
-        itemKey: shapingItemKey,
-        listing:
-          loaded.result ??
-          (current?.itemKey === shapingItemKey ? current.listing : null),
-        currentGoalContractSha256:
-          hashes === null
-            ? current?.itemKey === shapingItemKey
-              ? current.currentGoalContractSha256
-              : null
-            : hashes.currentGoalContractSha256,
-        derivedGoalContractSha256:
-          hashes === null
-            ? current?.itemKey === shapingItemKey
-              ? current.derivedGoalContractSha256
-              : null
-            : hashes.derivedGoalContractSha256,
-        loading: false,
-        error: loaded.error,
-      }));
+      setShapingArtifactState((current) =>
+        shapingArtifactRequestEpochRef.current !== requestEpoch ||
+        shapingItemKeyRef.current !== shapingItemKey
+          ? current
+          : {
+              itemKey: shapingItemKey,
+              listing:
+                loaded.result ??
+                (current?.itemKey === shapingItemKey
+                  ? current.listing
+                  : null),
+              currentGoalContractSha256:
+                hashes === null
+                  ? current?.itemKey === shapingItemKey
+                    ? current.currentGoalContractSha256
+                    : null
+                  : hashes.currentGoalContractSha256,
+              derivedGoalContractSha256:
+                hashes === null
+                  ? current?.itemKey === shapingItemKey
+                    ? current.derivedGoalContractSha256
+                    : null
+                  : hashes.derivedGoalContractSha256,
+              loading: false,
+              error: loaded.error,
+            },
+      );
     });
     return () => controller.abort();
   }, [
@@ -4120,16 +4849,10 @@ export function DetailPanel({
   }
 
   async function handleCompileShapingMission(): Promise<void> {
-    if (legacyShapingHandoff.mode !== "active") {
+    if (currentDecisionShapingPhase === null) {
       return;
     }
-    const phase = legacyShapingHandoff.phase;
-    if (phase === "spec" && selectedAcceptanceSha256.length === 0) {
-      setShapingActionError(
-        "Choose an accepted Brainstorm input before compiling the Spec mission.",
-      );
-      return;
-    }
+    const phase = currentDecisionShapingPhase;
 
     setShapingMutation("compiling");
     setShapingActionError(null);
@@ -4137,15 +4860,11 @@ export function DetailPanel({
     try {
       const response = await fetch(
         `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/${phase}/mission`,
-        phase === "spec"
-          ? {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                brainstorm_acceptance_sha256: selectedAcceptanceSha256,
-              }),
-            }
-          : { method: "POST" },
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        },
       );
       const body = (await response.json()) as
         | ShapingCompilation
@@ -4172,30 +4891,29 @@ export function DetailPanel({
   }
 
   async function handleImportShapingResult(): Promise<void> {
-    if (legacyShapingHandoff.mode !== "active") {
-      return;
-    }
-    const phase = legacyShapingHandoff.phase;
-    if (phase === "spec" && selectedAcceptanceSha256.length === 0) {
+    if (currentShapingManualRecoveryBinding === null) {
       setShapingActionError(
-        "Choose an accepted Brainstorm input before importing the Spec result.",
+        "Compile the current shaping mission before importing its result.",
       );
       return;
     }
+    const binding = currentShapingManualRecoveryBinding;
+    const phase = binding.phase;
     setShapingMutation("importing");
     setShapingActionError(null);
     try {
       const response = await fetch(
         `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/${phase}/import`,
-        phase === "spec"
-          ? {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                brainstorm_acceptance_sha256: selectedAcceptanceSha256,
-              }),
-            }
-          : { method: "POST" },
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expected_mission_content_sha256:
+              binding.expectedMissionContentSha256,
+            expected_shaping_state_sha256:
+              binding.expectedShapingStateSha256,
+          }),
+        },
       );
       const body = (await response.json()) as
         | ShapingImportResult
@@ -4232,6 +4950,209 @@ export function DetailPanel({
       setShapingCopiedState({ itemKey: shapingItemKey, target });
     } catch {
       setShapingActionError("The shaping handoff value could not be copied.");
+    }
+  }
+
+  async function handlePrepareShapingManualRecovery(
+    retried: boolean,
+  ): Promise<void> {
+    const binding = currentShapingManualRecoveryBinding;
+    if (binding === null) {
+      return;
+    }
+    const operationKey = `prepare:${binding.identity}`;
+    if (shapingManualRecoveryOperationsRef.current.has(operationKey)) {
+      return;
+    }
+    shapingManualRecoveryOperationsRef.current.add(operationKey);
+    setShapingManualRecoveryUiState((current) =>
+      updateShapingManualRecovery(current, {
+        type: "prepare_started",
+        identity: binding.identity,
+      }),
+    );
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/${binding.phase}/manual-ingress`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expected_mission_content_sha256:
+              binding.expectedMissionContentSha256,
+            expected_shaping_state_sha256:
+              binding.expectedShapingStateSha256,
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | ManualShapingIngressResult
+        | MutationErrorResponse;
+      if (shapingManualRecoveryIdentityRef.current !== binding.identity) {
+        return;
+      }
+      if (!response.ok || "error" in body) {
+        setShapingManualRecoveryUiState((current) =>
+          updateShapingManualRecovery(current, {
+            type: "prepare_failed",
+            identity: binding.identity,
+            reason:
+              "error" in body
+                ? body.error?.message ??
+                  "The manual recovery instruction could not be published."
+                : "The manual recovery instruction could not be published.",
+            retried,
+          }),
+        );
+        return;
+      }
+      setShapingManualRecoveryUiState((current) =>
+        updateShapingManualRecovery(current, {
+          type: "prepare_succeeded",
+          identity: binding.identity,
+          result: body as ManualShapingIngressResult,
+        }),
+      );
+    } catch {
+      if (shapingManualRecoveryIdentityRef.current === binding.identity) {
+        setShapingManualRecoveryUiState((current) =>
+          updateShapingManualRecovery(current, {
+            type: "prepare_failed",
+            identity: binding.identity,
+            reason:
+              "The manual recovery instruction could not be published. Check the local server and try again.",
+            retried,
+          }),
+        );
+      }
+    } finally {
+      shapingManualRecoveryOperationsRef.current.delete(operationKey);
+    }
+  }
+
+  async function handleCopyShapingManualRecovery(
+    target: "task" | "instruction" | "ingress",
+    value: string,
+  ): Promise<void> {
+    const binding = currentShapingManualRecoveryBinding;
+    if (binding === null) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      if (shapingManualRecoveryIdentityRef.current === binding.identity) {
+        setShapingManualRecoveryUiState((current) =>
+          updateShapingManualRecovery(current, {
+            type: "copied",
+            identity: binding.identity,
+            target,
+          }),
+        );
+      }
+    } catch {
+      if (shapingManualRecoveryIdentityRef.current === binding.identity) {
+        setShapingManualRecoveryUiState((current) =>
+          updateShapingManualRecovery(current, {
+            type: "copy_failed",
+            identity: binding.identity,
+            reason: "The manual recovery value could not be copied.",
+          }),
+        );
+      }
+    }
+  }
+
+  async function handleImportShapingManualResult(): Promise<void> {
+    const binding = currentShapingManualRecoveryBinding;
+    if (binding === null) {
+      return;
+    }
+    const operationKey = `import:${binding.identity}`;
+    if (shapingManualRecoveryOperationsRef.current.has(operationKey)) {
+      return;
+    }
+    shapingManualRecoveryOperationsRef.current.add(operationKey);
+    let pausedRefresh = false;
+    setShapingManualRecoveryUiState((current) =>
+      updateShapingManualRecovery(current, {
+        type: "import_started",
+        identity: binding.identity,
+      }),
+    );
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/shaping/${binding.phase}/import`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expected_mission_content_sha256:
+              binding.expectedMissionContentSha256,
+            expected_shaping_state_sha256:
+              binding.expectedShapingStateSha256,
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | ShapingImportResult
+        | MutationErrorResponse;
+      if (shapingManualRecoveryIdentityRef.current !== binding.identity) {
+        return;
+      }
+      if (!response.ok || "error" in body) {
+        setShapingManualRecoveryUiState((current) =>
+          updateShapingManualRecovery(current, {
+            type: "import_failed",
+            identity: binding.identity,
+            reason:
+              "error" in body
+                ? body.error?.message ??
+                  "The manual shaping result could not be imported."
+                : "The manual shaping result could not be imported.",
+          }),
+        );
+        return;
+      }
+      const imported = body as ShapingImportResult;
+      setShapingImportState({ itemKey: shapingItemKey, result: imported });
+      setShapingManualRecoveryUiState((current) =>
+        updateShapingManualRecovery(current, {
+          type: "import_succeeded",
+          identity: binding.identity,
+          result: imported,
+        }),
+      );
+      if (imported.outcome === "applied") {
+        const refreshBinding = shapingRefreshBindingRef.current;
+        if (refreshBinding !== null) {
+          shapingRefreshControllerRef.current?.update({
+            ...refreshBinding.observation,
+            visible: false,
+          });
+          pausedRefresh = true;
+        }
+        markShapingArtifactsLoading();
+        await loadShapingArtifacts();
+      }
+    } catch {
+      if (shapingManualRecoveryIdentityRef.current === binding.identity) {
+        setShapingManualRecoveryUiState((current) =>
+          updateShapingManualRecovery(current, {
+            type: "import_failed",
+            identity: binding.identity,
+            reason:
+              "The manual shaping result could not be imported. Check the local server and try again.",
+          }),
+        );
+      }
+    } finally {
+      shapingManualRecoveryOperationsRef.current.delete(operationKey);
+      if (
+        pausedRefresh &&
+        shapingManualRecoveryIdentityRef.current === binding.identity
+      ) {
+        setShapingRefreshRestartVersion((current) => current + 1);
+      }
     }
   }
 
@@ -5195,8 +6116,15 @@ export function DetailPanel({
               fieldId={fieldId}
               projection={shapingDecisionProjection}
               selectedModel={selectedShapingModel}
+              advancedRecovery={shapingAdvancedRecovery}
               requestChangesComposer={shapingRequestChangesComposer}
-              busy={shapingDecisionBusy || shapingLoading}
+              busy={
+                shapingDecisionBusy ||
+                shapingLoading ||
+                shapingMutation !== null ||
+                currentShapingManualRecovery?.importing === true ||
+                currentShapingManualRecovery?.recovery.state === "loading"
+              }
               error={shapingError}
               onSelectModel={(model) => {
                 if (shapingPickerKey !== null) {
@@ -5222,6 +6150,24 @@ export function DetailPanel({
                   });
                 }
               }}
+              onCompileManualMission={() =>
+                void handleCompileShapingMission()
+              }
+              onPrepareManualRecovery={() =>
+                void handlePrepareShapingManualRecovery(false)
+              }
+              onRetryManualRecovery={() =>
+                void handlePrepareShapingManualRecovery(true)
+              }
+              onCopyManualRecovery={(target, value) =>
+                void handleCopyShapingManualRecovery(target, value)
+              }
+              onImportManualResult={() =>
+                void handleImportShapingManualResult()
+              }
+              onCopyManualCompilation={(target, value) =>
+                void handleCopyShapingValue(target, value)
+              }
               onRefreshStatus={() =>
                 setShapingRefreshRestartVersion((current) => current + 1)
               }

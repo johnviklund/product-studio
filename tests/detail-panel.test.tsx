@@ -5,17 +5,21 @@ import { describe, expect, it, vi } from "vitest";
 import {
   canEditGoalContractFromFullWorkItem,
   ConnectedExecuteSection,
+  dispatchShapingManualRecoveryAction,
   PatchWorkflowSection,
   RunEvidenceSection,
   selectedModelForShapingPicker,
+  type ShapingAdvancedRecoveryViewState,
   ShapingDecisionView,
   ShapingSection,
   specProposalToGoalContractDraft,
+  updateShapingManualRecovery,
   updateShapingRequestChangesComposer,
 } from "../components/kanban/detail-panel";
 import { nextActionForCardState } from "../components/kanban/board-card";
 import type {
   BrainstormMissionCompilation,
+  ManualShapingIngressResult,
   ShapingImportResult,
   SpecMissionCompilation,
 } from "../src/application/portfolio";
@@ -31,6 +35,7 @@ import type {
   StoredShapingArtifact,
 } from "../src/domain/shaping";
 import type { ShapingModelPickerOption } from "../src/domain/portfolio-preferences";
+import type { ShapingRunSummary } from "../src/domain/shaping-run";
 import type { GoalContract, WorkItemPhase } from "../src/domain/work-item";
 import {
   shapingHandoffForItem,
@@ -135,6 +140,44 @@ const brainstormCompilation: BrainstormMissionCompilation = {
   workspace_path: "/workspace/product-studio",
   task_path: brainstormTaskPath,
   mission_path: `.founder/shaping/${workItemId}/brainstorm-${"1".repeat(64)}/mission.json`,
+};
+const manualIngressDirectory = `.founder/shaping-ingress/${workItemId}/brainstorm-${brainstormIdentity.input_sha256}`;
+const manualIngressPath = `${manualIngressDirectory}/result.json`;
+const manualInstructionPath = `${manualIngressDirectory}/instruction.json`;
+const manualRequiredFields = [
+  ...brainstormMission.result_contract.required_fields,
+];
+const manualRecoveryTask = [
+  `Published TASK.md: ${brainstormTaskPath}`,
+  `Exact result ingress: ${manualIngressPath}`,
+  "Result schema version: 1",
+  "Maximum result bytes: 262144",
+  `Mission content SHA-256: ${missionContentSha256}`,
+  "Required result fields:",
+  ...manualRequiredFields.map((field) => `- ${field}`),
+].join("\n");
+const manualIngressResult: ManualShapingIngressResult = {
+  source_id: "source-1",
+  work_item_id: workItemId,
+  task: manualRecoveryTask,
+  instruction: {
+    schema_version: 1,
+    origin: "manual_import",
+    shaping_run_id: null,
+    work_item_id: workItemId,
+    phase: "brainstorm",
+    mission_input_sha256: brainstormIdentity.input_sha256,
+    mission_content_sha256: missionContentSha256,
+    task_path: brainstormTaskPath,
+    mission_path: brainstormCompilation.mission_path,
+    ingress_path: manualIngressPath,
+    result_schema_version: 1,
+    required_fields: manualRequiredFields,
+    max_result_bytes: 262_144,
+    created_at: "2026-08-04T08:00:00.000Z",
+    instruction_sha256: "e".repeat(64),
+  },
+  instruction_path: manualInstructionPath,
 };
 const brainstormImport: ShapingImportResult = {
   source_id: "source-1",
@@ -399,6 +442,65 @@ function decisionRun(
   };
 }
 
+const failedShapingRun: ShapingRunSummary = {
+  schema_version: 1,
+  shaping_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b9",
+  mission: {
+    phase: "brainstorm",
+    work_item_id: workItemId,
+    input_sha256: brainstormIdentity.input_sha256,
+    content_sha256: missionContentSha256,
+  },
+  provenance: {
+    role: { value: "writer", assurance: "controller_observed" },
+    seat: { value: "brainstorm", assurance: "controller_observed" },
+    requested_model: { value: "requested-model", assurance: "user_declared" },
+    effective_model: {
+      assurance: "adapter_attested",
+      model_id: "effective-model",
+      deployment_id: null,
+      observed_event_sha256: "f".repeat(64),
+    },
+    effort: { value: "high", assurance: "user_declared" },
+    harness: {
+      value: { id: "copilot-cli", version: "1.0.75" },
+      assurance: "controller_observed",
+    },
+    adapter_profile: {
+      value: {
+        adapter_id: "copilot-acp",
+        adapter_version: "1",
+        profile_id: "brainstorm-v1",
+      },
+      assurance: "controller_observed",
+    },
+  },
+  write_policy: {
+    kind: "single_ingress_file",
+    ingress_path: `${manualIngressDirectory}/connected-result.json`,
+    instruction_sha256: "0".repeat(64),
+    commands: "forbidden",
+    urls: "forbidden",
+    mcp: "forbidden",
+    credentials: "forbidden",
+    outside_workspace_writes: "forbidden",
+    reads: "workspace_and_repository_unrestricted",
+    execution_mode: "permission_mediated_local",
+    result_assurance: "result_scope_validation",
+    containment_assurance: "not_independently_enforced",
+    machine_authority: "launching_user",
+  },
+  lifecycle: {
+    status: "terminal",
+    started_at: "2026-08-04T08:01:00.000Z",
+    updated_at: "2026-08-04T08:02:00.000Z",
+    completed_at: "2026-08-04T08:02:00.000Z",
+    terminal_outcome: "failed",
+    partial: false,
+  },
+  diagnostics: { count: 2, truncated: false },
+};
+
 function appliedDecisionContext(
   phase: ShapingPhase,
   result: ShapingResultSubmission,
@@ -433,12 +535,14 @@ function renderDecision(
     error: string | null;
   } | null = null,
   busy = false,
+  advancedRecovery?: ShapingAdvancedRecoveryViewState,
 ): string {
   return renderToStaticMarkup(
     <ShapingDecisionView
       fieldId="decision"
       projection={projection}
       selectedModel={selectedModel}
+      advancedRecovery={advancedRecovery}
       requestChangesComposer={requestChangesComposer}
       busy={busy}
       onSelectModel={noop}
@@ -448,6 +552,12 @@ function renderDecision(
       onChangeRequestChangesFeedback={noop}
       onSelectRequestChangesModel={noop}
       onSubmitRequestChanges={noop}
+      onCompileManualMission={noop}
+      onPrepareManualRecovery={noop}
+      onRetryManualRecovery={noop}
+      onCopyManualRecovery={noop}
+      onImportManualResult={noop}
+      onCopyManualCompilation={noop}
       onRefreshStatus={noop}
       onShowFullWorkItem={noop}
     />,
@@ -500,6 +610,37 @@ function advancedRecoveryMarkup(html: string): string {
     throw new Error("advanced recovery disclosure not found");
   }
   return visibleMarkup(html.slice(start, end));
+}
+
+function outsideAdvancedRecoveryMarkup(html: string): string {
+  const detailsStart = html.lastIndexOf(
+    "<details",
+    html.indexOf('data-region="advanced-recovery"'),
+  );
+  const detailsEnd = html.indexOf("</details>", detailsStart);
+  if (detailsStart < 0 || detailsEnd < 0) {
+    throw new Error("advanced recovery disclosure not found");
+  }
+  return visibleMarkup(
+    `${html.slice(0, detailsStart)}${html.slice(detailsEnd + "</details>".length)}`,
+  );
+}
+
+function advancedRecoveryView(
+  overrides: Partial<ShapingAdvancedRecoveryViewState> = {},
+): ShapingAdvancedRecoveryViewState {
+  return {
+    identity: "advanced-recovery-v1",
+    phase: "brainstorm",
+    preparationEnabled: true,
+    currentTaskPath: brainstormTaskPath,
+    compilation: brainstormCompilation,
+    copiedCompilationTarget: null,
+    manualRecovery: null,
+    run: null,
+    compiling: false,
+    ...overrides,
+  };
 }
 
 type ShapingProps = ComponentProps<typeof ShapingSection>;
@@ -820,6 +961,570 @@ describe("detail panel decision-first shaping", () => {
     expect(canEditGoalContractFromFullWorkItem("brainstorm", false)).toBe(true);
     expect(canEditGoalContractFromFullWorkItem("spec", false)).toBe(true);
     expect(canEditGoalContractFromFullWorkItem("plan", true)).toBe(true);
+  });
+
+  it("keeps manual recovery inert until preparation and preserves all five explicit states", () => {
+    const identity = JSON.stringify([
+      "source-1",
+      workItemId,
+      "brainstorm",
+      missionContentSha256,
+      shapingStateSha256,
+    ]);
+
+    expect(
+      updateShapingManualRecovery(null, {
+        type: "prepare_succeeded",
+        identity,
+        result: manualIngressResult,
+      }),
+    ).toBeNull();
+    expect(
+      updateShapingManualRecovery(null, {
+        type: "copied",
+        identity,
+        target: "task",
+      }),
+    ).toBeNull();
+    expect(
+      updateShapingManualRecovery(null, {
+        type: "import_started",
+        identity,
+      }),
+    ).toBeNull();
+
+    const loading = updateShapingManualRecovery(null, {
+      type: "prepare_started",
+      identity,
+    });
+    if (loading === null) {
+      throw new Error("expected a loading manual-recovery state");
+    }
+    const ready = updateShapingManualRecovery(loading, {
+      type: "prepare_succeeded",
+      identity,
+      result: manualIngressResult,
+    });
+    if (ready === null) {
+      throw new Error("expected a ready manual-recovery state");
+    }
+    const copied = updateShapingManualRecovery(ready, {
+      type: "copied",
+      identity,
+      target: "task",
+    });
+    if (copied === null) {
+      throw new Error("expected a copied manual-recovery state");
+    }
+    const failed = updateShapingManualRecovery(loading, {
+      type: "prepare_failed",
+      identity,
+      reason: "The instruction write failed.",
+      retried: false,
+    });
+    if (failed === null) {
+      throw new Error("expected a failed manual-recovery state");
+    }
+    const retryLoading = updateShapingManualRecovery(failed, {
+      type: "prepare_started",
+      identity,
+    });
+    const retried = updateShapingManualRecovery(retryLoading, {
+      type: "prepare_failed",
+      identity,
+      reason: "The retry also failed.",
+      retried: true,
+    });
+    if (retried === null) {
+      throw new Error("expected a retry manual-recovery state");
+    }
+
+    expect([
+      loading.recovery.state,
+      ready.recovery.state,
+      failed.recovery.state,
+      retried.recovery.state,
+      copied.recovery.state,
+    ]).toEqual(["loading", "ready", "failure", "retry", "copy"]);
+    expect(ready.prepared).toEqual(manualIngressResult);
+
+    const importing = updateShapingManualRecovery(ready, {
+      type: "import_started",
+      identity,
+    });
+    expect(importing).toMatchObject({
+      recovery: { state: "ready" },
+      importing: true,
+      error: null,
+    });
+    expect(
+      updateShapingManualRecovery(importing, {
+        type: "copy_failed",
+        identity,
+        reason: "Clipboard access failed.",
+      }),
+    ).toMatchObject({
+      recovery: { state: "ready" },
+      importing: true,
+      error: "Clipboard access failed.",
+    });
+    const imported = updateShapingManualRecovery(importing, {
+      type: "import_succeeded",
+      identity,
+      result: brainstormImport,
+    });
+    expect(imported).toMatchObject({
+      recovery: { state: "ready" },
+      imported: brainstormImport,
+      importing: false,
+    });
+
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        run: decisionRun("terminal", "failed"),
+      }),
+    );
+    const renderedStates = [loading, ready, failed, retried, copied].map(
+      (manualRecovery) =>
+        visibleMarkup(
+          renderDecision(
+            projection,
+            null,
+            null,
+            false,
+            advancedRecoveryView({ manualRecovery }),
+          ),
+        ),
+    );
+    for (const [index, state] of [
+      "loading",
+      "ready",
+      "failure",
+      "retry",
+      "copy",
+    ].entries()) {
+      expect(renderedStates[index]).toContain(
+        `data-manual-recovery-state="${state}"`,
+      );
+    }
+    expect(renderedStates[0]).toContain(
+      "Publishing the manual recovery instruction…",
+    );
+    expect(renderedStates[1]).toContain("Manual recovery ready");
+    expect(renderedStates[2]).toContain("Manual recovery preparation failed");
+    expect(renderedStates[3]).toContain("Manual recovery retry failed");
+    expect(renderedStates[4]).toContain("Copied task.");
+    if (importing === null) {
+      throw new Error("expected an importing manual-recovery state");
+    }
+    expect(
+      visibleMarkup(
+        renderDecision(
+          projection,
+          null,
+          null,
+          false,
+          advancedRecoveryView({ manualRecovery: importing }),
+        ),
+      ),
+    ).toContain("Importing…");
+  });
+
+  it("uses one collapsed truthful recovery disclosure for Idea, Brainstorm, Spec, and Plan", () => {
+    const surfaces = [
+      {
+        name: "Idea",
+        projection: shapingHandoffForItem(
+          decisionItem("idea"),
+          decisionSurfaceContext({ revision: null }),
+        ),
+        recovery: advancedRecoveryView({
+          phase: null,
+          currentTaskPath: null,
+          compilation: null,
+        }),
+      },
+      {
+        name: "Brainstorm",
+        projection: shapingHandoffForItem(
+          decisionItem("brainstorm"),
+          appliedDecisionContext("brainstorm", brainstormResult),
+        ),
+        recovery: advancedRecoveryView(),
+      },
+      {
+        name: "Spec",
+        projection: shapingHandoffForItem(
+          decisionItem("spec"),
+          appliedDecisionContext("spec", specResult),
+        ),
+        recovery: advancedRecoveryView({
+          phase: "spec",
+          currentTaskPath: specTaskPath,
+          compilation: specCompilation,
+        }),
+      },
+      {
+        name: "Plan",
+        projection: shapingHandoffForItem(
+          decisionItem("plan", decisionGoalContract),
+          appliedDecisionContext("plan", planResult),
+        ),
+        recovery: advancedRecoveryView({
+          phase: "plan",
+          currentTaskPath: null,
+          compilation: null,
+        }),
+      },
+    ];
+
+    for (const surface of surfaces) {
+      const html = renderDecision(
+        surface.projection,
+        null,
+        null,
+        false,
+        surface.recovery,
+      );
+      const disclosure = advancedRecoveryMarkup(html);
+      const detailsStart = html.lastIndexOf(
+        "<details",
+        html.indexOf('data-region="advanced-recovery"'),
+      );
+      const openingTag = html.slice(detailsStart, html.indexOf(">", detailsStart) + 1);
+
+      expect(openingTag, surface.name).not.toMatch(/\sopen(?:=|\s|>)/u);
+      expect(openingTag, surface.name).toContain(
+        'data-recovery-identity="advanced-recovery-v1"',
+      );
+      expect(disclosure, surface.name).toContain(
+        "Permission requests are mediated locally.",
+      );
+      expect(disclosure, surface.name).toContain(
+        "only the exact result-ingress path and validates that result scope",
+      );
+      expect(disclosure, surface.name).toContain(
+        "the founder's own user authority",
+      );
+      expect(disclosure, surface.name).toContain(
+        "can read the workspace and repository",
+      );
+      expect(disclosure, surface.name).toContain(
+        "Operating-system separation is not independently enforced.",
+      );
+      expect(disclosure.toLowerCase(), surface.name).not.toMatch(
+        /sandbox|contained|isolated|cannot reach|prevented|technically unable/u,
+      );
+    }
+
+    const ideaRecovery = advancedRecoveryMarkup(
+      renderDecision(
+        surfaces[0]!.projection,
+        null,
+        null,
+        false,
+        surfaces[0]!.recovery,
+      ),
+    );
+    expect(ideaRecovery).toContain("Start Brainstorm without a model");
+    expect(ideaRecovery).toContain('data-manual-recovery-state="idle"');
+    expect(ideaRecovery).not.toContain(
+      "Publishing the manual recovery instruction…",
+    );
+
+    const unavailablePreparation = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({ revision: null }),
+    );
+    const unavailableHtml = renderDecision(
+      unavailablePreparation,
+      null,
+      null,
+      false,
+      advancedRecoveryView({
+        identity: "no-current-revision",
+        preparationEnabled: false,
+        currentTaskPath: null,
+        compilation: null,
+      }),
+    );
+    expect(buttonAttributes(unavailableHtml, "Prepare manual recovery")).toContain(
+      "disabled",
+    );
+
+    const runtimeUnavailable = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        models: {
+          status: "unavailable",
+          reason: "The connected runtime is unavailable.",
+          available_model_ids: [],
+          model_picker_options: { brainstorm: [], spec: [], plan: [] },
+        },
+      }),
+    );
+    const runtimeUnavailableHtml = renderDecision(
+      runtimeUnavailable,
+      null,
+      null,
+      false,
+      advancedRecoveryView(),
+    );
+    expect(
+      exactButtonCount(runtimeUnavailableHtml, "Prepare manual recovery"),
+    ).toBe(1);
+    expect(
+      buttonAttributes(runtimeUnavailableHtml, "Prepare manual recovery"),
+    ).toContain('data-action-priority="primary"');
+  });
+
+  it("dispatches every UI-only recovery action without falling through to the decision builder", () => {
+    const prepare = vi.fn();
+    const retry = vi.fn();
+    const copyTask = vi.fn();
+    const importResult = vi.fn();
+    const callbacks = { prepare, retry, copyTask, importResult };
+    const action = (
+      kind:
+        | "prepare_manual_recovery"
+        | "retry_manual_recovery"
+        | "copy_manual_task"
+        | "import_manual_result"
+        | "launch_phase",
+    ) => ({
+      kind,
+      label: kind,
+      launch_mode: null,
+      primary: false,
+      enabled: true,
+    } as const);
+
+    expect(
+      dispatchShapingManualRecoveryAction(
+        action("prepare_manual_recovery"),
+        null,
+        callbacks,
+      ),
+    ).toBe(true);
+    expect(
+      dispatchShapingManualRecoveryAction(
+        action("retry_manual_recovery"),
+        null,
+        callbacks,
+      ),
+    ).toBe(true);
+    expect(
+      dispatchShapingManualRecoveryAction(
+        action("copy_manual_task"),
+        manualRecoveryTask,
+        callbacks,
+      ),
+    ).toBe(true);
+    expect(
+      dispatchShapingManualRecoveryAction(
+        action("import_manual_result"),
+        null,
+        callbacks,
+      ),
+    ).toBe(true);
+    expect(
+      dispatchShapingManualRecoveryAction(
+        action("launch_phase"),
+        null,
+        callbacks,
+      ),
+    ).toBe(false);
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(retry).toHaveBeenCalledOnce();
+    expect(copyTask).toHaveBeenCalledWith(manualRecoveryTask);
+    expect(importResult).toHaveBeenCalledOnce();
+  });
+
+  it("renders the exact prepared ingress contract, copy controls, and Base recovery controls", () => {
+    const identity = "prepared-recovery";
+    const loading = updateShapingManualRecovery(null, {
+      type: "prepare_started",
+      identity,
+    });
+    const ready = updateShapingManualRecovery(loading, {
+      type: "prepare_succeeded",
+      identity,
+      result: manualIngressResult,
+    });
+    if (ready === null) {
+      throw new Error("expected prepared manual recovery");
+    }
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        run: decisionRun("terminal", "failed"),
+      }),
+    );
+    const html = renderDecision(
+      projection,
+      null,
+      null,
+      false,
+      advancedRecoveryView({ manualRecovery: ready }),
+    );
+    const disclosure = advancedRecoveryMarkup(html);
+
+    expect(disclosure).toContain(brainstormTaskPath);
+    expect(disclosure).toContain(manualInstructionPath);
+    expect(disclosure).toContain(manualIngressPath);
+    expect(disclosure).toContain(manualRecoveryTask);
+    expect(disclosure).toContain("Result schema version");
+    expect(disclosure).toContain(">1</dd>");
+    expect(disclosure).toContain("Maximum result bytes");
+    expect(disclosure).toContain(">262144</dd>");
+    expect(disclosure).toContain("Mission content SHA-256");
+    expect(disclosure).toContain(missionContentSha256);
+    for (const field of manualRequiredFields) {
+      expect(disclosure).toContain(field);
+    }
+    for (const label of [
+      "Copy TASK.md",
+      "Copy Mission JSON",
+      "Copy Workspace",
+      "Copy Content SHA",
+      "Copy Instruction path",
+      "Copy Exact ingress path",
+      "Copy manual task",
+    ]) {
+      expect(disclosure, label).toContain(label);
+    }
+    expect(exactButtonCount(html, "Compile Brainstorm mission")).toBe(1);
+    expect(exactButtonCount(html, "Import result")).toBe(1);
+
+    const fullSpec = renderShaping({
+      projection: {
+        mode: "active",
+        phase: "spec",
+        required_input: "brainstorm_acceptance_sha256",
+        can_compile: true,
+        can_import: true,
+      },
+      artifacts: [acceptedBrainstormArtifact],
+      selectedAcceptanceSha256: acceptanceContentSha256,
+      imported: specImport,
+    });
+    expect(visibleMarkup(fullSpec)).toContain("Use proposal as draft");
+  });
+
+  it("shows only sanitized rejection evidence and bounded failed-run diagnostics", () => {
+    const rawContentCanary = "RAW_RESULT_CONTENT_MUST_NEVER_RENDER";
+    const rejectedResult = {
+      source_id: "source-1",
+      work_item_id: workItemId,
+      outcome: "rejected" as const,
+      rejection: {
+        raw_result_sha256: "7".repeat(64),
+        byte_length: 4_096,
+        reasons: [
+          {
+            code: "schema_violation" as const,
+            field_path: "identity.input_sha256",
+          },
+          {
+            code: "mission_hash_mismatch" as const,
+            field_path: "brainstorm_mission_content_sha256",
+          },
+        ],
+      },
+      raw_result_source: rawContentCanary,
+    } satisfies ShapingImportResult & { raw_result_source: string };
+    const identity = "rejected-recovery";
+    const loading = updateShapingManualRecovery(null, {
+      type: "prepare_started",
+      identity,
+    });
+    const ready = updateShapingManualRecovery(loading, {
+      type: "prepare_succeeded",
+      identity,
+      result: manualIngressResult,
+    });
+    const rejected = updateShapingManualRecovery(ready, {
+      type: "import_succeeded",
+      identity,
+      result: rejectedResult,
+    });
+    if (rejected === null) {
+      throw new Error("expected rejected manual import evidence");
+    }
+    const projection = shapingHandoffForItem(
+      decisionItem("brainstorm"),
+      decisionSurfaceContext({
+        run: decisionRun("terminal", "failed"),
+      }),
+    );
+    const html = renderDecision(
+      projection,
+      null,
+      null,
+      false,
+      advancedRecoveryView({
+        manualRecovery: rejected,
+        run: failedShapingRun,
+      }),
+    );
+    const disclosure = advancedRecoveryMarkup(html);
+
+    expect(disclosure).toContain('data-recovery-rejection="sanitized"');
+    expect(disclosure).toContain("identity.input_sha256: schema_violation");
+    expect(disclosure).toContain(
+      "brainstorm_mission_content_sha256: mission_hash_mismatch",
+    );
+    expect(disclosure).toContain("7".repeat(64));
+    expect(disclosure).toContain(">4096</dd>");
+    expect(html).not.toContain(rawContentCanary);
+
+    expect(disclosure).toContain("Connected run diagnostics");
+    expect(disclosure).toContain(failedShapingRun.shaping_run_id);
+    expect(disclosure).toContain("failed");
+    expect(disclosure).toContain("requested-model");
+    expect(disclosure).toContain("effective-model");
+    expect(disclosure).toContain(failedShapingRun.write_policy.ingress_path);
+    expect(disclosure).toContain("2 recorded · complete");
+  });
+
+  it("keeps Plan auxiliary implementation context inside Advanced recovery only", () => {
+    const auxiliaryPlan: PlanResultSubmission = {
+      ...planResult,
+      relevant_skills: ["unique-step-23-skill"],
+      product_doc_impacts: ["UNIQUE_STEP_23_PRODUCT_IMPACT"],
+      todo_impacts: ["UNIQUE_STEP_23_TODO_IMPACT"],
+    };
+    const projection = shapingHandoffForItem(
+      decisionItem("plan", decisionGoalContract),
+      appliedDecisionContext("plan", auxiliaryPlan),
+    );
+    const html = renderDecision(
+      projection,
+      null,
+      null,
+      false,
+      advancedRecoveryView({
+        phase: "plan",
+        currentTaskPath: null,
+        compilation: null,
+      }),
+    );
+    const disclosure = advancedRecoveryMarkup(html);
+    const outside = outsideAdvancedRecoveryMarkup(html);
+
+    expect(disclosure).toContain("Plan implementation context");
+    expect(disclosure).toContain("Relevant skills");
+    expect(disclosure).toContain("Product doc impacts");
+    expect(disclosure).toContain("Todo impacts");
+    for (const value of [
+      "unique-step-23-skill",
+      "UNIQUE_STEP_23_PRODUCT_IMPACT",
+      "UNIQUE_STEP_23_TODO_IMPACT",
+    ]) {
+      expect(disclosure).toContain(value);
+      expect(outside).not.toContain(value);
+    }
   });
 
   it("renders the Brainstorm regions in phase-exact order without foreign fields", () => {
