@@ -7,12 +7,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
+import { UntrustedRequestOriginError } from "../../src/application/request-origin";
 import { WorkItemController } from "../../src/application/work-item-controller";
 import type { StoredImportEvidence } from "../../src/domain/result";
 import {
+  InvalidWorkItemTransitionError,
   PortfolioWorkItemNotFoundError,
   UnknownPortfolioSourceError,
 } from "../../src/domain/portfolio";
+import {
+  CLOSED_IN_SLICE_PHASE_TRANSITIONS,
+  CONTROLLER_ONLY_PHASE_TRANSITIONS,
+} from "../../src/domain/workflow-policy";
 import {
   ControllerConflictError,
   InvalidWorkspaceError,
@@ -29,9 +35,11 @@ import { ProductWorkspace } from "../../src/workspace/product-workspace";
 import { PortfolioRegistry } from "../../src/workspace/portfolio-registry";
 
 const getService = vi.hoisted(() => vi.fn());
+const getTrustedOriginConfig = vi.hoisted(() => vi.fn());
 
 vi.mock("../../src/application/portfolio-service", () => ({
   getPortfolioService: getService,
+  getPortfolioTrustedOriginConfig: getTrustedOriginConfig,
 }));
 
 import * as workItemsRoute from "../../app/api/work-items/route";
@@ -55,7 +63,34 @@ import * as portfolioBrainstormMissionRoute from "../../app/api/portfolio/work-i
 import * as portfolioBrainstormImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/import/route";
 import * as portfolioSpecMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/mission/route";
 import * as portfolioSpecImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/import/route";
+import * as brainstormConnectedLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/connected/launch/route";
+import * as brainstormConnectedRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/connected/run/route";
+import * as brainstormConnectedCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/connected/cancel/route";
+import * as brainstormManualIngressRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/manual-ingress/route";
+import * as brainstormRequestChangesRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/request-changes/route";
+import * as brainstormRetryLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/retry-launch/route";
+import * as brainstormUseResultRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/use-result/route";
+import * as specConnectedLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/connected/launch/route";
+import * as specConnectedRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/connected/run/route";
+import * as specConnectedCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/connected/cancel/route";
+import * as specManualIngressRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/manual-ingress/route";
+import * as specRequestChangesRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/request-changes/route";
+import * as specRetryLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/retry-launch/route";
+import * as specApproveRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/spec/approve/route";
+import * as planConnectedLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/connected/launch/route";
+import * as planConnectedRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/connected/run/route";
+import * as planConnectedCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/connected/cancel/route";
+import * as planMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/mission/route";
+import * as planManualIngressRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/manual-ingress/route";
+import * as planImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/import/route";
+import * as planRequestChangesRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/request-changes/route";
+import * as planRetryLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/retry-launch/route";
+import * as planReplanRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/replan/route";
+import * as startBrainstormRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/start-brainstorm/route";
+import * as shapingModelsRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/models/route";
+import * as repairControllerLeaseRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/repair-controller-lease/route";
 import { GET as getPortfolioRunEvidence } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/run-evidence/route";
+import { SHAPING_REQUEST_MAX_BYTES } from "../../app/api/request-body";
 import {
   PATCH as updatePortfolioWorkItem,
 } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/route";
@@ -79,10 +114,6 @@ const getPortfolioConnectedRuns = portfolioConnectedRunRoute.GET;
 const cancelPortfolioConnectedRun = portfolioConnectedCancelRoute.POST;
 const decidePortfolioConnectedPermission = portfolioConnectedPermissionRoute.POST;
 const listPortfolioShaping = portfolioShapingRoute.GET;
-const compilePortfolioBrainstormMission = portfolioBrainstormMissionRoute.POST;
-const importPortfolioBrainstormResult = portfolioBrainstormImportRoute.POST;
-const compilePortfolioSpecMission = portfolioSpecMissionRoute.POST;
-const importPortfolioSpecResult = portfolioSpecImportRoute.POST;
 
 const createdRoots: string[] = [];
 const openIndexes: SQLitePortfolioIndex[] = [];
@@ -283,23 +314,39 @@ function missionRequest(): Request {
   );
 }
 
-function shapingRequest(
-  path:
-    | ""
-    | "/brainstorm/mission"
-    | "/brainstorm/import"
-    | "/brainstorm/accept"
-    | "/spec/mission"
-    | "/spec/import",
-  body?: unknown,
+function guardedWorkItemPostRequest(
+  relativePath: string,
+  body: unknown,
+  options: {
+    origin?: string | null;
+    host?: string | null;
+    raw_body?: boolean;
+  } = {},
 ): Request {
+  const headers = new Headers({ "content-type": "application/json" });
+  const origin =
+    "origin" in options ? options.origin : "http://127.0.0.1:3000";
+  const host = "host" in options ? options.host : "127.0.0.1:3000";
+  if (origin !== null && origin !== undefined) {
+    headers.set("origin", origin);
+  }
+  if (host !== null && host !== undefined) {
+    headers.set("host", host);
+  }
+  return new Request(
+    `http://localhost/api/portfolio/work-items/source/item/${relativePath}`,
+    {
+      method: "POST",
+      headers,
+      body: options.raw_body ? String(body) : JSON.stringify(body),
+    },
+  );
+}
+
+function shapingGetRequest(path: string): Request {
   return new Request(
     `http://localhost/api/portfolio/work-items/source/item/shaping${path}`,
-    {
-      method: path === "" ? "GET" : "POST",
-      headers: { "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    },
+    { method: "GET" },
   );
 }
 
@@ -368,8 +415,298 @@ function phaseUpdateContext(sourceId: string, workItemId: string) {
   return { params: Promise.resolve({ sourceId, workItemId }) };
 }
 
+type ApiRouteHandler = (
+  request: Request,
+  context: ReturnType<typeof phaseUpdateContext>,
+) => Promise<Response>;
+
+interface ShapingPostCase {
+  name: string;
+  relativePath: string;
+  handler: ApiRouteHandler;
+  body: Record<string, unknown>;
+  serviceMethod: string;
+  expectedArgs: (sourceId: string, workItemId: string) => unknown[];
+}
+
+interface ShapingGetCase {
+  name: string;
+  path: string;
+  handler: ApiRouteHandler;
+  serviceMethod: string;
+  expectedArgs: (sourceId: string, workItemId: string) => unknown[];
+}
+
+const SHA_A = "a".repeat(64);
+const SHA_B = "b".repeat(64);
+const SHA_C = "c".repeat(64);
+const SHAPING_RUN_ID = "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1";
+const bindingBody = {
+  expected_mission_content_sha256: SHA_A,
+  expected_shaping_state_sha256: SHA_C,
+};
+const decisionBody = {
+  launch_mode: "connected" as const,
+  requested_model: "model-next",
+  expected_mission_content_sha256: SHA_A,
+  expected_result_content_sha256: SHA_B,
+  expected_shaping_state_sha256: SHA_C,
+};
+const controllerDecisionBody = {
+  launch_mode: "connected" as const,
+  next_requested_model: "model-next",
+  expected_mission_content_sha256: SHA_A,
+  expected_result_content_sha256: SHA_B,
+  expected_shaping_state_sha256: SHA_C,
+};
+
+const SHAPING_POST_CASES: ShapingPostCase[] = [
+  ...([
+    {
+      phase: "brainstorm" as const,
+      launch: brainstormConnectedLaunchRoute.POST,
+      runCancel: brainstormConnectedCancelRoute.POST,
+      mission: portfolioBrainstormMissionRoute.POST,
+      manualIngress: brainstormManualIngressRoute.POST,
+      importResult: portfolioBrainstormImportRoute.POST,
+      requestChanges: brainstormRequestChangesRoute.POST,
+      retry: brainstormRetryLaunchRoute.POST,
+      compileMethod: "compileBrainstormMission",
+      importMethod: "importBrainstormResult",
+    },
+    {
+      phase: "spec" as const,
+      launch: specConnectedLaunchRoute.POST,
+      runCancel: specConnectedCancelRoute.POST,
+      mission: portfolioSpecMissionRoute.POST,
+      manualIngress: specManualIngressRoute.POST,
+      importResult: portfolioSpecImportRoute.POST,
+      requestChanges: specRequestChangesRoute.POST,
+      retry: specRetryLaunchRoute.POST,
+      compileMethod: "compileSpecMission",
+      importMethod: "importSpecResult",
+    },
+    {
+      phase: "plan" as const,
+      launch: planConnectedLaunchRoute.POST,
+      runCancel: planConnectedCancelRoute.POST,
+      mission: planMissionRoute.POST,
+      manualIngress: planManualIngressRoute.POST,
+      importResult: planImportRoute.POST,
+      requestChanges: planRequestChangesRoute.POST,
+      retry: planRetryLaunchRoute.POST,
+      compileMethod: "compilePlanMission",
+      importMethod: "importPlanResult",
+    },
+  ] as const).flatMap((routes): ShapingPostCase[] => [
+    {
+      name: `${routes.phase} connected launch`,
+      relativePath: `shaping/${routes.phase}/connected/launch`,
+      handler: routes.launch,
+      body: { requested_model: "model-current" },
+      serviceMethod: "launchShapingRun",
+      expectedArgs: (sourceId, workItemId) => [
+        sourceId,
+        workItemId,
+        routes.phase,
+        { requested_model: "model-current" },
+      ],
+    },
+    {
+      name: `${routes.phase} connected cancel`,
+      relativePath: `shaping/${routes.phase}/connected/cancel`,
+      handler: routes.runCancel,
+      body: { shaping_run_id: SHAPING_RUN_ID },
+      serviceMethod: "cancelShapingRun",
+      expectedArgs: (sourceId, workItemId) => [
+        sourceId,
+        workItemId,
+        SHAPING_RUN_ID,
+        routes.phase,
+      ],
+    },
+    {
+      name: `${routes.phase} mission`,
+      relativePath: `shaping/${routes.phase}/mission`,
+      handler: routes.mission,
+      body: {},
+      serviceMethod: routes.compileMethod,
+      expectedArgs: (sourceId, workItemId) => [sourceId, workItemId],
+    },
+    {
+      name: `${routes.phase} manual ingress`,
+      relativePath: `shaping/${routes.phase}/manual-ingress`,
+      handler: routes.manualIngress,
+      body: bindingBody,
+      serviceMethod: "openManualIngress",
+      expectedArgs: (sourceId, workItemId) => [
+        sourceId,
+        workItemId,
+        routes.phase,
+        bindingBody,
+      ],
+    },
+    {
+      name: `${routes.phase} import`,
+      relativePath: `shaping/${routes.phase}/import`,
+      handler: routes.importResult,
+      body: bindingBody,
+      serviceMethod: routes.importMethod,
+      expectedArgs: (sourceId, workItemId) => [
+        sourceId,
+        workItemId,
+        bindingBody,
+      ],
+    },
+    {
+      name: `${routes.phase} request changes`,
+      relativePath: `shaping/${routes.phase}/request-changes`,
+      handler: routes.requestChanges,
+      body: { ...decisionBody, feedback: "Address the open question." },
+      serviceMethod: "requestShapingChanges",
+      expectedArgs: (sourceId, workItemId) => [
+        sourceId,
+        workItemId,
+        { ...controllerDecisionBody, feedback: "Address the open question." },
+        routes.phase,
+      ],
+    },
+    {
+      name: `${routes.phase} retry launch`,
+      relativePath: `shaping/${routes.phase}/retry-launch`,
+      handler: routes.retry,
+      body: {
+        decision_id: SHA_A,
+        expected_shaping_state_sha256: SHA_C,
+      },
+      serviceMethod: "retryShapingLaunch",
+      expectedArgs: (sourceId, workItemId) => [
+        sourceId,
+        workItemId,
+        routes.phase,
+        { decision_id: SHA_A, expected_shaping_state_sha256: SHA_C },
+      ],
+    },
+  ]),
+  {
+    name: "start brainstorm",
+    relativePath: "shaping/start-brainstorm",
+    handler: startBrainstormRoute.POST,
+    body: {
+      launch_mode: "connected",
+      requested_model: "model-next",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: SHA_C,
+    },
+    serviceMethod: "startBrainstorm",
+    expectedArgs: (sourceId, workItemId) => [
+      sourceId,
+      workItemId,
+      {
+        launch_mode: "connected",
+        next_requested_model: "model-next",
+        expected_mission_content_sha256: null,
+        expected_result_content_sha256: null,
+        expected_shaping_state_sha256: SHA_C,
+      },
+    ],
+  },
+  {
+    name: "use brainstorm result",
+    relativePath: "shaping/brainstorm/use-result",
+    handler: brainstormUseResultRoute.POST,
+    body: decisionBody,
+    serviceMethod: "useBrainstormResult",
+    expectedArgs: (sourceId, workItemId) => [
+      sourceId,
+      workItemId,
+      controllerDecisionBody,
+    ],
+  },
+  {
+    name: "approve spec result",
+    relativePath: "shaping/spec/approve",
+    handler: specApproveRoute.POST,
+    body: { ...decisionBody, goal_contract_sha256: SHA_C },
+    serviceMethod: "approveSpecResult",
+    expectedArgs: (sourceId, workItemId) => [
+      sourceId,
+      workItemId,
+      { ...controllerDecisionBody, goal_contract_sha256: SHA_C },
+    ],
+  },
+  {
+    name: "replan with updated contract",
+    relativePath: "shaping/plan/replan",
+    handler: planReplanRoute.POST,
+    body: { ...decisionBody, goal_contract_sha256: SHA_C },
+    serviceMethod: "replanWithUpdatedContract",
+    expectedArgs: (sourceId, workItemId) => [
+      sourceId,
+      workItemId,
+      { ...controllerDecisionBody, goal_contract_sha256: SHA_C },
+    ],
+  },
+  {
+    name: "repair retained controller lease",
+    relativePath: "repair-controller-lease",
+    handler: repairControllerLeaseRoute.POST,
+    body: { acknowledged_run_id: SHAPING_RUN_ID },
+    serviceMethod: "repairRetainedControllerLease",
+    expectedArgs: (sourceId, workItemId) => [
+      sourceId,
+      workItemId,
+      { acknowledged_run_id: SHAPING_RUN_ID },
+    ],
+  },
+];
+
+const SHAPING_GET_CASES: ShapingGetCase[] = [
+  {
+    name: "shaping artifact listing",
+    path: "",
+    handler: listPortfolioShaping,
+    serviceMethod: "listShapingArtifacts",
+    expectedArgs: (sourceId, workItemId) => [sourceId, workItemId],
+  },
+  {
+    name: "brainstorm connected runs",
+    path: "/brainstorm/connected/run",
+    handler: brainstormConnectedRunRoute.GET,
+    serviceMethod: "listShapingRuns",
+    expectedArgs: (sourceId, workItemId) => [sourceId, workItemId, "brainstorm"],
+  },
+  {
+    name: "spec connected runs",
+    path: "/spec/connected/run",
+    handler: specConnectedRunRoute.GET,
+    serviceMethod: "listShapingRuns",
+    expectedArgs: (sourceId, workItemId) => [sourceId, workItemId, "spec"],
+  },
+  {
+    name: "plan connected runs",
+    path: "/plan/connected/run",
+    handler: planConnectedRunRoute.GET,
+    serviceMethod: "listShapingRuns",
+    expectedArgs: (sourceId, workItemId) => [sourceId, workItemId, "plan"],
+  },
+  {
+    name: "shaping models",
+    path: "/models",
+    handler: shapingModelsRoute.GET,
+    serviceMethod: "getShapingModelAvailability",
+    expectedArgs: () => [],
+  },
+];
+
 beforeEach(() => {
   getService.mockReset();
+  getTrustedOriginConfig.mockReset();
+  getTrustedOriginConfig.mockReturnValue({
+    origin: "http://127.0.0.1:3000",
+    host: "127.0.0.1:3000",
+  });
 });
 
 afterEach(async () => {
@@ -426,19 +763,17 @@ describe("portfolio API routes", () => {
     expect(body.failures).toEqual([]);
   });
 
-  it("updates a source-qualified work item phase", async () => {
+  it("keeps a generic post-Execute phase update available", async () => {
     await createService();
-    const workspacePath = await createWorkspace();
+    const { workspacePath, workItemId } = await createMissionReadyWorkspace();
     const registrationResponse = await registerWorkspace(
       registrationRequest(workspacePath),
     );
     const registration = await registrationResponse.json();
     const sourceId = registration.workspace.workspace_id as string;
-    const workItemId = registration.rebuild.items[0].work_item.goal
-      .work_item_id as string;
 
     const response = await updatePortfolioWorkItem(
-      phaseUpdateRequest({ target_phase: "spec" }),
+      phaseUpdateRequest({ target_phase: "review" }),
       phaseUpdateContext(sourceId, workItemId),
     );
     const updated = await response.json();
@@ -449,12 +784,54 @@ describe("portfolio API routes", () => {
       project: { workspace_path: workspacePath },
       work_item: {
         goal: { work_item_id: workItemId },
-        state: { phase: "spec", status: "active" },
+        state: { phase: "review", status: "active" },
       },
     });
     expect(await (await workItemsRoute.GET()).json()).toEqual({
       items: [updated],
     });
+  });
+
+  it("returns the documented 409 for every non-generic shaping arrow", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const transitions = [
+      ...CONTROLLER_ONLY_PHASE_TRANSITIONS.map((transition) => ({
+        ...transition,
+        reason: `${transition.action_label} — ${transition.explanation}`,
+      })),
+      ...CLOSED_IN_SLICE_PHASE_TRANSITIONS.map((transition) => ({
+        ...transition,
+        reason: transition.explanation,
+      })),
+    ];
+    expect(transitions).toHaveLength(7);
+
+    for (const transition of transitions) {
+      const updateWorkItemPhase = vi.fn().mockRejectedValue(
+        new InvalidWorkItemTransitionError(
+          transition.from,
+          transition.to,
+          transition.reason,
+        ),
+      );
+      getService.mockReset();
+      getService.mockResolvedValue({ updateWorkItemPhase });
+
+      const response = await updatePortfolioWorkItem(
+        phaseUpdateRequest({ target_phase: transition.to }),
+        context,
+      );
+
+      expect(response.status, `${transition.from} -> ${transition.to}`).toBe(409);
+      expect(await response.json()).toEqual({
+        error: { code: "invalid_transition", message: transition.reason },
+      });
+      expect(updateWorkItemPhase).toHaveBeenCalledWith(
+        "source",
+        "item",
+        { target_phase: transition.to },
+      );
+    }
   });
 
   it("saves and assigns a source-qualified capture through the unified route", async () => {
@@ -970,163 +1347,497 @@ describe("portfolio API routes", () => {
     expect(decideConnectedPermission).not.toHaveBeenCalled();
   });
 
-  it("routes every shaping operation through the source-qualified service", async () => {
+  it("routes the complete static shaping matrix through one source-qualified service call", async () => {
     const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
     const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
-    const acceptanceSha256 = "a".repeat(64);
-    const payloads = {
-      listing: { source_id: sourceId, work_item_id: workItemId, artifacts: [] },
-      brainstormMission: { kind: "brainstorm-mission" },
-      brainstormImport: { kind: "brainstorm-import" },
-      specMission: { kind: "spec-mission" },
-      specImport: { kind: "spec-import" },
-    };
-    const listShapingArtifacts = vi.fn().mockResolvedValue(payloads.listing);
-    const compileBrainstormMission = vi
-      .fn()
-      .mockResolvedValue(payloads.brainstormMission);
-    const importBrainstormResult = vi
-      .fn()
-      .mockResolvedValue(payloads.brainstormImport);
-    const compileSpecMission = vi.fn().mockResolvedValue(payloads.specMission);
-    const importSpecResult = vi.fn().mockResolvedValue(payloads.specImport);
-    getService.mockResolvedValue({
-      listShapingArtifacts,
-      compileBrainstormMission,
-      importBrainstormResult,
-      compileSpecMission,
-      importSpecResult,
-    });
     const context = phaseUpdateContext(sourceId, workItemId);
 
-    const responses = await Promise.all([
-      listPortfolioShaping(shapingRequest(""), context),
-      compilePortfolioBrainstormMission(
-        shapingRequest("/brainstorm/mission"),
-        context,
-      ),
-      importPortfolioBrainstormResult(
-        shapingRequest("/brainstorm/import"),
-        context,
-      ),
-      compilePortfolioSpecMission(
-        shapingRequest("/spec/mission", {
-          brainstorm_acceptance_sha256: acceptanceSha256,
-        }),
-        context,
-      ),
-      importPortfolioSpecResult(
-        shapingRequest("/spec/import", {
-          brainstorm_acceptance_sha256: acceptanceSha256,
-        }),
-        context,
-      ),
-    ]);
+    for (const route of SHAPING_POST_CASES) {
+      getService.mockReset();
+      const payload = { route: route.name };
+      const action = vi.fn().mockResolvedValue(payload);
+      getService.mockResolvedValue({ [route.serviceMethod]: action });
 
-    expect(responses.map(({ status }) => status)).toEqual([
-      200, 200, 200, 200, 200,
-    ]);
-    expect(await Promise.all(responses.map((response) => response.json()))).toEqual(
-      Object.values(payloads),
-    );
-    expect(listShapingArtifacts).toHaveBeenCalledWith(sourceId, workItemId);
-    expect(compileBrainstormMission).toHaveBeenCalledWith(sourceId, workItemId);
-    expect(importBrainstormResult).toHaveBeenCalledWith(sourceId, workItemId);
-    expect(compileSpecMission).toHaveBeenCalledWith(sourceId, workItemId, {
-      brainstorm_acceptance_sha256: acceptanceSha256,
-    });
-    expect(importSpecResult).toHaveBeenCalledWith(sourceId, workItemId, {
-      brainstorm_acceptance_sha256: acceptanceSha256,
-    });
-    expect([
-      portfolioShapingRoute.runtime,
-      portfolioBrainstormMissionRoute.runtime,
-      portfolioBrainstormImportRoute.runtime,
-      portfolioSpecMissionRoute.runtime,
-      portfolioSpecImportRoute.runtime,
-    ]).toEqual(Array.from({ length: 5 }, () => "nodejs"));
+      const response = await route.handler(
+        guardedWorkItemPostRequest(route.relativePath, route.body),
+        context,
+      );
+
+      expect(response.status, route.name).toBe(200);
+      expect(await response.json()).toEqual(payload);
+      expect(action).toHaveBeenCalledOnce();
+      expect(action).toHaveBeenCalledWith(
+        ...route.expectedArgs(sourceId, workItemId),
+      );
+    }
+
+    for (const route of SHAPING_GET_CASES) {
+      getService.mockReset();
+      const payload = { route: route.name };
+      const action = vi.fn().mockResolvedValue(payload);
+      getService.mockResolvedValue({ [route.serviceMethod]: action });
+
+      const response = await route.handler(shapingGetRequest(route.path), context);
+
+      expect(response.status, route.name).toBe(200);
+      expect(await response.json()).toEqual(payload);
+      expect(action).toHaveBeenCalledWith(
+        ...route.expectedArgs(sourceId, workItemId),
+      );
+    }
   });
 
-  it("maps malformed and unavailable shaping requests through established errors", async () => {
-    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
-    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
-    const compileSpecMission = vi.fn();
-    const unknownAcceptanceSha256 = "b".repeat(64);
-    const importSpecResult = vi.fn().mockRejectedValue(
-      new ControllerConflictError(
-        "mission_not_ready",
-        workItemId,
-        "No current spec shaping artifact exists.",
-      ),
+  it("rejects every shaping POST before body or state access when origin trust fails", async () => {
+    const context = phaseUpdateContext("source", "item");
+
+    for (const route of SHAPING_POST_CASES) {
+      const variants = [
+        {
+          request: () =>
+            guardedWorkItemPostRequest(route.relativePath, "{malformed", {
+              origin: null,
+              raw_body: true,
+            }),
+        },
+        {
+          request: () =>
+            guardedWorkItemPostRequest(route.relativePath, route.body, {
+              origin: "http://127.0.0.1:4000",
+            }),
+        },
+        {
+          request: () =>
+            guardedWorkItemPostRequest(route.relativePath, route.body, {
+              host: "127.0.0.1:4000",
+            }),
+        },
+        {
+          configurationError:
+            "PRODUCT_STUDIO_APP_ORIGIN must be configured as exactly one loopback origin.",
+          request: () =>
+            guardedWorkItemPostRequest(route.relativePath, route.body),
+        },
+        {
+          configurationError:
+            "PRODUCT_STUDIO_APP_ORIGIN must be configured as a loopback origin.",
+          request: () =>
+            guardedWorkItemPostRequest(route.relativePath, route.body),
+        },
+      ];
+
+      for (const variant of variants) {
+        getService.mockReset();
+        getTrustedOriginConfig.mockReset();
+        if (variant.configurationError === undefined) {
+          getTrustedOriginConfig.mockReturnValue({
+            origin: "http://127.0.0.1:3000",
+            host: "127.0.0.1:3000",
+          });
+        } else {
+          getTrustedOriginConfig.mockImplementation(() => {
+            throw new UntrustedRequestOriginError(variant.configurationError!);
+          });
+        }
+
+        const response = await route.handler(variant.request(), context);
+
+        expect(response.status, route.name).toBe(403);
+        expect(await response.json()).toMatchObject({
+          error: { code: "untrusted_request_origin" },
+        });
+        expect(getService).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  it("does not pull a shaping request body before rejecting its origin", async () => {
+    const context = phaseUpdateContext("source", "item");
+
+    for (const route of SHAPING_POST_CASES) {
+      let pulls = 0;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull() {
+            pulls += 1;
+            throw new Error("untrusted request body must not be read");
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const request = new Request(
+        `http://localhost/api/portfolio/work-items/source/item/${route.relativePath}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            host: "127.0.0.1:3000",
+          },
+          body,
+          duplex: "half",
+        } as RequestInit & { duplex: "half" },
+      );
+
+      getService.mockReset();
+      const response = await route.handler(request, context);
+
+      expect(response.status, route.name).toBe(403);
+      expect(pulls, route.name).toBe(0);
+      expect(getService).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rejects oversized, malformed, and foreign shaping bodies before service construction", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const forbiddenFields = [
+      "capability_envelope",
+      "narrowed_capability_envelope",
+      "ingress_path",
+      "output_path",
+      "result",
+      "executable",
+      "phase",
+    ];
+    const invalidRequestBody = {
+      error: { code: "invalid_request", message: "Invalid request" },
+    };
+
+    getTrustedOriginConfig.mockReturnValue({
+      origin: "http://127.0.0.1:3000",
+      host: "127.0.0.1:3000",
+    });
+    for (const route of SHAPING_POST_CASES) {
+      for (const field of forbiddenFields) {
+        getService.mockReset();
+        const response = await route.handler(
+          guardedWorkItemPostRequest(route.relativePath, {
+            ...route.body,
+            [field]: field === "result" ? { raw: true } : "forbidden",
+          }),
+          context,
+        );
+        expect(response.status, `${route.name}: ${field}`).toBe(400);
+        expect(await response.json()).toEqual(invalidRequestBody);
+        expect(getService).not.toHaveBeenCalled();
+      }
+
+      getService.mockReset();
+      const oversized = await route.handler(
+        guardedWorkItemPostRequest(
+          route.relativePath,
+          `${JSON.stringify(route.body)}${" ".repeat(
+            SHAPING_REQUEST_MAX_BYTES + 1,
+          )}`,
+          { raw_body: true },
+        ),
+        context,
+      );
+      expect(oversized.status, `${route.name}: oversized`).toBe(400);
+      expect(await oversized.json()).toEqual(invalidRequestBody);
+      expect(getService).not.toHaveBeenCalled();
+
+      getService.mockReset();
+      const malformed = await route.handler(
+        guardedWorkItemPostRequest(route.relativePath, "{malformed", {
+          raw_body: true,
+        }),
+        context,
+      );
+      expect(malformed.status, `${route.name}: malformed`).toBe(400);
+      expect(await malformed.json()).toEqual(invalidRequestBody);
+      expect(getService).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps retry-launch and retained-lease repair bodies exact", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const invalidRequestBody = {
+      error: { code: "invalid_request", message: "Invalid request" },
+    };
+    const retryRoutes = SHAPING_POST_CASES.filter(
+      (route) => route.serviceMethod === "retryShapingLaunch",
     );
-    const compileBrainstormMission = vi.fn().mockRejectedValue(
-      new ControllerConflictError(
-        "mission_not_ready",
-        workItemId,
-        "Brainstorm is not ready.",
-      ),
+    expect(retryRoutes).toHaveLength(3);
+    for (const route of retryRoutes) {
+      for (const extra of [
+        { requested_model: "must-come-from-intent" },
+        { launch_mode: "connected" },
+      ]) {
+        getService.mockReset();
+        const response = await route.handler(
+          guardedWorkItemPostRequest(route.relativePath, {
+            ...route.body,
+            ...extra,
+          }),
+          context,
+        );
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual(invalidRequestBody);
+        expect(getService).not.toHaveBeenCalled();
+      }
+    }
+
+    const repair = SHAPING_POST_CASES.find(
+      (route) => route.serviceMethod === "repairRetainedControllerLease",
+    )!;
+    getService.mockReset();
+    const repairWithExtra = await repair.handler(
+      guardedWorkItemPostRequest(repair.relativePath, {
+        ...repair.body,
+        launch_mode: "manual",
+      }),
+      context,
     );
-    const listShapingArtifacts = vi.fn().mockRejectedValue(
-      new PortfolioWorkItemNotFoundError(sourceId, workItemId),
+    expect(repairWithExtra.status).toBe(400);
+    expect(await repairWithExtra.json()).toEqual(invalidRequestBody);
+    expect(getService).not.toHaveBeenCalled();
+  });
+
+  it("enforces connected-versus-manual model presence on every decision route", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const decisionRoutes = SHAPING_POST_CASES.filter((route) =>
+      [
+        "startBrainstorm",
+        "useBrainstormResult",
+        "approveSpecResult",
+        "requestShapingChanges",
+        "replanWithUpdatedContract",
+      ].includes(route.serviceMethod),
     );
+
+    for (const route of decisionRoutes) {
+      const action = vi.fn().mockResolvedValue({ ok: true });
+      getService.mockReset();
+      getService.mockResolvedValue({ [route.serviceMethod]: action });
+      const withoutModel = { ...route.body };
+      delete withoutModel.requested_model;
+      const manualBody = { ...withoutModel, launch_mode: "manual" };
+
+      const responses = await Promise.all([
+        route.handler(
+          guardedWorkItemPostRequest(route.relativePath, route.body),
+          context,
+        ),
+        route.handler(
+          guardedWorkItemPostRequest(route.relativePath, manualBody),
+          context,
+        ),
+        route.handler(
+          guardedWorkItemPostRequest(route.relativePath, {
+            ...route.body,
+            launch_mode: "manual",
+          }),
+          context,
+        ),
+        route.handler(
+          guardedWorkItemPostRequest(route.relativePath, withoutModel),
+          context,
+        ),
+      ]);
+
+      expect(responses.map(({ status }) => status), route.name).toEqual([
+        200, 200, 400, 400,
+      ]);
+      expect(action).toHaveBeenCalledTimes(2);
+      expect(action.mock.calls[1]?.[2]).toMatchObject({
+        launch_mode: "manual",
+        next_requested_model: null,
+      });
+    }
+  });
+
+  it("encodes action-specific binding nullability in route-local schemas", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const start = SHAPING_POST_CASES.find(
+      (route) => route.serviceMethod === "startBrainstorm",
+    )!;
+    const useResult = SHAPING_POST_CASES.find(
+      (route) => route.serviceMethod === "useBrainstormResult",
+    )!;
+    const approve = SHAPING_POST_CASES.find(
+      (route) => route.serviceMethod === "approveSpecResult",
+    )!;
+    const replan = SHAPING_POST_CASES.find(
+      (route) => route.serviceMethod === "replanWithUpdatedContract",
+    )!;
+    const requestChanges = SHAPING_POST_CASES.find(
+      (route) => route.serviceMethod === "requestShapingChanges",
+    )!;
+    const invalidCases = [
+      [start, { ...start.body, expected_mission_content_sha256: SHA_A }],
+      [start, { ...start.body, expected_result_content_sha256: SHA_B }],
+      [useResult, { ...useResult.body, expected_mission_content_sha256: null }],
+      [useResult, { ...useResult.body, expected_result_content_sha256: null }],
+      [approve, { ...approve.body, goal_contract_sha256: undefined }],
+      [replan, { ...replan.body, goal_contract_sha256: undefined }],
+      [useResult, { ...useResult.body, goal_contract_sha256: SHA_C }],
+      [requestChanges, { ...requestChanges.body, goal_contract_sha256: SHA_C }],
+    ] as const;
+
+    for (const [route, body] of invalidCases) {
+      getService.mockReset();
+      const response = await route.handler(
+        guardedWorkItemPostRequest(route.relativePath, body),
+        context,
+      );
+      expect(response.status, route.name).toBe(400);
+      expect(getService).not.toHaveBeenCalled();
+    }
+  });
+
+  it("maps every shaping controller conflict and retained-lease mismatch to 409", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const route = SHAPING_POST_CASES.find(
+      (candidate) => candidate.serviceMethod === "startBrainstorm",
+    )!;
+    for (const kind of [
+      "stale_expectation",
+      "mission_not_ready",
+      "idempotency_conflict",
+      "lease_held",
+      "repair_required",
+    ] as const) {
+      getService.mockReset();
+      getService.mockResolvedValue({
+        startBrainstorm: vi.fn().mockRejectedValue(
+          new ControllerConflictError(kind, "item", `${kind} from shaping`),
+        ),
+      });
+      const response = await route.handler(
+        guardedWorkItemPostRequest(route.relativePath, route.body),
+        context,
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: { code: kind, message: `${kind} from shaping` },
+      });
+    }
+
+    const repair = SHAPING_POST_CASES.find(
+      (candidate) => candidate.serviceMethod === "repairRetainedControllerLease",
+    )!;
+    getService.mockReset();
     getService.mockResolvedValue({
-      compileSpecMission,
-      importSpecResult,
-      compileBrainstormMission,
-      listShapingArtifacts,
+      repairRetainedControllerLease: vi.fn().mockRejectedValue(
+        new ControllerConflictError(
+          "stale_expectation",
+          "item",
+          "Acknowledged run does not match the retained run.",
+        ),
+      ),
     });
-    const context = phaseUpdateContext(sourceId, workItemId);
+    const mismatch = await repair.handler(
+      guardedWorkItemPostRequest(repair.relativePath, repair.body),
+      context,
+    );
+    expect(mismatch.status).toBe(409);
+    expect(await mismatch.json()).toMatchObject({
+      error: { code: "stale_expectation" },
+    });
+  });
 
-    const malformed = await compilePortfolioSpecMission(
-      shapingRequest("/spec/mission", {
-        brainstorm_acceptance_sha256: "not-a-sha",
-      }),
-      context,
-    );
-    const missingSelector = await importPortfolioSpecResult(
-      shapingRequest("/spec/import", {}),
-      context,
-    );
-    const unknownSelector = await importPortfolioSpecResult(
-      shapingRequest("/spec/import", {
-        brainstorm_acceptance_sha256: unknownAcceptanceSha256,
-      }),
-      context,
-    );
-    const conflict = await compilePortfolioBrainstormMission(
-      shapingRequest("/brainstorm/mission"),
-      context,
-    );
-    const missing = await listPortfolioShaping(shapingRequest(""), context);
+  it("keeps shaping GETs available without trusted-origin configuration", async () => {
+    const context = phaseUpdateContext("source", "item");
+    getTrustedOriginConfig.mockImplementation(() => {
+      throw new UntrustedRequestOriginError("configuration unavailable");
+    });
+    for (const route of SHAPING_GET_CASES) {
+      getService.mockReset();
+      const action = vi.fn().mockResolvedValue({ route: route.name });
+      getService.mockResolvedValue({ [route.serviceMethod]: action });
+      const response = await route.handler(shapingGetRequest(route.path), context);
+      expect(response.status, route.name).toBe(200);
+      expect(action).toHaveBeenCalledOnce();
+      expect(getTrustedOriginConfig).not.toHaveBeenCalled();
+    }
+  });
 
-    expect(malformed.status).toBe(400);
-    expect(await malformed.json()).toEqual({
-      error: { code: "invalid_request", message: "Invalid request" },
-    });
-    expect(missingSelector.status).toBe(400);
-    expect(await missingSelector.json()).toEqual({
-      error: { code: "invalid_request", message: "Invalid request" },
-    });
-    expect(unknownSelector.status).toBe(409);
-    expect(await unknownSelector.json()).toEqual({
-      error: {
-        code: "mission_not_ready",
-        message: "No current spec shaping artifact exists.",
-      },
-    });
-    expect(conflict.status).toBe(409);
-    expect(await conflict.json()).toEqual({
-      error: { code: "mission_not_ready", message: "Brainstorm is not ready." },
-    });
-    expect(missing.status).toBe(404);
-    expect(await missing.json()).toEqual({
-      error: { code: "work_item_not_found", message: "Work item not found" },
-    });
-    expect(compileSpecMission).not.toHaveBeenCalled();
-    expect(importSpecResult).toHaveBeenCalledOnce();
-    expect(importSpecResult).toHaveBeenCalledWith(sourceId, workItemId, {
-      brainstorm_acceptance_sha256: unknownAcceptanceSha256,
-    });
+  it("mounts only the allowed static shaping action topology", () => {
+    const routeRoot = join(
+      process.cwd(),
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]",
+    );
+    const present = [
+      "shaping/brainstorm/retry-launch/route.ts",
+      "shaping/spec/retry-launch/route.ts",
+      "shaping/plan/retry-launch/route.ts",
+      "shaping/brainstorm/connected/launch/route.ts",
+      "shaping/brainstorm/connected/run/route.ts",
+      "shaping/brainstorm/connected/cancel/route.ts",
+      "shaping/spec/connected/launch/route.ts",
+      "shaping/spec/connected/run/route.ts",
+      "shaping/spec/connected/cancel/route.ts",
+      "shaping/plan/connected/launch/route.ts",
+      "shaping/plan/connected/run/route.ts",
+      "shaping/plan/connected/cancel/route.ts",
+      "shaping/brainstorm/use-result/route.ts",
+      "shaping/spec/approve/route.ts",
+      "shaping/plan/replan/route.ts",
+      "shaping/models/route.ts",
+      "repair-controller-lease/route.ts",
+    ];
+    const absent = [
+      "shaping/[phase]",
+      "shaping/brainstorm/accept/route.ts",
+      "shaping/brainstorm/approve/route.ts",
+      "shaping/plan/approve/route.ts",
+      "shaping/spec/use-result/route.ts",
+      "shaping/plan/use-result/route.ts",
+      "shaping/brainstorm/replan/route.ts",
+      "shaping/spec/replan/route.ts",
+      "shaping/permission/route.ts",
+      "shaping/brainstorm/permission/route.ts",
+      "shaping/spec/permission/route.ts",
+      "shaping/plan/permission/route.ts",
+      "shaping/brainstorm/connected/permission/route.ts",
+      "shaping/spec/connected/permission/route.ts",
+      "shaping/plan/connected/permission/route.ts",
+    ];
+    expect(present.every((path) => existsSync(join(routeRoot, path)))).toBe(true);
+    expect(absent.every((path) => !existsSync(join(routeRoot, path)))).toBe(true);
+    const postModules = [
+      brainstormConnectedLaunchRoute,
+      brainstormConnectedCancelRoute,
+      portfolioBrainstormMissionRoute,
+      brainstormManualIngressRoute,
+      portfolioBrainstormImportRoute,
+      brainstormRequestChangesRoute,
+      brainstormRetryLaunchRoute,
+      brainstormUseResultRoute,
+      specConnectedLaunchRoute,
+      specConnectedCancelRoute,
+      portfolioSpecMissionRoute,
+      specManualIngressRoute,
+      portfolioSpecImportRoute,
+      specRequestChangesRoute,
+      specRetryLaunchRoute,
+      specApproveRoute,
+      planConnectedLaunchRoute,
+      planConnectedCancelRoute,
+      planMissionRoute,
+      planManualIngressRoute,
+      planImportRoute,
+      planRequestChangesRoute,
+      planRetryLaunchRoute,
+      planReplanRoute,
+      startBrainstormRoute,
+      repairControllerLeaseRoute,
+    ];
+    const getModules = [
+      brainstormConnectedRunRoute,
+      specConnectedRunRoute,
+      planConnectedRunRoute,
+      shapingModelsRoute,
+    ];
+    expect(postModules).toHaveLength(26);
+    expect(getModules).toHaveLength(4);
+    for (const routeModule of postModules) {
+      expect(Object.keys(routeModule).sort()).toEqual(["POST", "runtime"]);
+      expect(routeModule.runtime).toBe("nodejs");
+    }
+    for (const routeModule of getModules) {
+      expect(Object.keys(routeModule).sort()).toEqual(["GET", "runtime"]);
+      expect(routeModule.runtime).toBe("nodejs");
+    }
   });
 
   it("maps patch and attention conflicts through the established response contract", async () => {

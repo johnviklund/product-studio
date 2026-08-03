@@ -9,5 +9,5 @@ const missionRequestSchema = z.strictObject({});
 export const POST = createShapingPostRoute(
   missionRequestSchema,
   (service, sourceId, workItemId) =>
-    service.compileBrainstormMission(sourceId, workItemId),
+    service.compilePlanMission(sourceId, workItemId),
 );

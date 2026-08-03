@@ -79,6 +79,7 @@ import {
   workItemSchema,
   type CreateCaptureInput,
   type ControllerRunManifest,
+  type RetainedControllerLeaseRepairResult,
   type SaveWorkItemInput,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
@@ -1183,11 +1184,13 @@ export class PortfolioService {
     sourceId: string,
     workItemId: string,
     shapingRunId: string,
+    expectedPhase?: ShapingPhase,
   ): Promise<PortfolioShapingLaunchResult> {
     const validatedRunId = controllerRunIdSchema.parse(shapingRunId);
     const { source } = await this.requireActiveShapingItem(
       sourceId,
       workItemId,
+      expectedPhase,
     );
     const record = await source.workspace.readShapingRun(
       workItemId,
@@ -1195,6 +1198,12 @@ export class PortfolioService {
     );
     if (record === null) {
       throw this.missionNotReady(workItemId, "Shaping run was not found.");
+    }
+    if (expectedPhase !== undefined && record.mission.phase !== expectedPhase) {
+      throw this.missionNotReady(
+        workItemId,
+        `Shaping run ${validatedRunId} does not belong to ${expectedPhase}.`,
+      );
     }
     if (record.lifecycle.status === "terminal") {
       return this.portfolioShapingLaunchResult(source, workItemId, {
@@ -1255,6 +1264,38 @@ export class PortfolioService {
     });
   }
 
+  async listShapingRuns(
+    sourceId: string,
+    workItemId: string,
+    phase: ShapingPhase,
+  ): Promise<ShapingRunSummary[]> {
+    const { source } = await this.requireActiveShapingItem(
+      sourceId,
+      workItemId,
+      phase,
+    );
+    return (await source.workspace.listShapingRuns(workItemId))
+      .filter((run) => run.mission.phase === phase)
+      .map(summarizeShapingRun);
+  }
+
+  async repairRetainedControllerLease(
+    sourceId: string,
+    workItemId: string,
+    input: { acknowledged_run_id: string },
+  ): Promise<RetainedControllerLeaseRepairResult> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const repaired = await source.workspace.repairRetainedControllerLease(
+      workItemId,
+      input,
+    );
+    await this.rebuild();
+    return repaired;
+  }
+
   async startBrainstorm(
     sourceId: string,
     workItemId: string,
@@ -1272,8 +1313,18 @@ export class PortfolioService {
     sourceId: string,
     workItemId: string,
     input: RequestShapingChangesInput,
+    expectedPhase?: ShapingPhase,
   ): Promise<PortfolioShapingDecisionResult> {
-    const source = await this.requireDecisionSource(sourceId, workItemId);
+    const source =
+      expectedPhase === undefined
+        ? await this.requireDecisionSource(sourceId, workItemId)
+        : (
+            await this.requireActiveShapingItem(
+              sourceId,
+              workItemId,
+              expectedPhase,
+            )
+          ).source;
     this.preflightDecisionLaunch(workItemId, input);
     const decided = await this.workItemController(
       source.workspace,

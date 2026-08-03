@@ -1,26 +1,16 @@
-import { getPortfolioService } from "../../../../../../../../../src/application/portfolio-service";
-import { errorResponse } from "../../../../../../../responses";
+import { z } from "zod";
+
+import { createShapingPostRoute } from "../../route-factory";
 
 export const runtime = "nodejs";
 
-interface RouteContext {
-  params: Promise<{
-    sourceId: string;
-    workItemId: string;
-  }>;
-}
+const importRequestSchema = z.strictObject({
+  expected_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  expected_shaping_state_sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+});
 
-export async function POST(
-  _request: Request,
-  context: RouteContext,
-): Promise<Response> {
-  try {
-    const { sourceId, workItemId } = await context.params;
-    const service = await getPortfolioService();
-    const result = await service.importBrainstormResult(sourceId, workItemId);
-
-    return Response.json(result);
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
+export const POST = createShapingPostRoute(
+  importRequestSchema,
+  (service, sourceId, workItemId, input) =>
+    service.importBrainstormResult(sourceId, workItemId, input),
+);

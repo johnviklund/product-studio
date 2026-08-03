@@ -12,5 +12,5 @@ const importRequestSchema = z.strictObject({
 export const POST = createShapingPostRoute(
   importRequestSchema,
   (service, sourceId, workItemId, input) =>
-    service.importSpecResult(sourceId, workItemId, input),
+    service.importPlanResult(sourceId, workItemId, input),
 );
