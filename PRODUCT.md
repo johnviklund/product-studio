@@ -37,6 +37,26 @@ connecting to, proxying, or exposing MCP servers or tools.
 - Execution is external and replaceable. The product owns intent, evidence, and the next
   action; capable agent applications perform individual attempts.
 
+The loopback bind is the local runtime perimeter: Product Studio is served on `127.0.0.1`,
+and non-loopback deployment is unsupported. Every shaping mutation fails closed unless
+`PRODUCT_STUDIO_APP_ORIGIN` is exactly one configured loopback origin and the request's `Origin`
+and `Host` headers both match it; forwarded headers are ignored. These checks, exact hash binding,
+and structural freshness provide browser-CSRF protection and freshness, not identity or
+human-presence proof. They do not defend against a malicious same-user local process, including an
+agent launched by Product Studio. The principles above therefore remain workflow guarantees, not
+OS-enforced containment.
+
+Product Studio gives a producing shaping agent no approval action, approval endpoint capability,
+or approval credential:
+`PRODUCT_STUDIO_APP_ORIGIN` is excluded by name from the spawned environment allowlist; no origin,
+route path, or binding hash is included in its prompt, `TASK.md`, mission, launch instruction, or run
+record; and every ACP-mediated command or URL attempt is denied. The controller never advances from
+agent output automatically; each phase move is a separate founder-initiated leased decision. At
+the controller/workflow layer, an agent cannot approve its own result. This describes what the
+product supplies and what the controller does, not a technical inability of a
+same-user process to call the loopback decision routes. Closing that gap would require a distinct
+user account, an OS sandbox, or real authentication and is outside this slice.
+
 ## 4. MVP scope
 
 Milestones 1–3 form the MVP:
@@ -74,6 +94,14 @@ Spec, plan, risky-change, patch/escalation, and ship/revert gates preserve human
 Passing checks can make a result `review_ready`; only an authorized human or policy gate
 may set it to `completed`.
 
+Forward shaping transitions are reserved to their dedicated decision operations:
+`idea → brainstorm`, `brainstorm → spec`, and `spec → plan`. `Start Brainstorm`, in
+connected or manual-recovery mode, is the only route from Idea into Brainstorm, so entry always
+publishes a mission. The generic phase update refuses those arrows, while `idea → spec`,
+`spec → brainstorm`, `plan → spec`, and `plan → execute` are closed in this slice. Spec
+requires a real Brainstorm selection, backward movement uses phase-local `Request changes`, and
+Execute approval is not yet available.
+
 ## 7. Durable-state rule
 
 Markdown holds semantic artifacts such as product direction, briefs, specifications,
@@ -94,9 +122,42 @@ per-item leases and strict durable manifests; incompatible or partial combinatio
 SQLite schema v6 is a rebuildable projection of those files, including purpose, non-goals,
 patch-cycle state, and attention, not
 a migration authority. A further immutable artifact family exists at
-`.founder/shaping/<work_item_id>/<phase>-<input_sha256>/` (`TASK.md`, `mission.json`,
-`result.json`, `import.json`, and the acceptance receipt) for the Brainstorm and Spec shaping
-phases; these are deliberately unprojected — no SQLite table indexes them.
+`.founder/shaping/<work_item_id>/<phase>-<input_sha256>/` for Brainstorm, Spec, and Plan at
+`shaping_schema_version: 2`. Its missions form immutable, feedback-bearing revision chains. Each
+revision carries at most one applied result, atomically published under `applied/` with
+`result.json`, `import.json`, one `production.json`, and the `applied.json` commit marker, plus one
+immutable decision receipt when that revision is decided. A separate
+`.founder/shaping-runs/<work_item_id>/<run_id>/` family holds artifact-only run records and their
+hash-bound launch instruction with a single writable `ingress/` path. Deterministic manual ingress
+lives separately under `.founder/shaping-ingress/<work_item_id>/<phase>-<input_sha256>/`, whose
+root is gitignored. These shaping families are deliberately unprojected — no SQLite table indexes
+them.
+
+An applied shaping result is recognized only as a complete, commit-marked bundle: readers accept
+`applied/` only after `applied.json` validates every component. Publication and terminal run
+success are crash-coupled in one order — validate, publish the bundle, then mark the run ready — so
+reconciliation can finish a crash between those operations without accepting a partial result or
+creating a duplicate run.
+
+Founder seat-model preferences persist in the versioned, gitignored application-root document
+`.portfolio/model-preferences.json`. They are reusable preferences, not product or workflow truth,
+which is why they live outside `.founder/` and outside SQLite.
+
+Shaping artifacts are versioned durable files with no backward-compatible reader. A schema cut
+therefore requires an explicit founder decision about both the existing artifacts and the durable
+state that depends on them. On 2026-08-01 that decision archived and reset the disposable workspace
+because two active work items had governed goal contracts derived from the retired v1 results.
+
+A retained per-work-item `.controller.lock` fails closed. The controller neither identifies its
+owner nor claims or takes over another process's lock; it reports an actionable `repair_required`
+with the lock, recorded run, and repair action. Explicit founder-invoked repair verifies that the
+lock payload and `state.active_run` describe the same acknowledged run, clears both durable
+representations in a crash-safe order, and is idempotent. Automatic owner identification, claiming,
+takeover, and orphan signalling remain a later controller-reliability slice. Shaping-run
+reconciliation retains its separate non-destructive signal-0 liveness probe, with PID reuse failing
+closed by treating a responding PID as live. Each shaping decision intent also records the exact
+pre- and post-operation `goal.yaml` and `state.json` bytes and hashes, so recovery is decided from
+durable files alone.
 
 ## 8. Core documents
 
@@ -115,12 +176,14 @@ The following remain unresolved and must be decided with implementation evidence
 - The first two proof repositories for provider-neutral manual handoff.
 - Canonical mission and result-submission schemas, including which agent-specific renderers
   add real value.
-  - **Decided (2026-07-28, ROADMAP 3.4 Slice 1, commits `d94ed51`–`be08779`):** the Brainstorm and
-    Spec shaping phases get their **own** contract (`src/domain/shaping.ts`,
-    `shaping_schema_version: 1`, identity `(phase, work_item_id, input_sha256)`) rather than
+  - **Decided (2026-07-28, ROADMAP 3.4 Slice 1, commits `d94ed51`–`be08779`):** the Brainstorm,
+    Spec, and Plan shaping phases use their **own** contract (`src/domain/shaping.ts`,
+    `shaping_schema_version: 2`, identity `(phase, work_item_id, input_sha256)`) rather than
     widening `MissionPhase` — Execute's identity requires a governed goal version, input revision,
-    and attempt that a Brainstorm or Spec item legitimately does not have, so `MISSION_PHASES`
-    stays `["execute","review","patch"]`. Renderers: exactly one provider-neutral
+    and attempt that shaping items do not all legitimately have, so `MISSION_PHASES` stays
+    `["execute","review","patch"]`. Shaping mission content is model-independent and
+    path-independent: model provenance belongs to each run, while every concrete ingress path is
+    carried by a hash-bound per-launch instruction. Renderers: exactly one provider-neutral
     `renderShapingTaskMd`, no agent-specific renderers. The Execute/Review/Patch half of this
     decision — which agent-specific renderers, if any, add real value there — remains open.
 - The first approved non-MCP local transport and reference adapter. Whether it uses a CLI or
@@ -133,6 +196,19 @@ The following remain unresolved and must be decided with implementation evidence
     containment (`not_independently_enforced` / `launching_user` machine authority, disclosed to
     the founder). A future adapter must satisfy the same contract; the transport/protocol choice
     itself must still not alter the user workflow.
+    Shaping runs use no capability envelope: their narrow artifact-only write policy is part of the
+    shaping-run contract and is enforced by a shaping-specific pure evaluator because the shared
+    envelope evaluator permits every in-workspace write. This guarantee covers ACP-mediated
+    permission requests only; unmediated writes are not prevented and repository reads are not
+    isolated, under the same `permission_mediated_local` / `not_independently_enforced` disclosure.
+- Connected shaping runs record an adapter-observed effective model resolved from ACP `session/new`
+  configuration options and `config_option_update` notifications. The evidence is hashed and
+  redacted before persistence: option id, type, category, current value, choice values, and the
+  validated `deployment_id` scalar are retained in the hash input, while other `_meta` keys and all
+  names and descriptions are discarded. Effective identity is never backfilled from the requested
+  model, launch arguments, or configured model list; an unobserved model is recorded and rendered
+  as the literal `unknown`. Per-seat model independence is proven from observed effective identities,
+  not requests.
 - Whether a future managed runner needs subprocess-only execution or PTY support.
 - GitHub synchronization depth: repositories and pull requests only, or optional issue
   mirroring.
