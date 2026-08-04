@@ -59,7 +59,9 @@ import {
 import {
   WORK_ITEM_PRIORITIES,
   WORK_ITEM_TYPES,
+  type ActiveRun,
   type GoalContract,
+  type RetainedControllerLeaseRepairResult,
   type WorkItemPhase,
   type WorkItemPriority,
   type WorkItemType,
@@ -110,6 +112,7 @@ interface DetailPanelProps {
 
 interface MutationErrorResponse {
   error?: {
+    code?: string;
     message?: string;
   };
 }
@@ -266,6 +269,73 @@ export function updateShapingRequestChangesComposer(
     case "request_succeeded":
       return null;
   }
+}
+
+export interface RetainedControllerLeaseRepairUiState {
+  identity: string;
+  itemKey: string;
+  phase: ShapingPhase;
+  retainedRun: ActiveRun;
+  acknowledged: boolean;
+  status: "awaiting_acknowledgement" | "repairing" | "repaired";
+  error: string | null;
+}
+
+export function retainedControllerLeaseRepairForConflict(input: {
+  itemKey: string;
+  phase: ShapingPhase;
+  errorCode: string | undefined;
+  errorMessage: string | undefined;
+  activeRun: ActiveRun | undefined;
+}): RetainedControllerLeaseRepairUiState | null {
+  if (
+    input.errorCode !== "repair_required" ||
+    !input.errorMessage?.includes("repairRetainedControllerLease") ||
+    input.activeRun === undefined
+  ) {
+    return null;
+  }
+  return {
+    identity: JSON.stringify([
+      input.itemKey,
+      input.activeRun.run_id,
+      input.activeRun.acquired_at,
+    ]),
+    itemKey: input.itemKey,
+    phase: input.phase,
+    retainedRun: input.activeRun,
+    acknowledged: false,
+    status: "awaiting_acknowledgement",
+    error: null,
+  };
+}
+
+export type RetainedControllerLeaseRepairRequest =
+  | { status: "blocked"; reason: "acknowledgement_required" }
+  | {
+      status: "ready";
+      method: "POST";
+      route: string;
+      body: { acknowledged_run_id: string };
+    };
+
+export function retainedControllerLeaseRepairRequest(
+  sourceId: string,
+  workItemId: string,
+  repair: RetainedControllerLeaseRepairUiState,
+): RetainedControllerLeaseRepairRequest {
+  if (
+    !repair.acknowledged ||
+    repair.status !== "awaiting_acknowledgement"
+  ) {
+    return { status: "blocked", reason: "acknowledgement_required" };
+  }
+  return {
+    status: "ready",
+    method: "POST",
+    route: `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/repair-controller-lease`,
+    body: { acknowledged_run_id: repair.retainedRun.run_id },
+  };
 }
 
 interface ShapingLaunchFailureState {
@@ -2243,6 +2313,7 @@ export interface ShapingDecisionViewProps {
     selectedModel: string | null;
     error: string | null;
   } | null;
+  retainedControllerLeaseRepair?: RetainedControllerLeaseRepairUiState | null;
   busy?: boolean;
   error?: string | null;
   onSelectModel: (model: string) => void;
@@ -2256,6 +2327,8 @@ export interface ShapingDecisionViewProps {
     feedback: string,
     selectedModel: string | null,
   ) => void;
+  onAcknowledgeRetainedControllerLease: (acknowledged: boolean) => void;
+  onRepairRetainedControllerLease: () => void;
   onCompileManualMission?: () => void;
   onPrepareManualRecovery?: () => void;
   onRetryManualRecovery?: () => void;
@@ -2311,6 +2384,7 @@ export function ShapingDecisionView({
   selectedModel,
   advancedRecovery,
   requestChangesComposer,
+  retainedControllerLeaseRepair = null,
   busy = false,
   error = null,
   onSelectModel,
@@ -2320,6 +2394,8 @@ export function ShapingDecisionView({
   onChangeRequestChangesFeedback,
   onSelectRequestChangesModel,
   onSubmitRequestChanges,
+  onAcknowledgeRetainedControllerLease,
+  onRepairRetainedControllerLease,
   onCompileManualMission,
   onPrepareManualRecovery,
   onRetryManualRecovery,
@@ -2658,6 +2734,92 @@ export function ShapingDecisionView({
             >
               {error}
             </p>
+          )}
+          {retainedControllerLeaseRepair === null ? null : retainedControllerLeaseRepair.status ===
+            "repaired" ? (
+            <p
+              data-retained-controller-lease="repaired"
+              className="mt-4 border-l-2 border-success bg-success/10 px-3 py-2 text-xs leading-5"
+              role="status"
+            >
+              Retained lock repaired. Submit the preserved decision again to
+              replay it.
+            </p>
+          ) : (
+            <section
+              data-retained-controller-lease={
+                retainedControllerLeaseRepair.status
+              }
+              aria-labelledby={`${fieldId}-retained-controller-lease`}
+              className="mt-4 border-l-2 border-[#e4b93f] bg-[#e4b93f]/10 px-3 py-3 text-xs leading-5"
+            >
+              <h4
+                id={`${fieldId}-retained-controller-lease`}
+                className="font-semibold text-foreground"
+              >
+                Retained controller run
+              </h4>
+              <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+                <dt className="text-muted-foreground">Run</dt>
+                <dd className="break-all">
+                  {retainedControllerLeaseRepair.retainedRun.run_id}
+                </dd>
+                <dt className="text-muted-foreground">Acquired</dt>
+                <dd>
+                  <time
+                    dateTime={
+                      retainedControllerLeaseRepair.retainedRun.acquired_at
+                    }
+                  >
+                    {retainedControllerLeaseRepair.retainedRun.acquired_at}
+                  </time>
+                </dd>
+                <dt className="text-muted-foreground">Phase</dt>
+                <dd>{shapingPhaseLabel(retainedControllerLeaseRepair.phase)}</dd>
+                <dt className="text-muted-foreground">Operation</dt>
+                <dd className="break-all">
+                  {retainedControllerLeaseRepair.retainedRun.idempotency_key}
+                </dd>
+              </dl>
+              <label className="mt-3 flex items-start gap-2 text-foreground">
+                <input
+                  type="checkbox"
+                  checked={retainedControllerLeaseRepair.acknowledged}
+                  disabled={
+                    busy ||
+                    retainedControllerLeaseRepair.status === "repairing"
+                  }
+                  onChange={(event) =>
+                    onAcknowledgeRetainedControllerLease(event.target.checked)
+                  }
+                  className="mt-0.5 size-4 rounded border-border bg-background accent-primary"
+                />
+                <span>
+                  I have confirmed no operation for run{" "}
+                  {retainedControllerLeaseRepair.retainedRun.run_id} is still
+                  executing.
+                </span>
+              </label>
+              {retainedControllerLeaseRepair.error === null ? null : (
+                <p className="mt-3 text-destructive" role="alert">
+                  {retainedControllerLeaseRepair.error}
+                </p>
+              )}
+              <button
+                type="button"
+                disabled={
+                  busy ||
+                  !retainedControllerLeaseRepair.acknowledged ||
+                  retainedControllerLeaseRepair.status === "repairing"
+                }
+                onClick={onRepairRetainedControllerLease}
+                className="mt-3 h-9 rounded-md border bg-secondary px-3 text-xs font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {retainedControllerLeaseRepair.status === "repairing"
+                  ? "Repairing retained lock…"
+                  : "Repair retained lock"}
+              </button>
+            </section>
           )}
         </section>
 
@@ -3880,6 +4042,10 @@ export function DetailPanel({
     useState<ShapingLaunchFailureState | null>(null);
   const [shapingNewAttemptState, setShapingNewAttemptState] =
     useState<ShapingNewAttemptState | null>(null);
+  const [
+    retainedControllerLeaseRepairState,
+    setRetainedControllerLeaseRepairState,
+  ] = useState<RetainedControllerLeaseRepairUiState | null>(null);
   const [shapingDecisionBusyIdentities, setShapingDecisionBusyIdentities] =
     useState<Set<string>>(() => new Set());
   const shapingDecisionBusyRef = useRef<Set<string>>(new Set());
@@ -4149,6 +4315,10 @@ export function DetailPanel({
     shapingEligible &&
     (currentShapingState === null || currentShapingState.loading);
   const shapingError = currentShapingState?.error ?? null;
+  const currentRetainedControllerLeaseRepair =
+    retainedControllerLeaseRepairState?.itemKey === shapingItemKey
+      ? retainedControllerLeaseRepairState
+      : null;
   const shapingCompilation =
     shapingCompilationState?.itemKey === shapingItemKey
       ? shapingCompilationState.result
@@ -5440,6 +5610,18 @@ export function DetailPanel({
         return;
       }
       if (!response.ok || "error" in body) {
+        if ("error" in body && currentDecisionShapingPhase !== null) {
+          const retainedRepair = retainedControllerLeaseRepairForConflict({
+            itemKey: operationItemKey,
+            phase: currentDecisionShapingPhase,
+            errorCode: body.error?.code,
+            errorMessage: body.error?.message,
+            activeRun: state.active_run,
+          });
+          if (retainedRepair !== null) {
+            setRetainedControllerLeaseRepairState(retainedRepair);
+          }
+        }
         setActionFailure(
           "error" in body
             ? body.error?.message ?? "The shaping action could not be completed."
@@ -5456,6 +5638,7 @@ export function DetailPanel({
           }),
         );
       }
+      setRetainedControllerLeaseRepairState(null);
 
       if ("work_item" in body) {
         const decision = body as PortfolioShapingDecisionResult;
@@ -5539,6 +5722,98 @@ export function DetailPanel({
       if (shapingItemKeyRef.current === operationItemKey) {
         setShapingRefreshRestartVersion((current) => current + 1);
       }
+    }
+  }
+
+  function handleAcknowledgeRetainedControllerLease(
+    acknowledged: boolean,
+  ): void {
+    const identity = currentRetainedControllerLeaseRepair?.identity;
+    if (identity === undefined) {
+      return;
+    }
+    setRetainedControllerLeaseRepairState((current) =>
+      current?.identity === identity &&
+      current.status === "awaiting_acknowledgement"
+        ? { ...current, acknowledged, error: null }
+        : current,
+    );
+  }
+
+  async function handleRepairRetainedControllerLease(): Promise<void> {
+    const repair = currentRetainedControllerLeaseRepair;
+    if (repair === null) {
+      return;
+    }
+    const request = retainedControllerLeaseRepairRequest(
+      item.source_id,
+      goal.work_item_id,
+      repair,
+    );
+    if (request.status === "blocked") {
+      return;
+    }
+    const identity = repair.identity;
+    setRetainedControllerLeaseRepairState((current) =>
+      current?.identity === identity
+        ? { ...current, status: "repairing", error: null }
+        : current,
+    );
+    try {
+      const response = await fetch(request.route, {
+        method: request.method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request.body),
+      });
+      const body = (await response.json()) as
+        | RetainedControllerLeaseRepairResult
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setRetainedControllerLeaseRepairState((current) =>
+          current?.identity === identity
+            ? {
+                ...current,
+                status: "awaiting_acknowledgement",
+                error:
+                  "error" in body
+                    ? body.error?.message ??
+                      "The retained controller lock could not be repaired."
+                    : "The retained controller lock could not be repaired.",
+              }
+            : current,
+        );
+        return;
+      }
+      setRetainedControllerLeaseRepairState((current) =>
+        current?.identity === identity
+          ? {
+              ...current,
+              acknowledged: false,
+              status: "repaired",
+              error: null,
+            }
+          : current,
+      );
+      setShapingActionError(null, repair.itemKey);
+      if (shapingRequestChangesIdentity !== null) {
+        setShapingRequestChangesComposerState((current) =>
+          updateShapingRequestChangesComposer(current, {
+            type: "request_started",
+            identity: shapingRequestChangesIdentity,
+          }),
+        );
+      }
+    } catch {
+      setRetainedControllerLeaseRepairState((current) =>
+        current?.identity === identity
+          ? {
+              ...current,
+              status: "awaiting_acknowledgement",
+              error:
+                "The retained controller lock could not be repaired. Check the local server and try again.",
+            }
+          : current,
+      );
     }
   }
 
@@ -6232,12 +6507,16 @@ export function DetailPanel({
               selectedModel={selectedShapingModel}
               advancedRecovery={shapingAdvancedRecovery}
               requestChangesComposer={shapingRequestChangesComposer}
+              retainedControllerLeaseRepair={
+                currentRetainedControllerLeaseRepair
+              }
               busy={
                 shapingDecisionBusy ||
                 shapingLoading ||
                 shapingMutation !== null ||
                 currentShapingManualRecovery?.importing === true ||
-                currentShapingManualRecovery?.recovery.state === "loading"
+                currentShapingManualRecovery?.recovery.state === "loading" ||
+                currentRetainedControllerLeaseRepair?.status === "repairing"
               }
               error={shapingError}
               onSelectModel={(model) => {
@@ -6264,6 +6543,12 @@ export function DetailPanel({
                   });
                 }
               }}
+              onAcknowledgeRetainedControllerLease={
+                handleAcknowledgeRetainedControllerLease
+              }
+              onRepairRetainedControllerLease={() =>
+                void handleRepairRetainedControllerLease()
+              }
               onCompileManualMission={() =>
                 void handleCompileShapingMission()
               }

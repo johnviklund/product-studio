@@ -7,6 +7,8 @@ import {
   ConnectedExecuteSection,
   dispatchShapingManualRecoveryAction,
   PatchWorkflowSection,
+  retainedControllerLeaseRepairForConflict,
+  retainedControllerLeaseRepairRequest,
   RunEvidenceSection,
   selectedModelForShapingPicker,
   type ShapingAdvancedRecoveryViewState,
@@ -536,6 +538,9 @@ function renderDecision(
   } | null = null,
   busy = false,
   advancedRecovery?: ShapingAdvancedRecoveryViewState,
+  retainedControllerLeaseRepair: ComponentProps<
+    typeof ShapingDecisionView
+  >["retainedControllerLeaseRepair"] = null,
 ): string {
   return renderToStaticMarkup(
     <ShapingDecisionView
@@ -544,6 +549,7 @@ function renderDecision(
       selectedModel={selectedModel}
       advancedRecovery={advancedRecovery}
       requestChangesComposer={requestChangesComposer}
+      retainedControllerLeaseRepair={retainedControllerLeaseRepair}
       busy={busy}
       onSelectModel={noop}
       onAction={noop}
@@ -552,6 +558,8 @@ function renderDecision(
       onChangeRequestChangesFeedback={noop}
       onSelectRequestChangesModel={noop}
       onSubmitRequestChanges={noop}
+      onAcknowledgeRetainedControllerLease={noop}
+      onRepairRetainedControllerLease={noop}
       onCompileManualMission={noop}
       onPrepareManualRecovery={noop}
       onRetryManualRecovery={noop}
@@ -2142,6 +2150,142 @@ describe("detail panel decision-first shaping", () => {
         identity,
       }),
     ).toBeNull();
+  });
+
+  it("binds retained-lock acknowledgement and repair to the exact durable run", () => {
+    const activeRun = {
+      run_id: "fadecefa-01cb-5540-a0a8-4c14a145a962",
+      idempotency_key: "request-changes:plan:retained",
+      acquired_at: "2026-08-04T17:22:14.615Z",
+    };
+    const repair = retainedControllerLeaseRepairForConflict({
+      itemKey: "source-1:item-1:plan",
+      phase: "plan",
+      errorCode: "repair_required",
+      errorMessage:
+        "The controller retains a run; use repairRetainedControllerLease after confirming it is no longer executing.",
+      activeRun,
+    });
+
+    expect(repair).toEqual({
+      identity: JSON.stringify([
+        "source-1:item-1:plan",
+        activeRun.run_id,
+        activeRun.acquired_at,
+      ]),
+      itemKey: "source-1:item-1:plan",
+      phase: "plan",
+      retainedRun: activeRun,
+      acknowledged: false,
+      status: "awaiting_acknowledgement",
+      error: null,
+    });
+    expect(
+      retainedControllerLeaseRepairForConflict({
+        itemKey: "source-1:item-1:plan",
+        phase: "plan",
+        errorCode: "stale_expectation",
+        errorMessage:
+          "The controller retains a run; use repairRetainedControllerLease after confirming it is no longer executing.",
+        activeRun,
+      }),
+    ).toBeNull();
+    expect(
+      retainedControllerLeaseRepairForConflict({
+        itemKey: "source-1:item-1:plan",
+        phase: "plan",
+        errorCode: "repair_required",
+        errorMessage:
+          "The controller retains a run; use repairRetainedControllerLease after confirming it is no longer executing.",
+        activeRun: undefined,
+      }),
+    ).toBeNull();
+    expect(
+      retainedControllerLeaseRepairForConflict({
+        itemKey: "source-1:item-1:plan",
+        phase: "plan",
+        errorCode: "repair_required",
+        errorMessage: "A pending manifest needs deterministic reconciliation.",
+        activeRun,
+      }),
+    ).toBeNull();
+
+    expect(
+      retainedControllerLeaseRepairRequest("source-1", workItemId, repair!),
+    ).toEqual({ status: "blocked", reason: "acknowledgement_required" });
+    expect(
+      retainedControllerLeaseRepairRequest("source-1", workItemId, {
+        ...repair!,
+        acknowledged: true,
+      }),
+    ).toEqual({
+      status: "ready",
+      method: "POST",
+      route: `/api/portfolio/work-items/source-1/${workItemId}/repair-controller-lease`,
+      body: { acknowledged_run_id: activeRun.run_id },
+    });
+  });
+
+  it("renders the retained-lock acknowledgement before repair and preserves explicit replay", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("plan", decisionGoalContract),
+      appliedDecisionContext("plan", planResult),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "plan") {
+      throw new Error("expected a ready Plan projection");
+    }
+    const retainedRun = {
+      run_id: "fadecefa-01cb-5540-a0a8-4c14a145a962",
+      idempotency_key: "request-changes:plan:retained",
+      acquired_at: "2026-08-04T17:22:14.615Z",
+    };
+    const baseRepair = {
+      identity: "retained-repair",
+      itemKey: "source-1:item-1:plan",
+      phase: "plan" as const,
+      retainedRun,
+      acknowledged: false,
+      status: "awaiting_acknowledgement" as const,
+      error: null,
+    };
+
+    const blocked = visibleMarkup(
+      renderDecision(projection, null, null, false, undefined, baseRepair),
+    );
+    expect(blocked).toContain("Retained controller run");
+    expect(blocked).toContain(retainedRun.run_id);
+    expect(blocked).toContain(retainedRun.acquired_at);
+    expect(blocked).toContain("Plan");
+    expect(blocked).toContain(retainedRun.idempotency_key);
+    expect(blocked).toContain(
+      `I have confirmed no operation for run ${retainedRun.run_id} is still executing.`,
+    );
+    expect(buttonAttributes(blocked, "Repair retained lock")).toContain(
+      ' disabled=""',
+    );
+
+    const acknowledged = renderDecision(
+      projection,
+      null,
+      null,
+      false,
+      undefined,
+      { ...baseRepair, acknowledged: true },
+    );
+    expect(buttonAttributes(acknowledged, "Repair retained lock")).not.toContain(
+      ' disabled=""',
+    );
+
+    const repaired = visibleMarkup(
+      renderDecision(projection, null, null, false, undefined, {
+        ...baseRepair,
+        status: "repaired",
+      }),
+    );
+    expect(repaired).toContain(
+      "Retained lock repaired. Submit the preserved decision again to replay it.",
+    );
+    expect(repaired).not.toContain("Repair retained lock");
   });
 
   it("keeps the preserved ready projection inert while its replacement artifacts load", () => {
