@@ -6852,7 +6852,6 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
     const expectedIdentity = {
-      schema_version: 1 as const,
       decision_id: decisionId,
       ...draft,
       next_goal_bytes: nextGoalBytes,
