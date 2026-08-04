@@ -5,6 +5,27 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-08-04 · Connected shaping and guided Spec-to-Plan handoff (roadmap 3.4 slice 2) · Codex/Copilot mixed
+- Cut shaping schema v2 across Brainstorm, Spec, and Plan: immutable feedback-bearing revisions,
+  one commit-marked applied bundle per revision, durable decision intents/receipts, separate
+  artifact-only shaping-run/manual-ingress families, and versioned per-seat model preferences.
+- Added controller-owned connected shaping decisions and launch/replay/reconciliation around an
+  artifact-only ACP permission evaluator; effective models come only from adapter-observed
+  configuration events, and retained controller locks require explicit acknowledged repair rather
+  than takeover.
+- Replaced compile/import-first UI with bounded run and decision surfaces for the five founder
+  actions, exact current-result approvals, request-changes/replan recovery, collapsed `Advanced
+  recovery`, shaping-aware board/attention projections, and no Plan → Execute action.
+- Verified: 34 test files / 685 tests pass; lint has zero errors and seven known warnings. Typecheck
+  retains exactly six recorded baseline diagnostics; the production build compiled before stopping
+  on the first same baseline diagnostic. Headed checks exercised Brainstorm, Spec, and Plan with
+  three distinct adapter-observed effective models plus retained-lock repair and updated-contract
+  replan; Phase 4 review remains pending.
+- Commits: `6ca9b52`..`df93db2`
+- Why: delivers ROADMAP 3.4 Slice 2 through `Plan result ready` without manual prompt/result
+  assembly while preserving explicit human gates, artifact-only shaping authority, truthful
+  provenance, and the later Plan approval → Execute boundary.
+
 ## 2026-07-28 · Brainstorm and Spec shaping missions (roadmap 3.4 slice 1) · Copilot/Codex mixed
 - Cut a separate, immutable shaping contract (`src/domain/shaping.ts`, `shaping_schema_version: 1`,
   identity `(phase, work_item_id, input_sha256)`) rather than widening `MissionPhase` — Execute's
@@ -314,14 +335,3 @@ not archived — they remain in git history).
 - Commits: e416789 203c556 c7759a7 5ef7bca 935a97e addb81b fc63456 3e17eea
 - Why: completes roadmap 1.2's durable portfolio seam so the focused cross-project Kanban can
   build on registered workspaces without treating local cache state as truth.
-
-## 2026-07-17 · Durable workspace foundation (roadmap 1.1)
-- Defined the work-item domain contract and schema-versioned `.founder/` filesystem repository
-  (goal.yaml + state.json as durable truth).
-- Added a fully rebuildable SQLite index (never the source of truth) and an application service
-  coordinating repository + index.
-- Exposed the HTTP work-item contract (list/create/get/delete + rebuild route) and shipped a
-  fixture, seed script, and minimal shell.
-- Commits: b14922b 0df4128 2d375e5 f29e6bb 88ddb65 98b3c62 d93a37d
-- Why: establishes the durable, rebuildable-index architecture roadmap phase 1.1 requires before
-  any UI/board work can build on it.

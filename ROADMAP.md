@@ -243,14 +243,16 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Dependencies:** 2.1–2.5 and 3.1–3.3.
 - **Slice 2 selected experience direction (2026-07-31):** Use the guided handoff defined in
   [`DESIGN.md`](DESIGN.md#connected-shaping-and-spec-approval-roadmap-34-slice-2): connected
-  Brainstorm and Spec are the normal path, a ready Spec becomes one concise founder decision with
-  `Approve & create plan`, and manual artifact handoff remains collapsed recovery. The
+  Brainstorm, Spec, and Plan are the normal path, a ready Spec becomes one concise founder decision
+  with `Approve & run Plan`, and manual artifact handoff remains collapsed recovery. The
   [directional mockup](docs/design/roadmap-3.4-slice-2-guided-handoff.png) supports the written
-  contract but does not define lifecycle state. Workflow shaping and implementation remain pending.
-- **Status:** In progress — Slice 1 delivered, commits `d94ed51`–`be08779` (Brainstorm and Spec
-  shaping missions: compile, import, and accept for both phases, on-ramp from an assigned `idea`
-  via `Start brainstorm`). Remaining: connected launch, per-step model selection, Plan mission, and
-  a two-model end-to-end run.
+  contract but does not define lifecycle state. Slice 2 is delivered through `Plan result ready`;
+  Plan approval → Execute remains pending.
+- **Status:** In progress — Slice 2 delivered, commits `6ca9b52`–`df93db2` (connected Brainstorm,
+  Spec, and Plan launch; per-seat model selection; the Plan mission; and a headed end-to-end run
+  with three distinct adapter-observed effective model identities). Remaining: Plan approval →
+  Execute. The 3.4 completion signal is not yet claimed because the cycle does not reach approved
+  implementation.
 - **Completion signal:** A real feature completes the version-one cycle without manual prompt or
   result assembly, uses at least two distinct recorded LLM model identities across its
   agent-driven steps, preserves every required human gate, and leaves reproducible mission, result,

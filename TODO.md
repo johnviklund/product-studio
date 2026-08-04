@@ -24,6 +24,10 @@ delivery phases.
   now carries an `open_questions` field, confined to the shaping contract and not wired to any
   attention production (spec's non-goals excluded that). This is a candidate producer shape, not a
   fix — the item stays open.*
+  *Pointer updated 2026-08-04 (ROADMAP 3.4 Slice 2): `PlanResultSubmission` now also carries
+  `open_questions`, and the guided decision surfaces render unresolved questions without producing
+  `ambiguous_goal` attention. This adds another candidate signal shape, not a producer — the item
+  stays open.*
 
 ## Small UI Changes
 
@@ -47,6 +51,9 @@ delivery phases.
   shaping section adds to `components/kanban/detail-panel.tsx`'s capture mode but deliberately
   leaves `tagsFromInput` and the free-text tags input untouched (spec's non-goals scoped
   card-metadata editing out of the slice) — this item still applies as written.*
+  *Pointer updated 2026-08-04 (ROADMAP 3.4 Slice 2): the guided shaping, monitoring, recovery, and
+  decision surfaces substantially rewrote `detail-panel.tsx` again but still leave `tagsFromInput`
+  and the free-text tags input untouched — this item still applies as written.*
 
 ## Open Questions
 

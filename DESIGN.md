@@ -461,9 +461,11 @@ Overview prioritizes:
 6. Reply or request-changes composer.
 7. Sticky contextual actions.
 
-This ordering describes Execute/Review-phase items. For a `brainstorm` or `spec` item, the panel
-leads with the shaping handoff (compile, import, accept) in place of items 3–5; a captured item's
-narrow panel (below) leads with the same handoff once it has an active `brainstorm`/`spec` item.
+This ordering describes Execute/Review-phase items. For a `brainstorm`, `spec`, or `plan` item,
+the panel leads with the guided shaping projection — bounded connected-run status or the current
+result's decision surface — in place of items 3–5. Manual compile, external `TASK.md` execution,
+and result import stay in collapsed `Advanced recovery`; a captured item's narrow panel (below)
+hosts the same projection whenever one of those three shaping phases is active.
 
 For review-ready work, the footer uses primary `Approve result` and secondary `Send comments`.
 Approval binds to the exact result being displayed — including a shaping acceptance receipt, which
