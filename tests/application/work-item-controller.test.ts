@@ -59,6 +59,7 @@ import {
   isShapingPhase,
   type BrainstormMissionPackage,
   type BrainstormResultSubmission,
+  type PlanShapingInput,
   type PlanResultSubmission,
   type ShapingMissionPackage,
   type ShapingPhase,
@@ -3338,13 +3339,22 @@ describe("WorkItemController", () => {
       repository,
       replanned.work_item,
     );
+    const requirePlanShapingInput = (
+      input: ShapingMissionPackage["input"],
+    ): PlanShapingInput => {
+      if (input.phase !== "plan") {
+        throw new Error("Expected stale Plan mission input");
+      }
+      return input;
+    };
+    const stalePlanInput = requirePlanShapingInput(stalePlanMission.input);
     expect(replannedTip.mission.input).toMatchObject({
       phase: "plan",
       goal_contract_sha256: replanInput.goal_contract_sha256,
       goal_version: 2,
-      spec_approval: stalePlanMission.input.spec_approval,
+      spec_approval: stalePlanInput.spec_approval,
       spec_approval_sha256:
-        stalePlanMission.input.spec_approval_sha256,
+        stalePlanInput.spec_approval_sha256,
       revision: {
         supersedes_input_sha256:
           stalePlanMission.identity.input_sha256,
