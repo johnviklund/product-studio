@@ -1981,14 +1981,22 @@ function PreviewText({
   preview,
   expanded,
   onExpand,
+  compact = false,
 }: {
   preview: ShapingTextPreview;
   expanded: boolean;
   onExpand: () => void;
+  compact?: boolean;
 }) {
   return (
     <>
-      <p className="mt-1 text-sm leading-6">
+      <p
+        className={
+          compact
+            ? "mt-1 text-[11px] leading-[14px]"
+            : "mt-1 text-sm leading-6"
+        }
+      >
         {expanded ? preview.full : preview.shown}
       </p>
       {preview.truncated ? (
@@ -1996,7 +2004,7 @@ function PreviewText({
           type="button"
           aria-expanded={expanded}
           onClick={onExpand}
-          className="mt-2 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          className={`${compact ? "mt-1 text-[11px] leading-[14px]" : "mt-2 text-xs"} font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary`}
         >
           {expanded ? "Show less" : preview.expander_label}
         </button>
@@ -2010,32 +2018,47 @@ function PreviewList({
   expanded,
   onExpand,
   marker = "check",
+  compact = false,
+  hideMarker = false,
 }: {
   preview: ShapingListPreview;
   expanded: boolean;
   onExpand: () => void;
   marker?: "check" | "question" | "plain";
+  compact?: boolean;
+  hideMarker?: boolean;
 }) {
   const values = expanded
     ? preview.full
     : preview.shown.map((value) => value.shown);
   return (
     <>
-      <ul className="mt-3 space-y-2.5 text-sm leading-5">
+      <ul
+        className={
+          compact
+            ? "mt-1.5 space-y-1 text-[11px] leading-[14px]"
+            : "mt-3 space-y-2.5 text-sm leading-5"
+        }
+      >
         {values.map((value, index) => (
-          <li key={`${index}:${value}`} className="flex items-start gap-2.5">
-            <span
-              aria-hidden="true"
-              className={`mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border text-[10px] ${
-                marker === "question"
-                  ? "border-primary text-primary"
-                  : marker === "check"
-                    ? "border-success text-success"
-                    : "border-border text-muted-foreground"
-              }`}
-            >
-              {marker === "question" ? "?" : marker === "check" ? "✓" : "·"}
-            </span>
+          <li
+            key={`${index}:${value}`}
+            className={`flex items-start ${compact ? "gap-1.5" : "gap-2.5"}`}
+          >
+            {hideMarker ? null : (
+              <span
+                aria-hidden="true"
+                className={`mt-0.5 grid shrink-0 place-items-center rounded-full border ${compact ? "size-3 text-[8px]" : "size-4 text-[10px]"} ${
+                  marker === "question"
+                    ? "border-primary text-primary"
+                    : marker === "check"
+                      ? "border-success text-success"
+                      : "border-border text-muted-foreground"
+                }`}
+              >
+                {marker === "question" ? "?" : marker === "check" ? "✓" : "·"}
+              </span>
+            )}
             <span>{value}</span>
           </li>
         ))}
@@ -2045,12 +2068,42 @@ function PreviewList({
           type="button"
           aria-expanded={expanded}
           onClick={onExpand}
-          className="mt-3 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          className={`${compact ? "mt-1 text-[11px] leading-[14px]" : "mt-3 text-xs"} font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary`}
         >
           {expanded ? "Show less" : preview.expander_label}
         </button>
       ) : null}
     </>
+  );
+}
+
+function CompactSpecGovernedField({
+  label,
+  fieldKey,
+  preview,
+  expanded,
+  onExpand,
+}: {
+  label: string;
+  fieldKey: string;
+  preview: ShapingListPreview;
+  expanded: boolean;
+  onExpand: () => void;
+}) {
+  return (
+    <div data-spec-governed-field={fieldKey} className="min-w-0">
+      <h4 className="text-[10px] font-medium text-muted-foreground uppercase">
+        {label}
+      </h4>
+      <PreviewList
+        preview={preview}
+        expanded={expanded}
+        onExpand={onExpand}
+        marker="plain"
+        compact
+        hideMarker
+      />
+    </div>
   );
 }
 
@@ -2110,13 +2163,18 @@ function DecisionRegion({
   region,
   heading,
   children,
+  compact = false,
 }: {
   region: string;
   heading: string;
   children: ReactNode;
+  compact?: boolean;
 }) {
   return (
-    <section data-region={region} className="border-t px-5 py-5">
+    <section
+      data-region={region}
+      className={`border-t px-5 ${compact ? "py-2" : "py-5"}`}
+    >
       <h3 className="text-[11px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
         {heading}
       </h3>
@@ -2130,11 +2188,13 @@ function ModelPicker({
   selectedModel,
   busy,
   onSelectModel,
+  compact = false,
 }: {
   picker: ShapingModelPickerProjection;
   selectedModel: string;
   busy: boolean;
   onSelectModel: (model: string) => void;
+  compact?: boolean;
 }) {
   const selected = picker.options.find(
     (option) => option.model_id === selectedModel,
@@ -2146,7 +2206,7 @@ function ModelPicker({
         value={selectedModel}
         disabled={busy}
         onChange={(event) => onSelectModel(event.target.value)}
-        className="mt-3 h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+        className={`${compact ? "mt-2 h-8 text-xs" : "mt-3 h-10 text-sm"} w-full rounded-md border bg-background px-3 outline-none focus:border-primary focus:ring-1 focus:ring-primary`}
       >
         {picker.options.map((option) => (
           <option key={option.model_id} value={option.model_id}>
@@ -2393,6 +2453,8 @@ export function ShapingDecisionView({
     (advancedRecovery !== undefined ||
       manualRecovery !== null ||
       prepareManualAction !== undefined);
+  const compactSpecDecision =
+    projection.mode === "ready" && projection.phase === "spec";
   function toggleExpanded(key: string): void {
     setExpandedFields((current) => {
       const next = new Set(current);
@@ -2425,11 +2487,70 @@ export function ShapingDecisionView({
       onAction(action);
     }
   }
+  function renderProvenanceRegion(compact: boolean): ReactNode {
+    if (!("provenance" in projection) || projection.provenance.length === 0) {
+      return null;
+    }
+    return (
+      <DecisionRegion
+        region="provenance"
+        heading="Provenance"
+        compact={compact}
+      >
+        <div
+          className={`${compact ? "mt-1.5 gap-1 text-[10px] leading-[13px]" : "mt-3 gap-2 text-xs"} flex flex-wrap items-center`}
+        >
+          {projection.provenance.map((use, index) => (
+            <div key={use.seat} className="contents">
+              {index === 0 ? null : (
+                <span className="text-muted-foreground" aria-hidden="true">
+                  →
+                </span>
+              )}
+              <span
+                className={`rounded-sm border bg-background px-2 ${compact ? "py-0.5" : "py-1.5"}`}
+              >
+                {shapingPhaseLabel(use.seat)} · requested {use.requested_model} ·
+                effective {use.effective_model}
+              </span>
+            </div>
+          ))}
+        </div>
+      </DecisionRegion>
+    );
+  }
+  function renderNextStepRegion(compact: boolean): ReactNode {
+    if (picker === null) {
+      return runtimeUnavailable === null ? null : (
+        <DecisionRegion
+          region="runtime"
+          heading="Connected runtime"
+          compact={compact}
+        >
+          <p className="mt-2 text-sm leading-5 text-muted-foreground">
+            {runtimeUnavailable}
+          </p>
+        </DecisionRegion>
+      );
+    }
+    return (
+      <DecisionRegion region="next-step" heading="Next step" compact={compact}>
+        <ModelPicker
+          picker={picker}
+          selectedModel={currentModel}
+          busy={busy}
+          onSelectModel={onSelectModel}
+          compact={compact}
+        />
+      </DecisionRegion>
+    );
+  }
 
   return (
     <div
       data-shaping-decision-view="true"
       data-shaping-mode={projection.mode}
+      data-shaping-density={compactSpecDecision ? "compact-spec" : "default"}
       aria-labelledby={`${fieldId}-shaping-decision`}
       className="flex min-h-0 flex-1 flex-col"
     >
@@ -2440,12 +2561,14 @@ export function ShapingDecisionView({
         <section
           data-region="status"
           data-refresh-running={lifecycle?.refresh_running ?? false}
-          className="px-5 py-5"
+          className={`px-5 ${compactSpecDecision ? "py-2" : "py-5"}`}
         >
-          <div className="flex items-start gap-3">
+          <div
+            className={`flex items-start ${compactSpecDecision ? "gap-2" : "gap-3"}`}
+          >
             <span
               aria-hidden="true"
-              className={`mt-0.5 grid size-8 shrink-0 place-items-center rounded-full border text-sm ${
+              className={`mt-0.5 grid shrink-0 place-items-center rounded-full border ${compactSpecDecision ? "size-7 text-xs" : "size-8 text-sm"} ${
                 status.tone === "ready"
                   ? "border-success text-success"
                   : status.tone === "error"
@@ -2463,17 +2586,23 @@ export function ShapingDecisionView({
               )}
               <h3
                 id={`${fieldId}-shaping-decision`}
-                className="text-base font-semibold"
+                className={
+                  compactSpecDecision
+                    ? "text-sm font-semibold"
+                    : "text-base font-semibold"
+                }
               >
                 {status.headline}
               </h3>
-              <p className="mt-1 text-sm leading-5 text-muted-foreground">
+              <p
+                className={`${compactSpecDecision ? "text-xs leading-4" : "text-sm leading-5"} mt-1 text-muted-foreground`}
+              >
                 {status.copy}
               </p>
               <button
                 type="button"
                 onClick={onShowFullWorkItem}
-                className="mt-2 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                className={`${compactSpecDecision ? "mt-1" : "mt-2"} text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary`}
               >
                 View full work item
               </button>
@@ -2576,46 +2705,51 @@ export function ShapingDecisionView({
 
         {projection.mode === "ready" && projection.phase === "spec" ? (
           <>
-            <DecisionRegion region="summary" heading="Proposal summary">
+            <DecisionRegion region="summary" heading="Proposal summary" compact>
               <PreviewText
                 preview={projection.sections.summary.purpose}
                 expanded={previewExpanded("spec-purpose")}
                 onExpand={() => toggleExpanded("spec-purpose")}
+                compact
               />
             </DecisionRegion>
             <DecisionRegion
               region="criteria"
               heading="Acceptance criteria (observable)"
+              compact
             >
               <PreviewList
                 preview={projection.sections.criteria}
                 expanded={previewExpanded("spec-criteria")}
                 onExpand={() => toggleExpanded("spec-criteria")}
+                compact
               />
             </DecisionRegion>
-            <DecisionRegion region="governed-fields" heading="Governed fields">
+            <DecisionRegion region="governed-fields" heading="Governed fields" compact>
               <p className="mt-2 text-xs leading-5 text-muted-foreground">
                 {projection.sections.governed_fields.pointer}
               </p>
-              {(
-                [
-                  ["Non-goals", "spec-non-goals", projection.sections.governed_fields.non_goals],
-                  ["Allowed scope", "spec-allowed-scope", projection.sections.governed_fields.allowed_scope],
-                  ["Review ready", "spec-review-ready", projection.sections.governed_fields.review_ready],
-                ] as const
-              ).map(([label, key, preview]) => (
-                <div key={key} className="mt-4">
-                  <h4 className="text-[11px] font-medium text-muted-foreground uppercase">
-                    {label}
-                  </h4>
-                  <PreviewList
+              <div
+                data-spec-governed-layout="compact"
+                className="mt-1.5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_88px_minmax(0,1.25fr)]"
+              >
+                {(
+                  [
+                    ["Non-goals", "spec-non-goals", projection.sections.governed_fields.non_goals],
+                    ["Allowed scope", "spec-allowed-scope", projection.sections.governed_fields.allowed_scope],
+                    ["Review ready", "spec-review-ready", projection.sections.governed_fields.review_ready],
+                  ] as const
+                ).map(([label, key, preview]) => (
+                  <CompactSpecGovernedField
+                    key={key}
+                    label={label}
+                    fieldKey={key}
                     preview={preview}
                     expanded={previewExpanded(key)}
                     onExpand={() => toggleExpanded(key)}
-                    marker="plain"
                   />
-                </div>
-              ))}
+                ))}
+              </div>
             </DecisionRegion>
           </>
         ) : null}
@@ -2675,40 +2809,19 @@ export function ShapingDecisionView({
           </DecisionRegion>
         ) : null}
 
-        {"provenance" in projection && projection.provenance.length > 0 ? (
-          <DecisionRegion region="provenance" heading="Provenance">
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-              {projection.provenance.map((use, index) => (
-                <div key={use.seat} className="contents">
-                  {index === 0 ? null : (
-                    <span className="text-muted-foreground" aria-hidden="true">→</span>
-                  )}
-                  <span className="rounded-sm border bg-background px-2 py-1.5">
-                    {shapingPhaseLabel(use.seat)} · requested {use.requested_model} · effective {use.effective_model}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </DecisionRegion>
-        ) : null}
-
-        {picker === null ? (
-          runtimeUnavailable === null ? null : (
-            <DecisionRegion region="runtime" heading="Connected runtime">
-              <p className="mt-2 text-sm leading-5 text-muted-foreground">
-                {runtimeUnavailable}
-              </p>
-            </DecisionRegion>
-          )
+        {compactSpecDecision ? (
+          <div
+            data-spec-decision-controls="compact"
+            className={picker === null ? undefined : "grid grid-cols-[3fr_2fr]"}
+          >
+            {renderProvenanceRegion(true)}
+            {renderNextStepRegion(true)}
+          </div>
         ) : (
-          <DecisionRegion region="next-step" heading="Next step">
-            <ModelPicker
-              picker={picker}
-              selectedModel={currentModel}
-              busy={busy}
-              onSelectModel={onSelectModel}
-            />
-          </DecisionRegion>
+          <>
+            {renderProvenanceRegion(false)}
+            {renderNextStepRegion(false)}
+          </>
         )}
 
         {!requestChangesOpen ? null : (
@@ -2784,7 +2897,7 @@ export function ShapingDecisionView({
           data-region="advanced-recovery"
           data-recovery-identity={advancedRecovery?.identity}
           data-manual-recovery-state={manualRecovery?.state ?? "idle"}
-          className="border-t px-5 py-4"
+          className={`border-t px-5 ${compactSpecDecision ? "py-2" : "py-4"}`}
         >
           <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
             Advanced recovery
@@ -6060,7 +6173,13 @@ export function DetailPanel({
       />
       <aside
         aria-labelledby="detail-panel-title"
-        className="fixed inset-y-0 right-0 z-30 flex w-full shrink-0 flex-col border-l bg-muted sm:w-[410px] lg:static lg:z-auto"
+        className={`fixed inset-y-0 right-0 z-30 flex w-full shrink-0 flex-col border-l bg-muted lg:static lg:z-auto ${
+          shapingDecisionProjection?.mode === "ready" &&
+          shapingDecisionProjection.phase === "spec" &&
+          !showFullWorkItem
+            ? "sm:w-[460px]"
+            : "sm:w-[410px]"
+        }`}
       >
         <header className="flex h-16 shrink-0 items-center justify-between border-b px-4">
           <div className="min-w-0">

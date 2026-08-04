@@ -1582,6 +1582,9 @@ describe("detail panel decision-first shaping", () => {
     const html = renderDecision(projection);
     const visible = visibleMarkup(html);
 
+    expect(html).toContain('data-shaping-density="compact-spec"');
+    expect(html).toContain('data-spec-governed-layout="compact"');
+    expect(html).toContain('data-spec-decision-controls="compact"');
     expect(regionNames(html)).toEqual([
       "status",
       "summary",
