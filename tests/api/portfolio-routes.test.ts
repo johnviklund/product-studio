@@ -441,6 +441,15 @@ interface ShapingGetCase {
   expectedArgs: (sourceId: string, workItemId: string) => unknown[];
 }
 
+interface ConnectedPostCase {
+  name: string;
+  action: "launch" | "cancel" | "permission";
+  handler: ApiRouteHandler;
+  body: Record<string, unknown>;
+  serviceMethod: string;
+  serviceResult: unknown;
+}
+
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
 const SHA_C = "c".repeat(64);
@@ -463,6 +472,37 @@ const controllerDecisionBody = {
   expected_result_content_sha256: SHA_B,
   expected_shaping_state_sha256: SHA_C,
 };
+
+const CONNECTED_POST_CASES: ConnectedPostCase[] = [
+  {
+    name: "connected permission",
+    action: "permission",
+    handler: decidePortfolioConnectedPermission,
+    body: {
+      connected_run_id: SHAPING_RUN_ID,
+      operation_sha256: SHA_A,
+      decision: "keep_denied",
+    },
+    serviceMethod: "decideConnectedPermission",
+    serviceResult: { decision: "kept_denied" },
+  },
+  {
+    name: "connected launch",
+    action: "launch",
+    handler: launchPortfolioConnectedMission,
+    body: { model_override: "model-current" },
+    serviceMethod: "launchConnectedExecute",
+    serviceResult: { connected_run: { status: "running" } },
+  },
+  {
+    name: "connected cancel",
+    action: "cancel",
+    handler: cancelPortfolioConnectedRun,
+    body: { connected_run_id: SHAPING_RUN_ID },
+    serviceMethod: "cancelConnectedRun",
+    serviceResult: { connected_run: { status: "cancelled" } },
+  },
+];
 
 const SHAPING_POST_CASES: ShapingPostCase[] = [
   ...([
@@ -1336,7 +1376,11 @@ describe("portfolio API routes", () => {
       launchPortfolioConnectedMission(
         new Request("http://localhost/connected/launch", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            origin: "http://127.0.0.1:3000",
+            host: "127.0.0.1:3000",
+          },
           body: "{invalid",
         }),
         context,
@@ -1352,6 +1396,66 @@ describe("portfolio API routes", () => {
     expect(launchConnectedExecute).not.toHaveBeenCalled();
     expect(cancelConnectedRun).not.toHaveBeenCalled();
     expect(decideConnectedPermission).not.toHaveBeenCalled();
+  });
+
+  it("rejects un-originated connected POSTs before body or service access", async () => {
+    const context = phaseUpdateContext("source", "item");
+
+    for (const route of CONNECTED_POST_CASES) {
+      getService.mockReset();
+      getService.mockResolvedValue({
+        [route.serviceMethod]: vi.fn().mockResolvedValue(route.serviceResult),
+      });
+      const request = new Request(
+        `http://localhost/api/portfolio/work-items/source/item/mission/connected/${route.action}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            host: "127.0.0.1:3000",
+          },
+          body: JSON.stringify(route.body),
+        },
+      );
+
+      const response = await route.handler(request, context);
+
+      expect(response.status, route.name).toBe(403);
+      expect(await response.json()).toMatchObject({
+        error: { code: "untrusted_request_origin" },
+      });
+      expect(getService).not.toHaveBeenCalled();
+    }
+
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull() {
+          pulls += 1;
+          throw new Error("untrusted connected request body must not be read");
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const request = new Request(
+      "http://localhost/api/portfolio/work-items/source/item/mission/connected/permission",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          host: "127.0.0.1:3000",
+        },
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" },
+    );
+
+    getService.mockReset();
+    const response = await decidePortfolioConnectedPermission(request, context);
+
+    expect(response.status).toBe(403);
+    expect(pulls).toBe(0);
+    expect(getService).not.toHaveBeenCalled();
   });
 
   it("routes the complete static shaping matrix through one source-qualified service call", async () => {

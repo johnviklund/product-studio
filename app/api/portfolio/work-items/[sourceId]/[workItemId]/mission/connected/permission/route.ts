@@ -1,21 +1,9 @@
 import { z } from "zod";
 
-import { getPortfolioService } from "../../../../../../../../../src/application/portfolio-service";
 import { controllerRunIdSchema } from "../../../../../../../../../src/domain/work-item";
-import {
-  CONNECTED_REQUEST_MAX_BYTES,
-  readCappedJsonRequest,
-} from "../../../../../../../request-body";
-import { errorResponse } from "../../../../../../../responses";
+import { createConnectedPostRoute } from "../../../route-factory";
 
 export const runtime = "nodejs";
-
-interface RouteContext {
-  params: Promise<{
-    sourceId: string;
-    workItemId: string;
-  }>;
-}
 
 const permissionRequestSchema = z.strictObject({
   connected_run_id: controllerRunIdSchema,
@@ -23,26 +11,12 @@ const permissionRequestSchema = z.strictObject({
   decision: z.enum(["allow_once", "keep_denied"]),
 });
 
-export async function POST(
-  request: Request,
-  context: RouteContext,
-): Promise<Response> {
-  try {
-    const input = await readCappedJsonRequest(
-      request,
-      permissionRequestSchema,
-      CONNECTED_REQUEST_MAX_BYTES,
-    );
-    const { sourceId, workItemId } = await context.params;
-    const service = await getPortfolioService();
-    const decided = await service.decideConnectedPermission(
+export const POST = createConnectedPostRoute(
+  permissionRequestSchema,
+  (service, sourceId, workItemId, input) =>
+    service.decideConnectedPermission(
       sourceId,
       workItemId,
       input,
-    );
-
-    return Response.json(decided);
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
+    ),
+);
