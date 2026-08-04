@@ -29,6 +29,60 @@ delivery phases.
   `ambiguous_goal` attention. This adds another candidate signal shape, not a producer — the item
   stays open.*
 
+### Guard the 13 remaining unguarded mutating API routes
+
+- **Status:** Deferred — fenced out of ROADMAP 3.4 Slice 2 by patch-cycle decision D6 (2026-08-05).
+- **Idea:** Slice 2 introduced `assertTrustedRequestOrigin` (`src/application/request-origin.ts`)
+  and applied it to every shaping POST through the route factory. A full enumeration of `app/api`
+  during Phase 4 cycle 2 found it guards **26 of 42** mutating route files — **16 are unguarded**.
+  Three (`mission/connected/{permission,launch,cancel}`) are in Slice 2's own diff and are closed by
+  its patch plan Steps 9–11. The remaining **13 are pre-existing and untouched**:
+  `[workItemId]/route.ts` PATCH (`updateWorkItemPhase` — cross-origin phase transitions),
+  `[workItemId]/edit/` PATCH, `mission/{route,retry,import}`, `mission/patch{,/import}`,
+  `mission/review{,/import}`, `patch-plan/`, `portfolio/work-items/` POST, `work-items/rebuild/`
+  POST, and `workspaces/` POST (`register()` → `resolve(workspace_path)`, which makes Product Studio
+  index an attacker-chosen directory and persist it to the registry). The exposure is reachable, not
+  theoretical: those routes call bare `await request.json()`, which ignores `Content-Type`, so a
+  cross-origin `<form method="POST" enctype="text/plain">` is a CORS *simple* request needing no
+  preflight and no readable response; the app binds `127.0.0.1` (`next dev -H 127.0.0.1`), which a
+  page in the founder's browser can reach. `work-items/rebuild` takes **no body at all**, so a bare
+  auto-submitting form fires it.
+- **Boundary:** Not a Slice 2 regression — nothing was guarded at Base `25b64f4`; `request-origin.ts`
+  is new in that slice. Scope as one design pass, not a patch: route all 13 through a single shared
+  factory carrying the origin check *and* a capped read, since each currently reads its body its own
+  way. Two things ride along and should land in the same slice. First, those same 13 routes read
+  **unbounded** bodies (`request.json()` with no cap) while `readCappedJsonRequest` exists and is
+  used elsewhere — fix the cap and the origin check together, never the cap alone. Second,
+  **D1's tripwire:** `readCappedJsonRequest` deliberately does *not* require a JSON `Content-Type`,
+  which is safe only for as long as `assertTrustedRequestOrigin` fails closed on a missing `Origin`
+  header; if that is ever relaxed to admit a non-browser client, the `Content-Type` gate becomes
+  load-bearing and must land in the same change. Note also that `[workItemId]/route.ts` PATCH is the
+  single enforcement point for the closed-transition policy (see the controller item below), so the
+  two items are worth reading together.
+
+### Enforce the dedicated-transition policy inside the controller
+
+- **Status:** Deferred — blocked on a dedicated `plan → execute` operation (patch-cycle decision D2,
+  2026-08-05; raised as a Phase 4 P2 and re-upheld in cycle 2).
+- **Idea:** `WorkItemController.transition()` validates against `ALLOWED_PHASE_TRANSITIONS` only and
+  never consults `dedicatedTransitionPolicy` (`src/domain/workflow-policy.ts:95`), whose only callers
+  are `src/application/portfolio.ts:1096` and `src/presentation/board.ts:728`. So the closed-set rule
+  is enforced one layer above the controller. AGENTS.md states "the controller owns transitions" and
+  `transition()` is public, which means the immutability guarantee for a decided revision currently
+  rests on every future caller remembering to go through the portfolio. Verified not exploitable as
+  of 3.4 Slice 2: the only production path is `[workItemId]/route.ts` PATCH →
+  `service.updateWorkItemPhase` → the guarded call at `portfolio.ts:1096-1107`.
+- **Boundary:** Cannot be made green inside Slice 2, which is why it is deferred rather than small.
+  The test setup helpers drive `["spec", "plan", "execute"]` straight through `controller.transition()`
+  (`tests/api/portfolio-routes.test.ts:222`, `tests/application/work-item-controller.test.ts:264`,
+  `tests/application/portfolio.test.ts:747`), and that chain contains both `spec → plan`
+  (`dedicated_operation_required`) and `plan → execute` (`closed_in_slice`) — for which no legitimate
+  replacement operation exists yet ("Execute approval is not part of this slice",
+  `src/domain/workflow-policy.ts:73-76`). Enforcing it earlier means either inventing the Execute
+  approval operation or weakening the test setups. Belongs to the slice that introduces a dedicated
+  `plan → execute` operation; move the check into `transition()` there, rejecting
+  `dedicated_operation_required` and `closed_in_slice`.
+
 ## Small UI Changes
 
 - **Replace the free-text tags box with a token/chip picker (capture panel + editor).**
