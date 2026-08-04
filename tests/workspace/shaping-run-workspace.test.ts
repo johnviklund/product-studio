@@ -875,7 +875,7 @@ describe("shaping-run workspace storage", () => {
       firstRunId,
       processIdentity,
     );
-    const signals: Array<[number, NodeJS.Signals | number | undefined]> = [];
+    const signals: Array<[number, string | number | undefined]> = [];
     vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
       signals.push([pid, signal]);
       throw Object.assign(new Error("no such process"), { code: "ESRCH" });
