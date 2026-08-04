@@ -2579,10 +2579,14 @@ describe("ProductWorkspace", () => {
       workspace.readAppliedShapingResult(artifact.mission.identity),
     ).resolves.toBeNull();
 
+    const persistedBrainstormIdentity = artifact.mission.identity;
+    if (persistedBrainstormIdentity.phase !== "brainstorm") {
+      throw new Error("Expected persisted Brainstorm shaping identity");
+    }
     const applied = await writeAppliedShapingBundle(artifact, {
       result_schema_version: 1,
       brainstorm_mission_content_sha256: artifact.mission.content_sha256,
-      identity: artifact.mission.identity,
+      identity: persistedBrainstormIdentity,
       problem_statement: "The marker binds every component.",
       approach: "Reject any mismatched sibling.",
       non_goals: [],
