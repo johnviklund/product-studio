@@ -1,4 +1,4 @@
-import { createShapingGetRoute } from "../route-factory";
+import { createShapingGetRoute } from "../../route-factory";
 
 export const runtime = "nodejs";
 

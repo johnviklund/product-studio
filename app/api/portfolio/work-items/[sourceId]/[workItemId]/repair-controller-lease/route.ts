@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { createShapingPostRoute } from "../shaping/route-factory";
+import { createShapingPostRoute } from "../route-factory";
 
 export const runtime = "nodejs";
 
