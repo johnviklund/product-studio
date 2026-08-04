@@ -398,7 +398,11 @@ function connectedRequest(
     `http://localhost/api/portfolio/work-items/source/item/mission/connected/${action}`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        origin: "http://127.0.0.1:3000",
+        host: "127.0.0.1:3000",
+      },
       body: JSON.stringify(body),
     },
   );
