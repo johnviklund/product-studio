@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { PortfolioAttentionItem } from "../src/application/portfolio";
+import type {
+  PortfolioAttentionItem,
+  PortfolioNeedsYouEntry,
+} from "../src/application/portfolio";
 import { AttentionDecisionList } from "../components/inbox/attention-inbox";
 import { WorkspaceRail } from "../components/workspace-rail";
 
@@ -155,6 +158,60 @@ const connectedAttentionItem = {
   findings: [],
 } satisfies PortfolioAttentionItem;
 
+const governedAttentionEntry = {
+  kind: "governed",
+  entry: attentionItem,
+} satisfies PortfolioNeedsYouEntry;
+
+const connectedAttentionEntry = {
+  kind: "governed",
+  entry: connectedAttentionItem,
+} satisfies PortfolioNeedsYouEntry;
+
+const shapingAttentionEntry = {
+  kind: "shaping",
+  item: {
+    ...attentionItem.item,
+    work_item: {
+      ...attentionItem.item.work_item,
+      goal: {
+        ...attentionItem.item.work_item.goal,
+        title: "Approve the ready Spec result",
+        goal_contract: undefined,
+      },
+      state: {
+        ...attentionItem.item.work_item.state,
+        phase: "spec" as const,
+        goal_version: undefined,
+        input_revision: undefined,
+        attempt: undefined,
+        patch_cycle: undefined,
+      },
+    },
+  },
+  shaping_attention: {
+    schema_version: 1 as const,
+    kind: "spec_approval_shaping" as const,
+    work_item_id: workItemId,
+    source_id: sourceId,
+    phase: "spec" as const,
+    question: "A Spec result is ready for your approval." as const,
+    recommendation: "Open the item and use Approve & run Plan." as const,
+    binding: {
+      mission_content_sha256: "1".repeat(64),
+      applied_result_content_sha256: "2".repeat(64),
+      shaping_state_sha256: "3".repeat(64),
+    },
+    pins: {
+      artifact_paths: [
+        `.founder/shaping/${workItemId}/spec-a`,
+        `.founder/shaping/${workItemId}/spec-a/applied`,
+      ],
+    },
+    created_at: "2026-07-27T12:01:05.000Z",
+  },
+} satisfies PortfolioNeedsYouEntry;
+
 describe("attention inbox", () => {
   it("renders an explicit empty state", () => {
     const html = renderToStaticMarkup(
@@ -176,7 +233,7 @@ describe("attention inbox", () => {
 
   it("renders the complete source-qualified decision projection", () => {
     const html = renderToStaticMarkup(
-      <AttentionDecisionList items={[attentionItem]} totalCount={1} />,
+      <AttentionDecisionList items={[governedAttentionEntry]} totalCount={1} />,
     );
 
     expect(html).toContain(attentionItem.attention.question);
@@ -202,7 +259,7 @@ describe("attention inbox", () => {
 
   it("renders one read-only connected permission recovery row", () => {
     const html = renderToStaticMarkup(
-      <AttentionDecisionList items={[connectedAttentionItem]} totalCount={1} />,
+      <AttentionDecisionList items={[connectedAttentionEntry]} totalCount={1} />,
     );
 
     expect(html.match(/aria-label="Connected permission recovery"/g)).toHaveLength(1);
@@ -215,6 +272,27 @@ describe("attention inbox", () => {
     expect(html).toContain(`source=${sourceId}&amp;item=${workItemId}`);
     expect(html).not.toMatch(/<button[^>]*>Allow once and retry<\/button>/);
     expect(html).not.toMatch(/<button[^>]*>Keep denied<\/button>/);
+  });
+
+  it("renders a pre-contract shaping decision without governed fields", () => {
+    const html = renderToStaticMarkup(
+      <AttentionDecisionList items={[shapingAttentionEntry]} totalCount={1} />,
+    );
+
+    expect(html).toContain(shapingAttentionEntry.shaping_attention.question);
+    expect(html).toContain("Open the item and use Approve &amp; run Plan.");
+    expect(html).toContain("Approve the ready Spec result");
+    expect(html).toContain(
+      shapingAttentionEntry.shaping_attention.binding
+        .applied_result_content_sha256,
+    );
+    expect(html).toContain(
+      shapingAttentionEntry.shaping_attention.pins.artifact_paths[1],
+    );
+    expect(html).toContain(`source=${sourceId}&amp;item=${workItemId}`);
+    expect(html).not.toContain("Goal / input");
+    expect(html).not.toContain("Cost/capacity");
+    expect(html).not.toContain("Current findings");
   });
 
   it("marks only the current keyboard-accessible rail link", () => {

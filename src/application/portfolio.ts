@@ -9,7 +9,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 
 import { stringify } from "yaml";
 import { z } from "zod";
@@ -92,6 +92,7 @@ import {
   dedicatedTransitionPolicy,
   validatePhaseTransition,
 } from "../domain/workflow-policy";
+import { workspaceRelativePosixPathSchema } from "../domain/workspace-path";
 import {
   hashResolvedCapabilityEnvelope,
   summarizeConnectedRun,
@@ -115,6 +116,7 @@ import {
   normalizeShapingGoalInput,
   planResultSubmissionSchema,
   renderShapingTaskMd,
+  SHAPING_PHASES,
   shapingMissionPackageSchema,
   specResultSubmissionSchema,
   type BrainstormMissionPackage,
@@ -241,6 +243,13 @@ interface ResolvedSource {
   project: RegisteredWorkspace | null;
   workspace: WorkspaceGateway;
 }
+
+interface ShapingAttentionArtifacts {
+  artifacts: StoredShapingArtifact[];
+  runs: ShapingRunRecordV1[];
+}
+
+type ReadShapingAttentionArtifacts = () => Promise<ShapingAttentionArtifacts>;
 
 const TRANSFER_STAGES = ["staged", "published", "source_removed"] as const;
 const TRANSFER_TEMP_FILE_PATTERN =
@@ -532,6 +541,58 @@ export interface PortfolioAttentionItem {
   cost_capacity: "unknown";
 }
 
+export type PortfolioItemShapingRunStatus =
+  | "starting"
+  | "running"
+  | "blocked"
+  | "failed"
+  | "timed_out"
+  | "cancelled"
+  | "interrupted"
+  | "ready"
+  | "missing_result"
+  | "finishing"
+  | "needs_repair";
+
+export interface PortfolioItemShapingSummary {
+  phase: ShapingPhase;
+  tip_mission_content_sha256: string | null;
+  has_applied_result: boolean;
+  decision_kind: "brainstorm_selection" | "spec_approval" | null;
+  latest_run_status: PortfolioItemShapingRunStatus | null;
+}
+
+export interface PortfolioListItem extends PortfolioWorkItem {
+  shaping_summary?: PortfolioItemShapingSummary;
+}
+
+export interface ShapingAttentionV1 {
+  schema_version: 1;
+  kind: "spec_approval_shaping";
+  work_item_id: string;
+  source_id: string;
+  phase: "spec";
+  question: "A Spec result is ready for your approval.";
+  recommendation: "Open the item and use Approve & run Plan.";
+  binding: {
+    mission_content_sha256: string;
+    applied_result_content_sha256: string;
+    shaping_state_sha256: string;
+  };
+  pins: {
+    artifact_paths: [string, string];
+  };
+  created_at: string;
+}
+
+export type PortfolioNeedsYouEntry =
+  | { kind: "governed"; entry: PortfolioAttentionItem }
+  | {
+      kind: "shaping";
+      item: PortfolioWorkItem;
+      shaping_attention: ShapingAttentionV1;
+    };
+
 export interface PortfolioRetryResult extends PortfolioWorkItem {
   controller_run: ControllerRunManifest;
 }
@@ -722,6 +783,85 @@ const portfolioAttentionItemSchema: z.ZodType<PortfolioAttentionItem> =
     cost_capacity: z.literal("unknown"),
   });
 
+const shapingAttentionV1Schema: z.ZodType<ShapingAttentionV1> =
+  z
+    .strictObject({
+      schema_version: z.literal(1),
+      kind: z.literal("spec_approval_shaping"),
+      work_item_id: workItemIdSchema,
+      source_id: portfolioSourceIdSchema,
+      phase: z.literal("spec"),
+      question: z.literal("A Spec result is ready for your approval."),
+      recommendation: z.literal(
+        "Open the item and use Approve & run Plan.",
+      ),
+      binding: z.strictObject({
+        mission_content_sha256: shapingSha256Schema,
+        applied_result_content_sha256: shapingSha256Schema,
+        shaping_state_sha256: shapingSha256Schema,
+      }),
+      pins: z.strictObject({
+        artifact_paths: z.tuple([
+          workspaceRelativePosixPathSchema,
+          workspaceRelativePosixPathSchema,
+        ]),
+      }),
+      created_at: z.iso.datetime(),
+    })
+    .refine(
+      (attention) =>
+        attention.pins.artifact_paths[0] !==
+        attention.pins.artifact_paths[1],
+      {
+        message: "mission and applied artifact paths must be distinct",
+        path: ["pins", "artifact_paths"],
+      },
+    );
+
+const portfolioNeedsYouEntrySchema: z.ZodType<PortfolioNeedsYouEntry> =
+  z.discriminatedUnion("kind", [
+    z.strictObject({
+      kind: z.literal("governed"),
+      entry: portfolioAttentionItemSchema,
+    }),
+    z.strictObject({
+      kind: z.literal("shaping"),
+      item: portfolioWorkItemSchema,
+      shaping_attention: shapingAttentionV1Schema,
+    }),
+  ]).superRefine((candidate, context) => {
+    if (candidate.kind !== "shaping") {
+      return;
+    }
+    if (candidate.shaping_attention.source_id !== candidate.item.source_id) {
+      context.addIssue({
+        code: "custom",
+        message: "shaping attention must match item source_id",
+        path: ["shaping_attention", "source_id"],
+        input: candidate.shaping_attention.source_id,
+      });
+    }
+    if (
+      candidate.shaping_attention.work_item_id !==
+      candidate.item.work_item.goal.work_item_id
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "shaping attention must match item work_item_id",
+        path: ["shaping_attention", "work_item_id"],
+        input: candidate.shaping_attention.work_item_id,
+      });
+    }
+    if (candidate.item.work_item.state.phase !== "spec") {
+      context.addIssue({
+        code: "custom",
+        message: "shaping attention requires a Spec item",
+        path: ["item", "work_item", "state", "phase"],
+        input: candidate.item.work_item.state.phase,
+      });
+    }
+  });
+
 function validationReason(error: z.ZodError): string {
   return error.issues
     .map(({ path, message }) =>
@@ -813,8 +953,39 @@ export class PortfolioService {
     }
   }
 
-  async list(): Promise<PortfolioWorkItem[]> {
-    return this.index.list();
+  async list(): Promise<PortfolioListItem[]> {
+    return Promise.all(
+      this.index.list().map(async (item): Promise<PortfolioListItem> => {
+        if (
+          item.source_id === INBOX_SOURCE_ID ||
+          item.project === null ||
+          item.work_item.state.status !== "active" ||
+          !this.isShapingPhase(item.work_item.state.phase)
+        ) {
+          return item;
+        }
+
+        const source: ResolvedSource = {
+          source_id: item.source_id,
+          project: item.project,
+          workspace: this.makeWorkspace(item.project.workspace_path),
+        };
+        try {
+          return {
+            ...item,
+            shaping_summary: await this.portfolioItemShapingSummary(
+              source,
+              item.work_item,
+            ),
+          };
+        } catch (error) {
+          if (isExpectedWorkspaceFailure(error)) {
+            return item;
+          }
+          throw error;
+        }
+      }),
+    );
   }
 
   async createCapture(input: CreateCaptureInput): Promise<PortfolioWorkItem> {
@@ -2266,8 +2437,12 @@ export class PortfolioService {
     };
   }
 
-  async listAttention(): Promise<PortfolioAttentionItem[]> {
-    const attentionItems: PortfolioAttentionItem[] = [];
+  async listAttention(): Promise<PortfolioNeedsYouEntry[]> {
+    const governedItems: PortfolioAttentionItem[] = [];
+    const shapingItems: Extract<
+      PortfolioNeedsYouEntry,
+      { kind: "shaping" }
+    >[] = [];
     for (const project of await this.registry.read()) {
       const source: ResolvedSource = {
         source_id: project.workspace_id,
@@ -2284,25 +2459,58 @@ export class PortfolioService {
         throw error;
       }
       for (const workItem of workItems) {
-        const attentionItem = await this.projectAttention(source, workItem);
+        let shapingArtifactsPromise: Promise<ShapingAttentionArtifacts> | null =
+          null;
+        const readShapingArtifacts: ReadShapingAttentionArtifacts = () => {
+          shapingArtifactsPromise ??= Promise.all([
+            source.workspace.listShapingArtifacts(
+              workItem.goal.work_item_id,
+            ),
+            source.workspace.listShapingRuns(workItem.goal.work_item_id),
+          ]).then(([artifacts, runs]) => ({ artifacts, runs }));
+          return shapingArtifactsPromise;
+        };
+        const attentionItem = await this.projectAttention(
+          source,
+          workItem,
+          readShapingArtifacts,
+        );
         if (attentionItem !== null) {
-          attentionItems.push(attentionItem);
+          governedItems.push(attentionItem);
+          continue;
+        }
+        const shapingItem = await this.projectShapingAttention(
+          source,
+          workItem,
+          readShapingArtifacts,
+        );
+        if (shapingItem !== null) {
+          shapingItems.push(shapingItem);
         }
       }
     }
 
-    return z.array(portfolioAttentionItemSchema).parse(
-      attentionItems.sort(
-        (left, right) =>
-          right.attention.created_at.localeCompare(
-            left.attention.created_at,
-          ) ||
-          left.item.source_id.localeCompare(right.item.source_id) ||
-          left.item.work_item.goal.work_item_id.localeCompare(
-            right.item.work_item.goal.work_item_id,
-          ),
-      ),
+    governedItems.sort(
+      (left, right) =>
+        right.attention.created_at.localeCompare(left.attention.created_at) ||
+        left.item.source_id.localeCompare(right.item.source_id) ||
+        left.item.work_item.goal.work_item_id.localeCompare(
+          right.item.work_item.goal.work_item_id,
+        ),
     );
+    shapingItems.sort(
+      (left, right) =>
+        left.item.source_id.localeCompare(right.item.source_id) ||
+        left.item.work_item.goal.work_item_id.localeCompare(
+          right.item.work_item.goal.work_item_id,
+        ),
+    );
+    return z.array(portfolioNeedsYouEntrySchema).parse([
+      ...governedItems.map(
+        (entry): PortfolioNeedsYouEntry => ({ kind: "governed", entry }),
+      ),
+      ...shapingItems,
+    ]);
   }
 
   async retryExecuteAttempt(
@@ -3129,7 +3337,127 @@ export class PortfolioService {
   }
 
   private isShapingPhase(phase: WorkItem["state"]["phase"]): phase is ShapingPhase {
-    return phase === "brainstorm" || phase === "spec" || phase === "plan";
+    return SHAPING_PHASES.some((candidate) => candidate === phase);
+  }
+
+  private async portfolioItemShapingSummary(
+    source: ResolvedSource,
+    workItem: WorkItem,
+  ): Promise<PortfolioItemShapingSummary> {
+    const phase = workItem.state.phase;
+    if (!this.isShapingPhase(phase)) {
+      throw new Error(`Expected a shaping phase, received ${phase}.`);
+    }
+    const repairSummary = (): PortfolioItemShapingSummary => ({
+      phase,
+      tip_mission_content_sha256: null,
+      has_applied_result: false,
+      decision_kind: null,
+      latest_run_status: "needs_repair",
+    });
+
+    try {
+      const [artifacts, runs] = await Promise.all([
+        source.workspace.listShapingArtifacts(workItem.goal.work_item_id),
+        source.workspace.listShapingRuns(workItem.goal.work_item_id),
+      ]);
+      const tip = this.resolveShapingTip(
+        workItem.goal.work_item_id,
+        phase,
+        artifacts,
+      );
+      this.shapingDecisionState(workItem, artifacts, runs);
+      if (tip === null) {
+        return {
+          phase,
+          tip_mission_content_sha256: null,
+          has_applied_result: false,
+          decision_kind: null,
+          latest_run_status: null,
+        };
+      }
+
+      const hasAppliedResult =
+        tip.result !== null &&
+        tip.import_receipt?.outcome === "applied" &&
+        tip.production_receipt !== null &&
+        tip.applied_marker !== null;
+      const latestRun = runs
+        .filter(
+          (run) =>
+            run.mission.phase === phase &&
+            run.mission.input_sha256 === tip.mission.identity.input_sha256 &&
+            run.mission.content_sha256 === tip.mission.content_sha256,
+        )
+        .sort(
+          (left, right) =>
+            left.lifecycle.started_at.localeCompare(
+              right.lifecycle.started_at,
+            ) || left.shaping_run_id.localeCompare(right.shaping_run_id),
+        )
+        .at(-1);
+      let latestRunStatus: PortfolioItemShapingRunStatus | null = null;
+      if (tip.result !== null && !hasAppliedResult) {
+        latestRunStatus = "needs_repair";
+      } else if (
+        hasAppliedResult &&
+        latestRun !== undefined &&
+        latestRun.lifecycle.status !== "terminal"
+      ) {
+        latestRunStatus = "finishing";
+      } else if (hasAppliedResult) {
+        latestRunStatus = "ready";
+      } else if (latestRun?.lifecycle.status === "starting") {
+        latestRunStatus = "starting";
+      } else if (latestRun?.lifecycle.status === "running") {
+        latestRunStatus = "running";
+      } else if (latestRun?.lifecycle.status === "terminal") {
+        switch (latestRun.lifecycle.terminal?.outcome ?? null) {
+          case "missing_permission":
+            latestRunStatus = "blocked";
+            break;
+          case "completed":
+            latestRunStatus = "missing_result";
+            break;
+          case "failed":
+            latestRunStatus = "failed";
+            break;
+          case "cancelled":
+            latestRunStatus = "cancelled";
+            break;
+          case "timed_out":
+            latestRunStatus = "timed_out";
+            break;
+          case "interrupted":
+            latestRunStatus = "interrupted";
+            break;
+          case null:
+            latestRunStatus = "needs_repair";
+            break;
+        }
+      }
+
+      return {
+        phase,
+        tip_mission_content_sha256: tip.mission.content_sha256,
+        has_applied_result: hasAppliedResult,
+        decision_kind:
+          tip.decision === null
+            ? null
+            : "selected_at" in tip.decision.receipt
+              ? "brainstorm_selection"
+              : "spec_approval",
+        latest_run_status: latestRunStatus,
+      };
+    } catch (error) {
+      if (
+        error instanceof ControllerConflictError &&
+        error.kind === "repair_required"
+      ) {
+        return repairSummary();
+      }
+      throw error;
+    }
   }
 
   private requireCurrentShapingArtifact(
@@ -4122,6 +4450,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
   private async projectAttention(
     source: ResolvedSource,
     workItem: WorkItem,
+    readShapingArtifacts: ReadShapingAttentionArtifacts,
   ): Promise<PortfolioAttentionItem | null> {
     const contract = workItem.goal.goal_contract;
     const state = workItem.state;
@@ -4137,7 +4466,11 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     }
 
     const attention =
-      state.attention ?? this.phaseApprovalAttention(workItem);
+      state.attention ??
+      (await this.phaseApprovalAttention(
+        workItem,
+        readShapingArtifacts,
+      ));
     if (attention === null) {
       return null;
     }
@@ -4225,11 +4558,122 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     });
   }
 
-  private phaseApprovalAttention(workItem: WorkItem): WorkItemAttention | null {
-    const state = workItem.state;
+  private async projectShapingAttention(
+    source: ResolvedSource,
+    workItem: WorkItem,
+    readShapingArtifacts: ReadShapingAttentionArtifacts,
+  ): Promise<Extract<PortfolioNeedsYouEntry, { kind: "shaping" }> | null> {
     if (
-      state.phase !== "spec" &&
-      state.phase !== "plan"
+      source.source_id === INBOX_SOURCE_ID ||
+      workItem.state.status !== "active" ||
+      workItem.state.phase !== "spec"
+    ) {
+      return null;
+    }
+
+    try {
+      const { artifacts, runs } = await readShapingArtifacts();
+      const tip = this.resolveShapingTip(
+        workItem.goal.work_item_id,
+        "spec",
+        artifacts,
+      );
+      const shapingState = this.shapingDecisionState(
+        workItem,
+        artifacts,
+        runs,
+      );
+      if (
+        tip === null ||
+        tip.result === null ||
+        tip.import_receipt?.outcome !== "applied" ||
+        tip.production_receipt === null ||
+        tip.applied_marker === null ||
+        tip.decision !== null ||
+        shapingState.active_shaping_run_id !== null
+      ) {
+        return null;
+      }
+      const shapingAttention = shapingAttentionV1Schema.parse({
+        schema_version: 1,
+        kind: "spec_approval_shaping",
+        work_item_id: workItem.goal.work_item_id,
+        source_id: source.source_id,
+        phase: "spec",
+        question: "A Spec result is ready for your approval.",
+        recommendation: "Open the item and use Approve & run Plan.",
+        binding: {
+          mission_content_sha256: tip.mission.content_sha256,
+          applied_result_content_sha256: tip.result.result_content_sha256,
+          shaping_state_sha256: hashShapingDecisionState(shapingState),
+        },
+        pins: {
+          artifact_paths: [
+            posix.dirname(tip.mission_path),
+            posix.dirname(tip.result.result_path),
+          ],
+        },
+        created_at: tip.applied_marker.committed_at,
+      });
+      return {
+        kind: "shaping",
+        item: this.toPortfolioItem(source, workItem),
+        shaping_attention: shapingAttention,
+      };
+    } catch (error) {
+      if (
+        error instanceof ControllerConflictError &&
+        error.kind === "repair_required"
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async phaseApprovalAttention(
+    workItem: WorkItem,
+    readShapingArtifacts: ReadShapingAttentionArtifacts,
+  ): Promise<WorkItemAttention | null> {
+    const state = workItem.state;
+    if (state.phase !== "spec") {
+      return null;
+    }
+    let tip: StoredShapingArtifact | null;
+    let runs: ShapingRunRecordV1[];
+    let artifacts: StoredShapingArtifact[];
+    let shapingState: ShapingDecisionState;
+    try {
+      const snapshot = await readShapingArtifacts();
+      runs = snapshot.runs;
+      artifacts = snapshot.artifacts;
+      tip = this.resolveShapingTip(
+        workItem.goal.work_item_id,
+        "spec",
+        artifacts,
+      );
+      shapingState = this.shapingDecisionState(
+        workItem,
+        artifacts,
+        runs,
+      );
+    } catch (error) {
+      if (
+        error instanceof ControllerConflictError &&
+        error.kind === "repair_required"
+      ) {
+        return null;
+      }
+      throw error;
+    }
+    if (
+      tip === null ||
+      tip.result === null ||
+      tip.import_receipt?.outcome !== "applied" ||
+      tip.production_receipt === null ||
+      tip.applied_marker === null ||
+      tip.decision !== null ||
+      shapingState.active_shaping_run_id !== null
     ) {
       return null;
     }
@@ -4240,32 +4684,17 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       patch_cycle: state.patch_cycle!,
     };
     const artifactPaths = [
-      `.founder/work-items/${state.work_item_id}/goal.yaml`,
-      `.founder/work-items/${state.work_item_id}/state.json`,
+      tip.mission_path,
+      tip.result.result_path,
     ] as [string, ...string[]];
-    return workItemAttentionSchema.parse(
-      state.phase === "spec"
-        ? {
-            kind: "spec_approval",
-            question:
-              "Does the current goal contract authorize planning this work?",
-            recommendation:
-              "Open the item and approve its existing transition to Plan.",
-            created_at: state.updated_at,
-            governed_tuple: tuple,
-            pins: { artifact_paths: artifactPaths, evidence_paths: [] },
-          }
-        : {
-            kind: "plan_approval",
-            question:
-              "Does the current goal contract and allowed scope authorize execution?",
-            recommendation:
-              "Open the item and approve its existing transition to Execute.",
-            created_at: state.updated_at,
-            governed_tuple: tuple,
-            pins: { artifact_paths: artifactPaths, evidence_paths: [] },
-          },
-    );
+    return workItemAttentionSchema.parse({
+      kind: "spec_approval",
+      question: "Does the current goal contract authorize planning this work?",
+      recommendation: "Open the item and use Approve & run Plan.",
+      created_at: tip.applied_marker.committed_at,
+      governed_tuple: tuple,
+      pins: { artifact_paths: artifactPaths, evidence_paths: [] },
+    });
   }
 
   private resolveConnectedCapabilityEnvelope(
@@ -4479,7 +4908,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     }
     if (result.outcome === "missing_permission") {
       return {
-        outcome: "failed" as const,
+        outcome: "missing_permission" as const,
         partial: true,
         reason:
           "The artifact-only shaping runtime denied a mediated request outside its single-ingress write policy.",

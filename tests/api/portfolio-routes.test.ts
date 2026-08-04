@@ -1089,13 +1089,16 @@ describe("portfolio API routes", () => {
     };
     const attention = [
       {
-        item: { source_id: sourceId, project: null },
-        attention: { kind: "patch_plan_approval" },
-        acceptance_criteria: [],
-        verification: { status: "unknown", commands: [] },
-        findings: [],
-        patch_cycle_limit: 3,
-        cost_capacity: "unknown",
+        kind: "governed",
+        entry: {
+          item: { source_id: sourceId, project: null },
+          attention: { kind: "patch_plan_approval" },
+          acceptance_criteria: [],
+          verification: { status: "unknown", commands: [] },
+          findings: [],
+          patch_cycle_limit: 3,
+          cost_capacity: "unknown",
+        },
       },
     ];
     const compilePatchMission = vi.fn().mockResolvedValue(mission);

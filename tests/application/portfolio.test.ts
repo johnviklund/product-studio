@@ -2021,6 +2021,16 @@ describe("PortfolioService", () => {
       const listing = await service.listShapingArtifacts(sourceId, workItemId);
       return currentPhaseArtifact(listing.artifacts, "brainstorm").result !== null;
     }).toBe(true);
+    await expect.poll(async () => {
+      const listing = await service.listShapingArtifacts(sourceId, workItemId);
+      const run = listing.runs.find(
+        (candidate) => candidate.shaping_run_id === shapingRunId,
+      );
+      return (
+        run?.lifecycle.status === "terminal" &&
+        run.lifecycle.terminal_outcome === "completed"
+      );
+    }).toBe(true);
     const listing = await service.listShapingArtifacts(sourceId, workItemId);
     const artifact = currentPhaseArtifact(listing.artifacts, "brainstorm");
     const run = listing.runs.find(
@@ -2374,9 +2384,17 @@ describe("PortfolioService", () => {
         shaping_run_id: runId,
         lifecycle: expect.objectContaining({
           status: "terminal",
-          terminal_outcome: "failed",
+          terminal_outcome: "missing_permission",
         }),
         diagnostics: expect.objectContaining({ count: 1 }),
+      }),
+    );
+    expect(await service.list()).toContainEqual(
+      expect.objectContaining({
+        source_id: sourceId,
+        shaping_summary: expect.objectContaining({
+          latest_run_status: "blocked",
+        }),
       }),
     );
     expect(await service.listAttention()).toEqual([]);
@@ -3358,16 +3376,21 @@ describe("PortfolioService", () => {
     });
     await expect.poll(async () => {
       const attention = await connectedService.listAttention();
-      return attention[0]?.attention.kind;
+      return attention[0]?.kind === "governed"
+        ? attention[0].entry.attention.kind
+        : null;
     }).toBe("missing_permission");
     const attention = (await connectedService.listAttention())[0]!;
     expect(attention).toMatchObject({
-      item: { source_id: sourceId },
-      attention: {
-        kind: "missing_permission",
-        operation: {
-          connected_run_id: launched.connected_run.connected_run_id,
-          operation_sha256: hashCanonicalCapabilityRequest(deniedOperation),
+      kind: "governed",
+      entry: {
+        item: { source_id: sourceId },
+        attention: {
+          kind: "missing_permission",
+          operation: {
+            connected_run_id: launched.connected_run.connected_run_id,
+            operation_sha256: hashCanonicalCapabilityRequest(deniedOperation),
+          },
         },
       },
     });
@@ -3462,7 +3485,14 @@ describe("PortfolioService", () => {
       },
     ];
     const index = new SQLitePortfolioIndex(":memory:");
-    const { service } = await createService(index, () => repository);
+    const { service } = await createService(index, (workspacePath) =>
+      workspacePath === root
+        ? repository
+        : new ProductWorkspace(workspacePath, {
+            git: controllerGit,
+            verificationRunner: controllerRunner,
+          }),
+    );
     const registration = await service.register({ workspace_path: root });
     const rebuildSpy = vi.spyOn(index, "rebuild");
     rebuildSpy.mockClear();
@@ -3790,29 +3820,32 @@ describe("PortfolioService", () => {
     const rebuildCallsBeforeAttention = index.rebuild.mock.calls.length;
     expect(await service.listAttention()).toMatchObject([
       {
-        item: {
-          source_id: sourceId,
-          work_item: {
-            goal: { work_item_id: created.goal.work_item_id },
+        kind: "governed",
+        entry: {
+          item: {
+            source_id: sourceId,
+            work_item: {
+              goal: { work_item_id: created.goal.work_item_id },
+            },
           },
-        },
-        attention: {
-          kind: "patch_plan_approval",
-          governed_tuple: { patch_cycle: 0 },
-        },
-        acceptance_criteria: [
-          {
-            criterion: "The mission package is reproducible",
-            status: "needs_attention",
+          attention: {
+            kind: "patch_plan_approval",
+            governed_tuple: { patch_cycle: 0 },
           },
-        ],
-        verification: {
-          status: "passed",
-          commands: [{ name: "Tests", status: "passed" }],
+          acceptance_criteria: [
+            {
+              criterion: "The mission package is reproducible",
+              status: "needs_attention",
+            },
+          ],
+          verification: {
+            status: "passed",
+            commands: [{ name: "Tests", status: "passed" }],
+          },
+          findings: [{ finding_id: "F-portfolio-1" }],
+          patch_cycle_limit: 3,
+          cost_capacity: "unknown",
         },
-        findings: [{ finding_id: "F-portfolio-1" }],
-        patch_cycle_limit: 3,
-        cost_capacity: "unknown",
       },
     ]);
     expect(index.rebuild).toHaveBeenCalledTimes(rebuildCallsBeforeAttention);
@@ -4004,9 +4037,12 @@ describe("PortfolioService", () => {
     });
     expect(await service.listAttention()).toMatchObject([
       {
-        attention: { kind: "review_ready" },
-        findings: [],
-        acceptance_criteria: [{ status: "reviewed" }],
+        kind: "governed",
+        entry: {
+          attention: { kind: "review_ready" },
+          findings: [],
+          acceptance_criteria: [{ status: "reviewed" }],
+        },
       },
     ]);
     index.close();
@@ -4051,7 +4087,7 @@ describe("PortfolioService", () => {
     index.close();
   });
 
-  it("projects one durable approval decision for each active Spec and Plan item", async () => {
+  it("does not synthesize approval attention without a ready Spec result or for Plan", async () => {
     const root = await createWorkspace("Phase Approval Attention");
     const repository = new ProductWorkspace(root);
     const specItem = await repository.create({
@@ -4071,32 +4107,244 @@ describe("PortfolioService", () => {
 
     const attention = await service.listAttention();
 
-    expect(attention.map((item) => item.attention.kind).sort()).toEqual([
-      "plan_approval",
-      "spec_approval",
-    ]);
-    expect(attention).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          attention: expect.objectContaining({
-            kind: "spec_approval",
-            question:
-              "Does the current goal contract authorize planning this work?",
-          }),
-          verification: { status: "unknown", commands: [] },
-          findings: [],
-          cost_capacity: "unknown",
-        }),
-        expect.objectContaining({
-          attention: expect.objectContaining({
-            kind: "plan_approval",
-            question:
-              "Does the current goal contract and allowed scope authorize execution?",
-          }),
-        }),
-      ]),
-    );
+    expect(attention).toEqual([]);
     expect(index.rebuild).toHaveBeenCalledTimes(rebuildCallsBeforeAttention);
+    index.close();
+  });
+
+  it("projects one bound Spec shaping decision and invalidates it from durable state", async () => {
+    const root = await createWorkspace("Shaping Attention Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Approve one ready Spec result",
+      type: "Feature",
+    });
+    const index = createMemoryIndex();
+    const { service } = await createService(index, () => repository);
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+
+    await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "manual",
+      next_requested_model: null,
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    await applyManualShapingResult(
+      service,
+      root,
+      sourceId,
+      workItemId,
+      "brainstorm",
+    );
+    const brainstormReady = await service.listShapingArtifacts(
+      sourceId,
+      workItemId,
+    );
+    const brainstormTip = currentPhaseArtifact(
+      brainstormReady.artifacts,
+      "brainstorm",
+    );
+    await service.useBrainstormResult(sourceId, workItemId, {
+      launch_mode: "manual",
+      next_requested_model: null,
+      expected_mission_content_sha256: brainstormTip.mission.content_sha256,
+      expected_result_content_sha256:
+        brainstormTip.result!.result_content_sha256,
+      expected_shaping_state_sha256:
+        brainstormReady.expected_shaping_state_sha256,
+    });
+
+    await expect(service.listAttention()).resolves.toEqual([]);
+    const firstApplied = await applyManualShapingResult(
+      service,
+      root,
+      sourceId,
+      workItemId,
+      "spec",
+    );
+    if (
+      firstApplied.imported.outcome !== "applied" ||
+      !("proposal" in firstApplied.imported.result)
+    ) {
+      throw new Error("Expected one applied Spec result.");
+    }
+    const firstReady = await service.listShapingArtifacts(sourceId, workItemId);
+    const firstTip = currentPhaseArtifact(firstReady.artifacts, "spec");
+    const [shapingEntry] = await service.listAttention();
+    expect(shapingEntry).toMatchObject({
+      kind: "shaping",
+      item: {
+        source_id: sourceId,
+        work_item: {
+          goal: { work_item_id: workItemId },
+          state: { phase: "spec", status: "active" },
+        },
+      },
+      shaping_attention: {
+        schema_version: 1,
+        kind: "spec_approval_shaping",
+        work_item_id: workItemId,
+        source_id: sourceId,
+        recommendation: "Open the item and use Approve & run Plan.",
+        binding: {
+          mission_content_sha256: firstTip.mission.content_sha256,
+          applied_result_content_sha256:
+            firstTip.result!.result_content_sha256,
+          shaping_state_sha256: firstReady.expected_shaping_state_sha256,
+        },
+      },
+    });
+    expect(shapingEntry).not.toHaveProperty("entry");
+    const artifactListing = vi.spyOn(repository, "listShapingArtifacts");
+    artifactListing.mockClear();
+    expect(
+      (await service.list()).find(
+        (item) => item.work_item.goal.work_item_id === workItemId,
+      ),
+    ).toMatchObject({
+      shaping_summary: {
+        phase: "spec",
+        has_applied_result: true,
+        decision_kind: null,
+        latest_run_status: "ready",
+      },
+    });
+    expect(artifactListing).toHaveBeenCalledOnce();
+
+    const resultPath = join(root, firstTip.result!.result_path);
+    const originalResultSource = firstTip.result!.result_source;
+    await writeFile(resultPath, `${originalResultSource} `, "utf8");
+    await expect(service.listAttention()).resolves.toEqual([]);
+    expect(
+      (await service.list()).find(
+        (item) => item.work_item.goal.work_item_id === workItemId,
+      ),
+    ).toMatchObject({
+      shaping_summary: { latest_run_status: "needs_repair" },
+    });
+    await writeFile(resultPath, originalResultSource, "utf8");
+
+    const goalPath = join(
+      root,
+      ".founder",
+      "work-items",
+      workItemId,
+      "goal.yaml",
+    );
+    const statePath = join(
+      root,
+      ".founder",
+      "work-items",
+      workItemId,
+      "state.json",
+    );
+    const originalGoalSource = await readFile(goalPath, "utf8");
+    const originalStateSource = await readFile(statePath, "utf8");
+    const current = await repository.read(workItemId);
+    if (current === null) {
+      throw new Error("Expected the current Spec work item.");
+    }
+    const governedContract = goalContractFromSpecProposal(
+      firstApplied.imported.result.proposal,
+      1,
+    );
+    await writeFile(
+      goalPath,
+      stringify({ ...current.goal, goal_contract: governedContract }),
+      "utf8",
+    );
+    await writeFile(
+      statePath,
+      `${JSON.stringify(
+        {
+          ...current.state,
+          goal_version: 1,
+          input_revision: 1,
+          attempt: 0,
+          patch_cycle: 0,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await expect(service.listAttention()).resolves.toMatchObject([
+      {
+        kind: "governed",
+        entry: {
+          attention: {
+            kind: "spec_approval",
+            recommendation: "Open the item and use Approve & run Plan.",
+          },
+        },
+      },
+    ]);
+    await writeFile(goalPath, originalGoalSource, "utf8");
+    await writeFile(statePath, originalStateSource, "utf8");
+
+    await service.requestShapingChanges(sourceId, workItemId, {
+      launch_mode: "manual",
+      next_requested_model: null,
+      expected_mission_content_sha256: firstTip.mission.content_sha256,
+      expected_result_content_sha256:
+        firstTip.result!.result_content_sha256,
+      expected_shaping_state_sha256: firstReady.expected_shaping_state_sha256,
+      feedback: "Narrow the ready Spec before approval.",
+    });
+    await expect(service.listAttention()).resolves.toEqual([]);
+
+    const revisedApplied = await applyManualShapingResult(
+      service,
+      root,
+      sourceId,
+      workItemId,
+      "spec",
+    );
+    if (
+      revisedApplied.imported.outcome !== "applied" ||
+      !("proposal" in revisedApplied.imported.result)
+    ) {
+      throw new Error("Expected one revised applied Spec result.");
+    }
+    const revisedReady = await service.listShapingArtifacts(
+      sourceId,
+      workItemId,
+    );
+    const revisedTip = currentPhaseArtifact(revisedReady.artifacts, "spec");
+    await service.approveSpecResult(sourceId, workItemId, {
+      launch_mode: "manual",
+      next_requested_model: null,
+      expected_mission_content_sha256: revisedTip.mission.content_sha256,
+      expected_result_content_sha256:
+        revisedTip.result!.result_content_sha256,
+      expected_shaping_state_sha256:
+        revisedReady.expected_shaping_state_sha256,
+      goal_contract_sha256: hashGoalContract(
+        goalContractFromSpecProposal(
+          revisedApplied.imported.result.proposal,
+          1,
+        ),
+      ),
+    });
+    await expect(service.listAttention()).resolves.toEqual([]);
+    expect(
+      (await service.list()).find(
+        (item) => item.work_item.goal.work_item_id === workItemId,
+      ),
+    ).toMatchObject({
+      work_item: { state: { phase: "plan" } },
+      shaping_summary: {
+        phase: "plan",
+        has_applied_result: false,
+        latest_run_status: null,
+      },
+    });
     index.close();
   });
 
@@ -4130,17 +4378,9 @@ describe("PortfolioService", () => {
     const invalidRegistration = await service.register({
       workspace_path: invalidRoot,
     });
-    const validRegistration = await service.register({ workspace_path: validRoot });
+    await service.register({ workspace_path: validRoot });
 
-    await expect(service.listAttention()).resolves.toMatchObject([
-      {
-        item: {
-          source_id: validRegistration.workspace.workspace_id,
-          work_item: { goal: { work_item_id: validItem.goal.work_item_id } },
-        },
-        attention: { kind: "spec_approval" },
-      },
-    ]);
+    await expect(service.listAttention()).resolves.toEqual([]);
     await expect(service.listAttention()).resolves.not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({

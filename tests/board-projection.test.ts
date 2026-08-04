@@ -290,9 +290,9 @@ describe("board projection", () => {
     expect(targetPhaseForColumn("todo")).toBe("brainstorm");
     expect(targetPhaseForColumn("review")).toBe("review");
     expect(resolveBoardDrop("idea", "todo")).toEqual({
-      ok: true,
-      changed: false,
-      target_phase: "idea",
+      ok: false,
+      reason:
+        "Open the item and use Start Brainstorm. The controller publishes the Brainstorm mission and starts the run in one action; if no model is available, use the manual recovery mode of the same action.",
     });
     expect(resolveBoardDrop("test", "review")).toEqual({
       ok: true,
@@ -308,9 +308,8 @@ describe("board projection", () => {
     expect(validatePhaseTransition("test", "ship")).toEqual({ ok: true });
     expect(validatePhaseTransition("learn", "ship")).toEqual({ ok: true });
     expect(resolveBoardDrop("plan", "execute")).toEqual({
-      ok: true,
-      changed: true,
-      target_phase: "execute",
+      ok: false,
+      reason: "Execute approval is not part of this slice.",
     });
 
     expect(validatePhaseTransition("idea", "plan")).toEqual({
@@ -326,6 +325,49 @@ describe("board projection", () => {
       reason: "Move from Plan to Ship is not allowed; move one column at a time.",
     });
   });
+
+  it.each([
+    [
+      "idea",
+      "todo",
+      "Open the item and use Start Brainstorm. The controller publishes the Brainstorm mission and starts the run in one action; if no model is available, use the manual recovery mode of the same action.",
+    ],
+    [
+      "brainstorm",
+      "spec",
+      "Open the item and use Use result & run Spec. The Spec input must be a real Brainstorm selection.",
+    ],
+    [
+      "spec",
+      "plan",
+      "Open the item and use Approve & run Plan. Approval writes the governed goal contract.",
+    ],
+    [
+      "idea",
+      "spec",
+      "Spec requires a Brainstorm selection; there is no direct-Spec input in this slice. A direct-Spec input variant is separate scope.",
+    ],
+    [
+      "spec",
+      "todo",
+      "Use Request changes on Spec; it creates a new revision in place instead of reopening a decided one.",
+    ],
+    [
+      "plan",
+      "spec",
+      "Use Request changes on Plan; it creates a new revision in place instead of reopening a decided one.",
+    ],
+    [
+      "plan",
+      "execute",
+      "Execute approval is not part of this slice.",
+    ],
+  ] as const)(
+    "refuses the dedicated or closed %s drop into %s",
+    (phase, column, reason) => {
+      expect(resolveBoardDrop(phase, column)).toEqual({ ok: false, reason });
+    },
+  );
 
   it("provides one phase-derived next action", () => {
     expect(nextActionForPhase("idea")).toBe("Brainstorm the idea");
@@ -2248,25 +2290,23 @@ describe("board projection", () => {
         expect(targetIndex).not.toBe(sourceIndex);
       }
 
-      expect(actions.forward === null || actions.back === null).toBe(
-        phase === "idea" ||
-          phase === "brainstorm" ||
-          phase === "patch" ||
-          phase === "learn",
-      );
     }
 
-    expect(boardTransitionActionsForPhase("idea")).toMatchObject({
-      forward: { target_column_id: "spec", target_phase: "spec" },
+    expect(boardTransitionActionsForPhase("idea")).toEqual({
+      forward: null,
       back: null,
     });
-    expect(boardTransitionActionsForPhase("brainstorm")).toMatchObject({
-      forward: { target_column_id: "spec", target_phase: "spec" },
+    expect(boardTransitionActionsForPhase("brainstorm")).toEqual({
+      forward: null,
       back: null,
     });
-    expect(boardTransitionActionsForPhase("spec")).toMatchObject({
-      forward: { target_column_id: "plan", target_phase: "plan" },
-      back: { target_column_id: "todo", target_phase: "brainstorm" },
+    expect(boardTransitionActionsForPhase("spec")).toEqual({
+      forward: null,
+      back: null,
+    });
+    expect(boardTransitionActionsForPhase("plan")).toEqual({
+      forward: null,
+      back: null,
     });
     expect(boardTransitionActionsForPhase("test")).toMatchObject({
       forward: { target_column_id: "ship", target_phase: "ship" },

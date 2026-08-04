@@ -22,6 +22,7 @@ import type {
   PortfolioWorkItem,
   RegisteredWorkspace,
 } from "@/src/domain/portfolio";
+import type { PortfolioListItem } from "@/src/application/portfolio";
 import {
   BOARD_COLUMNS,
   BOARD_VIEW_STORAGE_KEY,
@@ -49,7 +50,7 @@ interface WorkspacesResponse {
 }
 
 interface WorkItemsResponse {
-  items: PortfolioWorkItem[];
+  items: PortfolioListItem[];
 }
 
 interface ErrorResponse {
@@ -62,6 +63,15 @@ interface TransitionMessage {
   kind: "success" | "error";
   text: string;
 }
+
+export type BoardTransitionRequestResult =
+  | { kind: "refused"; item: PortfolioWorkItem; reason: string }
+  | { kind: "unchanged"; item: PortfolioWorkItem }
+  | {
+      kind: "requested";
+      item: PortfolioWorkItem;
+      response: Response;
+    };
 
 type PanelState =
   | { kind: "capture" }
@@ -93,6 +103,35 @@ async function readJson<T>(response: Response): Promise<T> {
     throw new Error(`Request failed with status ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+export async function requestBoardTransition(
+  item: PortfolioWorkItem,
+  targetColumnId: BoardColumnId,
+  request: typeof fetch,
+  onRequestStart: () => void = () => undefined,
+): Promise<BoardTransitionRequestResult> {
+  const resolution = resolveBoardDrop(
+    item.work_item.state.phase,
+    targetColumnId,
+  );
+  if (!resolution.ok) {
+    return { kind: "refused", item, reason: resolution.reason };
+  }
+  if (!resolution.changed) {
+    return { kind: "unchanged", item };
+  }
+
+  onRequestStart();
+  const response = await request(
+    `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(item.work_item.goal.work_item_id)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target_phase: resolution.target_phase }),
+    },
+  );
+  return { kind: "requested", item, response };
 }
 
 function scopeLabel(view: BoardView, workspaces: RegisteredWorkspace[]): string {
@@ -135,13 +174,13 @@ function linkedBoardIdentity(): BoardItemIdentity | null {
 }
 
 export function KanbanBoard() {
-  const [items, setItems] = useState<PortfolioWorkItem[]>([]);
+  const [items, setItems] = useState<PortfolioListItem[]>([]);
   const [workspaces, setWorkspaces] = useState<RegisteredWorkspace[]>([]);
   const [view, setView] = useState<BoardView>(createDefaultBoardView);
   const [viewReady, setViewReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeItem, setActiveItem] = useState<PortfolioWorkItem | null>(null);
+  const [activeItem, setActiveItem] = useState<PortfolioListItem | null>(null);
   const [pendingItemKey, setPendingItemKey] = useState<string | null>(null);
   const [transitionMessage, setTransitionMessage] =
     useState<TransitionMessage | null>(null);
@@ -152,6 +191,7 @@ export function KanbanBoard() {
   const scrollPositionRef = useRef(view.scroll);
   const scrollSaveFrameRef = useRef<number | null>(null);
   const viewRef = useRef(view);
+  const loadRequestGenerationRef = useRef(0);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor),
@@ -163,6 +203,7 @@ export function KanbanBoard() {
   }, []);
 
   const loadPortfolio = useCallback(async () => {
+    const requestGeneration = ++loadRequestGenerationRef.current;
     setLoading(true);
     setError(null);
 
@@ -175,6 +216,9 @@ export function KanbanBoard() {
         readJson<WorkspacesResponse>(workspacesResponse),
         readJson<WorkItemsResponse>(itemsResponse),
       ]);
+      if (requestGeneration !== loadRequestGenerationRef.current) {
+        return;
+      }
       setWorkspaces(workspaceData.workspaces);
       setItems(itemData.items);
       if (!linkedItemHandledRef.current) {
@@ -203,13 +247,18 @@ export function KanbanBoard() {
         }
       }
     } catch (loadError) {
+      if (requestGeneration !== loadRequestGenerationRef.current) {
+        return;
+      }
       setError(
         loadError instanceof Error
           ? loadError.message
           : "Unable to load the portfolio",
       );
     } finally {
-      setLoading(false);
+      if (requestGeneration === loadRequestGenerationRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -219,6 +268,7 @@ export function KanbanBoard() {
 
   useEffect(
     () => () => {
+      loadRequestGenerationRef.current += 1;
       if (scrollSaveFrameRef.current !== null) {
         cancelAnimationFrame(scrollSaveFrameRef.current);
       }
@@ -292,7 +342,7 @@ export function KanbanBoard() {
   );
 
   const itemsByColumn = useMemo(() => {
-    const grouped = new Map<string, PortfolioWorkItem[]>();
+    const grouped = new Map<string, PortfolioListItem[]>();
     for (const column of BOARD_COLUMNS) {
       grouped.set(column.id, []);
     }
@@ -303,7 +353,7 @@ export function KanbanBoard() {
   }, [visibleItems]);
 
   const itemsByIdentity = useMemo(() => {
-    const mapped = new Map<string, PortfolioWorkItem>();
+    const mapped = new Map<string, PortfolioListItem>();
     for (const item of items) {
       mapped.set(
         boardItemIdentityKey({
@@ -387,6 +437,7 @@ export function KanbanBoard() {
       ),
     );
     setTransitionMessage({ kind: "success", text: message });
+    void loadPortfolio();
   }
 
   function handleCaptureAssigned(
@@ -436,38 +487,33 @@ export function KanbanBoard() {
     item: PortfolioWorkItem,
     targetColumnId: BoardColumnId,
   ): Promise<void> {
-    const resolution = resolveBoardDrop(
-      item.work_item.state.phase,
-      targetColumnId,
-    );
-    if (!resolution.ok) {
-      setTransitionMessage({ kind: "error", text: resolution.reason });
-      return;
-    }
-    if (!resolution.changed) {
-      setTransitionMessage({
-        kind: "success",
-        text: `Already in ${boardColumnForPhase(item.work_item.state.phase).label}.`,
-      });
-      return;
-    }
-
     const itemKey = boardItemIdentityKey({
       source_id: item.source_id,
       work_item_id: item.work_item.goal.work_item_id,
     });
-    setPendingItemKey(itemKey);
-    setTransitionMessage(null);
 
     try {
-      const response = await fetch(
-        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(item.work_item.goal.work_item_id)}`,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ target_phase: resolution.target_phase }),
+      const transition = await requestBoardTransition(
+        item,
+        targetColumnId,
+        fetch,
+        () => {
+          setPendingItemKey(itemKey);
+          setTransitionMessage(null);
         },
       );
+      if (transition.kind === "refused") {
+        setTransitionMessage({ kind: "error", text: transition.reason });
+        return;
+      }
+      if (transition.kind === "unchanged") {
+        setTransitionMessage({
+          kind: "success",
+          text: `Already in ${boardColumnForPhase(item.work_item.state.phase).label}.`,
+        });
+        return;
+      }
+      const response = transition.response;
       const body = (await response.json()) as PortfolioWorkItem & ErrorResponse;
       if (!response.ok) {
         setTransitionMessage({
@@ -491,6 +537,7 @@ export function KanbanBoard() {
         kind: "success",
         text: `Moved to ${boardColumnForPhase(body.work_item.state.phase).label}.`,
       });
+      void loadPortfolio();
     } catch {
       setTransitionMessage({
         kind: "error",

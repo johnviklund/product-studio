@@ -1,15 +1,21 @@
 import { useCallback, useRef, type KeyboardEvent } from "react";
 import { useDraggable } from "@dnd-kit/core";
 
-import type { PortfolioWorkItem } from "@/src/domain/portfolio";
+import type { PortfolioListItem } from "@/src/application/portfolio";
 import {
   boardItemIdentityKey,
   nextActionForPhase,
+  shapingCardStateForItem,
   type BoardItemIdentity,
 } from "@/src/presentation/board";
 
+type BoardCardStateInput = Pick<
+  PortfolioListItem["work_item"]["state"],
+  "phase" | "status" | "attention"
+>;
+
 interface BoardCardProps {
-  item: PortfolioWorkItem;
+  item: PortfolioListItem;
   selectedIdentity: BoardItemIdentity | null;
   onSelect: (identity: BoardItemIdentity) => void;
   previousIdentity?: BoardItemIdentity;
@@ -27,7 +33,7 @@ const updatedAtFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 function statusDotClass(
-  status: PortfolioWorkItem["work_item"]["state"]["status"],
+  status: PortfolioListItem["work_item"]["state"]["status"],
 ): string {
   switch (status) {
     case "active":
@@ -42,13 +48,23 @@ function statusDotClass(
 }
 
 export function nextActionForCardState(
-  state: Pick<
-    PortfolioWorkItem["work_item"]["state"],
-    "phase" | "status" | "attention"
-  >,
+  input:
+    | PortfolioListItem
+    | BoardCardStateInput,
 ): string {
+  const item = "work_item" in input ? input : null;
+  const state: BoardCardStateInput =
+    "work_item" in input ? input.work_item.state : input;
+  const shapingState = item === null ? null : shapingCardStateForItem(item);
+  if (shapingState !== null) {
+    return shapingState.next_action_label;
+  }
+  const phaseFallback =
+    state.phase === "plan"
+      ? "Review the plan result"
+      : nextActionForPhase(state.phase);
   if (state.status !== "active") {
-    return nextActionForPhase(state.phase);
+    return phaseFallback;
   }
   if (state.phase === "patch") {
     return "Compile or import the patch";
@@ -64,12 +80,13 @@ export function nextActionForCardState(
     case "review_ready":
       return "Review the result";
     default:
-      return nextActionForPhase(state.phase);
+      return phaseFallback;
   }
 }
 
-function BoardCardContent({ item }: { item: PortfolioWorkItem }) {
+function BoardCardContent({ item }: { item: PortfolioListItem }) {
   const { goal, state } = item.work_item;
+  const shapingState = shapingCardStateForItem(item);
 
   return (
     <>
@@ -90,14 +107,18 @@ function BoardCardContent({ item }: { item: PortfolioWorkItem }) {
           className={`size-1.5 shrink-0 rounded-full ${statusDotClass(state.status)}`}
           aria-hidden="true"
         />
-        <span>{state.phase}</span>
-        <span aria-hidden="true">·</span>
-        <span>{state.status}</span>
+        <span>{shapingState?.badge ?? state.phase}</span>
+        {shapingState === null ? (
+          <>
+            <span aria-hidden="true">·</span>
+            <span>{state.status}</span>
+          </>
+        ) : null}
       </span>
 
       <span className="mt-3 flex items-center justify-between gap-3 border-t pt-2.5">
         <span className="flex min-w-0 items-center text-xs text-foreground">
-          <span className="truncate">{nextActionForCardState(state)}</span>
+          <span className="truncate">{nextActionForCardState(item)}</span>
         </span>
         <time
           dateTime={state.updated_at}
@@ -187,7 +208,7 @@ export function BoardCard({
   );
 }
 
-export function BoardCardPreview({ item }: { item: PortfolioWorkItem }) {
+export function BoardCardPreview({ item }: { item: PortfolioListItem }) {
   return (
     <div className="kanban-drag-overlay w-[224px] rounded-md border border-[#3a404d] bg-card p-3 text-left">
       <BoardCardContent item={item} />

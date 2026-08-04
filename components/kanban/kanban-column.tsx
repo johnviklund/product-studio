@@ -1,6 +1,6 @@
 import { useDroppable } from "@dnd-kit/core";
 
-import type { PortfolioWorkItem } from "@/src/domain/portfolio";
+import type { PortfolioListItem } from "@/src/application/portfolio";
 import {
   boardItemIdentityKey,
   type BoardColumn,
@@ -11,7 +11,7 @@ import { BoardCard } from "./board-card";
 
 interface KanbanColumnProps {
   column: BoardColumn;
-  items: PortfolioWorkItem[];
+  items: PortfolioListItem[];
   loading: boolean;
   pendingItemKey: string | null;
   selectedIdentity: BoardItemIdentity | null;

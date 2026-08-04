@@ -4,7 +4,11 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowUpRight, RefreshCw } from "lucide-react";
 
-import type { PortfolioAttentionItem } from "@/src/application/portfolio";
+import type {
+  PortfolioAttentionItem,
+  PortfolioNeedsYouEntry,
+} from "@/src/application/portfolio";
+import type { PortfolioWorkItem } from "@/src/domain/portfolio";
 import type {
   WorkItemAttention,
   WorkItemAttentionKind,
@@ -21,14 +25,14 @@ import {
 import { WorkspaceRail } from "../workspace-rail";
 
 interface AttentionResponse {
-  items: PortfolioAttentionItem[];
+  items: PortfolioNeedsYouEntry[];
   error?: {
     message?: string;
   };
 }
 
 interface AttentionDecisionListProps {
-  items: PortfolioAttentionItem[];
+  items: PortfolioNeedsYouEntry[];
   totalCount: number;
 }
 
@@ -58,12 +62,16 @@ function formatElapsed(elapsedMs: number | undefined): string {
   return seconds === 0 ? `${minutes} min` : `${minutes} min ${seconds} sec`;
 }
 
-function boardHref(item: PortfolioAttentionItem): string {
+function boardHref(item: PortfolioWorkItem): string {
   const search = new URLSearchParams({
-    source: item.item.source_id,
-    item: item.item.work_item.goal.work_item_id,
+    source: item.source_id,
+    item: item.work_item.goal.work_item_id,
   });
   return `/?${search.toString()}`;
+}
+
+function workItemForEntry(entry: PortfolioNeedsYouEntry): PortfolioWorkItem {
+  return entry.kind === "governed" ? entry.entry.item : entry.item;
 }
 
 function statusLabel(value: string): string {
@@ -213,7 +221,7 @@ function AttentionDecision({ item }: { item: PortfolioAttentionItem }) {
           </p>
         </div>
         <Link
-          href={boardHref(item)}
+          href={boardHref(item.item)}
           className="flex h-9 shrink-0 items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
         >
           {recoveryLink ? "Open recovery" : "Open on board"}
@@ -340,6 +348,92 @@ function AttentionDecision({ item }: { item: PortfolioAttentionItem }) {
   );
 }
 
+function ShapingAttentionDecision({
+  entry,
+}: {
+  entry: Extract<PortfolioNeedsYouEntry, { kind: "shaping" }>;
+}) {
+  const { goal, state } = entry.item.work_item;
+  const attention = entry.shaping_attention;
+
+  return (
+    <article className="py-6 first:pt-0 last:pb-0">
+      <div className="flex items-start justify-between gap-5">
+        <div className="min-w-0">
+          <p className="text-[11px] font-medium tracking-[0.06em] text-warning uppercase">
+            Spec approval
+          </p>
+          <h2 className="mt-1 text-base font-semibold tracking-[-0.005em]">
+            {goal.title}
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {entry.item.project?.product_name ?? "Unassigned"} · {entry.item.source_id}
+          </p>
+        </div>
+        <Link
+          href={boardHref(entry.item)}
+          className="flex h-9 shrink-0 items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          Open on board
+          <ArrowUpRight className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
+        </Link>
+      </div>
+
+      <div className="mt-4 grid gap-3 border-l-2 border-warning bg-background px-4 py-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+        <div>
+          <h3 className="text-[11px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+            Decision
+          </h3>
+          <p className="mt-1 text-sm leading-6">{attention.question}</p>
+        </div>
+        <div>
+          <h3 className="text-[11px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+            Why now
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {attention.recommendation}
+          </p>
+        </div>
+      </div>
+
+      <dl className="mt-4 grid gap-3 border-y py-4 text-xs lg:grid-cols-3">
+        <div>
+          <dt className="text-muted-foreground">Mission hash</dt>
+          <dd className="mt-0.5 break-all">
+            {attention.binding.mission_content_sha256}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Applied result hash</dt>
+          <dd className="mt-0.5 break-all">
+            {attention.binding.applied_result_content_sha256}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Shaping state hash</dt>
+          <dd className="mt-0.5 break-all">
+            {attention.binding.shaping_state_sha256}
+          </dd>
+        </div>
+      </dl>
+
+      <div className="mt-4 border-t pt-4 text-xs">
+        <h3 className="font-medium">Exact artifacts</h3>
+        <ul className="mt-2 space-y-1.5 text-muted-foreground">
+          {attention.pins.artifact_paths.map((path) => (
+            <li key={path} className="break-all leading-5" title={path}>
+              {path}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <p className="mt-3 text-[11px] text-muted-foreground">
+        State · {state.phase}/{state.status} · result committed {attention.created_at}
+      </p>
+    </article>
+  );
+}
+
 export function AttentionDecisionList({
   items,
   totalCount,
@@ -369,18 +463,21 @@ export function AttentionDecisionList({
 
   return (
     <section className="divide-y" aria-label="Current attention decisions">
-      {items.map((item) => (
-        <AttentionDecision
-          key={`${item.item.source_id}:${item.item.work_item.goal.work_item_id}`}
-          item={item}
-        />
-      ))}
+      {items.map((entry) => {
+        const item = workItemForEntry(entry);
+        const key = `${item.source_id}:${item.work_item.goal.work_item_id}`;
+        return entry.kind === "governed" ? (
+          <AttentionDecision key={key} item={entry.entry} />
+        ) : (
+          <ShapingAttentionDecision key={key} entry={entry} />
+        );
+      })}
     </section>
   );
 }
 
 export function AttentionInbox() {
-  const [items, setItems] = useState<PortfolioAttentionItem[]>([]);
+  const [items, setItems] = useState<PortfolioNeedsYouEntry[]>([]);
   const [view, setView] = useState<BoardView>(createDefaultBoardView);
   const [scopeReady, setScopeReady] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -419,7 +516,10 @@ export function AttentionInbox() {
   }, [loadAttention]);
 
   const visibleItems = useMemo(
-    () => items.filter((item) => isBoardSourceVisible(item.item, view)),
+    () =>
+      items.filter((entry) =>
+        isBoardSourceVisible(workItemForEntry(entry), view),
+      ),
     [items, view],
   );
 
@@ -471,7 +571,7 @@ export function AttentionInbox() {
               <div>
                 <h2 className="text-sm font-semibold">Current decisions</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  One controller-projected decision per source-qualified work item.
+                  One current decision per source-qualified work item.
                 </p>
               </div>
               <p className="text-xs text-muted-foreground">

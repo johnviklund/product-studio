@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { PortfolioItemShapingSummary } from "../application/portfolio";
 import {
   workItemIdSchema,
   type GoalContract,
@@ -24,6 +25,7 @@ import type {
 } from "../domain/shaping";
 import {
   ALLOWED_PHASE_TRANSITIONS,
+  dedicatedTransitionPolicy,
   validatePhaseTransition as validateDomainPhaseTransition,
   type WorkflowTransitionResult,
 } from "../domain/workflow-policy";
@@ -617,6 +619,22 @@ export interface BoardItemLocation extends BoardItemIdentity {
   project: unknown | null;
 }
 
+export interface ShapingCardState {
+  badge: string;
+  next_action_label: string;
+}
+
+export interface ShapingCardItemInput {
+  source_id: string;
+  shaping_summary?: PortfolioItemShapingSummary;
+  work_item: {
+    state: {
+      phase: WorkItemPhase;
+      status: WorkItemStatus;
+    };
+  };
+}
+
 export interface BoardView {
   version: 1;
   project_source_ids: string[] | null;
@@ -704,12 +722,23 @@ export function resolveBoardDrop(
   targetColumnId: BoardColumnId,
 ): BoardDropResolution {
   const sourceColumn = boardColumnForPhase(sourcePhase);
+  const targetPhase = targetPhaseForColumn(targetColumnId);
+  const dedicatedPolicy = dedicatedTransitionPolicy(sourcePhase, targetPhase);
+
+  if (dedicatedPolicy.kind === "dedicated_operation_required") {
+    return {
+      ok: false,
+      reason: `Open the item and use ${dedicatedPolicy.action_label}. ${dedicatedPolicy.explanation}`,
+    };
+  }
+  if (dedicatedPolicy.kind === "closed_in_slice") {
+    return { ok: false, reason: dedicatedPolicy.explanation };
+  }
 
   if (sourceColumn.id === targetColumnId) {
     return { ok: true, changed: false, target_phase: sourcePhase };
   }
 
-  const targetPhase = targetPhaseForColumn(targetColumnId);
   const transition = validatePhaseTransition(sourcePhase, targetPhase);
 
   if (!transition.ok) {
@@ -721,6 +750,74 @@ export function resolveBoardDrop(
 
 export function nextActionForPhase(phase: WorkItemPhase): string {
   return NEXT_ACTION_BY_PHASE[phase];
+}
+
+export function shapingCardStateForItem(
+  item: ShapingCardItemInput,
+): ShapingCardState | null {
+  const { phase, status } = item.work_item.state;
+  if (item.source_id === INBOX_SOURCE_ID || status !== "active") {
+    return null;
+  }
+  if (phase === "idea") {
+    return { badge: "Idea", next_action_label: "Start Brainstorm" };
+  }
+  if (phase !== "brainstorm" && phase !== "spec" && phase !== "plan") {
+    return null;
+  }
+
+  const label = phaseLabel(phase);
+  const summary = item.shaping_summary;
+  if (summary === undefined || summary.phase !== phase) {
+    return { badge: label, next_action_label: `Start ${label}` };
+  }
+  switch (summary.latest_run_status) {
+    case "starting":
+    case "running":
+    case "finishing":
+      return {
+        badge: `${label} · Active`,
+        next_action_label: `${label} running`,
+      };
+    case "blocked":
+      return {
+        badge: `${label} · Blocked`,
+        next_action_label: `Retry ${label}`,
+      };
+    case "failed":
+    case "timed_out":
+    case "cancelled":
+    case "interrupted":
+    case "missing_result":
+      return {
+        badge: `${label} · Failed`,
+        next_action_label: `Retry ${label}`,
+      };
+    case "needs_repair":
+      return {
+        badge: `${label} · Needs repair`,
+        next_action_label: "Open advanced recovery",
+      };
+    case "ready":
+    case null:
+      break;
+  }
+
+  if (summary.has_applied_result) {
+    const nextAction =
+      summary.decision_kind !== null
+        ? `Review the ${label.toLowerCase()} result`
+        : phase === "brainstorm"
+          ? "Use result & run Spec"
+          : phase === "spec"
+            ? "Approve & run Plan"
+            : "Review the plan result";
+    return {
+      badge: `${label} · Ready`,
+      next_action_label: nextAction,
+    };
+  }
+  return { badge: label, next_action_label: `Start ${label}` };
 }
 
 export function detailPanelModeForItem(item: {
