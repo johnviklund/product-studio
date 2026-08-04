@@ -5562,7 +5562,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       ingress_path: paths.relativeIngressPath,
       result_schema_version:
         snapshot.mission.result_contract.result_schema_version,
-      required_fields: snapshot.mission.result_contract.required_fields,
+      required_fields: [...snapshot.mission.result_contract.required_fields],
       max_result_bytes: SHAPING_INGRESS_MAX_BYTES,
       created_at: createdAt,
     };
