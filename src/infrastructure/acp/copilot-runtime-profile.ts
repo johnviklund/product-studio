@@ -267,6 +267,28 @@ function pathFromRawInput(
   };
 }
 
+function isCopilotUnrestrictedReadPermission(
+  request: acp.RequestPermissionRequest,
+): boolean {
+  if (request.toolCall.kind !== "read") {
+    return false;
+  }
+  const rawInput = isRecord(request.toolCall.rawInput)
+    ? request.toolCall.rawInput
+    : null;
+  const candidates = [
+    rawInput?.fileName,
+    rawInput?.path,
+    ...(request.toolCall.locations ?? []).map((location) => location.path),
+  ].filter((value): value is string => typeof value === "string");
+  const unique = [...new Set(candidates)];
+  return (
+    unique.length === 1 &&
+    unique[0]!.trim() !== "" &&
+    !unique[0]!.includes("\u0000")
+  );
+}
+
 function urlFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | null {
   if (!isRecord(rawInput) || typeof rawInput.url !== "string") {
     return null;
@@ -447,6 +469,7 @@ export function createCopilotRuntimeProfile(
       limits: input.limits,
       normalize_permission: (request) =>
         normalizeCopilotPermission(request, workspaceCwd),
+      allow_unrestricted_read: isCopilotUnrestrictedReadPermission,
       initialize_session: async (session) => {
         const initialModelOptions = session.config_options.filter(
           (option) => option.type === "select" && option.category === "model",

@@ -35,6 +35,9 @@ export interface AcpRuntimeProfile {
   readonly normalize_permission: (
     request: acp.RequestPermissionRequest,
   ) => CanonicalCapabilityRequest | null;
+  readonly allow_unrestricted_read?: (
+    request: acp.RequestPermissionRequest,
+  ) => boolean;
   readonly write_text_file?: AcpWriteTextFileHandler;
   readonly initialize_session?: (
     session: AcpSessionInitializer,
@@ -337,6 +340,7 @@ class AcpEvidenceRecorder {
   private sequence = 0;
   private previousEventSha256: string | null = null;
   private retainedBytes = 0;
+  private recordQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly sink: AcpEventSink,
@@ -345,6 +349,21 @@ class AcpEvidenceRecorder {
   ) {}
 
   async record(
+    kind: AcpEvidenceEvent["kind"],
+    payload: AcpEvidenceEvent["payload"],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const queued = this.recordQueue.then(() =>
+      this.recordNow(kind, payload, signal),
+    );
+    this.recordQueue = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
+  private async recordNow(
     kind: AcpEvidenceEvent["kind"],
     payload: AcpEvidenceEvent["payload"],
     signal?: AbortSignal,
@@ -593,6 +612,30 @@ class StdioAcpSession implements AcpSession {
   private async handlePermissionRequest(
     request: acp.RequestPermissionRequest,
   ): Promise<acp.RequestPermissionResponse> {
+    let unrestrictedRead = false;
+    try {
+      unrestrictedRead =
+        this.profile.allow_unrestricted_read?.(request) === true;
+    } catch {
+      unrestrictedRead = false;
+    }
+    if (unrestrictedRead) {
+      await this.recorder.record(
+        "permission",
+        {
+          decision: "unrestricted_read",
+          operation_sha256: null,
+          reason: null,
+        },
+        this.writeAbortController.signal,
+      );
+      const allowed = selectOption(request.options, "allow_once");
+      if (allowed.outcome.outcome !== "selected") {
+        throw new AcpClientError("ACP request did not offer one-run approval.");
+      }
+      return allowed;
+    }
+
     let normalized: CanonicalCapabilityRequest | null;
     try {
       normalized = this.profile.normalize_permission(request);

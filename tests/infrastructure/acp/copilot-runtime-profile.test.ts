@@ -364,6 +364,39 @@ describe("Copilot ACP runtime profile", () => {
     });
   });
 
+  it("recognizes only exact Copilot read requests as unrestricted reads", () => {
+    const profile = createCopilotRuntimeProfile(input()).runtime_profile;
+
+    expect(
+      profile.allow_unrestricted_read?.(
+        permission({
+          kind: "read",
+          rawInput: { path: "TASK.md" },
+          locations: [{ path: "TASK.md" }],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      profile.allow_unrestricted_read?.(
+        permission({
+          kind: "read",
+          rawInput: { path: "TASK.md" },
+          locations: [{ path: "different.md" }],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      profile.allow_unrestricted_read?.(
+        permission({ kind: "read", rawInput: {} }),
+      ),
+    ).toBe(false);
+    expect(
+      profile.allow_unrestricted_read?.(
+        permission({ kind: "edit", rawInput: { path: "TASK.md" } }),
+      ),
+    ).toBe(false);
+  });
+
   it("auto-allows a real in-workspace write and denies an escape through the real envelope seam", () => {
     const envelope = resolveCapabilityEnvelope(["src"], defaults);
 

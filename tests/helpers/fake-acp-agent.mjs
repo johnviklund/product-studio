@@ -38,6 +38,22 @@ const application = acp
     if (!Array.isArray(context.params.mcpServers) || context.params.mcpServers.length !== 0) {
       throw new Error("The client must request zero MCP servers.");
     }
+    if (
+      typeof scenario.session_new_notification_delay_ms === "number" &&
+      scenario.session_new_notification_delay_ms >= 0
+    ) {
+      setTimeout(() => {
+        void context.client
+          .notify(acp.methods.client.session.update, {
+            sessionId,
+            update: {
+              sessionUpdate: "available_commands_update",
+              availableCommands: [],
+            },
+          })
+          .catch(() => undefined);
+      }, scenario.session_new_notification_delay_ms);
+    }
     return {
       sessionId,
       ...(currentConfigOptions.length > 0
@@ -134,7 +150,11 @@ const application = acp
           sessionId,
           toolCall: {
             toolCallId: `tool-${index + 1}`,
-            kind: "execute",
+            kind:
+              Array.isArray(scenario.request_tool_kinds) &&
+              typeof scenario.request_tool_kinds[index] === "string"
+                ? scenario.request_tool_kinds[index]
+                : "execute",
             status: "pending",
             title: "Controlled capability request",
             rawInput: requests[index],

@@ -152,6 +152,28 @@ class DelayedRunFinishedSink extends MemoryEventSink {
   }
 }
 
+class RejectConcurrentAppendSink extends MemoryEventSink {
+  private appendInProgress = false;
+  maximumConcurrentAppends = 0;
+
+  override async append(
+    event: AcpEvidenceEvent,
+  ): Promise<{ limit_reached: boolean }> {
+    if (this.appendInProgress) {
+      this.maximumConcurrentAppends = 2;
+      throw new Error("Another event append is already in progress.");
+    }
+    this.appendInProgress = true;
+    this.maximumConcurrentAppends = Math.max(this.maximumConcurrentAppends, 1);
+    try {
+      await new Promise((resolveAppend) => setTimeout(resolveAppend, 20));
+      return await super.append(event);
+    } finally {
+      this.appendInProgress = false;
+    }
+  }
+}
+
 async function createRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-acp-client-"));
   createdRoots.push(root);
@@ -470,6 +492,80 @@ describe("stdio ACP client adapter", () => {
     });
     expect(writeTextFile).toHaveBeenCalledTimes(2);
     expect(maximumActiveWrites).toBe(1);
+  });
+
+  it("serializes startup evidence with concurrent session notifications", async () => {
+    const root = await createRoot();
+    const sink = new RejectConcurrentAppendSink();
+    const session = await new StdioAcpClientAdapter().start(
+      profile(
+        root,
+        { session_new_notification_delay_ms: 25 },
+        join(root, "concurrent-notification-sentinel"),
+      ),
+      sink,
+    );
+
+    await expect(session.run("Observe the concurrent notification.")).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(sink.maximumConcurrentAppends).toBe(1);
+    expect(sink.events.map((event) => event.sequence)).toEqual(
+      sink.events.map((_event, index) => index + 1),
+    );
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        kind: "session_update",
+        payload: expect.objectContaining({
+          update_kind: "available_commands_update",
+        }),
+      }),
+    );
+  });
+
+  it("allows an exact unrestricted read without invoking the capability evaluator", async () => {
+    const root = await createRoot();
+    const evaluator = vi.fn(() => ({
+      decision: "reject_once" as const,
+      reason: "request_kind_forbidden",
+    }));
+    const sink = new MemoryEventSink();
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            requests: [{ path: "TASK.md" }],
+            request_tool_kinds: ["read"],
+          },
+          join(root, "unrestricted-read-sentinel"),
+        ),
+        evaluate_permission: evaluator,
+        allow_unrestricted_read: (request) =>
+          request.toolCall.kind === "read" &&
+          request.toolCall.rawInput !== null &&
+          typeof request.toolCall.rawInput === "object" &&
+          "path" in request.toolCall.rawInput &&
+          request.toolCall.rawInput.path === "TASK.md",
+      },
+      sink,
+    );
+
+    await expect(session.run("Read the immutable task.")).resolves.toMatchObject({
+      outcome: "completed",
+      permissions: [],
+    });
+    expect(evaluator).not.toHaveBeenCalled();
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        kind: "permission",
+        payload: {
+          decision: "unrestricted_read",
+          operation_sha256: null,
+          reason: null,
+        },
+      }),
+    );
   });
 
   it("aborts and settles an accepted client filesystem write before cancellation completes", async () => {
