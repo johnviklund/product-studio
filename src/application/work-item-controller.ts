@@ -51,6 +51,7 @@ import {
   hashGoalContract,
   hashGoalInput,
   hashShapingDecisionState,
+  isShapingPhase,
   normalizeShapingGoalInput,
   planResultSubmissionSchema,
   serializeShapingPackage,
@@ -4050,10 +4051,9 @@ export class WorkItemController {
     runs: ShapingRunRecordV1[],
   ): ShapingDecisionState {
     const phase = item.state.phase;
-    const tip =
-      phase === "brainstorm" || phase === "spec" || phase === "plan"
-        ? this.resolveShapingTip(item.goal.work_item_id, phase, artifacts)
-        : null;
+    const tip = isShapingPhase(phase)
+      ? this.resolveShapingTip(item.goal.work_item_id, phase, artifacts)
+      : null;
     const nonTerminalRuns = runs.filter(
       (run) => run.lifecycle.status !== "terminal",
     );
@@ -4199,7 +4199,7 @@ export class WorkItemController {
 
   private requireShapingPhase(item: WorkItem): ShapingPhase {
     const phase = item.state.phase;
-    if (phase !== "brainstorm" && phase !== "spec" && phase !== "plan") {
+    if (!isShapingPhase(phase)) {
       throw this.conflict(
         "stale_expectation",
         item.goal.work_item_id,

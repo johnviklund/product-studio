@@ -48,12 +48,13 @@ import type {
 } from "@/src/domain/result";
 import type { ConnectedRunSummary } from "@/src/domain/connected-run";
 import type { ShapingRunSummary } from "@/src/domain/shaping-run";
-import type {
-  BrainstormResultSubmission,
-  ShapingPhase,
-  ShapingResultSubmission,
-  SpecResultSubmission,
-  StoredShapingArtifact,
+import {
+  isShapingPhase,
+  type BrainstormResultSubmission,
+  type ShapingPhase,
+  type ShapingResultSubmission,
+  type SpecResultSubmission,
+  type StoredShapingArtifact,
 } from "@/src/domain/shaping";
 import {
   WORK_ITEM_PRIORITIES,
@@ -837,7 +838,7 @@ function shapingRefreshBindingForState(
   state: ShapingArtifactState,
 ): ShapingRefreshBinding | null {
   const phase = item.work_item.state.phase;
-  if (phase !== "brainstorm" && phase !== "spec" && phase !== "plan") {
+  if (!isShapingPhase(phase)) {
     return null;
   }
   const tip = currentShapingTip(phase, state.listing?.artifacts ?? []);
@@ -884,11 +885,11 @@ function shapingSurfaceContext(
   const listing = state.listing;
   if (
     listing === null ||
-    (phase !== "brainstorm" && phase !== "spec" && phase !== "plan" && phase !== "idea")
+    (phase !== "idea" && !isShapingPhase(phase))
   ) {
     return null;
   }
-  const shapingPhase = phase === "idea" ? null : phase;
+  const shapingPhase = isShapingPhase(phase) ? phase : null;
   const localLaunchFailure =
     launchFailure?.itemKey === state.itemKey ? launchFailure : null;
   const durableLaunchFailure = listing.post_commit_launch_failure;
@@ -1844,7 +1845,7 @@ function projectionPicker(
   }
   if (
     projection.mode === "ready" &&
-    (projection.phase === "brainstorm" || projection.phase === "spec")
+    "next_step" in projection.sections
   ) {
     return projection.sections.next_step ?? null;
   }
@@ -1885,7 +1886,7 @@ function projectionRuntimeUnavailable(
 ): string | null {
   if (
     projection.mode === "ready" &&
-    (projection.phase === "brainstorm" || projection.phase === "spec")
+    "runtime_unavailable" in projection.sections
   ) {
     return projection.sections.runtime_unavailable ?? null;
   }
@@ -3869,10 +3870,7 @@ export function DetailPanel({
     item.source_id !== INBOX_SOURCE_ID &&
     state.status === "active" &&
     eligibleIdea &&
-    (state.phase === "idea" ||
-      state.phase === "brainstorm" ||
-      state.phase === "spec" ||
-      state.phase === "plan");
+    (state.phase === "idea" || isShapingPhase(state.phase));
   const currentShapingState =
     shapingArtifactState?.itemKey === shapingItemKey
       ? shapingArtifactState
@@ -3915,12 +3913,9 @@ export function DetailPanel({
           shapingNewAttemptState,
           currentShapingRefresh,
         );
-  const currentDecisionShapingPhase =
-    state.phase === "brainstorm" ||
-    state.phase === "spec" ||
-    state.phase === "plan"
-      ? state.phase
-      : null;
+  const currentDecisionShapingPhase = isShapingPhase(state.phase)
+    ? state.phase
+    : null;
   const currentDecisionShapingTip =
     currentDecisionShapingPhase === null ||
     currentShapingState?.listing === null ||

@@ -17,7 +17,10 @@ import type {
   DecisionFirstShapingHandoffProjection,
   ShapingActionProjection,
 } from "../src/presentation/board";
-import type { ShapingPhase } from "../src/domain/shaping";
+import {
+  SHAPING_PHASES,
+  type ShapingPhase,
+} from "../src/domain/shaping";
 
 const SOURCE_ID = "source / one";
 const WORK_ITEM_ID = "wi_550e8400-e29b-41d4-a716-446655440000";
@@ -254,7 +257,7 @@ describe("shapingActionRequest", () => {
     });
   });
 
-  it.each(["brainstorm", "spec", "plan"] as const)(
+  it.each(SHAPING_PHASES)(
     "builds exact connected and manual request_changes requests for %s",
     (phase) => {
       const connectedAction = action("request_changes", "connected");
@@ -304,7 +307,7 @@ describe("shapingActionRequest", () => {
     },
   );
 
-  it.each(["brainstorm", "spec", "plan"] as const)(
+  it.each(SHAPING_PHASES)(
     "builds retry-launch for %s with only its immutable binding",
     (phase) => {
       const retryAction = action("retry_launch", null);
@@ -324,7 +327,7 @@ describe("shapingActionRequest", () => {
     },
   );
 
-  it.each(["brainstorm", "spec", "plan"] as const)(
+  it.each(SHAPING_PHASES)(
     "builds an ordinary connected %s launch request",
     (phase) => {
       const launchAction = action("launch_phase", "connected");
@@ -341,7 +344,7 @@ describe("shapingActionRequest", () => {
     },
   );
 
-  it.each(["brainstorm", "spec", "plan"] as const)(
+  it.each(SHAPING_PHASES)(
     "builds an exact %s cancellation request without model or binding fields",
     (phase) => {
       const cancelAction = action("cancel_run", null, {

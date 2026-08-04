@@ -371,6 +371,7 @@ describe("board projection", () => {
 
   it("provides one phase-derived next action", () => {
     expect(nextActionForPhase("idea")).toBe("Brainstorm the idea");
+    expect(nextActionForPhase("plan")).toBe("Review the plan result");
     expect(nextActionForPhase("execute")).toBe("Review the result");
     expect(nextActionForPhase("patch")).toBe("Review the patch");
     expect(nextActionForPhase("ship")).toBe("Capture the learning");

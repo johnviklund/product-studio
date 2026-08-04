@@ -15,13 +15,15 @@ import type {
   WorkflowModelUse,
 } from "../domain/portfolio-preferences";
 import type { ExternalResultSubmission } from "../domain/result";
-import type {
-  BrainstormResultSubmission,
-  PlanChecklistEntry,
-  PlanResultSubmission,
-  ShapingPhase,
-  ShapingResultSubmission,
-  SpecResultSubmission,
+import {
+  SHAPING_PHASES,
+  isShapingPhase,
+  type BrainstormResultSubmission,
+  type PlanChecklistEntry,
+  type PlanResultSubmission,
+  type ShapingPhase,
+  type ShapingResultSubmission,
+  type SpecResultSubmission,
 } from "../domain/shaping";
 import {
   ALLOWED_PHASE_TRANSITIONS,
@@ -595,7 +597,7 @@ const NEXT_ACTION_BY_PHASE = {
   idea: "Brainstorm the idea",
   brainstorm: "Write the specification",
   spec: "Plan the work",
-  plan: "Execute the plan",
+  plan: "Review the plan result",
   execute: "Review the result",
   review: "Test the result",
   patch: "Review the patch",
@@ -762,7 +764,7 @@ export function shapingCardStateForItem(
   if (phase === "idea") {
     return { badge: "Idea", next_action_label: "Start Brainstorm" };
   }
-  if (phase !== "brainstorm" && phase !== "spec" && phase !== "plan") {
+  if (!isShapingPhase(phase)) {
     return null;
   }
 
@@ -832,7 +834,6 @@ export function detailPanelModeForItem(item: {
     : "governed";
 }
 
-const SHAPING_PHASE_ORDER = ["brainstorm", "spec", "plan"] as const;
 const DEFAULT_SHAPING_REFRESH: ShapingRefreshProjection = {
   last_checked_at: null,
   refreshing: false,
@@ -1007,8 +1008,8 @@ function projectedProvenance(
   phase: ShapingPhase,
   uses: readonly WorkflowModelUse[],
 ): ShapingModelUseProjection[] {
-  const maximumSeat = SHAPING_PHASE_ORDER.indexOf(phase);
-  return SHAPING_PHASE_ORDER.slice(0, maximumSeat + 1).map((seat) => {
+  const maximumSeat = SHAPING_PHASES.indexOf(phase);
+  return SHAPING_PHASES.slice(0, maximumSeat + 1).map((seat) => {
     const use = uses.find((candidate) => candidate.seat === seat);
     return {
       seat,
@@ -1378,7 +1379,7 @@ export function shapingHandoffForItem(
     };
   }
 
-  if (phase !== "brainstorm" && phase !== "spec" && phase !== "plan") {
+  if (!isShapingPhase(phase)) {
     return {
       mode: "hidden",
       phase: null,

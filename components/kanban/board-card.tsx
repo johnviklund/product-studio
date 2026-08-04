@@ -59,10 +59,7 @@ export function nextActionForCardState(
   if (shapingState !== null) {
     return shapingState.next_action_label;
   }
-  const phaseFallback =
-    state.phase === "plan"
-      ? "Review the plan result"
-      : nextActionForPhase(state.phase);
+  const phaseFallback = nextActionForPhase(state.phase);
   if (state.status !== "active") {
     return phaseFallback;
   }

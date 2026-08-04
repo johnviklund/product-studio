@@ -30,6 +30,10 @@ export type ShapingPhase = (typeof SHAPING_PHASES)[number];
 export type ShapingDecisionOperation =
   (typeof SHAPING_DECISION_OPERATIONS)[number];
 
+export function isShapingPhase(phase: WorkItemPhase): phase is ShapingPhase {
+  return SHAPING_PHASES.some((candidate) => candidate === phase);
+}
+
 const BRAINSTORM_RESULT_REQUIRED_FIELDS = [
   "result_schema_version",
   "brainstorm_mission_content_sha256",

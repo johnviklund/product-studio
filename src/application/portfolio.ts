@@ -113,6 +113,7 @@ import {
   hashGoalContract,
   hashGoalInput,
   hashShapingDecisionState,
+  isShapingPhase,
   normalizeShapingGoalInput,
   planResultSubmissionSchema,
   renderShapingTaskMd,
@@ -960,7 +961,7 @@ export class PortfolioService {
           item.source_id === INBOX_SOURCE_ID ||
           item.project === null ||
           item.work_item.state.status !== "active" ||
-          !this.isShapingPhase(item.work_item.state.phase)
+          !isShapingPhase(item.work_item.state.phase)
         ) {
           return item;
         }
@@ -2975,7 +2976,7 @@ export class PortfolioService {
     if (workItem === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
-    const shapingPhase = this.isShapingPhase(workItem.state.phase);
+    const shapingPhase = isShapingPhase(workItem.state.phase);
     if (
       source.source_id === INBOX_SOURCE_ID ||
       workItem.state.status !== "active" ||
@@ -3005,7 +3006,7 @@ export class PortfolioService {
       source.source_id === INBOX_SOURCE_ID ||
       workItem.state.status !== "active" ||
       (workItem.state.phase !== "idea" &&
-        !this.isShapingPhase(workItem.state.phase)) ||
+        !isShapingPhase(workItem.state.phase)) ||
       (workItem.state.phase === "idea" &&
         (workItem.state.schema_version !== 2 ||
           workItem.goal.goal_contract !== undefined ||
@@ -3336,16 +3337,12 @@ export class PortfolioService {
     return result.plan_mission_content_sha256;
   }
 
-  private isShapingPhase(phase: WorkItem["state"]["phase"]): phase is ShapingPhase {
-    return SHAPING_PHASES.some((candidate) => candidate === phase);
-  }
-
   private async portfolioItemShapingSummary(
     source: ResolvedSource,
     workItem: WorkItem,
   ): Promise<PortfolioItemShapingSummary> {
     const phase = workItem.state.phase;
-    if (!this.isShapingPhase(phase)) {
+    if (!isShapingPhase(phase)) {
       throw new Error(`Expected a shaping phase, received ${phase}.`);
     }
     const repairSummary = (): PortfolioItemShapingSummary => ({
@@ -3554,7 +3551,7 @@ export class PortfolioService {
     runs: ShapingRunRecordV1[],
   ): ShapingDecisionState {
     const phase = workItem.state.phase;
-    const tip = this.isShapingPhase(phase)
+    const tip = isShapingPhase(phase)
       ? this.resolveShapingTip(
           workItem.goal.work_item_id,
           phase,
@@ -4168,7 +4165,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     runs: ShapingRunRecordV1[],
   ): Promise<ShapingPostCommitLaunchFailure | null> {
     const phase = workItem.state.phase;
-    if (workItem.state.status !== "active" || !this.isShapingPhase(phase)) {
+    if (workItem.state.status !== "active" || !isShapingPhase(phase)) {
       return null;
     }
     const tip = this.resolveShapingTip(
@@ -4306,7 +4303,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     artifacts: StoredShapingArtifact[],
     runs: ShapingRunRecordV1[],
   ): WorkflowModelUse[] {
-    const productions = (["brainstorm", "spec", "plan"] as const).flatMap(
+    const productions = SHAPING_PHASES.flatMap(
       (seat) => {
         const tip = this.resolveShapingTip(workItemId, seat, artifacts);
         return tip?.production_receipt === null ||
@@ -4328,7 +4325,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     ) {
       return { brainstorm: [], spec: [], plan: [] };
     }
-    const seats = ["brainstorm", "spec", "plan"] as const;
+    const seats = SHAPING_PHASES;
     const options = await Promise.all(
       seats.map(async (seat, seatIndex) => {
         const saved = await this.preferencesStore.getPreference(

@@ -56,6 +56,7 @@ import {
   hashGoalContract,
   hashGoalInput,
   hashShapingDecisionState,
+  isShapingPhase,
   type BrainstormMissionPackage,
   type BrainstormResultSubmission,
   type PlanResultSubmission,
@@ -1086,13 +1087,12 @@ async function currentShapingStateHash(
   item: WorkItem,
 ): Promise<string> {
   const phase = item.state.phase;
-  const tip =
-    phase === "brainstorm" || phase === "spec" || phase === "plan"
-      ? await repository.resolveCurrentMissionRevision(
-          item.goal.work_item_id,
-          phase,
-        )
-      : null;
+  const tip = isShapingPhase(phase)
+    ? await repository.resolveCurrentMissionRevision(
+        item.goal.work_item_id,
+        phase,
+      )
+    : null;
   const runs = await repository.listShapingRuns(item.goal.work_item_id);
   const currentRuns =
     tip === null
