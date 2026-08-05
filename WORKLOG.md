@@ -5,7 +5,7 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
-## 2026-08-04 · Connected shaping and guided Spec-to-Plan handoff (roadmap 3.4 slice 2) · Codex/Copilot mixed
+## 2026-08-05 · Connected shaping and guided Spec-to-Plan handoff (roadmap 3.4 slice 2) · Codex/Copilot mixed
 - Cut shaping schema v2 across Brainstorm, Spec, and Plan: immutable feedback-bearing revisions,
   one commit-marked applied bundle per revision, durable decision intents/receipts, separate
   artifact-only shaping-run/manual-ingress families, and versioned per-seat model preferences.
@@ -16,15 +16,21 @@ not archived — they remain in git history).
 - Replaced compile/import-first UI with bounded run and decision surfaces for the five founder
   actions, exact current-result approvals, request-changes/replan recovery, collapsed `Advanced
   recovery`, shaping-aware board/attention projections, and no Plan → Execute action.
-- Verified: 34 test files / 685 tests pass; lint has zero errors and seven known warnings. Typecheck
-  retains exactly six recorded baseline diagnostics; the production build compiled before stopping
-  on the first same baseline diagnostic. Headed checks exercised Brainstorm, Spec, and Plan with
-  three distinct adapter-observed effective models plus retained-lock repair and updated-contract
-  replan; Phase 4 review remains pending.
-- Commits: `6ca9b52`..`df93db2`
+- Three review cycles closed a red production build the plan had mislabeled "baseline" (six type
+  diagnostics, two genuine code defects), applied the new `assertTrustedRequestOrigin` CSRF guard
+  to the three in-slice `mission/connected/*` mutations including the ACP permission-approval
+  gate, and documented `PRODUCT_STUDIO_APP_ORIGIN` in `README.md`. 13 pre-existing unguarded
+  mutating routes and the controller's unconsulted `dedicatedTransitionPolicy` were verified,
+  scoped out by design, and deferred to `TODO.md` as their own next slice.
+- Verified at `c0bf64f`: 34 test files / 691 tests pass; lint 0 errors / 7 known warnings;
+  typecheck 0 diagnostics; production build exits 0; route surface re-enumerated at 29 guarded /
+  13 unguarded of 42 mutating files.
+- Commits: `6ca9b52`..`c0bf64f`
+- Review: ship as-is @ `c0bf64f` (cycle 3 of 3, clean)
 - Why: delivers ROADMAP 3.4 Slice 2 through `Plan result ready` without manual prompt/result
   assembly while preserving explicit human gates, artifact-only shaping authority, truthful
-  provenance, and the later Plan approval → Execute boundary.
+  provenance, and the later Plan approval → Execute boundary — and leaves the record's own
+  verification claims honest after a cycle that specifically punished an unmeasured one.
 
 ## 2026-07-28 · Brainstorm and Spec shaping missions (roadmap 3.4 slice 1) · Copilot/Codex mixed
 - Cut a separate, immutable shaping contract (`src/domain/shaping.ts`, `shaping_schema_version: 1`,
