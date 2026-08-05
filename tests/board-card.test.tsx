@@ -97,7 +97,7 @@ describe("closed board card shaping projection", () => {
       name: "Plan ready",
       item: cardItem("plan", "active", summary("plan", "ready")),
       badge: "Plan · Ready",
-      action: "Review the plan result",
+      action: "Approve &amp; run Execute",
     },
     {
       name: "failed run",
@@ -155,14 +155,14 @@ describe("closed board card shaping projection", () => {
     expect(html).not.toContain("Valid workflow transitions");
   });
 
-  it("keeps a non-active card on its phase fallback without exposing Execute", () => {
+  it("keeps a non-active card on its phase fallback without a ready badge", () => {
     const html = renderCard(
       cardItem("plan", "blocked", summary("plan", "ready")),
     );
 
     expect(html).toContain("plan");
     expect(html).toContain("blocked");
-    expect(html).toContain("Review the plan result");
+    expect(html).toContain("Approve &amp; run Execute");
     expect(html).not.toContain("Plan · Ready");
     expect(html).not.toContain("Execute the plan");
   });
