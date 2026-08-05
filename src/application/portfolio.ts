@@ -142,9 +142,11 @@ import {
   type ShapingRunSummary,
 } from "../domain/shaping-run";
 import {
+  WORKFLOW_MODEL_SEATS,
   shapingModelPickerOptions,
   summarizeWorkflowModelUse,
   type ShapingModelPickerOption,
+  type WorkflowModelSeat,
   type WorkflowModelUse,
 } from "../domain/portfolio-preferences";
 import type {
@@ -538,8 +540,9 @@ export interface ShapingArtifactListing {
   runs: ShapingRunSummary[];
   expected_shaping_state_sha256: string;
   model_availability: ShapingModelAvailability;
+  execute_model_availability: ShapingModelAvailability;
   model_use: WorkflowModelUse[];
-  model_picker_options: Record<ShapingPhase, ShapingModelPickerOption[]>;
+  model_picker_options: Record<WorkflowModelSeat, ShapingModelPickerOption[]>;
   post_commit_launch_failure: ShapingPostCommitLaunchFailure | null;
 }
 
@@ -1827,10 +1830,13 @@ export class PortfolioService {
     }
     const runs = await source.workspace.listShapingRuns(workItemId);
     const modelAvailability = this.shapingModelAvailability();
+    const executeModelAvailability = this.executeModelAvailability();
     const modelUse = this.workflowModelUse(workItemId, artifacts, runs);
     const modelPickerOptions = await this.modelPickerOptions(
       modelAvailability,
+      executeModelAvailability,
       modelUse,
+      this.isPlanDecisionEligible(workItem, artifacts, runs),
     );
     const postCommitLaunchFailure =
       await this.currentPostCommitLaunchFailure(
@@ -1848,6 +1854,7 @@ export class PortfolioService {
         this.shapingDecisionState(workItem, artifacts, runs),
       ),
       model_availability: modelAvailability,
+      execute_model_availability: executeModelAvailability,
       model_use: modelUse,
       model_picker_options: modelPickerOptions,
       post_commit_launch_failure: postCommitLaunchFailure,
@@ -3138,7 +3145,8 @@ export class PortfolioService {
       source.source_id === INBOX_SOURCE_ID ||
       workItem.state.status !== "active" ||
       (workItem.state.phase !== "idea" &&
-        !isShapingPhase(workItem.state.phase)) ||
+        !isShapingPhase(workItem.state.phase) &&
+        workItem.state.phase !== "execute") ||
       (workItem.state.phase === "idea" &&
         (workItem.state.schema_version !== 2 ||
           workItem.goal.goal_contract !== undefined ||
@@ -3147,7 +3155,7 @@ export class PortfolioService {
     ) {
       throw this.missionNotReady(
         workItemId,
-        "Shaping reads require an assigned item in active Idea, Brainstorm, Spec, or Plan.",
+        "Shaping reads require an assigned item in active Idea, Brainstorm, Spec, Plan, or Execute.",
       );
     }
     return { source, workItem };
@@ -4545,27 +4553,69 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     return summarizeWorkflowModelUse(runs, productions);
   }
 
-  private async modelPickerOptions(
-    availability: ShapingModelAvailability,
-    modelUse: WorkflowModelUse[],
-  ): Promise<Record<ShapingPhase, ShapingModelPickerOption[]>> {
+  private isPlanDecisionEligible(
+    workItem: WorkItem,
+    artifacts: StoredShapingArtifact[],
+    runs: ShapingRunRecordV1[],
+  ): boolean {
     if (
-      availability.status === "unavailable" ||
-      availability.adapter_id === null
+      workItem.state.schema_version !== 2 ||
+      workItem.state.phase !== "plan" ||
+      workItem.state.status !== "active" ||
+      workItem.state.attempt !== 0 ||
+      workItem.goal.goal_contract === undefined ||
+      workItem.state.goal_version === undefined ||
+      workItem.state.input_revision === undefined ||
+      workItem.goal.goal_contract.goal_version !== workItem.state.goal_version
     ) {
-      return { brainstorm: [], spec: [], plan: [] };
+      return false;
     }
-    const seats = SHAPING_PHASES;
+    const tip = this.resolveShapingTip(
+      workItem.goal.work_item_id,
+      "plan",
+      artifacts,
+    );
+    if (
+      tip === null ||
+      tip.result === null ||
+      tip.import_receipt?.outcome !== "applied" ||
+      tip.production_receipt === null ||
+      tip.applied_marker === null ||
+      tip.decision !== null ||
+      tip.mission.input.phase !== "plan" ||
+      tip.mission.input.goal_version !== workItem.state.goal_version ||
+      tip.mission.input.goal_contract_sha256 !==
+        hashGoalContract(workItem.goal.goal_contract)
+    ) {
+      return false;
+    }
+    return runs.every((run) => run.lifecycle.status === "terminal");
+  }
+
+  private async modelPickerOptions(
+    shapingAvailability: ShapingModelAvailability,
+    executeAvailability: ShapingModelAvailability,
+    modelUse: WorkflowModelUse[],
+    executeEligible: boolean,
+  ): Promise<Record<WorkflowModelSeat, ShapingModelPickerOption[]>> {
+    const seats = WORKFLOW_MODEL_SEATS;
     const options = await Promise.all(
       seats.map(async (seat, seatIndex) => {
+        const availability =
+          seat === "execute" ? executeAvailability : shapingAvailability;
+        if (
+          (seat === "execute" && !executeEligible) ||
+          availability.status === "unavailable" ||
+          availability.adapter_id === null
+        ) {
+          return [seat, []] as const;
+        }
         const saved = await this.preferencesStore.getPreference(
-          availability.adapter_id!,
+          availability.adapter_id,
           seat,
         );
         const priorUses = modelUse.filter(
-          (use) =>
-            isShapingPhase(use.seat) &&
-            seats.indexOf(use.seat) < seatIndex,
+          (use) => seats.indexOf(use.seat) < seatIndex,
         );
         return [
           seat,
@@ -4578,7 +4628,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       }),
     );
     return Object.fromEntries(options) as Record<
-      ShapingPhase,
+      WorkflowModelSeat,
       ShapingModelPickerOption[]
     >;
   }

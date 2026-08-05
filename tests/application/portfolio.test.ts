@@ -1859,11 +1859,22 @@ describe("PortfolioService", () => {
         has_three_distinct_models: false,
         reason: null,
       },
+      execute_model_availability: {
+        status: "unavailable",
+        adapter_id: null,
+        adapter_version: null,
+        profile_id: null,
+        available_model_ids: [],
+        distinct_model_count: 0,
+        has_three_distinct_models: false,
+        reason: "runtime_unavailable",
+      },
       model_use: [],
       model_picker_options: {
         brainstorm: pickerOptions,
         spec: pickerOptions,
         plan: pickerOptions,
+        execute: [],
       },
       post_commit_launch_failure: null,
     });
@@ -2524,6 +2535,215 @@ describe("PortfolioService", () => {
     });
     expect(recoveryRuntime.prepare).toHaveBeenCalledOnce();
     expect(await repository.listConnectedRuns(workItemId)).toHaveLength(1);
+  });
+
+  it("exposes Execute model options only for the current eligible Plan decision", async () => {
+    const root = await createWorkspace("Execute Picker Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Choose an independent Execute model",
+      type: "Feature",
+    });
+    const shapingRuntime = fakeArtifactOnlyRuntime();
+    const executePrepare = vi.fn(
+      async (input: Parameters<ConnectedExecuteRuntime["prepare"]>[0]) => {
+        void input;
+        throw new Error("Execute must not launch while reading picker options.");
+      },
+    );
+    const executeRuntime: ConnectedExecuteRuntime = {
+      configuration: () => ({
+        adapter_id: "fake-execute-acp",
+        adapter_version: "1.0.0",
+        profile_id: "execute-picker-v1",
+        available_model_ids: ["adapter-model-b", "execute-model"],
+        default_model: "execute-model",
+      }),
+      prepare: executePrepare,
+    };
+    const { service } = await createService(
+      createMemoryIndex(),
+      () => repository,
+      executeRuntime,
+      shapingRuntime.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const waitForAppliedPhase = async (phase: ShapingPhase) => {
+      await expect.poll(async () => {
+        const listing = await service.listShapingArtifacts(
+          sourceId,
+          workItemId,
+        );
+        const tip = currentPhaseArtifact(listing.artifacts, phase);
+        const run = listing.runs.find(
+          (candidate) =>
+            candidate.mission.phase === phase &&
+            candidate.mission.input_sha256 ===
+              tip.mission.identity.input_sha256,
+        );
+        return (
+          tip.result !== null &&
+          run?.lifecycle.status === "terminal" &&
+          run.lifecycle.terminal_outcome === "completed"
+        );
+      }).toBe(true);
+      return service.listShapingArtifacts(sourceId, workItemId);
+    };
+
+    await service.startBrainstorm(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "requested-model",
+      expected_mission_content_sha256: null,
+      expected_result_content_sha256: null,
+      expected_shaping_state_sha256: ideaShapingStateSha256(created),
+    });
+    const brainstormReady = await waitForAppliedPhase("brainstorm");
+    const brainstorm = currentPhaseArtifact(
+      brainstormReady.artifacts,
+      "brainstorm",
+    );
+    await service.useBrainstormResult(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "requested-model",
+      expected_mission_content_sha256: brainstorm.mission.content_sha256,
+      expected_result_content_sha256:
+        brainstorm.result!.result_content_sha256,
+      expected_shaping_state_sha256:
+        brainstormReady.expected_shaping_state_sha256,
+    });
+    const specReady = await waitForAppliedPhase("spec");
+    const spec = currentPhaseArtifact(specReady.artifacts, "spec");
+    const specResult = shapingResultForMission(spec.mission);
+    if (!("proposal" in specResult) || specResult.proposal === undefined) {
+      throw new Error("Expected one connected Spec proposal.");
+    }
+    const goalContract = goalContractFromSpecProposal(specResult.proposal, 1);
+    await service.approveSpecResult(sourceId, workItemId, {
+      launch_mode: "connected",
+      next_requested_model: "requested-model",
+      expected_mission_content_sha256: spec.mission.content_sha256,
+      expected_result_content_sha256: spec.result!.result_content_sha256,
+      expected_shaping_state_sha256: specReady.expected_shaping_state_sha256,
+      goal_contract_sha256: hashGoalContract(goalContract),
+    });
+    const planReady = await waitForAppliedPhase("plan");
+    const plan = currentPhaseArtifact(planReady.artifacts, "plan");
+
+    expect(planReady.execute_model_availability).toEqual({
+      status: "available",
+      adapter_id: "fake-execute-acp",
+      adapter_version: "1.0.0",
+      profile_id: "execute-picker-v1",
+      available_model_ids: ["adapter-model-b", "execute-model"],
+      distinct_model_count: 2,
+      has_three_distinct_models: false,
+      reason: null,
+    });
+    expect(planReady.model_use).toEqual([
+      expect.objectContaining({
+        seat: "brainstorm",
+        effective_model: "adapter-model-b",
+      }),
+      expect.objectContaining({
+        seat: "spec",
+        effective_model: "adapter-model-b",
+      }),
+      expect.objectContaining({
+        seat: "plan",
+        effective_model: "adapter-model-b",
+      }),
+    ]);
+    expect(planReady.model_picker_options.execute).toEqual([
+      {
+        model_id: "execute-model",
+        used_by_seats: [],
+        saved_preference: false,
+        recommended: true,
+        preselected: true,
+        reuse_warning: null,
+      },
+      {
+        model_id: "adapter-model-b",
+        used_by_seats: ["brainstorm", "spec", "plan"],
+        saved_preference: false,
+        recommended: false,
+        preselected: false,
+        reuse_warning:
+          "adapter-model-b was already used by brainstorm, spec, plan; reuse is allowed, but an unused model improves seat independence.",
+      },
+    ]);
+    expect(
+      planReady.model_picker_options.execute.map((option) => option.model_id),
+    ).not.toContain("requested-model");
+    expect(executePrepare).not.toHaveBeenCalled();
+
+    const unavailable = await createService(
+      createMemoryIndex(),
+      () => repository,
+      undefined,
+      shapingRuntime.runtime,
+    );
+    const unavailableRegistration = await unavailable.service.register({
+      workspace_path: root,
+    });
+    const unavailableListing = await unavailable.service.listShapingArtifacts(
+      unavailableRegistration.workspace.workspace_id,
+      workItemId,
+    );
+    expect(unavailableListing.execute_model_availability).toMatchObject({
+      status: "unavailable",
+      reason: "runtime_unavailable",
+    });
+    expect(unavailableListing.model_picker_options.execute).toEqual([]);
+
+    const goalPath = join(
+      root,
+      ".founder",
+      "work-items",
+      workItemId,
+      "goal.yaml",
+    );
+    const originalGoalSource = await readFile(goalPath, "utf8");
+    const governed = await repository.read(workItemId);
+    if (governed?.goal.goal_contract === undefined) {
+      throw new Error("Expected the governed Plan contract.");
+    }
+    await writeFile(
+      goalPath,
+      stringify({
+        ...governed.goal,
+        goal_contract: {
+          ...governed.goal.goal_contract,
+          purpose: `${governed.goal.goal_contract.purpose} (drifted)`,
+        },
+      }),
+      "utf8",
+    );
+    expect(
+      (
+        await service.listShapingArtifacts(sourceId, workItemId)
+      ).model_picker_options.execute,
+    ).toEqual([]);
+    await writeFile(goalPath, originalGoalSource, "utf8");
+
+    await service.approvePlanResult(sourceId, workItemId, {
+      launch_mode: "manual",
+      requested_model: null,
+      expected_mission_content_sha256: plan.mission.content_sha256,
+      expected_result_content_sha256: plan.result!.result_content_sha256,
+      expected_shaping_state_sha256:
+        planReady.expected_shaping_state_sha256,
+      goal_contract_sha256: hashGoalContract(goalContract),
+    });
+    const decided = await service.listShapingArtifacts(sourceId, workItemId);
+    expect(decided.model_picker_options.execute).toEqual([]);
+    expect(decided.execute_model_availability.status).toBe("available");
+    expect(executePrepare).not.toHaveBeenCalled();
   });
 
   it("runs artifact-only shaping through ACP, publishes before ready, and persists the last adapter-observed model", async () => {
