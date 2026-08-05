@@ -18,6 +18,7 @@ import {
   hashShapingIngressInstruction,
   hashShapingInput,
   planIdentitySchema,
+  planApprovalReceiptSchema,
   planResultSubmissionSchema,
   planShapingInputSchema,
   renderShapingTaskMd,
@@ -31,6 +32,7 @@ import {
   specResultSubmissionSchema,
   type BrainstormResultSubmission,
   type PlanResultSubmission,
+  type PlanApprovalReceipt,
   type PlanShapingInput,
   type ShapingAppliedMarkerV1,
   type ShapingDecisionIntentV1,
@@ -152,6 +154,21 @@ const planResult: PlanResultSubmission = {
   product_doc_impacts: ["Update PRODUCT.md after implementation."],
   todo_impacts: [],
   open_questions: [],
+};
+
+const planApproval: PlanApprovalReceipt = {
+  shaping_schema_version: SHAPING_SCHEMA_VERSION,
+  identity: planMission.identity,
+  mission_content_sha256: approval.mission_content_sha256,
+  result_content_sha256: approval.result_content_sha256,
+  goal_contract_sha256: approval.goal_contract_sha256,
+  goal_version: 1,
+  execute_tuple: {
+    goal_version: 1,
+    input_revision: 1,
+    attempt: 0,
+  },
+  approved_at: "2026-08-01T12:02:00.000Z",
 };
 
 function collectKeys(value: unknown, keys = new Set<string>()): Set<string> {
@@ -309,6 +326,9 @@ describe("shaping v2 contract", () => {
   it("keeps selection and approval receipts phase-specific", () => {
     expect(shapingDecisionReceiptSchema.parse(selection)).toEqual(selection);
     expect(shapingDecisionReceiptSchema.parse(approval)).toEqual(approval);
+    expect(shapingDecisionReceiptSchema.parse(planApproval)).toEqual(
+      planApproval,
+    );
     expect(() =>
       shapingSelectionReceiptSchema.parse({
         ...selection,
@@ -321,6 +341,51 @@ describe("shaping v2 contract", () => {
         identity: brainstormMission.identity,
       }),
     ).toThrow();
+    expect(() =>
+      planApprovalReceiptSchema.parse({
+        ...planApproval,
+        unknown: true,
+      }),
+    ).toThrow();
+    expect(() =>
+      shapingDecisionReceiptSchema.parse({
+        ...approval,
+        execute_tuple: planApproval.execute_tuple,
+      }),
+    ).toThrow();
+    expect(() =>
+      planApprovalReceiptSchema.parse({
+        ...planApproval,
+        execute_tuple: { ...planApproval.execute_tuple, attempt: 1 },
+      }),
+    ).toThrow();
+    expect(() =>
+      planApprovalReceiptSchema.parse({
+        ...planApproval,
+        execute_tuple: {
+          ...planApproval.execute_tuple,
+          goal_version: 2,
+        },
+      }),
+    ).toThrow("Execute tuple goal version must match");
+  });
+
+  it("keeps existing receipt hashes stable and separates Plan approval", () => {
+    expect(hashShapingDecisionReceipt(selection)).toBe(
+      "d16683c63650a71bff3198f8e55377596e715f3f9743633fc288c2afa3c7757a",
+    );
+    expect(hashShapingDecisionReceipt(approval)).toBe(
+      "ff0a89d8ae328376adb5e37d4b24d72e6c3985c89d230e9eac3fff8ed8aff595",
+    );
+    expect(planApproval.mission_content_sha256).toBe(
+      approval.mission_content_sha256,
+    );
+    expect(planApproval.result_content_sha256).toBe(
+      approval.result_content_sha256,
+    );
+    expect(hashShapingDecisionReceipt(planApproval)).not.toBe(
+      hashShapingDecisionReceipt(approval),
+    );
   });
 
   it("makes revisions part of input identity and renders feedback into TASK.md", () => {

@@ -200,9 +200,27 @@ export interface SpecApprovalReceipt {
   approved_at: string;
 }
 
+export interface PlanApprovalExecuteTuple {
+  goal_version: number;
+  input_revision: number;
+  attempt: 0;
+}
+
+export interface PlanApprovalReceipt {
+  shaping_schema_version: 2;
+  identity: ShapingIdentity<"plan">;
+  mission_content_sha256: string;
+  result_content_sha256: string;
+  goal_contract_sha256: string;
+  goal_version: number;
+  execute_tuple: PlanApprovalExecuteTuple;
+  approved_at: string;
+}
+
 export type ShapingDecisionReceipt =
   | ShapingSelectionReceipt
-  | SpecApprovalReceipt;
+  | SpecApprovalReceipt
+  | PlanApprovalReceipt;
 
 type EmbeddedShapingSelectionReceipt = Omit<
   ShapingSelectionReceipt,
@@ -594,8 +612,42 @@ export const specApprovalReceiptSchema: z.ZodType<SpecApprovalReceipt> =
     approved_at: z.iso.datetime(),
   });
 
+const planApprovalExecuteTupleSchema: z.ZodType<PlanApprovalExecuteTuple> =
+  z.strictObject({
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: z.literal(0),
+  });
+
+export const planApprovalReceiptSchema: z.ZodType<PlanApprovalReceipt> =
+  z
+    .strictObject({
+      shaping_schema_version: z.literal(SHAPING_SCHEMA_VERSION),
+      identity: planIdentitySchema,
+      mission_content_sha256: sha256Schema,
+      result_content_sha256: sha256Schema,
+      goal_contract_sha256: sha256Schema,
+      goal_version: positiveSafeIntegerSchema,
+      execute_tuple: planApprovalExecuteTupleSchema,
+      approved_at: z.iso.datetime(),
+    })
+    .superRefine((receipt, context) => {
+      if (receipt.goal_version !== receipt.execute_tuple.goal_version) {
+        context.addIssue({
+          code: "custom",
+          message: "Execute tuple goal version must match approved goal version",
+          path: ["execute_tuple", "goal_version"],
+          input: receipt.execute_tuple.goal_version,
+        });
+      }
+    });
+
 export const shapingDecisionReceiptSchema: z.ZodType<ShapingDecisionReceipt> =
-  z.union([shapingSelectionReceiptSchema, specApprovalReceiptSchema]);
+  z.union([
+    shapingSelectionReceiptSchema,
+    specApprovalReceiptSchema,
+    planApprovalReceiptSchema,
+  ]);
 
 const embeddedShapingSelectionReceiptSchema: z.ZodType<EmbeddedShapingSelectionReceipt> =
   z.strictObject({
@@ -1123,6 +1175,22 @@ function canonicalApproval(receipt: EmbeddedSpecApprovalReceipt) {
   };
 }
 
+function canonicalPlanApproval(receipt: PlanApprovalReceipt) {
+  return {
+    shaping_schema_version: receipt.shaping_schema_version,
+    identity: canonicalIdentity(receipt.identity),
+    mission_content_sha256: receipt.mission_content_sha256,
+    result_content_sha256: receipt.result_content_sha256,
+    goal_contract_sha256: receipt.goal_contract_sha256,
+    goal_version: receipt.goal_version,
+    execute_tuple: {
+      goal_version: receipt.execute_tuple.goal_version,
+      input_revision: receipt.execute_tuple.input_revision,
+      attempt: receipt.execute_tuple.attempt,
+    },
+  };
+}
+
 function canonicalShapingInput(input: ShapingInput) {
   const common = {
     phase: input.phase,
@@ -1356,11 +1424,25 @@ export function hashShapingDecisionReceipt(
   receipt: ShapingDecisionReceipt,
 ): string {
   const parsed = shapingDecisionReceiptSchema.parse(receipt);
-  return hashShapingArtifact(
-    "selected_at" in parsed
-      ? canonicalSelection(parsed)
-      : canonicalApproval(parsed),
-  );
+  const phase = parsed.identity.phase;
+  switch (phase) {
+    case "brainstorm":
+      return hashShapingArtifact(
+        canonicalSelection(shapingSelectionReceiptSchema.parse(parsed)),
+      );
+    case "spec":
+      return hashShapingArtifact(
+        canonicalApproval(specApprovalReceiptSchema.parse(parsed)),
+      );
+    case "plan":
+      return hashShapingArtifact(
+        canonicalPlanApproval(planApprovalReceiptSchema.parse(parsed)),
+      );
+    default: {
+      const exhaustivePhase: never = phase;
+      return exhaustivePhase;
+    }
+  }
 }
 
 export function serializeShapingContent(
