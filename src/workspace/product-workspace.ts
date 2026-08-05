@@ -125,14 +125,15 @@ import {
   type ExecutionDefaultsV1,
 } from "../domain/capability-envelope";
 import {
+  connectedRunLaunchFingerprint,
   connectedRunProcessIdentitySchema,
-  connectedRunRecordV1Schema,
+  connectedRunRecordV2Schema,
   connectedRunTerminalSchema,
   effectiveModelIdentitySchema,
   type ConnectedRunProtocolIdentity,
   type ConnectedRunTerminal,
   type ConnectedRunProcessIdentity,
-  type ConnectedRunRecordV1,
+  type ConnectedRunRecordV2,
   type EffectiveModelIdentity,
 } from "../domain/connected-run";
 import {
@@ -282,7 +283,7 @@ const connectedRunLaunchGuardSchema = z
     work_item_id: workItemIdSchema,
     connected_run_id: controllerRunIdSchema,
     launch_fingerprint: SHA256_SCHEMA,
-    record: connectedRunRecordV1Schema,
+    record: connectedRunRecordV2Schema,
     created_at: z.iso.datetime(),
   })
   .superRefine((guard, context) => {
@@ -544,35 +545,6 @@ function sanitizeConnectedRunEvent(
   }
   seen.delete(value);
   return sanitized;
-}
-
-function connectedRunLaunchFingerprint(record: ConnectedRunRecordV1): string {
-  const launchIdentity = {
-    schema_version: record.schema_version,
-    mission: record.mission,
-    governed_tuple: record.governed_tuple,
-    provenance: {
-      role: record.provenance.role,
-      seat: record.provenance.seat,
-      requested_model: record.provenance.requested_model,
-      effort: record.provenance.effort,
-      harness: record.provenance.harness,
-      adapter_profile: record.provenance.adapter_profile,
-      resolved_profile_sha256: record.provenance.resolved_profile_sha256,
-      resolved_skill_set_sha256:
-        record.provenance.resolved_skill_set_sha256,
-      capability_envelope_sha256:
-        record.provenance.capability_envelope_sha256,
-      authorization_sha256: record.provenance.authorization_sha256,
-    },
-    resolved_capability_envelope_sha256:
-      record.resolved_capability_envelope.envelope_sha256,
-    acp_protocol_version: record.acp.protocol_version,
-    limits: record.limits,
-  };
-  return createHash("sha256")
-    .update(`${JSON.stringify(launchIdentity, null, 2)}\n`)
-    .digest("hex");
 }
 
 function timestampAtOrAfter(...timestamps: string[]): string {
@@ -942,7 +914,7 @@ export interface AppliedShapingBundleWriteResult {
 }
 
 export interface ConnectedRunCreateResult {
-  record: ConnectedRunRecordV1;
+  record: ConnectedRunRecordV2;
   created: boolean;
 }
 
@@ -1026,9 +998,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   async createConnectedRun(
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
   ): Promise<ConnectedRunCreateResult> {
-    const validated = connectedRunRecordV1Schema.parse(record);
+    const validated = connectedRunRecordV2Schema.parse(record);
     const workItemId = validated.mission.identity.work_item_id;
     if (validated.lifecycle.status === "terminal") {
       throw new ControllerConflictError(
@@ -1123,7 +1095,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   async readConnectedRun(
     workItemId: string,
     connectedRunId: string,
-  ): Promise<ConnectedRunRecordV1 | null> {
+  ): Promise<ConnectedRunRecordV2 | null> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
     await this.readManifest();
@@ -1150,7 +1122,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
   async listConnectedRuns(
     workItemId: string,
-  ): Promise<ConnectedRunRecordV1[]> {
+  ): Promise<ConnectedRunRecordV2[]> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     await this.readManifest();
     const connectedRunsDirectory = join(
@@ -1177,7 +1149,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     workItemId: string,
     connectedRunId: string,
     processIdentity: ConnectedRunProcessIdentity,
-  ): Promise<ConnectedRunRecordV1> {
+  ): Promise<ConnectedRunRecordV2> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
     const validatedProcess = connectedRunProcessIdentitySchema.parse(
@@ -1217,7 +1189,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
 
     await this.writeJsonAtomically(paths.process, validatedProcess);
-    const updated = connectedRunRecordV1Schema.parse({
+    const updated = connectedRunRecordV2Schema.parse({
       ...record,
       lifecycle: {
         ...record.lifecycle,
@@ -1238,7 +1210,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     connectedRunId: string,
     acp: ConnectedRunProtocolIdentity,
     processIdentity: ConnectedRunProcessIdentity,
-  ): Promise<ConnectedRunRecordV1> {
+  ): Promise<ConnectedRunRecordV2> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
     const validatedProcess = connectedRunProcessIdentitySchema.parse(
@@ -1267,7 +1239,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         "connected process identity is immutable once recorded",
       );
     }
-    const updated = connectedRunRecordV1Schema.parse({
+    const updated = connectedRunRecordV2Schema.parse({
       ...record,
       acp,
       lifecycle: {
@@ -1306,7 +1278,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       { assurance: "adapter_attested" }
     >,
     signal?: AbortSignal,
-  ): Promise<ConnectedRunRecordV1> {
+  ): Promise<ConnectedRunRecordV2> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
     const validatedEffectiveModel = effectiveModelIdentitySchema.parse(
@@ -1353,7 +1325,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
-    const updated = connectedRunRecordV1Schema.parse({
+    const updated = connectedRunRecordV2Schema.parse({
       ...record,
       provenance: {
         ...record.provenance,
@@ -1372,7 +1344,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     workItemId: string,
     connectedRunId: string,
     terminal: ConnectedRunTerminal,
-  ): Promise<ConnectedRunRecordV1> {
+  ): Promise<ConnectedRunRecordV2> {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
     const record = await this.requireConnectedRun(
@@ -1380,7 +1352,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       validatedRunId,
     );
     const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
-    const updated = connectedRunRecordV1Schema.parse({
+    const updated = connectedRunRecordV2Schema.parse({
       ...record,
       lifecycle: {
         status: "terminal",
@@ -1491,7 +1463,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
   }
 
-  async reconcileConnectedRuns(): Promise<ConnectedRunRecordV1[]> {
+  async reconcileConnectedRuns(): Promise<ConnectedRunRecordV2[]> {
     await this.readManifest();
     const connectedRunsDirectory = join(
       this.founderDirectory,
@@ -1501,7 +1473,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       return [];
     }
 
-    const reconciled: ConnectedRunRecordV1[] = [];
+    const reconciled: ConnectedRunRecordV2[] = [];
     const itemEntries = await readdir(connectedRunsDirectory, {
       withFileTypes: true,
     });
@@ -9403,9 +9375,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   private async publishConnectedRunDirectory(
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
   ): Promise<void> {
-    const validated = connectedRunRecordV1Schema.parse(record);
+    const validated = connectedRunRecordV2Schema.parse(record);
     const workItemId = validated.mission.identity.work_item_id;
     const itemDirectory = join(
       this.founderDirectory,
@@ -9454,7 +9426,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   private async resolveExistingConnectedRunLaunch(
-    candidate: ConnectedRunRecordV1,
+    candidate: ConnectedRunRecordV2,
   ): Promise<ConnectedRunCreateResult> {
     const workItemId = candidate.mission.identity.work_item_id;
     const itemDirectory = join(
@@ -9536,7 +9508,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   private async releaseConnectedRunGuardForRecord(
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
   ): Promise<void> {
     const itemDirectory = join(
       this.founderDirectory,
@@ -9557,7 +9529,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     workItemId: string,
     connectedRunId: string,
     itemDirectory: string,
-  ): Promise<ConnectedRunRecordV1 | null> {
+  ): Promise<ConnectedRunRecordV2 | null> {
     const paths = this.connectedRunPaths(workItemId, connectedRunId);
     if (!(await this.hasSafeDirectory(paths.directory))) {
       return null;
@@ -9570,7 +9542,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const record = this.parseJson(
       runSource,
       paths.run,
-      connectedRunRecordV1Schema,
+      connectedRunRecordV2Schema,
     );
     if (record.connected_run_id !== connectedRunId) {
       throw this.invalid(
@@ -9612,8 +9584,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   private async readConnectedRunsFromItemDirectory(
     workItemId: string,
     itemDirectory: string,
-  ): Promise<ConnectedRunRecordV1[]> {
-    const records: ConnectedRunRecordV1[] = [];
+  ): Promise<ConnectedRunRecordV2[]> {
+    const records: ConnectedRunRecordV2[] = [];
     const entries = await readdir(itemDirectory, { withFileTypes: true });
     for (const entry of entries.sort((left, right) =>
       left.name.localeCompare(right.name),
@@ -9694,7 +9666,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   private async requireConnectedRun(
     workItemId: string,
     connectedRunId: string,
-  ): Promise<ConnectedRunRecordV1> {
+  ): Promise<ConnectedRunRecordV2> {
     const record = await this.readConnectedRun(workItemId, connectedRunId);
     if (record === null) {
       throw new ControllerConflictError(
@@ -9707,11 +9679,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   private interruptedConnectedRun(
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
     reason: string,
-  ): ConnectedRunRecordV1 {
+  ): ConnectedRunRecordV2 {
     const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
-    return connectedRunRecordV1Schema.parse({
+    return connectedRunRecordV2Schema.parse({
       ...record,
       lifecycle: {
         status: "terminal",
@@ -9730,7 +9702,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   private async reconcileConnectedRunItem(
     workItemId: string,
     itemDirectory: string,
-  ): Promise<ConnectedRunRecordV1[]> {
+  ): Promise<ConnectedRunRecordV2[]> {
     const guard = await this.readConnectedRunGuard(itemDirectory);
     if (guard !== null) {
       const guardedRecord = await this.readConnectedRunFromDirectory(
@@ -9762,7 +9734,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
-    const reconciled: ConnectedRunRecordV1[] = [];
+    const reconciled: ConnectedRunRecordV2[] = [];
     for (const storedRecord of records) {
       if (storedRecord.lifecycle.status === "terminal") {
         await this.releaseConnectedRunGuardForRecord(storedRecord);
@@ -9777,7 +9749,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       const storedProcess = await this.readConnectedRunProcess(paths.process);
       let record = storedRecord;
       if (storedProcess !== null && record.process === null) {
-        record = connectedRunRecordV1Schema.parse({
+        record = connectedRunRecordV2Schema.parse({
           ...record,
           lifecycle: {
             ...record.lifecycle,

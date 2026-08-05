@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  connectedRunLaunchFingerprint,
   hashResolvedCapabilityEnvelope,
   connectedRunDiagnosticSchema,
   connectedRunLifecycleSchema,
@@ -249,6 +250,24 @@ describe("connected-run domain", () => {
     });
     expect(reviewSummary).not.toHaveProperty("capability_envelope_sha256");
     expect(reviewSummary).not.toHaveProperty("authorization.envelope_sha256");
+  });
+
+  it("includes phase and authorization in the launch fingerprint", () => {
+    expect(connectedRunLaunchFingerprint(record)).not.toBe(
+      connectedRunLaunchFingerprint(reviewRecord),
+    );
+    expect(connectedRunLaunchFingerprint(record)).not.toBe(
+      connectedRunLaunchFingerprint({
+        ...record,
+        authorization: {
+          ...record.authorization,
+          envelope: resolveCapabilityEnvelope(["src"], defaults),
+          envelope_sha256: hashResolvedCapabilityEnvelope(
+            resolveCapabilityEnvelope(["src"], defaults),
+          ),
+        },
+      }),
+    );
   });
 
   it("records unavailable provenance explicitly instead of omitting it", () => {

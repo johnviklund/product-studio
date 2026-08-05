@@ -471,6 +471,46 @@ export function hashResolvedCapabilityEnvelope(
     .digest("hex");
 }
 
+export function connectedRunLaunchFingerprint(
+  input: ConnectedRunRecordV2,
+): string {
+  const record = connectedRunRecordV2Schema.parse(input);
+  const authorization =
+    record.authorization.kind === "capability_envelope"
+      ? {
+          kind: record.authorization.kind,
+          envelope_sha256: record.authorization.envelope_sha256,
+        }
+      : {
+          kind: record.authorization.kind,
+          policy_sha256: record.authorization.policy_sha256,
+        };
+  const launchIdentity = {
+    schema_version: record.schema_version,
+    phase: record.mission.identity.phase,
+    mission: record.mission,
+    governed_tuple: record.governed_tuple,
+    provenance: {
+      role: record.provenance.role,
+      seat: record.provenance.seat,
+      requested_model: record.provenance.requested_model,
+      effort: record.provenance.effort,
+      harness: record.provenance.harness,
+      adapter_profile: record.provenance.adapter_profile,
+      resolved_profile_sha256: record.provenance.resolved_profile_sha256,
+      resolved_skill_set_sha256:
+        record.provenance.resolved_skill_set_sha256,
+      authorization_sha256: record.provenance.authorization_sha256,
+    },
+    authorization,
+    acp_protocol_version: record.acp.protocol_version,
+    limits: record.limits,
+  };
+  return createHash("sha256")
+    .update(`${JSON.stringify(launchIdentity, null, 2)}\n`)
+    .digest("hex");
+}
+
 export const connectedRunRecordV2Schema: z.ZodType<ConnectedRunRecordV2> =
   z
     .strictObject({

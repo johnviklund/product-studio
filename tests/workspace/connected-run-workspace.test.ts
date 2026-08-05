@@ -20,7 +20,7 @@ import {
 import {
   hashResolvedCapabilityEnvelope,
   type ConnectedRunProcessIdentity,
-  type ConnectedRunRecordV1,
+  type ConnectedRunRecordV2,
 } from "../../src/domain/connected-run";
 import { InvalidWorkspaceError } from "../../src/domain/work-item";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
@@ -115,11 +115,11 @@ function connectedRun(
     maxEventBytes?: number;
     maxOutputBytes?: number;
   } = {},
-): ConnectedRunRecordV1 {
+): ConnectedRunRecordV2 {
   const envelope = resolveCapabilityEnvelope(["src", "tests"], defaults);
   const envelopeSha256 = hashResolvedCapabilityEnvelope(envelope);
   return {
-    schema_version: 1,
+    schema_version: 2,
     connected_run_id: connectedRunId,
     mission: {
       identity: {
@@ -173,16 +173,13 @@ function connectedRun(
         value: "d".repeat(64),
         assurance: "controller_observed",
       },
-      capability_envelope_sha256: {
-        value: envelopeSha256,
-        assurance: "controller_observed",
-      },
       authorization_sha256: {
         value: "e".repeat(64),
         assurance: "controller_observed",
       },
     },
-    resolved_capability_envelope: {
+    authorization: {
+      kind: "capability_envelope",
       envelope,
       envelope_sha256: envelopeSha256,
     },
@@ -288,6 +285,36 @@ describe("connected-run workspace storage", () => {
       kind: "lease_held",
       workItemId,
     });
+  });
+
+  it("rejects a launch guard whose legacy fingerprint does not bind v2 phase authorization", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    await workspace.createConnectedRun(connectedRun());
+    const guardPath = join(
+      root,
+      ".founder",
+      "connected-runs",
+      workItemId,
+      ".launch-guard.json",
+    );
+    const guard = JSON.parse(await readFile(guardPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    await writeFile(
+      guardPath,
+      `${JSON.stringify(
+        { ...guard, launch_fingerprint: "0".repeat(64) },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    await expect(workspace.reconcileConnectedRuns()).rejects.toThrow(
+      "launch_fingerprint must hash the guarded launch identity",
+    );
   });
 
   it("redacts retained events, enforces immutable limits, and stores strict process identity", async () => {
