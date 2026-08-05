@@ -6,12 +6,12 @@ import {
   connectedRunLifecycleSchema,
   connectedRunLimitsSchema,
   connectedRunProvenanceSchema,
-  connectedRunRecordV1Schema,
+  connectedRunRecordV2Schema,
   connectedRunSummarySchema,
   effectiveModelIdentitySchema,
   launchConnectedExecuteInputSchema,
   summarizeConnectedRun,
-  type ConnectedRunRecordV1,
+  type ConnectedRunRecordV2,
 } from "../../src/domain/connected-run";
 import {
   resolveCapabilityEnvelope,
@@ -26,6 +26,7 @@ const observedEventSha256 = "c".repeat(64);
 const authorizationSha256 = "d".repeat(64);
 const profileSha256 = "e".repeat(64);
 const skillSetSha256 = "f".repeat(64);
+const reviewPolicySha256 = "1".repeat(64);
 const defaults: ExecutionDefaultsV1 = {
   schema_version: 1,
   approved_command_forms: [
@@ -38,8 +39,8 @@ const defaults: ExecutionDefaultsV1 = {
 const envelope = resolveCapabilityEnvelope(["src", "tests"], defaults);
 const envelopeSha256 = hashResolvedCapabilityEnvelope(envelope);
 
-const record: ConnectedRunRecordV1 = {
-  schema_version: 1,
+const record: ConnectedRunRecordV2 = {
+  schema_version: 2,
   connected_run_id: connectedRunId,
   mission: {
     identity: {
@@ -93,16 +94,13 @@ const record: ConnectedRunRecordV1 = {
       value: skillSetSha256,
       assurance: "controller_observed",
     },
-    capability_envelope_sha256: {
-      value: envelopeSha256,
-      assurance: "controller_observed",
-    },
     authorization_sha256: {
       value: authorizationSha256,
       assurance: "controller_observed",
     },
   },
-  resolved_capability_envelope: {
+  authorization: {
+    kind: "capability_envelope",
     envelope,
     envelope_sha256: envelopeSha256,
   },
@@ -145,9 +143,34 @@ const record: ConnectedRunRecordV1 = {
   },
 };
 
+const reviewRecord: ConnectedRunRecordV2 = {
+  ...record,
+  mission: {
+    ...record.mission,
+    identity: {
+      phase: "review",
+      work_item_id: workItemId,
+      goal_version: 2,
+      input_revision: 3,
+      attempt: 1,
+    },
+    path: `.founder/missions/${workItemId}/review-2-3-1/mission.json`,
+  },
+  provenance: {
+    ...record.provenance,
+    role: { value: "reviewer", assurance: "controller_observed" },
+    seat: { value: "reviewer", assurance: "controller_observed" },
+  },
+  authorization: {
+    kind: "review_result_ingress",
+    result_path: `.founder/missions/${workItemId}/review-2-3-1/result.json`,
+    policy_sha256: reviewPolicySha256,
+  },
+};
+
 describe("connected-run domain", () => {
   it("strictly round-trips every durable contract and rejects unknown keys", () => {
-    expect(connectedRunRecordV1Schema.parse(record)).toEqual(record);
+    expect(connectedRunRecordV2Schema.parse(record)).toEqual(record);
     expect(connectedRunProvenanceSchema.parse(record.provenance)).toEqual(
       record.provenance,
     );
@@ -174,7 +197,7 @@ describe("connected-run domain", () => {
     );
 
     expect(() =>
-      connectedRunRecordV1Schema.parse({ ...record, provider: "vendor" }),
+      connectedRunRecordV2Schema.parse({ ...record, provider: "vendor" }),
     ).toThrow();
     expect(() =>
       connectedRunProvenanceSchema.parse({
@@ -188,6 +211,44 @@ describe("connected-run domain", () => {
         capability_envelope: envelope,
       }),
     ).toThrow();
+  });
+
+  it("rejects v1 records and summaries without a compatibility reader", () => {
+    expect(() =>
+      connectedRunRecordV2Schema.parse({ ...record, schema_version: 1 }),
+    ).toThrow();
+
+    const summary = summarizeConnectedRun(record);
+    expect(() =>
+      connectedRunSummarySchema.parse({ ...summary, schema_version: 1 }),
+    ).toThrow();
+  });
+
+  it("binds each mission phase to its authorization kind", () => {
+    expect(connectedRunRecordV2Schema.parse(reviewRecord)).toEqual(
+      reviewRecord,
+    );
+    expect(() =>
+      connectedRunRecordV2Schema.parse({
+        ...reviewRecord,
+        authorization: record.authorization,
+      }),
+    ).toThrow("review connected runs require review_result_ingress");
+    expect(() =>
+      connectedRunRecordV2Schema.parse({
+        ...record,
+        authorization: reviewRecord.authorization,
+      }),
+    ).toThrow("execute connected runs require capability_envelope");
+
+    const reviewSummary = summarizeConnectedRun(reviewRecord);
+    expect(reviewSummary.mission.identity.phase).toBe("review");
+    expect(reviewSummary.authorization).toEqual({
+      kind: "review_result_ingress",
+      policy_sha256: reviewPolicySha256,
+    });
+    expect(reviewSummary).not.toHaveProperty("capability_envelope_sha256");
+    expect(reviewSummary).not.toHaveProperty("authorization.envelope_sha256");
   });
 
   it("records unavailable provenance explicitly instead of omitting it", () => {
@@ -245,32 +306,20 @@ describe("connected-run domain", () => {
 
   it("binds tuple and envelope digests to the immutable mission record", () => {
     expect(() =>
-      connectedRunRecordV1Schema.parse({
+      connectedRunRecordV2Schema.parse({
         ...record,
         governed_tuple: { ...record.governed_tuple, attempt: 2 },
       }),
     ).toThrow("governed_tuple attempt must match mission identity");
     expect(() =>
-      connectedRunRecordV1Schema.parse({
+      connectedRunRecordV2Schema.parse({
         ...record,
-        resolved_capability_envelope: {
-          ...record.resolved_capability_envelope,
+        authorization: {
+          ...record.authorization,
           envelope_sha256: "0".repeat(64),
         },
       }),
     ).toThrow("envelope_sha256 must hash the resolved capability envelope");
-    expect(() =>
-      connectedRunRecordV1Schema.parse({
-        ...record,
-        provenance: {
-          ...record.provenance,
-          capability_envelope_sha256: {
-            value: "0".repeat(64),
-            assurance: "controller_observed",
-          },
-        },
-      }),
-    ).toThrow("provenance capability digest must match");
   });
 
   it("requires coherent terminal lifecycle and preserves partial outcomes", () => {
@@ -308,7 +357,7 @@ describe("connected-run domain", () => {
 
     expect(connectedRunSummarySchema.parse(summary)).toEqual(summary);
     expect(summary).toEqual({
-      schema_version: 1,
+      schema_version: 2,
       connected_run_id: connectedRunId,
       mission: {
         identity: record.mission.identity,
@@ -325,7 +374,10 @@ describe("connected-run domain", () => {
         harness: record.provenance.harness,
         adapter_profile: record.provenance.adapter_profile,
       },
-      capability_envelope_sha256: envelopeSha256,
+      authorization: {
+        kind: "capability_envelope",
+        envelope_sha256: envelopeSha256,
+      },
       acp_protocol_version: record.acp.protocol_version,
       lifecycle: {
         status: "running",
@@ -339,7 +391,10 @@ describe("connected-run domain", () => {
     });
     expect(summary).toMatchObject({
       connected_run_id: connectedRunId,
-      capability_envelope_sha256: envelopeSha256,
+      authorization: {
+        kind: "capability_envelope",
+        envelope_sha256: envelopeSha256,
+      },
       lifecycle: {
         status: "running",
         terminal_outcome: null,
@@ -348,7 +403,7 @@ describe("connected-run domain", () => {
       diagnostics: { count: 1, truncated: false },
     });
     expect(summary).not.toHaveProperty("process");
-    expect(summary).not.toHaveProperty("resolved_capability_envelope");
+    expect(summary).not.toHaveProperty("authorization.envelope");
     expect(summary).not.toHaveProperty("provenance.authorization_sha256");
     expect(summary).not.toHaveProperty("diagnostics.entries");
     expect(() =>
@@ -367,7 +422,7 @@ describe("connected-run domain", () => {
 
   it("bounds retained diagnostic count and message size", () => {
     expect(() =>
-      connectedRunRecordV1Schema.parse({
+      connectedRunRecordV2Schema.parse({
         ...record,
         diagnostics: {
           entries: Array.from({ length: 21 }, () =>

@@ -9,6 +9,7 @@ import {
 import {
   missionIdentitySchema,
   type MissionIdentity,
+  type MissionPhase,
 } from "./mission";
 import {
   governedTupleSchema,
@@ -16,7 +17,7 @@ import {
 } from "./work-item";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
-export const CONNECTED_RUN_SCHEMA_VERSION = 1 as const;
+export const CONNECTED_RUN_SCHEMA_VERSION = 2 as const;
 const KNOWN_PROVENANCE_ASSURANCES = [
   "controller_observed",
   "adapter_attested",
@@ -89,24 +90,37 @@ export interface ConnectedRunProvenance {
   adapter_profile: ProvenanceValue<SanitizedAdapterProfileIdentity>;
   resolved_profile_sha256: ProvenanceValue<string>;
   resolved_skill_set_sha256: ProvenanceValue<string>;
-  capability_envelope_sha256: {
-    value: string;
-    assurance: "controller_observed";
-  };
   authorization_sha256: ProvenanceValue<string>;
 }
 
 export interface ConnectedRunMissionReference {
-  identity: MissionIdentity<"execute">;
+  identity: MissionIdentity<MissionPhase>;
   path: string;
   content_sha256: string;
   source_commit: string;
 }
 
-export interface ResolvedCapabilityEnvelopeReference {
-  envelope: CapabilityEnvelopeV1;
-  envelope_sha256: string;
-}
+export type ConnectedRunAuthorization =
+  | {
+      kind: "capability_envelope";
+      envelope: CapabilityEnvelopeV1;
+      envelope_sha256: string;
+    }
+  | {
+      kind: "review_result_ingress";
+      result_path: string;
+      policy_sha256: string;
+    };
+
+export type ConnectedRunAuthorizationSummary =
+  | {
+      kind: "capability_envelope";
+      envelope_sha256: string;
+    }
+  | {
+      kind: "review_result_ingress";
+      policy_sha256: string;
+    };
 
 export interface ConnectedRunProtocolIdentity {
   protocol_version: ProvenanceValue<number>;
@@ -153,13 +167,13 @@ export interface ConnectedRunDiagnostics {
   truncated: boolean;
 }
 
-export interface ConnectedRunRecordV1 {
-  schema_version: 1;
+export interface ConnectedRunRecordV2 {
+  schema_version: 2;
   connected_run_id: string;
   mission: ConnectedRunMissionReference;
   governed_tuple: GovernedTuple;
   provenance: ConnectedRunProvenance;
-  resolved_capability_envelope: ResolvedCapabilityEnvelopeReference;
+  authorization: ConnectedRunAuthorization;
   acp: ConnectedRunProtocolIdentity;
   lifecycle: ConnectedRunLifecycle;
   limits: ConnectedRunLimits;
@@ -168,10 +182,10 @@ export interface ConnectedRunRecordV1 {
 }
 
 export interface ConnectedRunSummary {
-  schema_version: 1;
+  schema_version: 2;
   connected_run_id: string;
   mission: {
-    identity: MissionIdentity<"execute">;
+    identity: MissionIdentity<MissionPhase>;
     content_sha256: string;
     source_commit: string;
   };
@@ -186,7 +200,7 @@ export interface ConnectedRunSummary {
     | "harness"
     | "adapter_profile"
   >;
-  capability_envelope_sha256: string;
+  authorization: ConnectedRunAuthorizationSummary;
   acp_protocol_version: ProvenanceValue<number>;
   lifecycle: {
     status: ConnectedRunLifecycleStatus;
@@ -243,13 +257,6 @@ export function provenanceValueSchema<T>(
   ]) as z.ZodType<ProvenanceValue<T>>;
 }
 
-const executeMissionIdentitySchema: z.ZodType<MissionIdentity<"execute">> =
-  missionIdentitySchema.refine(
-    (identity): identity is MissionIdentity<"execute"> =>
-      identity.phase === "execute",
-    "connected runs require an execute mission identity",
-  );
-
 export const connectedRuntimeIdentitySchema: z.ZodType<ConnectedRuntimeIdentity> =
   z.strictObject({
     id: exactNonEmptyStringSchema,
@@ -292,20 +299,30 @@ export const connectedRunProvenanceSchema: z.ZodType<ConnectedRunProvenance> =
     ),
     resolved_profile_sha256: provenanceValueSchema(sha256Schema),
     resolved_skill_set_sha256: provenanceValueSchema(sha256Schema),
-    capability_envelope_sha256: z.strictObject({
-      value: sha256Schema,
-      assurance: z.literal("controller_observed"),
-    }),
     authorization_sha256: provenanceValueSchema(sha256Schema),
   });
 
 const connectedRunMissionReferenceSchema: z.ZodType<ConnectedRunMissionReference> =
   z.strictObject({
-    identity: executeMissionIdentitySchema,
+    identity: missionIdentitySchema,
     path: workspaceRelativePosixPathSchema,
     content_sha256: sha256Schema,
     source_commit: gitCommitSchema,
   });
+
+export const connectedRunAuthorizationSchema: z.ZodType<ConnectedRunAuthorization> =
+  z.discriminatedUnion("kind", [
+    z.strictObject({
+      kind: z.literal("capability_envelope"),
+      envelope: capabilityEnvelopeV1Schema,
+      envelope_sha256: sha256Schema,
+    }),
+    z.strictObject({
+      kind: z.literal("review_result_ingress"),
+      result_path: workspaceRelativePosixPathSchema,
+      policy_sha256: sha256Schema,
+    }),
+  ]);
 
 const connectedRunProtocolIdentitySchema: z.ZodType<ConnectedRunProtocolIdentity> =
   z.strictObject({
@@ -454,7 +471,7 @@ export function hashResolvedCapabilityEnvelope(
     .digest("hex");
 }
 
-export const connectedRunRecordV1Schema: z.ZodType<ConnectedRunRecordV1> =
+export const connectedRunRecordV2Schema: z.ZodType<ConnectedRunRecordV2> =
   z
     .strictObject({
       schema_version: z.literal(CONNECTED_RUN_SCHEMA_VERSION),
@@ -462,10 +479,7 @@ export const connectedRunRecordV1Schema: z.ZodType<ConnectedRunRecordV1> =
       mission: connectedRunMissionReferenceSchema,
       governed_tuple: governedTupleSchema,
       provenance: connectedRunProvenanceSchema,
-      resolved_capability_envelope: z.strictObject({
-        envelope: capabilityEnvelopeV1Schema,
-        envelope_sha256: sha256Schema,
-      }),
+      authorization: connectedRunAuthorizationSchema,
       acp: connectedRunProtocolIdentitySchema,
       lifecycle: connectedRunLifecycleSchema,
       limits: connectedRunLimitsSchema,
@@ -489,31 +503,53 @@ export const connectedRunRecordV1Schema: z.ZodType<ConnectedRunRecordV1> =
         }
       }
 
-      const expectedEnvelopeSha256 = hashResolvedCapabilityEnvelope(
-        record.resolved_capability_envelope.envelope,
-      );
       if (
-        record.resolved_capability_envelope.envelope_sha256 !==
-        expectedEnvelopeSha256
+        identity.phase === "patch" &&
+        record.governed_tuple.patch_cycle !== identity.patch_cycle
       ) {
         context.addIssue({
           code: "custom",
-          message: "envelope_sha256 must hash the resolved capability envelope",
-          path: ["resolved_capability_envelope", "envelope_sha256"],
-          input: record.resolved_capability_envelope.envelope_sha256,
+          message: "governed_tuple patch_cycle must match mission identity",
+          path: ["governed_tuple", "patch_cycle"],
+          input: record.governed_tuple.patch_cycle,
+        });
+      }
+
+      if (
+        identity.phase === "review" &&
+        record.authorization.kind !== "review_result_ingress"
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "review connected runs require review_result_ingress authorization",
+          path: ["authorization", "kind"],
+          input: record.authorization.kind,
         });
       }
       if (
-        record.provenance.capability_envelope_sha256.value !==
-        expectedEnvelopeSha256
+        identity.phase !== "review" &&
+        record.authorization.kind !== "capability_envelope"
       ) {
         context.addIssue({
           code: "custom",
-          message:
-            "provenance capability digest must match the resolved capability envelope",
-          path: ["provenance", "capability_envelope_sha256", "value"],
-          input: record.provenance.capability_envelope_sha256.value,
+          message: `${identity.phase} connected runs require capability_envelope authorization`,
+          path: ["authorization", "kind"],
+          input: record.authorization.kind,
         });
+      }
+
+      if (record.authorization.kind === "capability_envelope") {
+        const expectedEnvelopeSha256 = hashResolvedCapabilityEnvelope(
+          record.authorization.envelope,
+        );
+        if (record.authorization.envelope_sha256 !== expectedEnvelopeSha256) {
+          context.addIssue({
+            code: "custom",
+            message: "envelope_sha256 must hash the resolved capability envelope",
+            path: ["authorization", "envelope_sha256"],
+            input: record.authorization.envelope_sha256,
+          });
+        }
       }
 
       if (record.lifecycle.status === "running" && record.process === null) {
@@ -565,34 +601,57 @@ const summaryLifecycleSchema = z
   });
 
 export const connectedRunSummarySchema: z.ZodType<ConnectedRunSummary> =
-  z.strictObject({
-    schema_version: z.literal(CONNECTED_RUN_SCHEMA_VERSION),
-    connected_run_id: z.uuid(),
-    mission: z.strictObject({
-      identity: executeMissionIdentitySchema,
-      content_sha256: sha256Schema,
-      source_commit: gitCommitSchema,
-    }),
-    governed_tuple: governedTupleSchema,
-    provenance: z.strictObject({
-      role: provenanceValueSchema(exactNonEmptyStringSchema),
-      seat: provenanceValueSchema(exactNonEmptyStringSchema),
-      requested_model: provenanceValueSchema(exactNonEmptyStringSchema),
-      effective_model: effectiveModelIdentitySchema,
-      effort: provenanceValueSchema(exactNonEmptyStringSchema),
-      harness: provenanceValueSchema(connectedRuntimeIdentitySchema),
-      adapter_profile: provenanceValueSchema(
-        sanitizedAdapterProfileIdentitySchema,
-      ),
-    }),
-    capability_envelope_sha256: sha256Schema,
-    acp_protocol_version: provenanceValueSchema(positiveSafeIntegerSchema),
-    lifecycle: summaryLifecycleSchema,
-    diagnostics: z.strictObject({
-      count: nonNegativeSafeIntegerSchema,
-      truncated: z.boolean(),
-    }),
-  });
+  z
+    .strictObject({
+      schema_version: z.literal(CONNECTED_RUN_SCHEMA_VERSION),
+      connected_run_id: z.uuid(),
+      mission: z.strictObject({
+        identity: missionIdentitySchema,
+        content_sha256: sha256Schema,
+        source_commit: gitCommitSchema,
+      }),
+      governed_tuple: governedTupleSchema,
+      provenance: z.strictObject({
+        role: provenanceValueSchema(exactNonEmptyStringSchema),
+        seat: provenanceValueSchema(exactNonEmptyStringSchema),
+        requested_model: provenanceValueSchema(exactNonEmptyStringSchema),
+        effective_model: effectiveModelIdentitySchema,
+        effort: provenanceValueSchema(exactNonEmptyStringSchema),
+        harness: provenanceValueSchema(connectedRuntimeIdentitySchema),
+        adapter_profile: provenanceValueSchema(
+          sanitizedAdapterProfileIdentitySchema,
+        ),
+      }),
+      authorization: z.discriminatedUnion("kind", [
+        z.strictObject({
+          kind: z.literal("capability_envelope"),
+          envelope_sha256: sha256Schema,
+        }),
+        z.strictObject({
+          kind: z.literal("review_result_ingress"),
+          policy_sha256: sha256Schema,
+        }),
+      ]),
+      acp_protocol_version: provenanceValueSchema(positiveSafeIntegerSchema),
+      lifecycle: summaryLifecycleSchema,
+      diagnostics: z.strictObject({
+        count: nonNegativeSafeIntegerSchema,
+        truncated: z.boolean(),
+      }),
+    })
+    .superRefine((summary, context) => {
+      const isReview = summary.mission.identity.phase === "review";
+      if (isReview !== (summary.authorization.kind === "review_result_ingress")) {
+        context.addIssue({
+          code: "custom",
+          message: isReview
+            ? "review connected-run summary requires review_result_ingress authorization"
+            : `${summary.mission.identity.phase} connected-run summary requires capability_envelope authorization`,
+          path: ["authorization", "kind"],
+          input: summary.authorization.kind,
+        });
+      }
+    });
 
 export const launchConnectedExecuteInputSchema: z.ZodType<LaunchConnectedExecuteInput> =
   z.strictObject({
@@ -605,9 +664,9 @@ export const launchConnectedExecuteInputSchema: z.ZodType<LaunchConnectedExecute
   });
 
 export function summarizeConnectedRun(
-  input: ConnectedRunRecordV1,
+  input: ConnectedRunRecordV2,
 ): ConnectedRunSummary {
-  const record = connectedRunRecordV1Schema.parse(input);
+  const record = connectedRunRecordV2Schema.parse(input);
   return connectedRunSummarySchema.parse({
     schema_version: CONNECTED_RUN_SCHEMA_VERSION,
     connected_run_id: record.connected_run_id,
@@ -626,8 +685,16 @@ export function summarizeConnectedRun(
       harness: record.provenance.harness,
       adapter_profile: record.provenance.adapter_profile,
     },
-    capability_envelope_sha256:
-      record.resolved_capability_envelope.envelope_sha256,
+    authorization:
+      record.authorization.kind === "capability_envelope"
+        ? {
+            kind: record.authorization.kind,
+            envelope_sha256: record.authorization.envelope_sha256,
+          }
+        : {
+            kind: record.authorization.kind,
+            policy_sha256: record.authorization.policy_sha256,
+          },
     acp_protocol_version: record.acp.protocol_version,
     lifecycle: {
       status: record.lifecycle.status,
