@@ -1238,6 +1238,138 @@ async function createAppliedSpecDecisionFixture(
   };
 }
 
+async function createAppliedPlanDecisionFixture(
+  repository: ProductWorkspace,
+  options: { applyResult?: boolean } = {},
+) {
+  const spec = await createAppliedSpecDecisionFixture(repository);
+  const approved = await createController(repository).approveSpecResult(
+    spec.used.work_item.goal.work_item_id,
+    spec.input,
+  );
+  const tip = await currentShapingTip(repository, approved.work_item);
+  if (tip.mission.identity.phase !== "plan") {
+    throw new Error("Expected the approved Spec to publish a Plan mission");
+  }
+  const result = shapingResultForMission(tip.mission) as PlanResultSubmission;
+  const resultContentSha256 =
+    options.applyResult === false
+      ? "d".repeat(64)
+      : await writeAppliedControllerShapingBundle(
+          repository,
+          tip,
+          result,
+        );
+  const goalContract = approved.work_item.goal.goal_contract;
+  if (goalContract === undefined) {
+    throw new Error("Expected the approved Spec to create a goal contract");
+  }
+  return {
+    ...spec,
+    approved,
+    tip,
+    result,
+    resultContentSha256,
+    input: {
+      launch_mode: "manual" as const,
+      requested_model: null,
+      expected_mission_content_sha256: tip.mission.content_sha256,
+      expected_result_content_sha256: resultContentSha256,
+      expected_shaping_state_sha256: await currentShapingStateHash(
+        repository,
+        approved.work_item,
+      ),
+      goal_contract_sha256: hashGoalContract(goalContract),
+    },
+  };
+}
+
+async function readOptionalFixtureFile(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function listOptionalFixtureDirectory(
+  path: string,
+): Promise<string[] | null> {
+  try {
+    return (await readdir(path)).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function capturePlanApprovalDurableState(
+  repository: ProductWorkspace,
+  workItemId: string,
+) {
+  const itemDirectory = join(
+    repository.workspaceRoot,
+    ".founder",
+    "work-items",
+    workItemId,
+  );
+  const artifacts = await repository.listShapingArtifacts(workItemId);
+  const decisions = await Promise.all(
+    artifacts
+      .filter((artifact) => artifact.mission.identity.phase === "plan")
+      .map(async (artifact) => {
+        const path = join(
+          dirname(join(repository.workspaceRoot, artifact.mission_path)),
+          "decision.json",
+        );
+        return [path, await readOptionalFixtureFile(path)] as const;
+      }),
+  );
+  const approvalDirectory = join(itemDirectory, "plan-approvals");
+  const approvalEntries = await listOptionalFixtureDirectory(
+    approvalDirectory,
+  );
+  const approvalFiles =
+    approvalEntries === null
+      ? []
+      : await Promise.all(
+          approvalEntries.map(async (entry) => [
+            entry,
+            await readFile(join(approvalDirectory, entry), "utf8"),
+          ] as const),
+        );
+  return {
+    goal: await readFile(join(itemDirectory, "goal.yaml"), "utf8"),
+    state: await readFile(join(itemDirectory, "state.json"), "utf8"),
+    decisions,
+    approvalEntries,
+    approvalFiles,
+  };
+}
+
+async function expectPlanApprovalRejectionWithoutMutation(
+  repository: ProductWorkspace,
+  workItemId: string,
+  input: Parameters<WorkItemController["approvePlanResult"]>[1],
+  kind: string,
+) {
+  const before = await capturePlanApprovalDurableState(
+    repository,
+    workItemId,
+  );
+  await expect(
+    createController(repository).approvePlanResult(workItemId, input),
+  ).rejects.toMatchObject({ kind });
+  expect(
+    await capturePlanApprovalDurableState(repository, workItemId),
+  ).toEqual(before);
+}
+
 type ShapingResponseLossBoundary =
   | "before_intent"
   | "after_intent"
@@ -3548,6 +3680,303 @@ describe("WorkItemController", () => {
       ).toEqual([]);
     },
   );
+
+  it("approves one Plan into the unchanged Execute tuple and replays byte-identically", async () => {
+    const { repository } = await createWorkspace();
+    const fixture = await createAppliedPlanDecisionFixture(repository);
+    const workItemId = fixture.approved.work_item.goal.work_item_id;
+    const goalBefore = await readFile(
+      join(
+        repository.workspaceRoot,
+        ".founder",
+        "work-items",
+        workItemId,
+        "goal.yaml",
+      ),
+      "utf8",
+    );
+
+    const first = await createController(repository).approvePlanResult(
+      workItemId,
+      fixture.input,
+    );
+    expect(first).toMatchObject({
+      work_item: {
+        state: {
+          phase: "execute",
+          status: "active",
+          goal_version: fixture.approved.work_item.state.goal_version,
+          input_revision: fixture.approved.work_item.state.input_revision,
+          attempt: 0,
+        },
+      },
+      manifest: { outcome: "applied" },
+      launch_mode: "manual",
+      requested_model: null,
+      execute_tuple: {
+        goal_version: fixture.approved.work_item.state.goal_version,
+        input_revision: fixture.approved.work_item.state.input_revision,
+        attempt: 0,
+      },
+    });
+    expect(first.intent.previous_goal_bytes).toBe(
+      first.intent.next_goal_bytes,
+    );
+    expect(
+      await readFile(
+        join(
+          repository.workspaceRoot,
+          ".founder",
+          "work-items",
+          workItemId,
+          "goal.yaml",
+        ),
+        "utf8",
+      ),
+    ).toBe(goalBefore);
+    const approvalDirectory = join(
+      repository.workspaceRoot,
+      ".founder",
+      "work-items",
+      workItemId,
+      "plan-approvals",
+    );
+    expect((await readdir(approvalDirectory)).sort()).toEqual(
+      [
+        `${first.approval_id}.intent.json`,
+        `${first.approval_id}.json`,
+      ].sort(),
+    );
+    const decidedTip = await repository.resolveCurrentMissionRevision(
+      workItemId,
+      "plan",
+    );
+    expect(decidedTip?.decision?.receipt).toMatchObject({
+      identity: fixture.tip.mission.identity,
+      execute_tuple: first.execute_tuple,
+    });
+
+    const replay = await createControllerAt(
+      repository,
+      "2026-08-05T12:00:00.000Z",
+    ).approvePlanResult(workItemId, fixture.input);
+    expect(replay).toEqual(first);
+
+    const appliedBefore = await capturePlanApprovalDurableState(
+      repository,
+      workItemId,
+    );
+    await expect(
+      createController(repository).approvePlanResult(workItemId, {
+        ...fixture.input,
+        launch_mode: "connected",
+        requested_model: "execute-model",
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    await expect(
+      createController(repository).approvePlanResult(workItemId, {
+        ...fixture.input,
+        expected_shaping_state_sha256: "e".repeat(64),
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    expect(
+      await capturePlanApprovalDurableState(repository, workItemId),
+    ).toEqual(appliedBefore);
+  });
+
+  it("rejects every stale Plan approval hash without durable mutation", async () => {
+    for (const field of [
+      "expected_mission_content_sha256",
+      "expected_result_content_sha256",
+      "expected_shaping_state_sha256",
+    ] as const) {
+      const { repository } = await createWorkspace();
+      const fixture = await createAppliedPlanDecisionFixture(repository);
+      await expectPlanApprovalRejectionWithoutMutation(
+        repository,
+        fixture.approved.work_item.goal.work_item_id,
+        { ...fixture.input, [field]: "f".repeat(64) },
+        "stale_expectation",
+      );
+    }
+  });
+
+  it("rejects non-applied, non-tip, decided, stale-contract, wrong-phase, and retained-lease Plan approvals without mutation", async () => {
+    const nonAppliedWorkspace = await createWorkspace();
+    const nonApplied = await createAppliedPlanDecisionFixture(
+      nonAppliedWorkspace.repository,
+      { applyResult: false },
+    );
+    await expectPlanApprovalRejectionWithoutMutation(
+      nonAppliedWorkspace.repository,
+      nonApplied.approved.work_item.goal.work_item_id,
+      nonApplied.input,
+      "stale_expectation",
+    );
+
+    const nonTipWorkspace = await createWorkspace();
+    const nonTip = await createAppliedPlanDecisionFixture(
+      nonTipWorkspace.repository,
+    );
+    const requested = await createController(
+      nonTipWorkspace.repository,
+    ).requestShapingChanges(
+      nonTip.approved.work_item.goal.work_item_id,
+      {
+        launch_mode: "manual",
+        next_requested_model: null,
+        expected_mission_content_sha256:
+          nonTip.tip.mission.content_sha256,
+        expected_result_content_sha256: nonTip.resultContentSha256,
+        expected_shaping_state_sha256:
+          nonTip.input.expected_shaping_state_sha256,
+        feedback: "Supersede this Plan before approval.",
+      },
+    );
+    await expectPlanApprovalRejectionWithoutMutation(
+      nonTipWorkspace.repository,
+      requested.work_item.goal.work_item_id,
+      {
+        ...nonTip.input,
+        expected_shaping_state_sha256: await currentShapingStateHash(
+          nonTipWorkspace.repository,
+          requested.work_item,
+        ),
+      },
+      "stale_expectation",
+    );
+
+    const decidedWorkspace = await createWorkspace();
+    const decided = await createAppliedPlanDecisionFixture(
+      decidedWorkspace.repository,
+    );
+    const decidedItem = decided.approved.work_item;
+    await decidedWorkspace.repository.writeShapingDecisionReceipt({
+      shaping_schema_version: 2,
+      identity: {
+        phase: "plan",
+        work_item_id: decided.tip.mission.identity.work_item_id,
+        input_sha256: decided.tip.mission.identity.input_sha256,
+      },
+      mission_content_sha256: decided.tip.mission.content_sha256,
+      result_content_sha256: decided.resultContentSha256,
+      goal_contract_sha256: decided.input.goal_contract_sha256,
+      goal_version: decidedItem.state.goal_version!,
+      execute_tuple: {
+        goal_version: decidedItem.state.goal_version!,
+        input_revision: decidedItem.state.input_revision!,
+        attempt: 0,
+      },
+      approved_at: "2026-08-05T10:00:00.000Z",
+    });
+    await expectPlanApprovalRejectionWithoutMutation(
+      decidedWorkspace.repository,
+      decidedItem.goal.work_item_id,
+      {
+        ...decided.input,
+        expected_shaping_state_sha256: await currentShapingStateHash(
+          decidedWorkspace.repository,
+          decidedItem,
+        ),
+      },
+      "idempotency_conflict",
+    );
+
+    const staleContractWorkspace = await createWorkspace();
+    const staleContract = await createAppliedPlanDecisionFixture(
+      staleContractWorkspace.repository,
+    );
+    const staleItem = staleContract.approved.work_item;
+    const contract = staleItem.goal.goal_contract!;
+    const edited = await createController(
+      staleContractWorkspace.repository,
+    ).saveWorkItem(staleItem.goal.work_item_id, {
+      target_source_id: "inbox",
+      title: staleItem.goal.title,
+      type: staleItem.goal.type ?? null,
+      priority: staleItem.goal.priority ?? null,
+      tags: staleItem.goal.tags ?? [],
+      notes: staleItem.goal.notes ?? null,
+      goal_contract: {
+        purpose: `${contract.purpose} Changed.`,
+        acceptance_criteria: contract.acceptance_criteria,
+        non_goals: contract.non_goals,
+        allowed_scope: contract.allowed_scope,
+        review_ready: contract.review_ready,
+      },
+      expected_goal_version: staleItem.state.goal_version,
+      expected_input_revision: staleItem.state.input_revision,
+    });
+    await expectPlanApprovalRejectionWithoutMutation(
+      staleContractWorkspace.repository,
+      edited.work_item.goal.work_item_id,
+      {
+        ...staleContract.input,
+        expected_shaping_state_sha256: await currentShapingStateHash(
+          staleContractWorkspace.repository,
+          edited.work_item,
+        ),
+        goal_contract_sha256: hashGoalContract(
+          edited.work_item.goal.goal_contract!,
+        ),
+      },
+      "stale_expectation",
+    );
+
+    const wrongPhaseWorkspace = await createWorkspace();
+    const wrongPhase = await createAppliedPlanDecisionFixture(
+      wrongPhaseWorkspace.repository,
+    );
+    const wrongPhaseItem = wrongPhase.approved.work_item;
+    const transitioned = await createController(
+      wrongPhaseWorkspace.repository,
+    ).transition(wrongPhaseItem.goal.work_item_id, {
+      target_phase: "execute",
+      target_status: "active",
+      expected_phase: "plan",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: wrongPhaseItem.state.goal_version!,
+      expected_input_revision: wrongPhaseItem.state.input_revision!,
+      attempt: 0,
+    });
+    await expectPlanApprovalRejectionWithoutMutation(
+      wrongPhaseWorkspace.repository,
+      transitioned.work_item.goal.work_item_id,
+      {
+        ...wrongPhase.input,
+        expected_shaping_state_sha256: await currentShapingStateHash(
+          wrongPhaseWorkspace.repository,
+          transitioned.work_item,
+        ),
+      },
+      "stale_expectation",
+    );
+
+    const retainedWorkspace = await createWorkspace();
+    const retained = await createAppliedPlanDecisionFixture(
+      retainedWorkspace.repository,
+    );
+    const retainedItemId = retained.approved.work_item.goal.work_item_id;
+    const retainedLease = await retainedWorkspace.repository.acquireControllerLease(
+      retainedItemId,
+      {
+        run_id: "90000000-0000-4000-8000-000000000099",
+        idempotency_key: `${retainedItemId}:retained-plan-approval-test`,
+        acquired_at: "2026-08-05T10:00:00.000Z",
+      },
+    );
+    if (retainedLease === null) {
+      throw new Error("Expected retained Plan approval lease");
+    }
+    await expectPlanApprovalRejectionWithoutMutation(
+      retainedWorkspace.repository,
+      retainedItemId,
+      retained.input,
+      "repair_required",
+    );
+    await retainedWorkspace.repository.releaseControllerLease(retainedLease);
+  });
 
   it("fails closed on a retained controller lease without claiming it", async () => {
     const { repository } = await createWorkspace();

@@ -58,6 +58,7 @@ import {
   shapingDecisionReceiptSchema,
   shapingMissionPackageSchema,
   specResultSubmissionSchema,
+  type PlanApprovalReceipt,
   type ShapingDecisionIntentV1,
   type ShapingDecisionManifestV1,
   type ShapingDecisionOperation,
@@ -80,6 +81,7 @@ import {
   ControllerConflictError,
   InvalidWorkspaceError,
   acceptPatchPlanInputSchema,
+  approvePlanResultInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   connectedPermissionResolutionInputSchema,
@@ -89,6 +91,7 @@ import {
   retryExecuteAttemptInputSchema,
   recordConnectedPermissionDenialInputSchema,
   saveWorkItemInputSchema,
+  derivePlanApprovalId,
   parseWorkItemStateForRead,
   workItemIdSchema,
   workItemGoalSchema,
@@ -96,6 +99,7 @@ import {
   workItemStateSchema,
   type ActiveRun,
   type AcceptPatchPlanInput,
+  type ApprovePlanResultInput,
   type ControllerLease,
   type ControllerMutationResult,
   type ControllerRunManifest,
@@ -107,6 +111,8 @@ import {
   type ProductManifest,
   type ConnectedPermissionResolutionInput,
   type MissingPermissionOperation,
+  type PlanApprovalIntentV1,
+  type PlanApprovalManifestV1,
   type RecordConnectedPermissionDenialInput,
   type RetryExecuteAttemptInput,
   type SaveWorkItemInput,
@@ -241,6 +247,16 @@ export interface ShapingDecisionControllerResult {
     | null;
 }
 
+export interface PlanApprovalControllerResult {
+  work_item: WorkItem;
+  manifest: PlanApprovalManifestV1;
+  intent: PlanApprovalIntentV1;
+  approval_id: string;
+  launch_mode: "connected" | "manual";
+  requested_model: string | null;
+  execute_tuple: PlanApprovalReceipt["execute_tuple"];
+}
+
 interface ShapingDecisionRepository extends ControllerWorkItemRepository {
   listShapingArtifacts(workItemId: string): Promise<StoredShapingArtifact[]>;
   listShapingRuns(workItemId: string): Promise<ShapingRunRecordV1[]>;
@@ -261,6 +277,17 @@ interface ShapingDecisionBinding {
   next_requested_model: string | null;
 }
 
+interface PlanApprovalBinding {
+  work_item_id: string;
+  launch_mode: "connected" | "manual";
+  requested_model: string | null;
+  expected_mission_content_sha256: string;
+  expected_result_content_sha256: string;
+  expected_shaping_state_sha256: string;
+  goal_contract_sha256: string;
+  goal_version: number;
+}
+
 interface PreparedShapingDecision {
   phase_from: "idea" | ShapingPhase;
   phase_to: ShapingPhase;
@@ -271,6 +298,11 @@ interface PreparedShapingDecision {
   plan_repository_base_commit: string | null;
   plan_goal_contract_sha256: string | null;
   plan_goal_version: number | null;
+}
+
+interface PreparedPlanApproval {
+  next_state: WorkItem["state"];
+  receipt: PlanApprovalReceipt;
 }
 
 export interface ImportExternalResultResult extends ControllerMutationResult {
@@ -487,6 +519,219 @@ export class WorkItemController {
       "replan_with_updated_contract",
       replanWithUpdatedContractInputSchema.parse(input),
     );
+  }
+
+  async approvePlanResult(
+    workItemId: string,
+    input: ApprovePlanResultInput,
+  ): Promise<PlanApprovalControllerResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = approvePlanResultInputSchema.parse(input);
+    const repository = this.shapingRepository();
+    const preLockItem = await repository.read(validatedId);
+    if (preLockItem === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+    const goalVersion = preLockItem.state.goal_version;
+    if (goalVersion === undefined) {
+      throw this.conflict(
+        "stale_expectation",
+        validatedId,
+        "Plan approval requires a governed goal version.",
+      );
+    }
+    const binding: PlanApprovalBinding = {
+      work_item_id: validatedId,
+      ...validatedInput,
+      goal_version: goalVersion,
+    };
+    const approvalId = derivePlanApprovalId(binding);
+    const idempotencyKey = `${validatedId}:plan-approval:${approvalId}`;
+    const activeRun = this.activeRun(
+      deriveControllerRunId(idempotencyKey, "approve-plan-result"),
+      idempotencyKey,
+    );
+    const lease = await repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      let storedManifest: PlanApprovalManifestV1 | null;
+      try {
+        storedManifest = await repository.readPlanApprovalManifest(
+          validatedId,
+          approvalId,
+        );
+      } catch (error) {
+        if (
+          error instanceof ControllerConflictError &&
+          error.kind === "repair_required" &&
+          error.reason.includes("receipt without a manifest")
+        ) {
+          const recoverableIntent =
+            await repository.readPlanApprovalIntent(
+              validatedId,
+              approvalId,
+            );
+          if (recoverableIntent !== null) {
+            this.assertPlanApprovalIntentMatchesBinding(
+              recoverableIntent,
+              binding,
+            );
+            await this.assertResumablePlanApprovalIntent(
+              repository,
+              lease.work_item,
+              recoverableIntent,
+            );
+            return await this.materializePlanApproval(
+              repository,
+              lease,
+              recoverableIntent,
+            );
+          }
+        }
+        throw error;
+      }
+      if (storedManifest?.outcome === "applied") {
+        const storedIntent = await this.requirePlanApprovalIntent(
+          repository,
+          binding,
+          approvalId,
+        );
+        this.assertPlanApprovalManifestMatchesIntent(
+          storedManifest,
+          storedIntent,
+        );
+        return this.planApprovalResult(storedIntent, storedManifest);
+      }
+      if (storedManifest?.outcome === "failed") {
+        throw this.conflict(
+          "idempotency_conflict",
+          validatedId,
+          `Plan approval ${approvalId} is already failed.`,
+        );
+      }
+
+      const storedIntent = await repository.readPlanApprovalIntent(
+        validatedId,
+        approvalId,
+      );
+      if (storedIntent !== null) {
+        this.assertPlanApprovalIntentMatchesBinding(storedIntent, binding);
+        if (storedManifest?.outcome === "pending") {
+          this.assertPlanApprovalManifestMatchesIntent(
+            storedManifest,
+            storedIntent,
+          );
+          const reconciled = await repository.reconcilePlanApprovalCommit(
+            lease,
+            approvalId,
+          );
+          return this.planApprovalResult(
+            storedIntent,
+            reconciled.manifest,
+          );
+        }
+        await this.assertResumablePlanApprovalIntent(
+          repository,
+          lease.work_item,
+          storedIntent,
+        );
+        return await this.materializePlanApproval(
+          repository,
+          lease,
+          storedIntent,
+        );
+      }
+      if (storedManifest !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Plan approval ${approvalId} has a manifest but no durable intent.`,
+        );
+      }
+
+      const artifacts = await repository.listShapingArtifacts(validatedId);
+      const planTip = this.resolveShapingTip(
+        validatedId,
+        "plan",
+        artifacts,
+      );
+      if (planTip?.decision !== null && planTip?.decision !== undefined) {
+        throw this.conflict(
+          "idempotency_conflict",
+          validatedId,
+          "The Plan tip already has a different durable approval binding.",
+        );
+      }
+      const runs = await repository.listShapingRuns(validatedId);
+      const currentShapingState = this.shapingDecisionState(
+        lease.work_item,
+        artifacts,
+        runs,
+      );
+      if (
+        hashShapingDecisionState(currentShapingState) !==
+        binding.expected_shaping_state_sha256
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "Expected Plan shaping state does not match the durable work item and artifact tip.",
+        );
+      }
+
+      const prepared = this.preparePlanApproval(
+        lease.work_item,
+        artifacts,
+        binding,
+      );
+      const receiptBytes = this.serializeDecisionReceipt(
+        prepared.receipt,
+      );
+      const writtenIntent = await repository.writePlanApprovalIntent(
+        lease,
+        {
+          intent: {
+            schema_version: 1,
+            work_item_id: validatedId,
+            launch_mode: binding.launch_mode,
+            requested_model: binding.requested_model,
+            expected_mission_content_sha256:
+              binding.expected_mission_content_sha256,
+            expected_result_content_sha256:
+              binding.expected_result_content_sha256,
+            expected_shaping_state_sha256:
+              binding.expected_shaping_state_sha256,
+            goal_contract_sha256: binding.goal_contract_sha256,
+            goal_version: binding.goal_version,
+            receipt_bytes: receiptBytes,
+            receipt_sha256: this.hashSource(receiptBytes),
+            execute_tuple: prepared.receipt.execute_tuple,
+          },
+          state: prepared.next_state,
+        },
+      );
+      return await this.materializePlanApproval(
+        repository,
+        lease,
+        writtenIntent.intent,
+      );
+    } finally {
+      await repository.releaseControllerLease(lease);
+    }
   }
 
   private async executeShapingDecision(
@@ -4045,6 +4290,86 @@ export class WorkItemController {
     };
   }
 
+  private preparePlanApproval(
+    item: WorkItem,
+    artifacts: StoredShapingArtifact[],
+    binding: PlanApprovalBinding,
+  ): PreparedPlanApproval {
+    const workItemId = item.goal.work_item_id;
+    if (
+      item.state.schema_version !== 2 ||
+      item.state.phase !== "plan" ||
+      item.state.status !== "active"
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Plan approval requires an active schema-v2 Plan work item.",
+      );
+    }
+    const goalContract = item.goal.goal_contract;
+    const goalVersion = item.state.goal_version;
+    const inputRevision = item.state.input_revision;
+    if (
+      goalContract === undefined ||
+      goalVersion === undefined ||
+      inputRevision === undefined ||
+      item.state.attempt !== 0 ||
+      goalContract.goal_version !== goalVersion ||
+      binding.goal_version !== goalVersion ||
+      binding.goal_contract_sha256 !== hashGoalContract(goalContract)
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Plan approval requires the current governed contract and unchanged execution tuple.",
+      );
+    }
+    const artifact = this.requireBoundAppliedShapingTip(
+      workItemId,
+      "plan",
+      artifacts,
+      binding.expected_mission_content_sha256,
+      binding.expected_result_content_sha256,
+    );
+    if (artifact.decision !== null) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Plan approval requires an undecided Plan tip.",
+      );
+    }
+    this.assertPlanMissionUsesCurrentContract(item, artifact);
+    const mission = artifact.mission as PlanMissionPackage;
+    const executeTuple = {
+      goal_version: goalVersion,
+      input_revision: inputRevision,
+      attempt: 0 as const,
+    };
+    const receipt: PlanApprovalReceipt = {
+      shaping_schema_version: 2,
+      identity: mission.identity,
+      mission_content_sha256: mission.content_sha256,
+      result_content_sha256: binding.expected_result_content_sha256,
+      goal_contract_sha256: binding.goal_contract_sha256,
+      goal_version: goalVersion,
+      execute_tuple: executeTuple,
+      approved_at: this.clock().toISOString(),
+    };
+    return {
+      next_state: workItemStateSchema.parse({
+        ...this.withoutControllerActiveRun(item).state,
+        phase: "execute",
+        status: "active",
+        updated_at: nextTimestamp(item.state.updated_at, this.clock),
+        goal_version: goalVersion,
+        input_revision: inputRevision,
+        attempt: 0,
+      }),
+      receipt,
+    };
+  }
+
   private shapingDecisionState(
     item: WorkItem,
     artifacts: StoredShapingArtifact[],
@@ -4242,6 +4567,290 @@ export class WorkItemController {
         "The Plan decision is bound to a superseded goal contract.",
       );
     }
+  }
+
+  private async requirePlanApprovalIntent(
+    repository: ShapingDecisionRepository,
+    binding: PlanApprovalBinding,
+    approvalId: string,
+  ): Promise<PlanApprovalIntentV1> {
+    const intent = await repository.readPlanApprovalIntent(
+      binding.work_item_id,
+      approvalId,
+    );
+    if (intent === null) {
+      throw this.conflict(
+        "repair_required",
+        binding.work_item_id,
+        `Applied Plan approval ${approvalId} has no durable intent.`,
+      );
+    }
+    this.assertPlanApprovalIntentMatchesBinding(intent, binding);
+    return intent;
+  }
+
+  private assertPlanApprovalIntentMatchesBinding(
+    intent: PlanApprovalIntentV1,
+    binding: PlanApprovalBinding,
+  ): void {
+    const expectedApprovalId = derivePlanApprovalId(binding);
+    if (
+      intent.approval_id !== expectedApprovalId ||
+      intent.work_item_id !== binding.work_item_id ||
+      intent.expected_mission_content_sha256 !==
+        binding.expected_mission_content_sha256 ||
+      intent.expected_result_content_sha256 !==
+        binding.expected_result_content_sha256 ||
+      intent.expected_shaping_state_sha256 !==
+        binding.expected_shaping_state_sha256 ||
+      intent.goal_contract_sha256 !== binding.goal_contract_sha256 ||
+      intent.goal_version !== binding.goal_version
+    ) {
+      throw this.conflict(
+        "idempotency_conflict",
+        binding.work_item_id,
+        `Stored Plan approval intent ${intent.approval_id} does not match the decision request.`,
+      );
+    }
+    if (
+      intent.launch_mode !== binding.launch_mode ||
+      intent.requested_model !== binding.requested_model
+    ) {
+      throw this.conflict(
+        "idempotency_conflict",
+        binding.work_item_id,
+        "A Plan approval replay cannot change its launch mode or requested model.",
+      );
+    }
+  }
+
+  private assertPlanApprovalManifestMatchesIntent(
+    manifest: PlanApprovalManifestV1,
+    intent: PlanApprovalIntentV1,
+  ): void {
+    const manifestIdentity = {
+      schema_version: manifest.schema_version,
+      approval_id: manifest.approval_id,
+      work_item_id: manifest.work_item_id,
+      launch_mode: manifest.launch_mode,
+      requested_model: manifest.requested_model,
+      expected_mission_content_sha256:
+        manifest.expected_mission_content_sha256,
+      expected_result_content_sha256:
+        manifest.expected_result_content_sha256,
+      expected_shaping_state_sha256:
+        manifest.expected_shaping_state_sha256,
+      goal_contract_sha256: manifest.goal_contract_sha256,
+      goal_version: manifest.goal_version,
+      receipt_sha256: manifest.receipt_sha256,
+      execute_tuple: manifest.execute_tuple,
+      goal_sha256: manifest.goal_sha256,
+      state_sha256: manifest.state_sha256,
+    };
+    const intentIdentity = {
+      schema_version: 1 as const,
+      approval_id: intent.approval_id,
+      work_item_id: intent.work_item_id,
+      launch_mode: intent.launch_mode,
+      requested_model: intent.requested_model,
+      expected_mission_content_sha256:
+        intent.expected_mission_content_sha256,
+      expected_result_content_sha256:
+        intent.expected_result_content_sha256,
+      expected_shaping_state_sha256:
+        intent.expected_shaping_state_sha256,
+      goal_contract_sha256: intent.goal_contract_sha256,
+      goal_version: intent.goal_version,
+      receipt_sha256: intent.receipt_sha256,
+      execute_tuple: intent.execute_tuple,
+      goal_sha256: intent.next_goal_sha256,
+      state_sha256: intent.next_state_sha256,
+    };
+    if (!isDeepStrictEqual(manifestIdentity, intentIdentity)) {
+      throw this.conflict(
+        "idempotency_conflict",
+        intent.work_item_id,
+        `Stored Plan approval manifest ${manifest.approval_id} differs from its intent.`,
+      );
+    }
+  }
+
+  private async assertResumablePlanApprovalIntent(
+    repository: ShapingDecisionRepository,
+    currentItem: WorkItem,
+    intent: PlanApprovalIntentV1,
+  ): Promise<void> {
+    const previousItem = this.workItemFromPreviousShapingBytes(
+      intent.previous_goal_bytes,
+      intent.previous_state_bytes,
+    );
+    const nextItem = this.workItemFromShapingBytes(
+      intent.next_goal_bytes,
+      intent.next_state_bytes,
+    );
+    const currentWithoutRun = this.withoutControllerActiveRun(currentItem);
+    const previousWithoutRun = this.withoutControllerActiveRun(previousItem);
+    const nextWithoutRun = this.withoutControllerActiveRun(nextItem);
+    const isPrevious = isDeepStrictEqual(
+      currentWithoutRun,
+      previousWithoutRun,
+    );
+    const isNext = isDeepStrictEqual(currentWithoutRun, nextWithoutRun);
+    if (!isPrevious && !isNext) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "Durable work-item state is neither the previous nor next pair recorded by the Plan approval intent.",
+      );
+    }
+    if (isNext) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "A Plan approval intent reached Execute without a pending or applied manifest.",
+      );
+    }
+
+    const artifacts = await repository.listShapingArtifacts(
+      intent.work_item_id,
+    );
+    const tip = this.resolveShapingTip(
+      intent.work_item_id,
+      "plan",
+      artifacts,
+    );
+    if (
+      tip === null ||
+      tip.mission.content_sha256 !==
+        intent.expected_mission_content_sha256 ||
+      tip.result?.result_content_sha256 !==
+        intent.expected_result_content_sha256 ||
+      tip.import_receipt?.outcome !== "applied" ||
+      tip.applied_marker === null
+    ) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "The pending Plan approval no longer matches the applied Plan tip.",
+      );
+    }
+    const reconstructedArtifacts = artifacts.map((artifact) => {
+      if (
+        artifact.mission.content_sha256 !==
+        intent.expected_mission_content_sha256
+      ) {
+        return artifact;
+      }
+      if (
+        artifact.decision !== null &&
+        this.serializeDecisionReceipt(artifact.decision.receipt) !==
+          intent.receipt_bytes
+      ) {
+        throw this.conflict(
+          "idempotency_conflict",
+          intent.work_item_id,
+          "The stored Plan receipt differs from the pending approval intent.",
+        );
+      }
+      return { ...artifact, decision: null };
+    });
+    const reconstructedState = this.shapingDecisionState(
+      previousWithoutRun,
+      reconstructedArtifacts,
+      await repository.listShapingRuns(intent.work_item_id),
+    );
+    if (
+      hashShapingDecisionState(reconstructedState) !==
+      intent.expected_shaping_state_sha256
+    ) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "Durable artifacts drifted beyond the receipt predicted by the Plan approval intent.",
+      );
+    }
+  }
+
+  private async materializePlanApproval(
+    repository: ShapingDecisionRepository,
+    lease: ControllerLease,
+    intent: PlanApprovalIntentV1,
+  ): Promise<PlanApprovalControllerResult> {
+    const parsedReceipt = shapingDecisionReceiptSchema.parse(
+      JSON.parse(intent.receipt_bytes) as unknown,
+    );
+    if (
+      parsedReceipt.identity.phase !== "plan" ||
+      this.serializeDecisionReceipt(parsedReceipt) !== intent.receipt_bytes
+    ) {
+      throw this.conflict(
+        "repair_required",
+        intent.work_item_id,
+        "The Plan approval intent receipt bytes are not canonical.",
+      );
+    }
+    const writtenReceipt =
+      await repository.writeShapingDecisionReceipt(parsedReceipt);
+    if (
+      writtenReceipt.receipt_content_sha256 !== intent.receipt_sha256 ||
+      this.serializeDecisionReceipt(writtenReceipt.receipt) !==
+        intent.receipt_bytes
+    ) {
+      throw this.conflict(
+        "idempotency_conflict",
+        intent.work_item_id,
+        "The durable Plan receipt differs from its approval intent.",
+      );
+    }
+
+    const nextItem = this.workItemFromShapingBytes(
+      intent.next_goal_bytes,
+      intent.next_state_bytes,
+    );
+    const pendingManifest: PlanApprovalManifestV1 = {
+      schema_version: 1,
+      approval_id: intent.approval_id,
+      work_item_id: intent.work_item_id,
+      launch_mode: intent.launch_mode,
+      requested_model: intent.requested_model,
+      expected_mission_content_sha256:
+        intent.expected_mission_content_sha256,
+      expected_result_content_sha256:
+        intent.expected_result_content_sha256,
+      expected_shaping_state_sha256:
+        intent.expected_shaping_state_sha256,
+      goal_contract_sha256: intent.goal_contract_sha256,
+      goal_version: intent.goal_version,
+      receipt_sha256: intent.receipt_sha256,
+      execute_tuple: intent.execute_tuple,
+      goal_sha256: intent.next_goal_sha256,
+      state_sha256: intent.next_state_sha256,
+      started_at: intent.created_at,
+      outcome: "pending",
+    };
+    const committed = await repository.commitPlanApproval(lease, {
+      state: nextItem.state,
+      manifest: pendingManifest,
+    });
+    return this.planApprovalResult(intent, committed.manifest);
+  }
+
+  private planApprovalResult(
+    intent: PlanApprovalIntentV1,
+    manifest: PlanApprovalManifestV1,
+  ): PlanApprovalControllerResult {
+    return {
+      work_item: this.workItemFromShapingBytes(
+        intent.next_goal_bytes,
+        intent.next_state_bytes,
+      ),
+      manifest,
+      intent,
+      approval_id: intent.approval_id,
+      launch_mode: intent.launch_mode,
+      requested_model: intent.requested_model,
+      execute_tuple: intent.execute_tuple,
+    };
   }
 
   private async requireShapingDecisionIntent(
