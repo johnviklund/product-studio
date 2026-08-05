@@ -36,6 +36,7 @@ import {
   controllerRunManifestSchema,
   createCaptureInputSchema,
   createWorkItemInputSchema,
+  deriveControllerRunId,
   derivePlanApprovalId,
   parseWorkItemStateForRead,
   planApprovalIntentSchema,
@@ -2703,7 +2704,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       return null;
     }
 
-    const matches = (
+    const controllerMatches = (
       await this.readControllerRunManifests(validatedIdentity.work_item_id)
     ).filter(
       (manifest) =>
@@ -2714,14 +2715,55 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         manifest.attempt === validatedIdentity.attempt,
     );
 
-    if (matches.length > 1) {
+    const planApprovalMatches = (
+      await this.readPlanApprovalManifests(validatedIdentity.work_item_id)
+    ).filter(
+      (manifest) =>
+        manifest.outcome === "applied" &&
+        manifest.execute_tuple.goal_version ===
+          validatedIdentity.goal_version &&
+        manifest.execute_tuple.input_revision ===
+          validatedIdentity.input_revision &&
+        manifest.execute_tuple.attempt === validatedIdentity.attempt,
+    );
+
+    if (planApprovalMatches.length > 1) {
+      throw new ControllerConflictError(
+        "mission_not_ready",
+        validatedIdentity.work_item_id,
+        "More than one applied Plan approval matches the governed Execute tuple.",
+      );
+    }
+    const approval = planApprovalMatches[0];
+    if (approval !== undefined) {
+      if (approval.completed_at === undefined) {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedIdentity.work_item_id,
+          `Applied Plan approval ${approval.approval_id} is missing completed_at.`,
+        );
+      }
+      const idempotencyKey = `${approval.work_item_id}:plan-approval:${approval.approval_id}`;
+      return controllerRunManifestSchema.parse({
+        schema_version: 1,
+        run_id: deriveControllerRunId(idempotencyKey, "approve-plan-result"),
+        work_item_id: approval.work_item_id,
+        idempotency_key: idempotencyKey,
+        phase: "execute",
+        ...approval.execute_tuple,
+        started_at: approval.started_at,
+        completed_at: approval.completed_at,
+        outcome: "applied",
+      });
+    }
+    if (controllerMatches.length > 1) {
       throw new ControllerConflictError(
         "mission_not_ready",
         validatedIdentity.work_item_id,
         "More than one applied execute manifest matches the governed tuple.",
       );
     }
-    return matches[0] ?? null;
+    return controllerMatches[0] ?? null;
   }
 
   async findAppliedPatchManifest(
@@ -7447,6 +7489,53 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           paths.manifest,
           planApprovalManifestSchema,
         );
+  }
+
+  private async readPlanApprovalManifests(
+    workItemId: string,
+  ): Promise<PlanApprovalManifestV1[]> {
+    const directory = join(
+      this.workItemsDirectory,
+      workItemId,
+      PLAN_APPROVALS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(directory))) {
+      return [];
+    }
+    const manifests: PlanApprovalManifestV1[] = [];
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.name.endsWith(".intent.json")) {
+        continue;
+      }
+      const match = /^([0-9a-f]{64})\.json$/.exec(entry.name);
+      if (match === null) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "Plan approval entry must use <approval_id>.json",
+        );
+      }
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "Plan approval manifest must be a regular file",
+        );
+      }
+      const manifest = await this.readPlanApprovalManifest(
+        workItemId,
+        match[1],
+      );
+      if (manifest === null) {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItemId,
+          `Plan approval manifest ${match[1]} disappeared while it was being read.`,
+        );
+      }
+      manifests.push(manifest);
+    }
+    return manifests.sort((left, right) =>
+      left.approval_id.localeCompare(right.approval_id),
+    );
   }
 
   private async findPendingPlanApprovalManifest(

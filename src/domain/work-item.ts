@@ -1409,6 +1409,24 @@ export function derivePlanApprovalId(input: PlanApprovalIdInput): string {
     .digest("hex");
 }
 
+export function deriveControllerRunId(
+  idempotencyKey: string,
+  operationFingerprint: string,
+): string {
+  const digest = createHash("sha256")
+    .update(idempotencyKey)
+    .update("\0")
+    .update(operationFingerprint)
+    .digest("hex")
+    .slice(0, 32)
+    .split("");
+
+  digest[12] = "5";
+  digest[16] = ((Number.parseInt(digest[16], 16) & 0x3) | 0x8).toString(16);
+  const value = digest.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
 export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
   z.strictObject({
     schema_version: z.literal(1),

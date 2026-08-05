@@ -140,7 +140,25 @@ class PausedShapingPublicationWorkspace extends ProductWorkspace {
 function preparedRuntime(
   session: AcpSession,
   requestedModel = "copilot-default",
-): { runtime: ConnectedExecuteRuntime; prepare: ReturnType<typeof vi.fn> } {
+  onStart?: () => void,
+): {
+  runtime: ConnectedExecuteRuntime;
+  prepare: ReturnType<typeof vi.fn>;
+  start: ReturnType<typeof vi.fn>;
+} {
+  const start = vi.fn(async (eventSink: AcpEventSink) => {
+    onStart?.();
+    await eventSink.append({
+      schema_version: 1,
+      sequence: 1,
+      observed_at: "2026-07-26T18:00:00.000Z",
+      kind: "session_started",
+      payload: {},
+      previous_event_sha256: null,
+      event_sha256: "a".repeat(64),
+    });
+    return session;
+  });
   const prepared: PreparedConnectedRuntime = {
     requested_model: requestedModel,
     reasoning_effort: "high",
@@ -162,20 +180,14 @@ function preparedRuntime(
       client_fs_write_text_file: false,
       credential_environment: "explicit_allowlist_without_credential_values",
     },
-    start: vi.fn(async (eventSink: AcpEventSink) => {
-      await eventSink.append({
-        schema_version: 1,
-        sequence: 1,
-        observed_at: "2026-07-26T18:00:00.000Z",
-        kind: "session_started",
-        payload: {},
-        previous_event_sha256: null,
-        event_sha256: "a".repeat(64),
-      });
-      return session;
-    }),
+    start,
   };
-  const prepare = vi.fn(async () => prepared);
+  const prepare = vi.fn(
+    async (input: Parameters<ConnectedExecuteRuntime["prepare"]>[0]) => {
+      void input;
+      return prepared;
+    },
+  );
   return {
     runtime: {
       configuration: () => ({
@@ -188,6 +200,7 @@ function preparedRuntime(
       prepare,
     },
     prepare,
+    start,
   };
 }
 
@@ -722,6 +735,94 @@ async function applyManualShapingResult(
         ? await service.importSpecResult(sourceId, workItemId, binding)
         : await service.importPlanResult(sourceId, workItemId, binding);
   return { artifact, binding, imported, manual, result };
+}
+
+async function prepareReadyPlan(
+  service: PortfolioService,
+  workspaceRoot: string,
+  sourceId: string,
+  workItem: WorkItem,
+) {
+  const workItemId = workItem.goal.work_item_id;
+  await service.startBrainstorm(sourceId, workItemId, {
+    launch_mode: "manual",
+    next_requested_model: null,
+    expected_mission_content_sha256: null,
+    expected_result_content_sha256: null,
+    expected_shaping_state_sha256: ideaShapingStateSha256(workItem),
+  });
+  await applyManualShapingResult(
+    service,
+    workspaceRoot,
+    sourceId,
+    workItemId,
+    "brainstorm",
+  );
+  const brainstormReady = await service.listShapingArtifacts(
+    sourceId,
+    workItemId,
+  );
+  const brainstorm = currentPhaseArtifact(
+    brainstormReady.artifacts,
+    "brainstorm",
+  );
+  await service.useBrainstormResult(sourceId, workItemId, {
+    launch_mode: "manual",
+    next_requested_model: null,
+    expected_mission_content_sha256: brainstorm.mission.content_sha256,
+    expected_result_content_sha256:
+      brainstorm.result!.result_content_sha256,
+    expected_shaping_state_sha256:
+      brainstormReady.expected_shaping_state_sha256,
+  });
+  const specApplied = await applyManualShapingResult(
+    service,
+    workspaceRoot,
+    sourceId,
+    workItemId,
+    "spec",
+  );
+  if (
+    specApplied.imported.outcome !== "applied" ||
+    !("proposal" in specApplied.imported.result)
+  ) {
+    throw new Error("Expected one applied Spec result.");
+  }
+  const specReady = await service.listShapingArtifacts(sourceId, workItemId);
+  const spec = currentPhaseArtifact(specReady.artifacts, "spec");
+  const goalContract = goalContractFromSpecProposal(
+    specApplied.imported.result.proposal,
+    1,
+  );
+  await service.approveSpecResult(sourceId, workItemId, {
+    launch_mode: "manual",
+    next_requested_model: null,
+    expected_mission_content_sha256: spec.mission.content_sha256,
+    expected_result_content_sha256: spec.result!.result_content_sha256,
+    expected_shaping_state_sha256: specReady.expected_shaping_state_sha256,
+    goal_contract_sha256: hashGoalContract(goalContract),
+  });
+  await applyManualShapingResult(
+    service,
+    workspaceRoot,
+    sourceId,
+    workItemId,
+    "plan",
+  );
+  const planReady = await service.listShapingArtifacts(sourceId, workItemId);
+  const plan = currentPhaseArtifact(planReady.artifacts, "plan");
+  return {
+    goalContract,
+    plan,
+    planReady,
+    binding: {
+      expected_mission_content_sha256: plan.mission.content_sha256,
+      expected_result_content_sha256: plan.result!.result_content_sha256,
+      expected_shaping_state_sha256:
+        planReady.expected_shaping_state_sha256,
+      goal_contract_sha256: hashGoalContract(goalContract),
+    },
+  };
 }
 
 async function governWorkItemThrough(
@@ -2030,6 +2131,399 @@ describe("PortfolioService", () => {
       }),
     ).rejects.toMatchObject({ kind: "mission_not_ready" });
     expect(fake.prepare).toHaveBeenCalledTimes(3);
+  });
+
+  it("approves a ready Plan for manual Execute exactly once and replays the immutable handoff", async () => {
+    const root = await createWorkspace("Manual Plan Approval Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Approve one manual Execute handoff",
+      type: "Feature",
+    });
+    const { service } = await createService(
+      createMemoryIndex(),
+      () => repository,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const ready = await prepareReadyPlan(
+      service,
+      root,
+      sourceId,
+      created,
+    );
+    const input = {
+      launch_mode: "manual" as const,
+      requested_model: null,
+      ...ready.binding,
+    };
+
+    const first = await service.approvePlanResult(
+      sourceId,
+      workItemId,
+      input,
+    );
+    expect(first).toMatchObject({
+      launch_mode: "manual",
+      requested_model: null,
+      work_item: {
+        goal: { goal_contract: ready.goalContract },
+        state: {
+          phase: "execute",
+          status: "active",
+          goal_version: 1,
+          input_revision: 1,
+          attempt: 0,
+        },
+      },
+      execute_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+      },
+      mission: { mission: { identity: { phase: "execute" } } },
+      connected_run: null,
+      next_launch: {
+        status: "manual",
+        connected_run_id: null,
+        reason: "runtime_unavailable",
+      },
+    });
+    const durable = await repository.read(workItemId);
+    expect(durable?.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+    });
+
+    const approvalDirectory = join(
+      root,
+      ".founder",
+      "work-items",
+      workItemId,
+      "plan-approvals",
+    );
+    const approvalEntries = (await readdir(approvalDirectory)).sort();
+    expect(approvalEntries).toEqual([
+      `${first.approval_id}.intent.json`,
+      `${first.approval_id}.json`,
+    ]);
+    const decided = currentPhaseArtifact(
+      await repository.listShapingArtifacts(workItemId),
+      "plan",
+    );
+    expect(decided.decision?.receipt).toMatchObject({
+      identity: ready.plan.mission.identity,
+      execute_tuple: first.execute_tuple,
+    });
+    const receiptPath = join(
+      root,
+      dirname(ready.plan.mission_path),
+      "decision.json",
+    );
+    const firstBytes = {
+      receipt: await readFile(receiptPath, "utf8"),
+      intent: await readFile(join(approvalDirectory, approvalEntries[0]!), "utf8"),
+      manifest: await readFile(join(approvalDirectory, approvalEntries[1]!), "utf8"),
+      mission: await readFile(first.mission!.mission_path, "utf8"),
+      task: await readFile(first.mission!.task_path, "utf8"),
+    };
+
+    const replay = await service.approvePlanResult(
+      sourceId,
+      workItemId,
+      input,
+    );
+    expect(replay).toEqual(first);
+    expect((await readdir(approvalDirectory)).sort()).toEqual(approvalEntries);
+    await expect(readFile(receiptPath, "utf8")).resolves.toBe(
+      firstBytes.receipt,
+    );
+    await expect(
+      readFile(join(approvalDirectory, approvalEntries[0]!), "utf8"),
+    ).resolves.toBe(firstBytes.intent);
+    await expect(
+      readFile(join(approvalDirectory, approvalEntries[1]!), "utf8"),
+    ).resolves.toBe(firstBytes.manifest);
+    await expect(readFile(replay.mission!.mission_path, "utf8")).resolves.toBe(
+      firstBytes.mission,
+    );
+    await expect(readFile(replay.mission!.task_path, "utf8")).resolves.toBe(
+      firstBytes.task,
+    );
+    expect(
+      await readdir(join(root, ".founder", "missions", workItemId)),
+    ).toHaveLength(1);
+  });
+
+  it("commits a connected Plan approval before agent start and replays one governed run", async () => {
+    const root = await createWorkspace("Connected Plan Approval Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Approve one connected Execute handoff",
+      type: "Feature",
+    });
+    const result = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7c1",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4101,
+        process_group_id: 4101,
+        started_at: "2026-08-05T14:00:00.000Z",
+      },
+      run: vi.fn(() => result.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    let approvalCommitted = false;
+    const fake = preparedRuntime(session, "execute-model", () => {
+      expect(approvalCommitted).toBe(true);
+    });
+    const originalCommit = repository.commitPlanApproval.bind(repository);
+    const commit = vi
+      .spyOn(repository, "commitPlanApproval")
+      .mockImplementation(async (lease, input) => {
+        const committed = await originalCommit(lease, input);
+        approvalCommitted = true;
+        return committed;
+      });
+    const { service } = await createService(
+      createMemoryIndex(),
+      () => repository,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const ready = await prepareReadyPlan(
+      service,
+      root,
+      sourceId,
+      created,
+    );
+    await expect(
+      service.approvePlanResult(sourceId, workItemId, {
+        launch_mode: "connected",
+        requested_model: "unavailable-model",
+        ...ready.binding,
+      }),
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      reason:
+        "Requested Execute model unavailable-model is not in available_model_ids.",
+    });
+    expect(await repository.read(workItemId)).toMatchObject({
+      state: { phase: "plan", status: "active" },
+    });
+    expect(
+      currentPhaseArtifact(
+        await repository.listShapingArtifacts(workItemId),
+        "plan",
+      ).decision,
+    ).toBeNull();
+    await expect(
+      readdir(
+        join(
+          root,
+          ".founder",
+          "work-items",
+          workItemId,
+          "plan-approvals",
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(fake.prepare).not.toHaveBeenCalled();
+    expect(fake.start).not.toHaveBeenCalled();
+    const input = {
+      launch_mode: "connected" as const,
+      requested_model: "execute-model",
+      ...ready.binding,
+    };
+
+    const first = await service.approvePlanResult(
+      sourceId,
+      workItemId,
+      input,
+    );
+    expect(first).toMatchObject({
+      launch_mode: "connected",
+      requested_model: "execute-model",
+      work_item: { state: { phase: "execute", status: "active" } },
+      next_launch: { status: "launched" },
+      connected_run: {
+        provenance: {
+          requested_model: {
+            value: "execute-model",
+            assurance: "user_declared",
+          },
+        },
+      },
+    });
+    expect(commit).toHaveBeenCalledOnce();
+    expect(fake.prepare).toHaveBeenCalledOnce();
+    expect(fake.start).toHaveBeenCalledOnce();
+    expect(session.run).toHaveBeenCalledOnce();
+    expect(fake.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ model_override: "execute-model" }),
+    );
+    expect(
+      Object.hasOwn(fake.prepare.mock.calls[0]![0], "requested_model"),
+    ).toBe(false);
+    const storedRuns = await repository.listConnectedRuns(workItemId);
+    expect(storedRuns).toHaveLength(1);
+    expect(storedRuns[0]).toMatchObject({
+      connected_run_id: first.next_launch.connected_run_id,
+      provenance: {
+        requested_model: {
+          value: "execute-model",
+          assurance: "user_declared",
+        },
+        capability_envelope_sha256: { assurance: "controller_observed" },
+        authorization_sha256: { assurance: "controller_observed" },
+      },
+      lifecycle: { status: "running" },
+    });
+
+    const replay = await service.approvePlanResult(
+      sourceId,
+      workItemId,
+      input,
+    );
+    expect(replay.approval_id).toBe(first.approval_id);
+    expect(replay.next_launch).toEqual(first.next_launch);
+    expect(replay.connected_run?.connected_run_id).toBe(
+      first.connected_run?.connected_run_id,
+    );
+    expect(commit).toHaveBeenCalledOnce();
+    expect(fake.prepare).toHaveBeenCalledOnce();
+    expect(fake.start).toHaveBeenCalledOnce();
+    expect(session.run).toHaveBeenCalledOnce();
+    expect(await repository.listConnectedRuns(workItemId)).toHaveLength(1);
+  });
+
+  it("keeps Execute recoverable when connected launch fails after Plan approval", async () => {
+    const root = await createWorkspace("Recoverable Plan Approval Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Recover a failed connected Execute launch",
+      type: "Feature",
+    });
+    const failingPrepare = vi.fn(
+      async (input: Parameters<ConnectedExecuteRuntime["prepare"]>[0]) => {
+        void input;
+        throw new Error("Execute adapter unavailable after approval commit");
+      },
+    );
+    const failingRuntime: ConnectedExecuteRuntime = {
+      configuration: () => ({
+        adapter_id: "copilot-acp",
+        adapter_version: "1.0.0",
+        profile_id: "noninteractive-execute-v1",
+        available_model_ids: ["execute-model"],
+        default_model: "execute-model",
+      }),
+      prepare: failingPrepare,
+    };
+    const { service } = await createService(
+      createMemoryIndex(),
+      () => repository,
+      failingRuntime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+    const ready = await prepareReadyPlan(
+      service,
+      root,
+      sourceId,
+      created,
+    );
+
+    const failed = await service.approvePlanResult(sourceId, workItemId, {
+      launch_mode: "connected",
+      requested_model: "execute-model",
+      ...ready.binding,
+    });
+    expect(failed).toMatchObject({
+      work_item: { state: { phase: "execute", status: "active" } },
+      connected_run: null,
+      next_launch: {
+        status: "failed",
+        connected_run_id: null,
+        reason: "Execute adapter unavailable after approval commit",
+      },
+    });
+    expect(failingPrepare).toHaveBeenCalledOnce();
+    expect(await repository.read(workItemId)).toMatchObject({
+      state: { phase: "execute", status: "active", attempt: 0 },
+    });
+    expect(await repository.listConnectedRuns(workItemId)).toEqual([]);
+    expect(
+      await readdir(
+        join(
+          root,
+          ".founder",
+          "work-items",
+          workItemId,
+          "plan-approvals",
+        ),
+      ),
+    ).toHaveLength(2);
+
+    const recoveryResult = deferred<AcpRunResult>();
+    const recoverySession: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7c2",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4102,
+        process_group_id: 4102,
+        started_at: "2026-08-05T14:01:00.000Z",
+      },
+      run: vi.fn(() => recoveryResult.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const recoveryRuntime = preparedRuntime(recoverySession, "execute-model");
+    const recovery = await createService(
+      createMemoryIndex(),
+      () => repository,
+      recoveryRuntime.runtime,
+    );
+    const recoveryRegistration = await recovery.service.register({
+      workspace_path: root,
+    });
+    const launched = await recovery.service.launchConnectedExecute(
+      recoveryRegistration.workspace.workspace_id,
+      workItemId,
+      { model_override: "execute-model" },
+    );
+    expect(launched.connected_run).toMatchObject({
+      lifecycle: { status: "running" },
+      provenance: {
+        requested_model: { value: "execute-model" },
+      },
+    });
+    expect(recoveryRuntime.prepare).toHaveBeenCalledOnce();
+    expect(await repository.listConnectedRuns(workItemId)).toHaveLength(1);
   });
 
   it("runs artifact-only shaping through ACP, publishes before ready, and persists the last adapter-observed model", async () => {

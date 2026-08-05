@@ -17,6 +17,7 @@ import { z } from "zod";
 import {
   deriveControllerIdempotencyKey,
   type ApproveSpecDecisionInput,
+  type PlanApprovalControllerResult,
   type ReplanWithUpdatedContractInput,
   type RequestShapingChangesInput,
   type ShapingDecisionControllerResult,
@@ -78,6 +79,7 @@ import {
   workItemIdSchema,
   workItemSchema,
   workItemStateSchema,
+  type ApprovePlanResultInput,
   type CreateCaptureInput,
   type ControllerRunManifest,
   type RetainedControllerLeaseRepairResult,
@@ -489,6 +491,33 @@ export interface PortfolioShapingDecisionResult extends PortfolioWorkItem {
   decision_id: string;
   next_mission: ShapingDecisionControllerResult["next_mission"];
   next_launch: ShapingNextLaunch;
+}
+
+export type ExecuteNextLaunch =
+  | {
+      status: "launched";
+      connected_run_id: string;
+      reason: null;
+    }
+  | {
+      status: "manual";
+      connected_run_id: null;
+      reason: "founder_selected_manual" | "runtime_unavailable";
+    }
+  | {
+      status: "failed";
+      connected_run_id: null;
+      reason: string;
+    };
+
+export interface PortfolioPlanApprovalResult extends PortfolioWorkItem {
+  approval_id: string;
+  launch_mode: PlanApprovalControllerResult["launch_mode"];
+  requested_model: string | null;
+  execute_tuple: PlanApprovalControllerResult["execute_tuple"];
+  mission: MissionCompilation | null;
+  connected_run: ConnectedRunSummary | null;
+  next_launch: ExecuteNextLaunch;
 }
 
 export interface ShapingRetryLaunchInput {
@@ -1576,6 +1605,64 @@ export class PortfolioService {
       source.workspace,
     ).approveSpecResult(workItemId, input);
     return this.finishShapingDecision(source, decided);
+  }
+
+  async approvePlanResult(
+    sourceId: string,
+    workItemId: string,
+    input: ApprovePlanResultInput,
+  ): Promise<PortfolioPlanApprovalResult> {
+    const source = await this.requireDecisionSource(sourceId, workItemId);
+    this.preflightExecuteLaunch(workItemId, input);
+    const approved = await this.workItemController(
+      source.workspace,
+    ).approvePlanResult(workItemId, input);
+
+    let mission: MissionCompilation | null = null;
+    try {
+      mission = await this.compileMission(sourceId, workItemId);
+      if (approved.launch_mode === "manual") {
+        await this.rebuild();
+        return this.planApprovalResult(source, approved, {
+          mission,
+          connected_run: null,
+          next_launch: {
+            status: "manual",
+            connected_run_id: null,
+            reason:
+              this.executeModelAvailability().status === "unavailable"
+                ? "runtime_unavailable"
+                : "founder_selected_manual",
+          },
+        });
+      }
+
+      const launched = await this.launchConnectedExecute(
+        sourceId,
+        workItemId,
+        { model_override: approved.requested_model! },
+      );
+      return this.planApprovalResult(source, approved, {
+        mission,
+        connected_run: launched.connected_run,
+        next_launch: {
+          status: "launched",
+          connected_run_id: launched.connected_run.connected_run_id,
+          reason: null,
+        },
+      });
+    } catch (error) {
+      await this.rebuild().catch(() => undefined);
+      return this.planApprovalResult(source, approved, {
+        mission,
+        connected_run: null,
+        next_launch: {
+          status: "failed",
+          connected_run_id: null,
+          reason: errorMessage(error).slice(0, 500),
+        },
+      });
+    }
   }
 
   async replanWithUpdatedContract(
@@ -3707,6 +3794,22 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     this.assertShapingModelAvailable(workItemId, input.next_requested_model);
   }
 
+  private preflightExecuteLaunch(
+    workItemId: string,
+    input: Pick<ApprovePlanResultInput, "launch_mode" | "requested_model">,
+  ): void {
+    if (input.launch_mode === "manual") {
+      return;
+    }
+    if (input.requested_model === null) {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected Execute launch requires one requested model.",
+      );
+    }
+    this.assertExecuteModelAvailable(workItemId, input.requested_model);
+  }
+
   private shapingModelAvailability(): ShapingModelAvailability {
     if (this.shapingRuntime === undefined) {
       return {
@@ -4223,6 +4326,24 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       work_item_id: workItemId,
       next_launch: this.shapingNextLaunch(launched),
       shaping_run: summarizeShapingRun(launched.record),
+    };
+  }
+
+  private planApprovalResult(
+    source: ResolvedSource,
+    approved: PlanApprovalControllerResult,
+    result: Pick<
+      PortfolioPlanApprovalResult,
+      "mission" | "connected_run" | "next_launch"
+    >,
+  ): PortfolioPlanApprovalResult {
+    return {
+      ...this.toPortfolioItem(source, approved.work_item),
+      approval_id: approved.approval_id,
+      launch_mode: approved.launch_mode,
+      requested_model: approved.requested_model,
+      execute_tuple: approved.execute_tuple,
+      ...result,
     };
   }
 
