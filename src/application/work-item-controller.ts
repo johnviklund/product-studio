@@ -2143,6 +2143,17 @@ export class WorkItemController {
             validatedInput.mission_content_sha256,
           );
           if (
+            validatedInput.model_override !== undefined &&
+            connected.provenance.requested_model.value !==
+              validatedInput.model_override
+          ) {
+            throw this.conflict(
+              "idempotency_conflict",
+              validatedId,
+              "A connected launch replay cannot change its requested one-run model.",
+            );
+          }
+          if (
             connectedRunLaunchFingerprint(connected) !==
             connectedRunLaunchFingerprint(validatedRecord)
           ) {

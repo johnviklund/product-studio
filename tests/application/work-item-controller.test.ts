@@ -2227,6 +2227,10 @@ describe("WorkItemController", () => {
         input: { ...fixture.input, expected_phase: "review" },
         record: fixture.record,
       },
+      {
+        input: { ...fixture.input, model_override: "another-model" },
+        record: fixture.record,
+      },
       { input: fixture.input, record: changedModel },
       {
         input: {
