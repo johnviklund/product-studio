@@ -211,6 +211,19 @@ describe("shapingActionRequest", () => {
       },
     },
     {
+      name: "approves the Plan",
+      actionKind: "approve_plan" as const,
+      route: `${BASE_ROUTE}/plan/approve`,
+      makeProjection: (selectedAction: ShapingActionProjection) =>
+        readyProjection("plan", selectedAction, { goalContract: true }),
+      body: {
+        expected_mission_content_sha256: SHA_A,
+        expected_result_content_sha256: SHA_B,
+        expected_shaping_state_sha256: SHA_C,
+        goal_contract_sha256: SHA_D,
+      },
+    },
+    {
       name: "replans against the current contract",
       actionKind: "replan_with_updated_contract" as const,
       route: `${BASE_ROUTE}/plan/replan`,
@@ -409,6 +422,16 @@ describe("shapingActionRequest", () => {
     );
   });
 
+  it("blocks connected Plan approval without its selected Execute model", () => {
+    const approve = action("approve_plan", "connected");
+    expect(
+      buildRequest(
+        readyProjection("plan", approve, { goalContract: true }),
+        approve,
+      ),
+    ).toEqual({ status: "blocked", reason: "missing_model" });
+  });
+
   it("blocks every independently required binding hash", () => {
     const missingStartState = () => {
       const selectedAction = action("start_brainstorm", "connected");
@@ -440,6 +463,14 @@ describe("shapingActionRequest", () => {
         readyProjection("spec", selectedAction),
         selectedAction,
         { selected_model: "model-plan" },
+      );
+    };
+    const missingPlanGoalContract = () => {
+      const selectedAction = action("approve_plan", "connected");
+      return buildRequest(
+        readyProjection("plan", selectedAction),
+        selectedAction,
+        { selected_model: "model-execute" },
       );
     };
     const missingReplanGoalContract = () => {
@@ -474,6 +505,7 @@ describe("shapingActionRequest", () => {
       ["ready result", missingReadyBinding("expected_result_content_sha256")],
       ["ready state", missingReadyBinding("expected_shaping_state_sha256")],
       ["approval goal contract", missingGoalContract()],
+      ["Plan approval goal contract", missingPlanGoalContract()],
       ["replan goal contract", missingReplanGoalContract()],
       ["retry decision", missingRetryBinding("decision_id")],
       [

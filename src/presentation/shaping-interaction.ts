@@ -234,6 +234,7 @@ export function shapingActionRequest(
     action.kind !== "start_brainstorm" &&
     action.kind !== "use_brainstorm_result" &&
     action.kind !== "approve_spec" &&
+    action.kind !== "approve_plan" &&
     action.kind !== "request_changes" &&
     action.kind !== "replan_with_updated_contract"
   ) {
@@ -295,6 +296,26 @@ export function shapingActionRequest(
       status: "ready",
       method: "POST",
       route: `${baseRoute}/spec/approve`,
+      body: {
+        ...launch.fields,
+        ...bindings,
+        goal_contract_sha256: projection.bindings.goal_contract_sha256,
+      },
+    };
+  }
+
+  if (action.kind === "approve_plan") {
+    if (
+      projection.mode !== "ready" ||
+      projection.phase !== "plan" ||
+      !isSha256(projection.bindings.goal_contract_sha256)
+    ) {
+      return blocked("missing_binding");
+    }
+    return {
+      status: "ready",
+      method: "POST",
+      route: `${baseRoute}/plan/approve`,
       body: {
         ...launch.fields,
         ...bindings,
