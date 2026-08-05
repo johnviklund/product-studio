@@ -161,6 +161,8 @@ import type {
 import {
   COPILOT_ADAPTER_ID,
   COPILOT_PROFILE_ID,
+  COPILOT_REVIEW_PROFILE_ID,
+  createCopilotReviewRuntimeProfile,
   createCopilotRuntimeProfile,
   type CopilotRuntimeProfileInput,
   type CopilotSanitizedProfileEvidence,
@@ -762,6 +764,71 @@ export class CopilotConnectedWritableRuntime
       sanitized_profile: profile.sanitized_profile_evidence,
       start: (eventSink, callbacks) =>
         this.adapter.start(profile.runtime_profile, eventSink, callbacks),
+    };
+  }
+}
+
+export interface CopilotConnectedReviewRuntimeOptions {
+  profile: Omit<
+    CopilotRuntimeProfileInput,
+    | "requested_model"
+    | "required_available_tools"
+    | "workspace_cwd"
+    | "evaluate_permission"
+    | "write_text_file"
+    | "limits"
+  > & {
+    default_model: string;
+  };
+}
+
+export class CopilotConnectedReviewRuntime implements ConnectedReviewRuntime {
+  constructor(
+    private readonly adapter: AcpClientAdapter,
+    private readonly options: CopilotConnectedReviewRuntimeOptions,
+  ) {}
+
+  configuration(): ConnectedRuntimeConfiguration {
+    return {
+      adapter_id: COPILOT_ADAPTER_ID,
+      adapter_version: this.options.profile.preflight.version,
+      profile_id: COPILOT_REVIEW_PROFILE_ID,
+      available_model_ids: this.options.profile.preflight.available_model_ids,
+      default_model: this.options.profile.default_model,
+    };
+  }
+
+  async prepare(
+    input: ConnectedReviewRuntimePrepareInput,
+  ): Promise<PreparedConnectedReviewRuntime> {
+    const base = {
+      ...this.options.profile,
+      requested_model: input.requested_model,
+      workspace_cwd: input.workspace_cwd,
+      review_policy: input.result_ingress_policy,
+      limits: input.limits,
+    };
+    const prepared = createCopilotReviewRuntimeProfile({
+      ...base,
+      write_text_file: async () => {
+        throw new Error("Prepared Review runtime cannot write before launch.");
+      },
+    });
+    return {
+      requested_model: input.requested_model,
+      reasoning_effort: this.options.profile.reasoning_effort,
+      sanitized_profile: prepared.sanitized_profile_evidence,
+      start: (eventSink, writeTextFile, callbacks) => {
+        const profile = createCopilotReviewRuntimeProfile({
+          ...base,
+          write_text_file: writeTextFile,
+        });
+        return this.adapter.start(
+          profile.runtime_profile,
+          eventSink,
+          callbacks,
+        );
+      },
     };
   }
 }

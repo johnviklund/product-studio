@@ -10,6 +10,11 @@ import {
   type CanonicalCapabilityRequest,
 } from "../../domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../domain/connected-run";
+import {
+  evaluateReviewPermissionRequest,
+  reviewRunPolicySchema,
+  type ReviewRunPolicy,
+} from "../../domain/review-run-policy";
 import type {
   AcpClientAdapter,
   AcpEventSink,
@@ -24,6 +29,9 @@ const execFileAsync = promisify(execFile);
 
 export const COPILOT_ADAPTER_ID = "copilot-acp";
 export const COPILOT_PROFILE_ID = "noninteractive-execute-v1";
+export const COPILOT_REVIEW_PROFILE_ID = "noninteractive-review-v1";
+export const COPILOT_REVIEW_READ_TOOL = "view";
+const COPILOT_REVIEW_READ_TOOLS = new Set([COPILOT_REVIEW_READ_TOOL, "read"]);
 const VERSION_OUTPUT = /^GitHub Copilot CLI (\d+\.\d+\.\d+)\.?\s*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u;
@@ -92,7 +100,9 @@ export interface CopilotRuntimeProfileInput {
 export interface CopilotSanitizedProfileEvidence {
   readonly adapter_id: typeof COPILOT_ADAPTER_ID;
   readonly adapter_version: string;
-  readonly profile_id: typeof COPILOT_PROFILE_ID;
+  readonly profile_id:
+    | typeof COPILOT_PROFILE_ID
+    | typeof COPILOT_REVIEW_PROFILE_ID;
   readonly executable: string;
   readonly argv: readonly string[];
   readonly requested_model: string;
@@ -111,6 +121,14 @@ export interface CopilotSanitizedProfileEvidence {
 export interface CopilotRuntimeProfile {
   readonly runtime_profile: AcpRuntimeProfile;
   readonly sanitized_profile_evidence: CopilotSanitizedProfileEvidence;
+}
+
+export interface CopilotReviewRuntimeProfileInput
+  extends Omit<
+    CopilotRuntimeProfileInput,
+    "required_available_tools" | "evaluate_permission"
+  > {
+  readonly review_policy: ReviewRunPolicy;
 }
 
 export interface CopilotAcpModelEvent {
@@ -511,6 +529,37 @@ export function createCopilotRuntimeProfile(
   };
 }
 
+export function createCopilotReviewRuntimeProfile(
+  input: CopilotReviewRuntimeProfileInput,
+): CopilotRuntimeProfile {
+  const { review_policy: reviewPolicyInput, ...profileInput } = input;
+  const reviewPolicy = reviewRunPolicySchema.parse(reviewPolicyInput);
+  const removedTools = profileInput.available_tools.filter((tool) =>
+    !COPILOT_REVIEW_READ_TOOLS.has(tool),
+  );
+  const availableTools = profileInput.available_tools.filter(
+    (tool) => COPILOT_REVIEW_READ_TOOLS.has(tool),
+  );
+  const excludedTools = [
+    ...new Set([...profileInput.excluded_tools, ...removedTools]),
+  ];
+  const prepared = createCopilotRuntimeProfile({
+    ...profileInput,
+    available_tools: availableTools,
+    required_available_tools: [COPILOT_REVIEW_READ_TOOL],
+    excluded_tools: excludedTools,
+    evaluate_permission: (request) =>
+      evaluateReviewPermissionRequest(reviewPolicy, request),
+  });
+  return {
+    ...prepared,
+    sanitized_profile_evidence: {
+      ...prepared.sanitized_profile_evidence,
+      profile_id: COPILOT_REVIEW_PROFILE_ID,
+    },
+  };
+}
+
 export function normalizeCopilotPermission(
   request: acp.RequestPermissionRequest,
   workspaceCwd: string,
@@ -571,5 +620,15 @@ export async function startCopilotRuntime(
   callbacks?: AcpSessionCallbacks,
 ): Promise<AcpSession> {
   const { runtime_profile } = createCopilotRuntimeProfile(input);
+  return adapter.start(runtime_profile, eventSink, callbacks);
+}
+
+export async function startCopilotReviewRuntime(
+  adapter: AcpClientAdapter,
+  input: CopilotReviewRuntimeProfileInput,
+  eventSink: AcpEventSink,
+  callbacks?: AcpSessionCallbacks,
+): Promise<AcpSession> {
+  const { runtime_profile } = createCopilotReviewRuntimeProfile(input);
   return adapter.start(runtime_profile, eventSink, callbacks);
 }

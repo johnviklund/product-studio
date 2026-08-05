@@ -9,11 +9,15 @@ import {
 import type { ConnectedRunLimits } from "../../../src/domain/connected-run";
 import type { AcpEventSink } from "../../../src/infrastructure/acp/acp-client";
 import {
+  COPILOT_REVIEW_PROFILE_ID,
+  createCopilotReviewRuntimeProfile,
   createCopilotRuntimeProfile,
   extractEffectiveModel,
   normalizeCopilotPermission,
   preflightCopilotExecutable,
+  startCopilotReviewRuntime,
   startCopilotRuntime,
+  type CopilotReviewRuntimeProfileInput,
   type CopilotRuntimeProfileInput,
 } from "../../../src/infrastructure/acp/copilot-runtime-profile";
 
@@ -66,6 +70,35 @@ function input(
             reason: "outside_capability_envelope",
           },
     limits,
+    ...overrides,
+  };
+}
+
+function reviewInput(
+  overrides: Partial<CopilotReviewRuntimeProfileInput> = {},
+): CopilotReviewRuntimeProfileInput {
+  const { evaluate_permission: _evaluatePermission, ...base } = input({
+    available_tools: ["view", "apply_patch", "execute", "fetch"],
+  });
+  void _evaluatePermission;
+  return {
+    ...base,
+    write_text_file: vi.fn(async () => undefined),
+    review_policy: {
+      kind: "single_result_file",
+      result_path: ".founder/review/result.json",
+      mission_result_binding_sha256: "b".repeat(64),
+      commands: "forbidden",
+      urls: "forbidden",
+      mcp: "forbidden",
+      credentials: "forbidden",
+      outside_workspace_writes: "forbidden",
+      reads: "workspace_and_repository_unrestricted",
+      execution_mode: "permission_mediated_local",
+      result_assurance: "result_scope_validation",
+      containment_assurance: "not_independently_enforced",
+      machine_authority: "launching_user",
+    },
     ...overrides,
   };
 }
@@ -272,6 +305,87 @@ describe("Copilot ACP runtime profile", () => {
     expect(disabled.sanitized_profile_evidence.client_fs_write_text_file).toBe(
       false,
     );
+  });
+
+  it("builds a distinct read-only Review profile with one mediated result writer", () => {
+    const writeTextFile = vi.fn(async () => undefined);
+    const profile = createCopilotReviewRuntimeProfile(
+      reviewInput({ write_text_file: writeTextFile }),
+    );
+
+    expect(profile.sanitized_profile_evidence).toMatchObject({
+      profile_id: COPILOT_REVIEW_PROFILE_ID,
+      available_tools: ["view"],
+      excluded_tools: [
+        "apply_patch",
+        "ask_user",
+        "execute",
+        "fetch",
+        "mcp",
+      ],
+      client_fs_write_text_file: true,
+    });
+    expect(profile.runtime_profile.write_text_file).toBe(writeTextFile);
+    expect(
+      profile.runtime_profile.evaluate_permission({
+        schema_version: 1,
+        kind: "workspace_write",
+        path: ".founder/review/result.json",
+      }),
+    ).toEqual({ decision: "allow_once", reason: null });
+    expect(
+      profile.runtime_profile.evaluate_permission({
+        schema_version: 1,
+        kind: "workspace_write",
+        path: ".founder/review/sibling.json",
+      }),
+    ).toEqual({
+      decision: "reject_once",
+      reason: "review_run_read_only",
+    });
+    expect(
+      profile.runtime_profile.evaluate_permission({
+        schema_version: 1,
+        kind: "command",
+        executable: "npm",
+        args: ["test"],
+      }),
+    ).toEqual({
+      decision: "reject_once",
+      reason: "review_run_read_only",
+    });
+    expect(profile.runtime_profile).not.toHaveProperty(
+      "capability_envelope",
+    );
+    const evidence = JSON.stringify(profile.sanitized_profile_evidence);
+    expect(evidence).not.toContain("capability_envelope");
+    expect(evidence).not.toContain(workspaceCwd);
+    expect(evidence).not.toContain(".founder/review");
+  });
+
+  it("fails Review model and required-read preflight before adapter spawn", async () => {
+    const adapter = { start: vi.fn() };
+    const sink: AcpEventSink = {
+      append: async () => ({ limit_reached: false }),
+    };
+
+    await expect(
+      startCopilotReviewRuntime(
+        adapter,
+        reviewInput({ requested_model: "gpt-unknown" }),
+        sink,
+      ),
+    ).rejects.toThrow("Requested Copilot model is unavailable.");
+    await expect(
+      startCopilotReviewRuntime(
+        adapter,
+        reviewInput({
+          available_tools: ["read", "apply_patch"],
+        }),
+        sink,
+      ),
+    ).rejects.toThrow("Required Copilot tools are unavailable: view.");
+    expect(adapter.start).not.toHaveBeenCalled();
   });
 
   it("normalizes only exact, non-shell Copilot permission requests", () => {
