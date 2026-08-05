@@ -4,8 +4,10 @@ import {
   compileMission,
   compilePatchMission,
   compileReviewMission,
+  hashHistoricalMissionContentV5,
   hashHistoricalMissionContentV4,
   hashMissionContent,
+  historicalMissionPackageV5Schema,
   historicalMissionPackageV4Schema,
   missionPackageSchema,
   patchSubjectSchema,
@@ -16,7 +18,9 @@ import {
   serializeReadableMissionPackage,
   serializeMissionPackage,
   type ExecuteReviewSubject,
+  type HistoricalExecuteMissionPackageV5,
   type HistoricalExecuteMissionPackageV4,
+  type HistoricalPatchMissionPackageV5,
   type MissionPaths,
   type PatchMissionControllerRun,
   type PatchReviewSubject,
@@ -265,7 +269,7 @@ describe("mission domain", () => {
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(renderTaskMd(second)).toBe(renderTaskMd(first));
     expect(first.content_sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(first.mission_schema_version).toBe(5);
+    expect(first.mission_schema_version).toBe(6);
     expect(first.identity.phase).toBe("execute");
     expect(first.source_revision.git_base_commit).toBe(paths.git_base_commit);
     expect(first.result_contract).toEqual({
@@ -545,6 +549,93 @@ describe("mission domain", () => {
     expect(() => missionPackageSchema.parse(historical)).toThrow();
   });
 
+  it("reads stored v5 execute and patch missions without mutating their authority", () => {
+    const currentExecute = compileMission(
+      workItem,
+      executeManifest,
+      paths,
+      executionDefaults,
+    );
+    const historicalExecuteDraft: HistoricalExecuteMissionPackageV5 = {
+      ...currentExecute,
+      mission_schema_version: 5,
+      content_sha256: "0".repeat(64),
+    };
+    const historicalExecute = {
+      ...historicalExecuteDraft,
+      content_sha256: hashHistoricalMissionContentV5(
+        historicalExecuteDraft,
+      ),
+    };
+
+    const currentPatch = compilePatchMission(
+      {
+        work_item: patchWorkItem,
+        controller_run: patchControllerRun,
+        patch_subject: patchSubject,
+        paths: patchPaths,
+      },
+      executionDefaults,
+    );
+    const {
+      capability_envelope: _currentPatchEnvelope,
+      ...patchWithoutEnvelope
+    } = currentPatch;
+    void _currentPatchEnvelope;
+    const historicalPatchDraft: HistoricalPatchMissionPackageV5 = {
+      ...patchWithoutEnvelope,
+      mission_schema_version: 5,
+      content_sha256: "0".repeat(64),
+    };
+    const historicalPatch = {
+      ...historicalPatchDraft,
+      content_sha256: hashHistoricalMissionContentV5(historicalPatchDraft),
+    };
+
+    expect(historicalMissionPackageV5Schema.parse(historicalExecute)).toEqual(
+      historicalExecute,
+    );
+    expect(historicalMissionPackageV5Schema.parse(historicalPatch)).toEqual(
+      historicalPatch,
+    );
+    expect(readableMissionPackageSchema.parse(historicalExecute)).toEqual(
+      historicalExecute,
+    );
+    expect(readableMissionPackageSchema.parse(historicalPatch)).toEqual(
+      historicalPatch,
+    );
+    expect(serializeReadableMissionPackage(historicalExecute)).toContain(
+      '"mission_schema_version": 5',
+    );
+    expect(serializeReadableMissionPackage(historicalPatch)).toContain(
+      '"mission_schema_version": 5',
+    );
+    const historicalExecuteBytes =
+      serializeReadableMissionPackage(historicalExecute);
+    const historicalPatchBytes =
+      serializeReadableMissionPackage(historicalPatch);
+    expect(
+      serializeReadableMissionPackage(
+        readableMissionPackageSchema.parse(
+          JSON.parse(historicalExecuteBytes),
+        ),
+      ),
+    ).toBe(historicalExecuteBytes);
+    expect(
+      serializeReadableMissionPackage(
+        readableMissionPackageSchema.parse(JSON.parse(historicalPatchBytes)),
+      ),
+    ).toBe(historicalPatchBytes);
+    expect(renderReadableTaskMd(historicalExecute)).toContain(
+      "## Capability envelope",
+    );
+    expect(renderReadableTaskMd(historicalPatch)).not.toContain(
+      "## Capability envelope",
+    );
+    expect(() => missionPackageSchema.parse(historicalExecute)).toThrow();
+    expect(() => missionPackageSchema.parse(historicalPatch)).toThrow();
+  });
+
   it("renders a neutral handoff and the explicit next gate", () => {
     const task = renderTaskMd(
       compileMission(workItem, executeManifest, paths, executionDefaults),
@@ -584,11 +675,11 @@ describe("mission domain", () => {
     expect(second).toEqual(first);
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(first.content_sha256).toBe(
-      "6dc0c13be1d6569a31aa70c6089017406a56a77c6ec42e3b95138e4b030808df",
+      "dabe5ab0b238768593f4dff7bd8e378b247abfca74a725a07410a4d5880ea80f",
     );
     expect(first.content_sha256).not.toBe(execute.content_sha256);
     expect(first.identity.phase).toBe("review");
-    expect(first.mission_schema_version).toBe(5);
+    expect(first.mission_schema_version).toBe(6);
     expect(first.controller_run.phase).toBe("review");
     expect(first.independence_attested).toBe(true);
     expect(first.review_subject).toEqual(reviewSubject);
@@ -666,12 +757,13 @@ describe("mission domain", () => {
       patch_subject: patchSubject,
       paths: patchPaths,
     };
-    const first = compilePatchMission(input);
-    const second = compilePatchMission(input);
+    const first = compilePatchMission(input, executionDefaults);
+    const second = compilePatchMission(input, executionDefaults);
     const reordered = {
       content_sha256: first.content_sha256,
       task_path: first.task_path,
       result_contract: first.result_contract,
+      capability_envelope: first.capability_envelope,
       patch_subject: {
         prior_review_subject: first.patch_subject.prior_review_subject,
         findings: first.patch_subject.findings,
@@ -692,9 +784,26 @@ describe("mission domain", () => {
     };
 
     expect(second).toEqual(first);
-    expect(first.mission_schema_version).toBe(5);
+    expect(first.mission_schema_version).toBe(6);
     expect(first.identity).toMatchObject({ phase: "patch", patch_cycle: 1 });
-    expect("capability_envelope" in first).toBe(false);
+    expect(first.capability_envelope).toEqual({
+      schema_version: 1,
+      workspace: {
+        allowed_scope_digest: deriveAllowedScopeDigest(
+          patchWorkItem.goal.goal_contract!.allowed_scope,
+        ),
+        execution_mode: "permission_mediated_local",
+        scope_assurance: "result_scope_validation",
+      },
+      runtime: {
+        containment_assurance: "not_independently_enforced",
+        machine_authority: "launching_user",
+        approved_command_forms: executionDefaults.approved_command_forms,
+        approved_url_operations: executionDefaults.approved_url_operations,
+        mcp: "forbidden",
+        credentials: "forbidden",
+      },
+    });
     expect(first.task_path).toBe(patchPaths.task_path);
     expect(hashMissionContent(reordered)).toBe(first.content_sha256);
     expect(missionPackageSchema.parse(reordered)).toEqual(first);
@@ -703,6 +812,7 @@ describe("mission domain", () => {
     );
     expect(renderTaskMd(first)).toContain("F-001");
     expect(renderTaskMd(first)).toContain("F-002");
+    expect(renderTaskMd(first)).toContain("## Capability envelope");
     expect(renderTaskMd(first)).toContain(
       "do not advance controller state or self-declare findings resolved",
     );

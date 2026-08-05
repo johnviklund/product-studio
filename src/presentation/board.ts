@@ -227,9 +227,10 @@ export interface ShapingSurfaceContext {
     model_picker_options: Record<
       ShapingPhase,
       readonly ShapingModelPickerOption[]
-    > & {
-      execute?: readonly ShapingModelPickerOption[];
-    };
+    > &
+      Partial<
+        Record<WorkflowModelSeat, readonly ShapingModelPickerOption[]>
+      >;
     execute?: {
       status: "available" | "unavailable";
       reason: string | null;

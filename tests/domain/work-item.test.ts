@@ -427,6 +427,7 @@ describe("durable work-item schemas", () => {
     (decision) => {
       const resolution = {
         decision,
+        expected_phase: "execute" as const,
         governed_tuple: {
           goal_version: 1,
           input_revision: 1,

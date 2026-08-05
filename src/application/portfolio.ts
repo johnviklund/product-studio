@@ -204,6 +204,7 @@ type WorkspaceGateway = Pick<
   | "findAppliedPatchManifest"
   | "readAppliedExecuteReviewSubject"
   | "readAppliedPatchReviewSubject"
+  | "readExecutionDefaults"
   | "writePatchMissionPackage"
   | "writeReviewMissionPackage"
   | "writeMissionPackage"
@@ -2699,17 +2700,21 @@ export class PortfolioService {
       completed_at: patchManifest.completed_at,
       outcome: "applied" as const,
     };
+    const executionDefaults = await source.workspace.readExecutionDefaults();
 
     return source.workspace.writePatchMissionPackage(
       identity,
       patchSubject,
       (paths) =>
-        compilePatchMissionPackage({
-          work_item: workItem,
-          controller_run: patchRun,
-          patch_subject: patchSubject,
-          paths,
-        }),
+        compilePatchMissionPackage(
+          {
+            work_item: workItem,
+            controller_run: patchRun,
+            patch_subject: patchSubject,
+            paths,
+          },
+          executionDefaults,
+        ),
     );
   }
 

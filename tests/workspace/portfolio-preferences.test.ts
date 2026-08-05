@@ -788,7 +788,10 @@ describe("cross-seat model logic", () => {
     const sharedUse = (seat: WorkflowModelUse["seat"]): WorkflowModelUse => ({
       seat,
       production_id: `${seat}-production`,
-      shaping_run_id: seat === "execute" ? null : runIds[seat],
+      shaping_run_id:
+        seat === "brainstorm" || seat === "spec" || seat === "plan"
+          ? runIds[seat]
+          : null,
       requested_model: "model-shared",
       effective_model: null,
     });

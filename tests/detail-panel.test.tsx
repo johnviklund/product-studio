@@ -698,7 +698,7 @@ function renderShaping(overrides: Partial<ShapingProps> = {}): string {
   return renderToStaticMarkup(<ShapingSection {...props} />);
 }
 const connectedRun: ConnectedRunSummary = {
-  schema_version: 1,
+  schema_version: 2,
   connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
   mission: {
     identity: {
@@ -741,7 +741,10 @@ const connectedRun: ConnectedRunSummary = {
       assurance: "controller_observed",
     },
   },
-  capability_envelope_sha256: "e".repeat(64),
+  authorization: {
+    kind: "capability_envelope",
+    envelope_sha256: "e".repeat(64),
+  },
   acp_protocol_version: { value: 1, assurance: "adapter_attested" },
   lifecycle: {
     status: "running",

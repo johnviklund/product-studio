@@ -1987,6 +1987,8 @@ describe("PortfolioService", () => {
         spec: pickerOptions,
         plan: pickerOptions,
         execute: [],
+        review: pickerOptions,
+        patch: pickerOptions,
       },
       post_commit_launch_failure: null,
     });
@@ -2514,8 +2516,11 @@ describe("PortfolioService", () => {
           value: "execute-model",
           assurance: "user_declared",
         },
-        capability_envelope_sha256: { assurance: "controller_observed" },
         authorization_sha256: { assurance: "controller_observed" },
+      },
+      authorization: {
+        kind: "capability_envelope",
+        envelope_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
       },
       lifecycle: { status: "running" },
     });
@@ -5315,13 +5320,40 @@ describe("PortfolioService", () => {
       `${JSON.stringify(accepted.controller_run, null, 2)}\n`,
       "utf8",
     );
+    const executionDirectory = join(root, ".founder", "execution");
+    await mkdir(executionDirectory, { recursive: true });
+    await writeFile(
+      join(executionDirectory, "defaults.json"),
+      `${JSON.stringify(
+        {
+          schema_version: 1,
+          approved_command_forms: [
+            { executable: "npm", args: ["run", "test"] },
+          ],
+          approved_url_operations: [],
+          mcp: "forbidden",
+          credentials: "forbidden",
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
 
     const patchMission = await service.compilePatchMission(
       sourceId,
       created.goal.work_item_id,
     );
     expect(patchMission.mission).toMatchObject({
+      mission_schema_version: 6,
       identity: { phase: "patch", patch_cycle: 1 },
+      capability_envelope: {
+        runtime: {
+          approved_command_forms: [
+            { executable: "npm", args: ["run", "test"] },
+          ],
+        },
+      },
       patch_subject: {
         findings: [{ finding_id: "F-portfolio-1" }],
       },

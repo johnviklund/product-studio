@@ -384,7 +384,6 @@ async function createImportFixture(options?: {
     expected_phase: "execute";
     expected_status: "active";
     expected_schema_version: 2;
-    run_ordinal: number;
     expected_goal_version: number;
     expected_input_revision: number;
     attempt: number;
@@ -1685,6 +1684,7 @@ async function createConnectedFixture(): Promise<{
     expected_phase: "execute";
     expected_status: "active";
     expected_schema_version: 2;
+    run_ordinal: number;
     governed_tuple: {
       goal_version: number;
       input_revision: number;
@@ -1965,14 +1965,24 @@ async function createPhaseConnectedFixture(
     phase === "review"
       ? compileReviewMission({
           work_item: workItem,
-          controller_run: manifest,
+          controller_run: {
+            ...manifest,
+            phase: "review",
+            outcome: "applied",
+            completed_at: manifest.completed_at!,
+          },
           review_subject: reviewSubject,
           paths,
           independence_attested: true,
         })
       : compilePatchMission({
           work_item: workItem,
-          controller_run: manifest,
+          controller_run: {
+            ...manifest,
+            phase: "patch",
+            outcome: "applied",
+            completed_at: manifest.completed_at!,
+          },
           patch_subject: {
             review_mission_content_sha256: "4".repeat(64),
             review_result_content_sha256: "5".repeat(64),
@@ -2237,10 +2247,6 @@ describe("WorkItemController", () => {
     }> = [
       {
         input: { ...fixture.input, expected_phase: "review" },
-        record: fixture.record,
-      },
-      {
-        input: { ...fixture.input, model_override: "another-model" },
         record: fixture.record,
       },
       { input: fixture.input, record: changedModel },

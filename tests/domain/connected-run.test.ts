@@ -10,7 +10,7 @@ import {
   connectedRunRecordV2Schema,
   connectedRunSummarySchema,
   effectiveModelIdentitySchema,
-  launchConnectedExecuteInputSchema,
+  launchConnectedInputSchema,
   summarizeConnectedRun,
   type ConnectedRunRecordV2,
 } from "../../src/domain/connected-run";
@@ -189,11 +189,12 @@ describe("connected-run domain", () => {
       expected_phase: "execute" as const,
       expected_status: "active" as const,
       expected_schema_version: 2 as const,
+      run_ordinal: 0,
       governed_tuple: record.governed_tuple,
       mission_content_sha256: missionSha256,
       model_override: "one-run-model",
     };
-    expect(launchConnectedExecuteInputSchema.parse(launchInput)).toEqual(
+    expect(launchConnectedInputSchema.parse(launchInput)).toEqual(
       launchInput,
     );
 
@@ -207,7 +208,7 @@ describe("connected-run domain", () => {
       }),
     ).toThrow();
     expect(() =>
-      launchConnectedExecuteInputSchema.parse({
+      launchConnectedInputSchema.parse({
         ...launchInput,
         capability_envelope: envelope,
       }),
@@ -260,7 +261,7 @@ describe("connected-run domain", () => {
       connectedRunLaunchFingerprint({
         ...record,
         authorization: {
-          ...record.authorization,
+          kind: "capability_envelope",
           envelope: resolveCapabilityEnvelope(["src"], defaults),
           envelope_sha256: hashResolvedCapabilityEnvelope(
             resolveCapabilityEnvelope(["src"], defaults),
