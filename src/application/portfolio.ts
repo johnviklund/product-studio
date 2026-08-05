@@ -2277,6 +2277,7 @@ export class PortfolioService {
       source.workspace,
     ).resolveConnectedPermission(workItemId, {
       decision: validatedInput.decision,
+      expected_phase: "execute",
       governed_tuple: governedTuple,
       connected_run_id: validatedInput.connected_run_id,
       operation_sha256: validatedInput.operation_sha256,

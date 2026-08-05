@@ -222,6 +222,7 @@ export type ConnectedPermissionDecision = "allow_once" | "keep_denied";
 
 export interface ConnectedPermissionResolutionInput {
   decision: ConnectedPermissionDecision;
+  expected_phase: "execute" | "patch";
   governed_tuple: GovernedTuple;
   operation_sha256: string;
   connected_run_id: string;
@@ -229,7 +230,7 @@ export interface ConnectedPermissionResolutionInput {
 }
 
 export interface RecordConnectedPermissionDenialInput {
-  expected_phase: "execute";
+  expected_phase: "execute" | "patch";
   expected_status: "active";
   expected_schema_version: 2;
   governed_tuple: GovernedTuple;
@@ -1014,6 +1015,7 @@ export const workItemAttentionSchema: z.ZodType<WorkItemAttention> =
   ]);
 
 const connectedPermissionResolutionFields = {
+  expected_phase: z.enum(["execute", "patch"]),
   governed_tuple: governedTupleSchema,
   operation_sha256: sha256Schema,
   connected_run_id: controllerRunIdSchema,
@@ -1038,7 +1040,7 @@ export const connectedPermissionResolutionInputSchema: z.ZodType<ConnectedPermis
 
 export const recordConnectedPermissionDenialInputSchema: z.ZodType<RecordConnectedPermissionDenialInput> =
   z.strictObject({
-    expected_phase: z.literal("execute"),
+    expected_phase: z.enum(["execute", "patch"]),
     expected_status: z.literal("active"),
     expected_schema_version: z.literal(2),
     governed_tuple: governedTupleSchema,

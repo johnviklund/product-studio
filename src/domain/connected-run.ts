@@ -7,6 +7,7 @@ import {
   type CapabilityEnvelopeV1,
 } from "./capability-envelope";
 import {
+  MISSION_PHASES,
   missionIdentitySchema,
   type MissionIdentity,
   type MissionPhase,
@@ -216,8 +217,8 @@ export interface ConnectedRunSummary {
   };
 }
 
-export interface LaunchConnectedExecuteInput {
-  expected_phase: "execute";
+export interface LaunchConnectedInput {
+  expected_phase: MissionPhase;
   expected_status: "active";
   expected_schema_version: 2;
   governed_tuple: GovernedTuple;
@@ -693,9 +694,9 @@ export const connectedRunSummarySchema: z.ZodType<ConnectedRunSummary> =
       }
     });
 
-export const launchConnectedExecuteInputSchema: z.ZodType<LaunchConnectedExecuteInput> =
+export const launchConnectedInputSchema: z.ZodType<LaunchConnectedInput> =
   z.strictObject({
-    expected_phase: z.literal("execute"),
+    expected_phase: z.enum(MISSION_PHASES),
     expected_status: z.literal("active"),
     expected_schema_version: z.literal(2),
     governed_tuple: governedTupleSchema,

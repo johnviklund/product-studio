@@ -8,6 +8,7 @@ import {
   MISSION_SCHEMA_VERSION,
   reviewSubjectSchema,
   type MissionIdentity,
+  type MissionPhase,
   type ReviewSubject,
 } from "../domain/mission";
 import {
@@ -15,9 +16,10 @@ import {
 } from "../domain/capability-envelope";
 import {
   connectedRunRecordV2Schema,
-  launchConnectedExecuteInputSchema,
+  connectedRunLaunchFingerprint,
+  launchConnectedInputSchema,
   type ConnectedRunRecordV2,
-  type LaunchConnectedExecuteInput,
+  type LaunchConnectedInput,
 } from "../domain/connected-run";
 import {
   commandEvidenceRecordSchema,
@@ -337,6 +339,15 @@ export interface ConnectedPermissionDecisionResult {
 
 interface ExecuteExpectation {
   expected_phase: "execute";
+  expected_status: WorkItemStatus;
+  expected_schema_version: 2;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
+}
+
+interface ConnectedExpectation {
+  expected_phase: MissionPhase;
   expected_status: WorkItemStatus;
   expected_schema_version: 2;
   expected_goal_version: number;
@@ -2023,8 +2034,9 @@ export class WorkItemController {
         input_revision: validatedInput.expected_input_revision,
         attempt: nextAttempt,
       };
-      return await this.retryExecuteAttemptWithLease({
+      return await this.retryConnectedAttemptWithLease({
         work_item_id: validatedId,
+        phase: "execute",
         lease,
         active_run: activeRun,
         manifest_identity: manifestIdentity,
@@ -2044,25 +2056,36 @@ export class WorkItemController {
 
   async launchConnectedExecute(
     workItemId: string,
-    input: LaunchConnectedExecuteInput,
+    input: LaunchConnectedInput & { expected_phase: "execute" },
+    record: ConnectedRunRecordV2,
+  ): Promise<ConnectedLaunchResult> {
+    return this.launchConnectedRun(workItemId, input, record);
+  }
+
+  async launchConnectedRun(
+    workItemId: string,
+    input: LaunchConnectedInput,
     record: ConnectedRunRecordV2,
   ): Promise<ConnectedLaunchResult> {
     const validatedId = workItemIdSchema.parse(workItemId);
-    const validatedInput = launchConnectedExecuteInputSchema.parse(input);
+    const validatedInput = launchConnectedInputSchema.parse(input);
     const validatedRecord = connectedRunRecordV2Schema.parse(record);
-    const expectation = this.executeExpectationFromConnectedInput(
+    const expectation = this.connectedExpectationFromInput(
       validatedInput,
     );
     const idempotencyKey = deriveControllerIdempotencyKey(
       validatedId,
-      "execute",
+      validatedInput.expected_phase,
       expectation.expected_goal_version,
       expectation.expected_input_revision,
       expectation.attempt,
     );
     const runId = deriveControllerRunId(
       idempotencyKey,
-      JSON.stringify({ operation: "launch_connected_execute", input: validatedInput }),
+      JSON.stringify({
+        operation: `launch_connected_${validatedInput.expected_phase}`,
+        input: validatedInput,
+      }),
     );
     const activeRun = this.activeRun(runId, idempotencyKey);
     const lease = await this.repository.acquireControllerLease(
@@ -2082,7 +2105,7 @@ export class WorkItemController {
         work_item_id: validatedId,
         run_id: runId,
         idempotency_key: idempotencyKey,
-        phase: "execute" as const,
+        phase: validatedInput.expected_phase,
         goal_version: expectation.expected_goal_version,
         input_revision: expectation.expected_input_revision,
         attempt: expectation.attempt,
@@ -2094,7 +2117,7 @@ export class WorkItemController {
       if (existing !== null) {
         if (
           manifestMatches(existing, manifestIdentity) &&
-          this.matchesActiveExecuteState(
+          this.matchesActiveConnectedState(
             lease.work_item,
             expectation,
             expectation.attempt,
@@ -2115,18 +2138,18 @@ export class WorkItemController {
           await this.validateConnectedMissionReference(
             validatedId,
             connected,
+            validatedInput.expected_phase,
             validatedInput.governed_tuple,
             validatedInput.mission_content_sha256,
           );
           if (
-            validatedInput.model_override !== undefined &&
-            connected.provenance.requested_model.value !==
-              validatedInput.model_override
+            connectedRunLaunchFingerprint(connected) !==
+            connectedRunLaunchFingerprint(validatedRecord)
           ) {
             throw this.conflict(
               "idempotency_conflict",
               validatedId,
-              "A connected launch replay cannot change its requested one-run model.",
+              "A connected launch replay cannot change its phase, mission, tuple, model, or authorization.",
             );
           }
           return {
@@ -2183,12 +2206,12 @@ export class WorkItemController {
     const validatedInput = recordConnectedPermissionDenialInputSchema.parse(
       input,
     );
-    const expectation = this.executeExpectationFromConnectedInput(
+    const expectation = this.connectedExpectationFromInput(
       validatedInput,
     );
     const idempotencyKey = deriveControllerIdempotencyKey(
       validatedId,
-      "execute",
+      validatedInput.expected_phase,
       expectation.expected_goal_version,
       expectation.expected_input_revision,
       expectation.attempt,
@@ -2218,7 +2241,7 @@ export class WorkItemController {
         work_item_id: validatedId,
         run_id: runId,
         idempotency_key: idempotencyKey,
-        phase: "execute" as const,
+        phase: validatedInput.expected_phase,
         goal_version: expectation.expected_goal_version,
         input_revision: expectation.expected_input_revision,
         attempt: expectation.attempt,
@@ -2288,7 +2311,7 @@ export class WorkItemController {
     );
     const idempotencyKey = deriveControllerIdempotencyKey(
       validatedId,
-      "execute",
+      validatedInput.expected_phase,
       validatedInput.governed_tuple.goal_version,
       validatedInput.governed_tuple.input_revision,
       nextAttempt,
@@ -2318,7 +2341,7 @@ export class WorkItemController {
         work_item_id: validatedId,
         run_id: runId,
         idempotency_key: idempotencyKey,
-        phase: "execute" as const,
+        phase: validatedInput.expected_phase,
         goal_version: validatedInput.governed_tuple.goal_version,
         input_revision: validatedInput.governed_tuple.input_revision,
         attempt: nextAttempt,
@@ -2331,10 +2354,10 @@ export class WorkItemController {
         if (existing !== null) {
           if (
             manifestMatches(existing, manifestIdentity) &&
-            this.matchesActiveExecuteState(
+            this.matchesActiveConnectedState(
               lease.work_item,
               {
-                expected_phase: "execute",
+                expected_phase: validatedInput.expected_phase,
                 expected_status: "active",
                 expected_schema_version: 2,
                 expected_goal_version:
@@ -2365,8 +2388,9 @@ export class WorkItemController {
       if (validatedInput.decision === "keep_denied") {
         return { work_item: lease.work_item, manifest: null };
       }
-      const mutation = await this.retryExecuteAttemptWithLease({
+      const mutation = await this.retryConnectedAttemptWithLease({
         work_item_id: validatedId,
+        phase: validatedInput.expected_phase,
         lease,
         active_run: activeRun,
         manifest_identity: manifestIdentity,
@@ -2387,8 +2411,9 @@ export class WorkItemController {
     }
   }
 
-  private async retryExecuteAttemptWithLease(input: {
+  private async retryConnectedAttemptWithLease(input: {
     work_item_id: string;
+    phase: "execute" | "patch";
     lease: ControllerLease;
     active_run: ActiveRun;
     manifest_identity: Omit<
@@ -2406,10 +2431,10 @@ export class WorkItemController {
     if (existing !== null) {
       if (
         manifestMatches(existing, input.manifest_identity) &&
-        this.matchesActiveExecuteState(
+        this.matchesActiveConnectedState(
           input.lease.work_item,
           {
-            expected_phase: "execute",
+            expected_phase: input.phase,
             expected_status: "active",
             expected_schema_version: 2,
             expected_goal_version: input.manifest_identity.goal_version,
@@ -2456,8 +2481,8 @@ export class WorkItemController {
     });
   }
 
-  private executeExpectationFromConnectedInput(input: {
-    expected_phase: "execute";
+  private connectedExpectationFromInput(input: {
+    expected_phase: MissionPhase;
     expected_status: "active";
     expected_schema_version: 2;
     governed_tuple: {
@@ -2465,7 +2490,7 @@ export class WorkItemController {
       input_revision: number;
       attempt: number;
     };
-  }): ExecuteExpectation {
+  }): ConnectedExpectation {
     return {
       expected_phase: input.expected_phase,
       expected_status: input.expected_status,
@@ -2476,14 +2501,14 @@ export class WorkItemController {
     };
   }
 
-  private matchesActiveExecuteState(
+  private matchesActiveConnectedState(
     current: WorkItem,
-    expectation: ExecuteExpectation,
+    expectation: ConnectedExpectation,
     attempt: number,
     requires_no_attention: boolean,
   ): boolean {
     return (
-      current.state.phase === "execute" &&
+      current.state.phase === expectation.expected_phase &&
       current.state.status === "active" &&
       current.state.schema_version === expectation.expected_schema_version &&
       current.state.goal_version === expectation.expected_goal_version &&
@@ -2499,9 +2524,9 @@ export class WorkItemController {
   ): boolean {
     const attention = current.state.attention;
     return (
-      this.matchesActiveExecuteState(
+      this.matchesActiveConnectedState(
         current,
-        this.executeExpectationFromConnectedInput(input),
+        this.connectedExpectationFromInput(input),
         input.governed_tuple.attempt,
         false,
       ) &&
@@ -2515,13 +2540,13 @@ export class WorkItemController {
   private async validateConnectedLaunch(
     workItemId: string,
     current: WorkItem,
-    input: LaunchConnectedExecuteInput,
+    input: LaunchConnectedInput,
     record: ConnectedRunRecordV2,
   ): Promise<void> {
-    this.validateExecuteExpectation(
+    this.validateConnectedExpectation(
       workItemId,
       current,
-      this.executeExpectationFromConnectedInput(input),
+      this.connectedExpectationFromInput(input),
     );
     this.validateGovernedTuple(workItemId, current, input.governed_tuple);
     if (current.state.attention !== undefined) {
@@ -2551,6 +2576,7 @@ export class WorkItemController {
     await this.validateConnectedMissionReference(
       workItemId,
       record,
+      input.expected_phase,
       input.governed_tuple,
       input.mission_content_sha256,
     );
@@ -2561,10 +2587,10 @@ export class WorkItemController {
     current: WorkItem,
     input: RecordConnectedPermissionDenialInput,
   ): Promise<ConnectedRunRecordV2> {
-    this.validateExecuteExpectation(
+    this.validateConnectedExpectation(
       workItemId,
       current,
-      this.executeExpectationFromConnectedInput(input),
+      this.connectedExpectationFromInput(input),
     );
     this.validateGovernedTuple(workItemId, current, input.governed_tuple);
     if (current.state.attention !== undefined) {
@@ -2581,6 +2607,7 @@ export class WorkItemController {
     await this.validateConnectedMissionReference(
       workItemId,
       record,
+      input.expected_phase,
       input.governed_tuple,
       input.mission_content_sha256,
     );
@@ -2622,15 +2649,15 @@ export class WorkItemController {
     input: ConnectedPermissionResolutionInput,
     knownRecord?: ConnectedRunRecordV2,
   ): Promise<ConnectedRunRecordV2> {
-    const expectation: ExecuteExpectation = {
-      expected_phase: "execute",
+    const expectation: ConnectedExpectation = {
+      expected_phase: input.expected_phase,
       expected_status: "active",
       expected_schema_version: 2,
       expected_goal_version: input.governed_tuple.goal_version,
       expected_input_revision: input.governed_tuple.input_revision,
       attempt: input.governed_tuple.attempt,
     };
-    this.validateExecuteExpectation(workItemId, current, expectation);
+    this.validateConnectedExpectation(workItemId, current, expectation);
     this.validateGovernedTuple(workItemId, current, input.governed_tuple);
     const attention = current.state.attention;
     if (
@@ -2659,6 +2686,7 @@ export class WorkItemController {
     await this.validateConnectedMissionReference(
       workItemId,
       record,
+      input.expected_phase,
       input.governed_tuple,
       input.mission_content_sha256,
     );
@@ -2689,6 +2717,7 @@ export class WorkItemController {
   private async validateConnectedMissionReference(
     workItemId: string,
     record: ConnectedRunRecordV2,
+    expectedPhase: MissionPhase,
     governedTuple: {
       goal_version: number;
       input_revision: number;
@@ -2699,6 +2728,7 @@ export class WorkItemController {
   ): Promise<void> {
     if (
       record.mission.identity.work_item_id !== workItemId ||
+      record.mission.identity.phase !== expectedPhase ||
       !this.governedTuplesMatch(record.governed_tuple, governedTuple) ||
       record.mission.content_sha256 !== missionContentSha256
     ) {
@@ -2826,8 +2856,7 @@ export class WorkItemController {
     );
     return {
       kind: "missing_permission",
-      question:
-        "Allow this exact out-of-envelope operation once and retry the fresh execute attempt?",
+      question: `Allow this exact out-of-envelope operation once and retry the fresh ${record.mission.identity.phase} attempt?`,
       recommendation:
         "Keep it denied unless it is required; allowing once creates a new immutable attempt.",
       created_at: createdAt,
@@ -3825,6 +3854,40 @@ export class WorkItemController {
         "stale_expectation",
         workItemId,
         "External result expectations do not match durable state.",
+      );
+    }
+    if (current.state.attempt !== input.attempt) {
+      throw this.conflict(
+        "attempt_conflict",
+        workItemId,
+        `Expected attempt ${input.attempt} but found ${current.state.attempt}.`,
+      );
+    }
+  }
+
+  private validateConnectedExpectation(
+    workItemId: string,
+    current: WorkItem,
+    input: ConnectedExpectation,
+  ): void {
+    if (current.goal.goal_contract === undefined) {
+      throw this.conflict(
+        "contract_required",
+        workItemId,
+        "Connected launches require an active goal contract.",
+      );
+    }
+    if (
+      current.state.phase !== input.expected_phase ||
+      current.state.status !== input.expected_status ||
+      current.state.schema_version !== input.expected_schema_version ||
+      current.state.goal_version !== input.expected_goal_version ||
+      current.state.input_revision !== input.expected_input_revision
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Connected launch expectations do not match durable state.",
       );
     }
     if (current.state.attempt !== input.attempt) {

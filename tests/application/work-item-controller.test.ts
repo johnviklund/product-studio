@@ -24,6 +24,7 @@ import {
   compileReviewMission,
   type ExecuteReviewSubject,
   type MissionIdentity,
+  type MissionPhase,
   type PatchReviewSubject,
   type PatchSubject,
 } from "../../src/domain/mission";
@@ -34,8 +35,14 @@ import {
 } from "../../src/domain/capability-envelope";
 import {
   hashResolvedCapabilityEnvelope,
-  type ConnectedRunRecordV1,
+  type ConnectedRunAuthorization,
+  type ConnectedRunRecordV2,
 } from "../../src/domain/connected-run";
+import {
+  deriveReviewMissionResultBindingSha256,
+  hashReviewRunPolicy,
+  type ReviewRunPolicy,
+} from "../../src/domain/review-run-policy";
 import {
   hashResultContent,
   importEvidenceSummarySchema,
@@ -78,6 +85,7 @@ import type {
 } from "../../src/domain/verification";
 import {
   ControllerConflictError,
+  deriveControllerRunId,
   workItemSchema,
   type ControllerRunManifest,
   type VerificationCommand,
@@ -1684,7 +1692,12 @@ async function createConnectedFixture(): Promise<{
     };
     mission_content_sha256: string;
   };
-  record: ConnectedRunRecordV1;
+  record: ConnectedRunRecordV2 & {
+    authorization: Extract<
+      ConnectedRunAuthorization,
+      { kind: "capability_envelope" }
+    >;
+  };
 }> {
   const { repository } = await createWorkspace();
   const { workItem, manifest } = await governToExecute(repository);
@@ -1719,8 +1732,13 @@ async function createConnectedFixture(): Promise<{
     },
     mission_content_sha256: artifact.mission.content_sha256,
   };
-  const record: ConnectedRunRecordV1 = {
-    schema_version: 1,
+  const record: ConnectedRunRecordV2 & {
+    authorization: Extract<
+      ConnectedRunAuthorization,
+      { kind: "capability_envelope" }
+    >;
+  } = {
+    schema_version: 2,
     connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
     mission: {
       identity,
@@ -1760,16 +1778,13 @@ async function createConnectedFixture(): Promise<{
         value: "c".repeat(64),
         assurance: "controller_observed",
       },
-      capability_envelope_sha256: {
-        value: envelopeSha256,
-        assurance: "controller_observed",
-      },
       authorization_sha256: {
         value: "d".repeat(64),
         assurance: "controller_observed",
       },
     },
-    resolved_capability_envelope: {
+    authorization: {
+      kind: "capability_envelope",
       envelope,
       envelope_sha256: envelopeSha256,
     },
@@ -1800,6 +1815,272 @@ async function createConnectedFixture(): Promise<{
     workItem,
     controller: createController(repository),
     input,
+    record,
+  };
+}
+
+async function createPhaseConnectedFixture(
+  phase: MissionPhase,
+): Promise<{
+  repository: ProductWorkspace;
+  workItem: WorkItem;
+  controller: WorkItemController;
+  input: {
+    expected_phase: MissionPhase;
+    expected_status: "active";
+    expected_schema_version: 2;
+    governed_tuple: {
+      goal_version: number;
+      input_revision: number;
+      attempt: number;
+      patch_cycle: number;
+    };
+    mission_content_sha256: string;
+  };
+  record: ConnectedRunRecordV2;
+}> {
+  const fixture = await createConnectedFixture();
+  if (phase === "execute") {
+    return fixture;
+  }
+
+  let workItem: WorkItem;
+  let manifest: ControllerRunManifest;
+  if (phase === "review") {
+    const transitioned = await fixture.controller.transition(
+      fixture.workItem.goal.work_item_id,
+      {
+        target_phase: "review",
+        target_status: "active",
+        expected_phase: "execute",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: fixture.workItem.state.goal_version!,
+        expected_input_revision: fixture.workItem.state.input_revision!,
+        attempt: fixture.workItem.state.attempt!,
+      },
+    );
+    workItem = transitioned.work_item;
+    manifest = transitioned.manifest;
+  } else {
+    const activeRun = {
+      run_id: "82000000-0000-4000-8000-000000000003",
+      idempotency_key: "phase-qualified-patch-fixture",
+      acquired_at: "2026-07-21T21:00:00.000Z",
+    };
+    const lease = await fixture.repository.acquireControllerLease(
+      fixture.workItem.goal.work_item_id,
+      activeRun,
+    );
+    if (lease === null) {
+      throw new Error("Patch connected fixture requires a durable item.");
+    }
+    try {
+      const mutation = await fixture.repository.commitControllerMutation(
+        lease,
+        {
+          goal: lease.work_item.goal,
+          state: {
+            ...lease.work_item.state,
+            phase: "patch",
+            patch_cycle: 1,
+            updated_at: "2026-07-21T21:00:01.000Z",
+          },
+          manifest: {
+            schema_version: 1,
+            run_id: activeRun.run_id,
+            work_item_id: lease.work_item.goal.work_item_id,
+            idempotency_key: activeRun.idempotency_key,
+            phase: "patch",
+            goal_version: lease.work_item.state.goal_version!,
+            input_revision: lease.work_item.state.input_revision!,
+            attempt: lease.work_item.state.attempt!,
+            started_at: activeRun.acquired_at,
+            outcome: "pending",
+          },
+        },
+      );
+      workItem = mutation.work_item;
+      manifest = mutation.manifest;
+    } finally {
+      await fixture.repository.releaseControllerLease(lease);
+    }
+  }
+
+  const reviewSubject: ExecuteReviewSubject = {
+    source: "execute",
+    execute_mission_content_sha256: "1".repeat(64),
+    execute_result_content_sha256: "2".repeat(64),
+    git_base_commit: testCommit,
+    accepted_result_commit: testCommit,
+    changed_files: ["src/application/work-item-controller.ts"],
+    execute_mission_path: `.founder/missions/${workItem.goal.work_item_id}/execute-1-1-0/mission.json`,
+    execute_evidence_path: `.founder/run-evidence/${workItem.goal.work_item_id}/execute-1-1-0/${"3".repeat(64)}`,
+    command_evidence: [
+      {
+        name: "Tests",
+        argv: ["npm", "test"],
+        started_at: "2026-07-21T20:58:00.000Z",
+        completed_at: "2026-07-21T20:58:01.000Z",
+        duration_ms: 1_000,
+        status: "passed",
+        exit_code: 0,
+        signal: null,
+        stdout: "green",
+        stderr: "",
+        output_truncated: false,
+      },
+    ],
+  };
+  const identity =
+    phase === "review"
+      ? {
+          phase,
+          work_item_id: workItem.goal.work_item_id,
+          goal_version: workItem.state.goal_version!,
+          input_revision: workItem.state.input_revision!,
+          attempt: workItem.state.attempt!,
+        }
+      : {
+          phase,
+          work_item_id: workItem.goal.work_item_id,
+          goal_version: workItem.state.goal_version!,
+          input_revision: workItem.state.input_revision!,
+          attempt: workItem.state.attempt!,
+          patch_cycle: workItem.state.patch_cycle!,
+        };
+  const phaseSuffix =
+    phase === "patch"
+      ? `${phase}-${identity.goal_version}-${identity.input_revision}-${identity.attempt}-${identity.patch_cycle}`
+      : `${phase}-${identity.goal_version}-${identity.input_revision}-${identity.attempt}`;
+  const paths = {
+    task_path: `.founder/missions/${identity.work_item_id}/${phaseSuffix}/TASK.md`,
+    output_path: `.founder/missions/${identity.work_item_id}/${phaseSuffix}/result.json`,
+    git_base_commit: testCommit,
+  };
+  const mission =
+    phase === "review"
+      ? compileReviewMission({
+          work_item: workItem,
+          controller_run: manifest,
+          review_subject: reviewSubject,
+          paths,
+          independence_attested: true,
+        })
+      : compilePatchMission({
+          work_item: workItem,
+          controller_run: manifest,
+          patch_subject: {
+            review_mission_content_sha256: "4".repeat(64),
+            review_result_content_sha256: "5".repeat(64),
+            review_mission_path: `.founder/missions/${identity.work_item_id}/review-1-1-0/mission.json`,
+            review_result_path: `.founder/missions/${identity.work_item_id}/review-1-1-0/result.json`,
+            review_evidence_path: `.founder/run-evidence/${identity.work_item_id}/review-1-1-0/${"6".repeat(64)}`,
+            reviewed_commit: testCommit,
+            findings: [reviewFinding("F-connected")],
+            prior_review_subject: reviewSubject,
+          },
+          paths,
+        });
+  const missionPath = paths.task_path.replace(/TASK\.md$/u, "mission.json");
+  const originalReadMissionPackage =
+    fixture.repository.readMissionPackage.bind(fixture.repository);
+  fixture.repository.readMissionPackage = async (requestedIdentity) =>
+    JSON.stringify(requestedIdentity) === JSON.stringify(identity)
+      ? { mission, mission_path: missionPath }
+      : originalReadMissionPackage(requestedIdentity);
+
+  const governedTuple = {
+    goal_version: identity.goal_version,
+    input_revision: identity.input_revision,
+    attempt: identity.attempt,
+    patch_cycle: workItem.state.patch_cycle!,
+  };
+  let authorization: ConnectedRunAuthorization;
+  if (phase === "review") {
+    const policy: ReviewRunPolicy = {
+      kind: "single_result_file",
+      result_path: mission.result_contract.output_path,
+      mission_result_binding_sha256:
+        deriveReviewMissionResultBindingSha256(
+          mission.content_sha256,
+          mission.result_contract.output_path,
+        ),
+      commands: "forbidden",
+      urls: "forbidden",
+      mcp: "forbidden",
+      credentials: "forbidden",
+      outside_workspace_writes: "forbidden",
+      reads: "workspace_and_repository_unrestricted",
+      execution_mode: "permission_mediated_local",
+      result_assurance: "result_scope_validation",
+      containment_assurance: "not_independently_enforced",
+      machine_authority: "launching_user",
+    };
+    authorization = {
+      kind: "review_result_ingress",
+      result_path: policy.result_path,
+      policy_sha256: hashReviewRunPolicy(policy),
+    };
+  } else {
+    authorization = fixture.record.authorization;
+  }
+  const authorizationSha256 =
+    authorization.kind === "capability_envelope"
+      ? authorization.envelope_sha256
+      : authorization.policy_sha256;
+  const record: ConnectedRunRecordV2 = {
+    ...fixture.record,
+    connected_run_id:
+      phase === "review"
+        ? "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2"
+        : "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b3",
+    mission: {
+      identity,
+      path: missionPath,
+      content_sha256: mission.content_sha256,
+      source_commit: mission.source_revision.git_base_commit,
+    },
+    governed_tuple: governedTuple,
+    provenance: {
+      ...fixture.record.provenance,
+      role: {
+        value: phase === "review" ? "reviewer" : "writer",
+        assurance: "controller_observed",
+      },
+      seat: {
+        value: phase === "review" ? "reviewer" : "executor",
+        assurance: "controller_observed",
+      },
+      adapter_profile: {
+        value: {
+          adapter_id: "fake-acp",
+          adapter_version: "1.0.0",
+          profile_id:
+            phase === "review"
+              ? "noninteractive-review-v1"
+              : "noninteractive-execute-v1",
+        },
+        assurance: "controller_observed",
+      },
+      authorization_sha256: {
+        value: authorizationSha256,
+        assurance: "controller_observed",
+      },
+    },
+    authorization,
+  };
+  return {
+    repository: fixture.repository,
+    workItem,
+    controller: fixture.controller,
+    input: {
+      expected_phase: phase,
+      expected_status: "active",
+      expected_schema_version: 2,
+      governed_tuple: governedTuple,
+      mission_content_sha256: mission.content_sha256,
+    },
     record,
   };
 }
@@ -1854,6 +2135,215 @@ describe("WorkItemController", () => {
     expect(replay.work_item.state.active_run).toBeUndefined();
   });
 
+  it("launches and replays one durable connected run per phase", async () => {
+    const runIds = new Set<string>();
+    for (const phase of ["execute", "review", "patch"] as const) {
+      const fixture = await createPhaseConnectedFixture(phase);
+      const launched = await fixture.controller.launchConnectedRun(
+        fixture.workItem.goal.work_item_id,
+        fixture.input,
+        fixture.record,
+      );
+      const replay = await fixture.controller.launchConnectedRun(
+        fixture.workItem.goal.work_item_id,
+        fixture.input,
+        fixture.record,
+      );
+
+      expect(launched.created).toBe(true);
+      expect(launched.connected_run.mission.identity.phase).toBe(phase);
+      expect(launched.manifest.phase).toBe(phase);
+      expect(launched.work_item.state.active_run).toBeUndefined();
+      expect(replay).toMatchObject({
+        created: false,
+        connected_run: {
+          connected_run_id: launched.connected_run.connected_run_id,
+        },
+        manifest: { run_id: launched.manifest.run_id },
+      });
+      runIds.add(launched.manifest.run_id);
+    }
+    expect(runIds.size).toBe(3);
+    const sharedIdempotencyKey = "shared-connected-launch-key";
+    expect(
+      new Set(
+        (["execute", "review", "patch"] as const).map((phase) =>
+          deriveControllerRunId(
+            sharedIdempotencyKey,
+            JSON.stringify({ operation: `launch_connected_${phase}` }),
+          ),
+        ),
+      ).size,
+    ).toBe(3);
+  });
+
+  it("rejects connected replay changes to phase, model, mission, tuple, or authorization", async () => {
+    const fixture = await createPhaseConnectedFixture("execute");
+    await fixture.controller.launchConnectedRun(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    const defaults: ExecutionDefaultsV1 = {
+      schema_version: 1,
+      approved_command_forms: [{ executable: "npm", args: ["run", "test"] }],
+      approved_url_operations: [],
+      mcp: "forbidden",
+      credentials: "forbidden",
+    };
+    const narrowedEnvelope = resolveCapabilityEnvelope(["src"], defaults);
+    const narrowedEnvelopeSha256 =
+      hashResolvedCapabilityEnvelope(narrowedEnvelope);
+    const changedAuthorization: ConnectedRunRecordV2 = {
+      ...fixture.record,
+      authorization: {
+        kind: "capability_envelope",
+        envelope: narrowedEnvelope,
+        envelope_sha256: narrowedEnvelopeSha256,
+      },
+      provenance: {
+        ...fixture.record.provenance,
+        authorization_sha256: {
+          value: narrowedEnvelopeSha256,
+          assurance: "controller_observed",
+        },
+      },
+    };
+    const changedModel: ConnectedRunRecordV2 = {
+      ...fixture.record,
+      provenance: {
+        ...fixture.record.provenance,
+        requested_model: {
+          value: "another-model",
+          assurance: "user_declared",
+        },
+      },
+    };
+    const cases: Array<{
+      input: typeof fixture.input;
+      record: ConnectedRunRecordV2;
+    }> = [
+      {
+        input: { ...fixture.input, expected_phase: "review" },
+        record: fixture.record,
+      },
+      { input: fixture.input, record: changedModel },
+      {
+        input: {
+          ...fixture.input,
+          mission_content_sha256: "f".repeat(64),
+        },
+        record: fixture.record,
+      },
+      {
+        input: {
+          ...fixture.input,
+          governed_tuple: {
+            ...fixture.input.governed_tuple,
+            attempt: fixture.input.governed_tuple.attempt + 1,
+          },
+        },
+        record: fixture.record,
+      },
+      { input: fixture.input, record: changedAuthorization },
+    ];
+
+    for (const replay of cases) {
+      await expect(
+        fixture.controller.launchConnectedRun(
+          fixture.workItem.goal.work_item_id,
+          replay.input,
+          replay.record,
+        ),
+      ).rejects.toBeInstanceOf(ControllerConflictError);
+    }
+  });
+
+  it("keeps permission recovery phase-bound to writable runs and excludes Review", async () => {
+    const patch = await createPhaseConnectedFixture("patch");
+    await patch.controller.launchConnectedRun(
+      patch.workItem.goal.work_item_id,
+      patch.input,
+      patch.record,
+    );
+    if (patch.record.authorization.kind !== "capability_envelope") {
+      throw new Error("Patch fixture requires capability authorization.");
+    }
+    const request = {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "git",
+      args: ["status"],
+    };
+    const operation = {
+      normalized_operation: request,
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest(request),
+      reason: "outside_capability_envelope",
+      resolved_envelope_sha256:
+        patch.record.authorization.envelope_sha256,
+      connected_run_id: patch.record.connected_run_id,
+    };
+    const denied = await patch.controller.recordConnectedPermissionDenial(
+      patch.workItem.goal.work_item_id,
+      { ...patch.input, expected_phase: "patch", operation },
+    );
+    expect(denied.work_item.state).toMatchObject({
+      phase: "patch",
+      attention: { kind: "missing_permission", operation },
+    });
+    await expect(
+      patch.controller.resolveConnectedPermission(
+        patch.workItem.goal.work_item_id,
+        {
+          decision: "keep_denied",
+          expected_phase: "patch",
+          governed_tuple: patch.input.governed_tuple,
+          operation_sha256: operation.operation_sha256,
+          connected_run_id: operation.connected_run_id,
+          mission_content_sha256: patch.input.mission_content_sha256,
+        },
+      ),
+    ).resolves.toMatchObject({ manifest: null });
+
+    const review = await createPhaseConnectedFixture("review");
+    await review.controller.launchConnectedRun(
+      review.workItem.goal.work_item_id,
+      review.input,
+      review.record,
+    );
+    await expect(
+      review.controller.recordConnectedPermissionDenial(
+        review.workItem.goal.work_item_id,
+        {
+          ...review.input,
+          expected_phase: "review",
+          operation: {
+            ...operation,
+            connected_run_id: review.record.connected_run_id,
+          },
+        } as never,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      review.controller.resolveConnectedPermission(
+        review.workItem.goal.work_item_id,
+        {
+          decision: "keep_denied",
+          expected_phase: "review",
+          governed_tuple: review.input.governed_tuple,
+          operation_sha256: operation.operation_sha256,
+          connected_run_id: review.record.connected_run_id,
+          mission_content_sha256: review.input.mission_content_sha256,
+        } as never,
+      ),
+    ).rejects.toThrow();
+    expect(
+      (await review.repository.read(review.workItem.goal.work_item_id))?.state
+        .attention,
+    ).toBeUndefined();
+  });
+
   it("creates missing-permission attention only for an exact out-of-envelope operation", async () => {
     const fixture = await createConnectedFixture();
     await fixture.controller.launchConnectedExecute(
@@ -1877,7 +2367,7 @@ describe("WorkItemController", () => {
       }),
       reason: "outside_capability_envelope",
       resolved_envelope_sha256:
-        fixture.record.resolved_capability_envelope.envelope_sha256,
+        fixture.record.authorization.envelope_sha256,
       connected_run_id: fixture.record.connected_run_id,
     };
 
@@ -1931,7 +2421,7 @@ describe("WorkItemController", () => {
       }),
       reason: "outside_capability_envelope",
       resolved_envelope_sha256:
-        fixture.record.resolved_capability_envelope.envelope_sha256,
+        fixture.record.authorization.envelope_sha256,
       connected_run_id: fixture.record.connected_run_id,
     };
 
@@ -1970,7 +2460,7 @@ describe("WorkItemController", () => {
       }),
       reason: "outside_capability_envelope",
       resolved_envelope_sha256:
-        fixture.record.resolved_capability_envelope.envelope_sha256,
+        fixture.record.authorization.envelope_sha256,
       connected_run_id: fixture.record.connected_run_id,
     };
     const denied = await fixture.controller.recordConnectedPermissionDenial(
@@ -1978,6 +2468,7 @@ describe("WorkItemController", () => {
       { ...fixture.input, operation },
     );
     const decision = {
+      expected_phase: "execute" as const,
       governed_tuple: fixture.input.governed_tuple,
       operation_sha256: operation.operation_sha256,
       connected_run_id: operation.connected_run_id,
