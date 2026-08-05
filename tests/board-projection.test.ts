@@ -10,6 +10,7 @@ import {
   boardColumnForPhase,
   boardItemIdentityKey,
   connectedExecuteForItem,
+  connectedPhaseForItem,
   connectedPermissionInboxForItem,
   createDefaultBoardView,
   detailPanelModeForItem,
@@ -39,6 +40,10 @@ import type {
   SpecResultSubmission,
 } from "../src/domain/shaping";
 import type { ShapingModelPickerOption } from "../src/domain/portfolio-preferences";
+import type {
+  ConnectedRunAuthorizationSummary,
+  ConnectedRunSummary,
+} from "../src/domain/connected-run";
 
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
 const SHA_A = "a".repeat(64);
@@ -121,6 +126,116 @@ function modelOption(
     preselected: false,
     reuse_warning: null,
     ...overrides,
+  };
+}
+
+function connectedRunSummary(
+  phase: "execute" | "review" | "patch",
+  overrides: {
+    connected_run_id?: string;
+    attempt?: number;
+    patch_cycle?: number;
+    status?: "starting" | "running" | "terminal";
+    terminal_outcome?:
+      | "completed"
+      | "missing_permission"
+      | "failed"
+      | "cancelled"
+      | "timed_out"
+      | "interrupted"
+      | null;
+    authorization?: ConnectedRunAuthorizationSummary;
+  } = {},
+): ConnectedRunSummary {
+  const attempt = overrides.attempt ?? 1;
+  const patchCycle = overrides.patch_cycle ?? (phase === "patch" ? 1 : 0);
+  const status = overrides.status ?? "running";
+  const terminalOutcome =
+    overrides.terminal_outcome ?? (status === "terminal" ? "failed" : null);
+  return {
+    schema_version: 2,
+    connected_run_id:
+      overrides.connected_run_id ??
+      "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+    mission: {
+      identity:
+        phase === "patch"
+          ? {
+              phase,
+              work_item_id: workItemId,
+              goal_version: 3,
+              input_revision: 2,
+              attempt,
+              patch_cycle: patchCycle,
+            }
+          : {
+              phase,
+              work_item_id: workItemId,
+              goal_version: 3,
+              input_revision: 2,
+              attempt,
+            },
+      content_sha256: SHA_A,
+      source_commit: "a".repeat(40),
+    },
+    governed_tuple: {
+      goal_version: 3,
+      input_revision: 2,
+      attempt,
+      patch_cycle: patchCycle,
+    },
+    provenance: {
+      role: {
+        value: phase === "review" ? "reviewer" : "writer",
+        assurance: "controller_observed",
+      },
+      seat: {
+        value: phase === "review" ? "reviewer" : "executor",
+        assurance: "controller_observed",
+      },
+      requested_model: {
+        value: `${phase}-model`,
+        assurance: "user_declared",
+      },
+      effective_model: {
+        assurance: "unknown",
+        model_id: null,
+        deployment_id: null,
+        observed_event_sha256: null,
+      },
+      effort: { value: "high", assurance: "user_declared" },
+      harness: {
+        value: { id: "copilot-acp", version: "1.0.0" },
+        assurance: "adapter_attested",
+      },
+      adapter_profile: {
+        value: {
+          adapter_id: "copilot-acp",
+          adapter_version: "1.0.0",
+          profile_id:
+            phase === "review"
+              ? "noninteractive-review-v1"
+              : "noninteractive-execute-v1",
+        },
+        assurance: "adapter_attested",
+      },
+    },
+    authorization:
+      overrides.authorization ??
+      (phase === "review"
+        ? { kind: "review_result_ingress", policy_sha256: SHA_B }
+        : { kind: "capability_envelope", envelope_sha256: SHA_C }),
+    acp_protocol_version: { value: 1, assurance: "adapter_attested" },
+    lifecycle: {
+      status,
+      started_at: "2026-08-05T18:00:00.000Z",
+      updated_at: "2026-08-05T18:01:00.000Z",
+      completed_at:
+        status === "terminal" ? "2026-08-05T18:01:00.000Z" : null,
+      terminal_outcome: terminalOutcome,
+      partial: terminalOutcome !== null && terminalOutcome !== "completed",
+    },
+    diagnostics: { count: 0, truncated: false },
   };
 }
 
@@ -2124,6 +2239,410 @@ describe("board projection", () => {
     expect(
       reviewHandoffForItem(reReviewItem, [appliedPatch, appliedPatch]),
     ).toMatchObject({ mode: "hidden" });
+  });
+
+  it("projects connected Review as read-only with phase-safe runs and picker state", () => {
+    const item = {
+      source_id: "ws_product",
+      work_item: {
+        goal: {
+          work_item_id: workItemId,
+          goal_contract: { goal_version: 3 },
+        },
+        state: {
+          phase: "review" as const,
+          status: "active" as const,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+          patch_cycle: 0,
+        },
+      },
+    };
+    const appliedExecute = {
+      evidence: {
+        phase: "execute" as const,
+        outcome: "applied" as const,
+        identity: {
+          work_item_id: workItemId,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+        },
+      },
+    };
+    const models = {
+      model_availability: {
+        execute: {
+          status: "available" as const,
+          reason: null,
+          available_model_ids: ["execute-model"],
+        },
+        review: {
+          status: "available" as const,
+          reason: null,
+          available_model_ids: ["review-model"],
+        },
+        patch: {
+          status: "available" as const,
+          reason: null,
+          available_model_ids: ["patch-model"],
+        },
+      },
+      model_picker_options: {
+        execute: [modelOption("execute-model", { preselected: true })],
+        review: [
+          modelOption("review-model", {
+            recommended: true,
+            preselected: true,
+          }),
+        ],
+        patch: [modelOption("patch-model", { preselected: true })],
+      },
+    };
+
+    const ready = connectedPhaseForItem(
+      item,
+      [appliedExecute],
+      "review",
+      { runs: [], models },
+    );
+    expect(ready).toMatchObject({
+      phase: "review",
+      mode: "launch",
+      can_launch: true,
+      read_only: true,
+      permission: null,
+      authorization: null,
+      model_picker: { seat: "review", selected_model: "review-model" },
+      actions: [
+        {
+          kind: "launch_phase",
+          phase: "review",
+          primary: true,
+          enabled: true,
+        },
+      ],
+    });
+    expect(ready.actions.filter((action) => action.primary)).toHaveLength(1);
+
+    const running = connectedPhaseForItem(
+      item,
+      [appliedExecute],
+      "review",
+      { runs: [connectedRunSummary("review")], models },
+    );
+    expect(running).toMatchObject({
+      mode: "running",
+      read_only: true,
+      authorization: {
+        kind: "review_result_ingress",
+        policy_sha256: SHA_B,
+      },
+      actions: [
+        {
+          kind: "cancel_run",
+          phase: "review",
+          primary: true,
+        },
+      ],
+    });
+    expect(running.authorization).not.toHaveProperty("envelope_sha256");
+    expect(running.actions).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "allow_once" }),
+      ]),
+    );
+
+    const wrongAuthorization = connectedPhaseForItem(
+      item,
+      [appliedExecute],
+      "review",
+      {
+        runs: [
+          connectedRunSummary("review", {
+            authorization: {
+              kind: "capability_envelope",
+              envelope_sha256: SHA_C,
+            },
+          }),
+        ],
+        models,
+      },
+    );
+    expect(wrongAuthorization).toMatchObject({
+      mode: "repair",
+      run: null,
+      authorization: null,
+      permission: null,
+    });
+    expect(JSON.stringify(wrongAuthorization)).not.toContain(SHA_C);
+
+    const unavailable = connectedPhaseForItem(
+      item,
+      [appliedExecute],
+      "review",
+      {
+        runs: [],
+        models: {
+          ...models,
+          model_availability: {
+            ...models.model_availability,
+            review: {
+              status: "unavailable",
+              reason: "runtime_unavailable",
+              available_model_ids: [],
+            },
+          },
+          model_picker_options: {
+            ...models.model_picker_options,
+            review: [],
+          },
+        },
+      },
+    );
+    expect(unavailable).toMatchObject({
+      mode: "launch",
+      can_launch: false,
+      runtime_unavailable: "runtime_unavailable",
+      actions: [
+        { kind: "launch_phase", primary: true, enabled: false },
+      ],
+    });
+
+    expect(
+      connectedPhaseForItem(
+        {
+          ...item,
+          work_item: {
+            ...item.work_item,
+            state: { ...item.work_item.state, goal_version: 2 },
+          },
+        },
+        [appliedExecute],
+        "review",
+        { runs: [], models },
+      ),
+    ).toMatchObject({ mode: "hidden", actions: [] });
+  });
+
+  it("projects connected Patch only from accepted-plan lineage with exact recovery actions", () => {
+    const executeMissionContentSha256 = "a".repeat(64);
+    const executeResultContentSha256 = "b".repeat(64);
+    const reviewMissionContentSha256 = "c".repeat(64);
+    const execute = {
+      evidence: {
+        phase: "execute" as const,
+        outcome: "applied" as const,
+        mission_content_sha256: executeMissionContentSha256,
+        result_content_sha256: executeResultContentSha256,
+        identity: {
+          work_item_id: workItemId,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 0,
+        },
+      },
+    };
+    const review = {
+      evidence: {
+        phase: "review" as const,
+        outcome: "applied" as const,
+        mission_content_sha256: reviewMissionContentSha256,
+        result_content_sha256: SHA_D,
+        result_commit: "e".repeat(40),
+        identity: { ...execute.evidence.identity },
+      },
+      submission: {
+        review_mission_content_sha256: reviewMissionContentSha256,
+        accepted_result_commit: "e".repeat(40),
+        verdict: "findings" as const,
+        execute_mission_content_sha256: executeMissionContentSha256,
+        execute_result_content_sha256: executeResultContentSha256,
+      },
+    };
+    const item = {
+      source_id: "ws_product",
+      work_item: {
+        goal: {
+          work_item_id: workItemId,
+          goal_contract: { goal_version: 3 },
+        },
+        state: {
+          phase: "patch" as const,
+          status: "active" as const,
+          goal_version: 3,
+          input_revision: 2,
+          attempt: 1,
+          patch_cycle: 1,
+        },
+      },
+    };
+    const models = {
+      model_availability: {
+        execute: {
+          status: "available" as const,
+          reason: null,
+          available_model_ids: ["execute-model"],
+        },
+        review: {
+          status: "available" as const,
+          reason: null,
+          available_model_ids: ["review-model"],
+        },
+        patch: {
+          status: "available" as const,
+          reason: null,
+          available_model_ids: ["patch-model"],
+        },
+      },
+      model_picker_options: {
+        execute: [modelOption("execute-model")],
+        review: [modelOption("review-model")],
+        patch: [
+          modelOption("patch-model", {
+            recommended: true,
+            preselected: true,
+          }),
+        ],
+      },
+    };
+    const evidence = [execute, review];
+
+    const ready = connectedPhaseForItem(item, evidence, "patch", {
+      runs: [connectedRunSummary("review")],
+      models,
+    });
+    expect(ready).toMatchObject({
+      mode: "launch",
+      can_launch: true,
+      read_only: false,
+      model_picker: { seat: "patch", selected_model: "patch-model" },
+      actions: [{ kind: "launch_phase", phase: "patch", primary: true }],
+    });
+    expect(ready.actions).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "cancel_run" }),
+      ]),
+    );
+    expect(
+      connectedPhaseForItem(item, [execute], "patch", {
+        runs: [],
+        models,
+      }),
+    ).toMatchObject({ mode: "hidden", actions: [] });
+
+    const activeRun = connectedRunSummary("patch");
+    const running = connectedPhaseForItem(item, evidence, "patch", {
+      runs: [activeRun],
+      models,
+    });
+    expect(running).toMatchObject({
+      mode: "running",
+      authorization: {
+        kind: "capability_envelope",
+        envelope_sha256: SHA_C,
+      },
+      actions: [
+        {
+          kind: "cancel_run",
+          phase: "patch",
+          connected_run_id: activeRun.connected_run_id,
+          primary: true,
+        },
+      ],
+    });
+
+    const permissionRun = connectedRunSummary("patch", {
+      status: "terminal",
+      terminal_outcome: "missing_permission",
+    });
+    const permission = {
+      kind: "missing_permission" as const,
+      question: "Allow this exact Patch operation once?",
+      recommendation: "Keep it denied unless the Patch requires it.",
+      created_at: "2026-08-05T18:02:00.000Z",
+      governed_tuple: permissionRun.governed_tuple,
+      pins: {
+        artifact_paths: [".founder/missions/patch/mission.json"] as [
+          string,
+          ...string[],
+        ],
+        evidence_paths: [],
+        mission_content_sha256: permissionRun.mission.content_sha256,
+      },
+      operation: {
+        normalized_operation: {
+          schema_version: 1 as const,
+          kind: "command" as const,
+          executable: "git",
+          args: ["status"],
+        },
+        canonical_args_sha256: SHA_A,
+        operation_sha256: SHA_B,
+        reason: "The command is outside the Patch envelope.",
+        resolved_envelope_sha256: SHA_C,
+        connected_run_id: permissionRun.connected_run_id,
+      },
+    };
+    const permissionProjection = connectedPhaseForItem(
+      {
+        ...item,
+        work_item: {
+          ...item.work_item,
+          state: { ...item.work_item.state, attention: permission },
+        },
+      },
+      evidence,
+      "patch",
+      { runs: [permissionRun], models },
+    );
+    expect(permissionProjection).toMatchObject({
+      mode: "permission",
+      permission,
+      actions: [
+        { kind: "allow_once", primary: true },
+        { kind: "keep_denied", primary: false },
+      ],
+    });
+
+    const finishing = connectedPhaseForItem(item, evidence, "patch", {
+      runs: [
+        connectedRunSummary("patch", {
+          status: "terminal",
+          terminal_outcome: "completed",
+        }),
+      ],
+      models,
+    });
+    expect(finishing).toMatchObject({
+      mode: "finishing",
+      actions: [
+        { kind: "wait_for_import", primary: true, enabled: false },
+      ],
+    });
+
+    const repair = connectedPhaseForItem(item, evidence, "patch", {
+      runs: [
+        activeRun,
+        connectedRunSummary("patch", {
+          connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2",
+        }),
+      ],
+      models,
+    });
+    expect(repair).toMatchObject({
+      mode: "repair",
+      actions: [
+        { kind: "open_advanced_recovery", primary: true },
+      ],
+    });
+    for (const projection of [ready, running, permissionProjection, finishing, repair]) {
+      expect(
+        projection.actions.filter((action) => action.primary),
+        projection.mode,
+      ).toHaveLength(1);
+    }
   });
 
   it("exposes one evidence-bound patch or attention action and hides stale projections", () => {

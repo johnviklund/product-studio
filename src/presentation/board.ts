@@ -16,6 +16,10 @@ import type {
   WorkflowModelUse,
 } from "../domain/portfolio-preferences";
 import type { ExternalResultSubmission } from "../domain/result";
+import type {
+  ConnectedRunAuthorizationSummary,
+  ConnectedRunSummary,
+} from "../domain/connected-run";
 import {
   SHAPING_PHASES,
   isShapingPhase,
@@ -504,6 +508,67 @@ export type ConnectedExecuteProjection =
       permission: null;
     };
 
+export type ConnectedWorkflowPhase = "execute" | "review" | "patch";
+
+export interface ConnectedModelProjectionContext {
+  model_availability: Record<
+    ConnectedWorkflowPhase,
+    {
+      status: "available" | "unavailable";
+      reason: string | null;
+      available_model_ids: readonly string[];
+    }
+  >;
+  model_picker_options: Record<
+    ConnectedWorkflowPhase,
+    readonly ShapingModelPickerOption[]
+  >;
+}
+
+export interface ConnectedProjectionContext {
+  runs: readonly ConnectedRunSummary[];
+  models?: ConnectedModelProjectionContext;
+}
+
+export type ConnectedProjectionActionKind =
+  | "launch_phase"
+  | "cancel_run"
+  | "allow_once"
+  | "keep_denied"
+  | "wait_for_import"
+  | "open_advanced_recovery";
+
+export interface ConnectedProjectionAction {
+  kind: ConnectedProjectionActionKind;
+  phase: ConnectedWorkflowPhase;
+  label: string;
+  primary: boolean;
+  enabled: boolean;
+  connected_run_id: string | null;
+}
+
+export interface ConnectedPhaseProjection {
+  phase: ConnectedWorkflowPhase;
+  mode:
+    | "hidden"
+    | "launch"
+    | "running"
+    | "permission"
+    | "finishing"
+    | "repair";
+  can_launch: boolean;
+  read_only: boolean;
+  permission: Extract<
+    WorkItemAttention,
+    { kind: "missing_permission" }
+  > | null;
+  run: ConnectedRunSummary | null;
+  authorization: ConnectedRunAuthorizationSummary | null;
+  model_picker?: ShapingModelPickerProjection<ConnectedWorkflowPhase>;
+  runtime_unavailable?: string;
+  actions: ConnectedProjectionAction[];
+}
+
 export type ConnectedPermissionInboxProjection =
   | {
       mode: "active";
@@ -963,25 +1028,23 @@ function currentRevisionModel(
   return current?.effective_model ?? current?.requested_model ?? null;
 }
 
-function projectedPicker<TSeat extends WorkflowModelSeat>(
-  context: ShapingSurfaceContext,
+function projectModelPickerOptions<TSeat extends WorkflowModelSeat>(
   seat: TSeat,
+  availability: {
+    status: "available" | "unavailable";
+    available_model_ids: readonly string[];
+  },
+  sourceOptions: readonly ShapingModelPickerOption[],
   currentModel: string | null = null,
 ): ShapingModelPickerProjection<TSeat> | null {
-  const availability =
-    seat === "execute" && context.models.execute !== undefined
-      ? context.models.execute
-      : context.models;
   if (
     availability.status !== "available" ||
-    availability.available_model_ids.length === 0
+    availability.available_model_ids.length === 0 ||
+    sourceOptions.length === 0
   ) {
     return null;
   }
-  const source = [...(context.models.model_picker_options[seat] ?? [])];
-  if (source.length === 0) {
-    return null;
-  }
+  const source = [...sourceOptions];
   const configuredOrder = new Map(
     source.map((option, index) => [option.model_id, index]),
   );
@@ -1021,6 +1084,23 @@ function projectedPicker<TSeat extends WorkflowModelSeat>(
       : null,
     reuse_warning: selectedOption?.reuse_warning ?? null,
   };
+}
+
+function projectedPicker<TSeat extends WorkflowModelSeat>(
+  context: ShapingSurfaceContext,
+  seat: TSeat,
+  currentModel: string | null = null,
+): ShapingModelPickerProjection<TSeat> | null {
+  const availability =
+    seat === "execute" && context.models.execute !== undefined
+      ? context.models.execute
+      : context.models;
+  return projectModelPickerOptions(
+    seat,
+    availability,
+    context.models.model_picker_options[seat] ?? [],
+    currentModel,
+  );
 }
 
 function projectedProvenance(
@@ -1989,6 +2069,7 @@ export function reviewHandoffForItem(
     state.phase === "review" &&
     state.status === "active" &&
     state.goal_version !== undefined &&
+    state.goal_version === goal.goal_contract.goal_version &&
     state.input_revision !== undefined &&
     state.attempt !== undefined &&
     state.patch_cycle !== undefined &&
@@ -2107,24 +2188,15 @@ function activePatchMatchesReviewLineage(
   },
 ): boolean {
   const subjectPhase = tuple.patch_cycle === 1 ? "execute" : "patch";
-  const subjects = evidence.filter(
-    (stored) =>
-      stored.evidence.phase === subjectPhase &&
-      stored.evidence.outcome === "applied" &&
-      evidenceMatchesTuple(stored, tuple) &&
-      (subjectPhase === "execute" ||
-        stored.evidence.identity.patch_cycle === tuple.patch_cycle - 1),
-  );
-  if (subjects.length !== 1) {
-    return false;
-  }
-  const subject = subjects[0].evidence;
   const reviews = evidence.filter((stored) => {
     const submission = reviewSubmissionForEvidence(stored);
     if (
       stored.evidence.phase !== "review" ||
       stored.evidence.outcome !== "applied" ||
-      !evidenceMatchesTuple(stored, tuple) ||
+      stored.evidence.identity.work_item_id !== tuple.work_item_id ||
+      stored.evidence.identity.goal_version !== tuple.goal_version ||
+      stored.evidence.identity.input_revision !== tuple.input_revision ||
+      stored.evidence.identity.attempt > tuple.attempt ||
       submission?.verdict !== "findings" ||
       submission.review_mission_content_sha256 !==
         stored.evidence.mission_content_sha256 ||
@@ -2132,6 +2204,23 @@ function activePatchMatchesReviewLineage(
     ) {
       return false;
     }
+
+    const subjects = evidence.filter(
+      (subject) =>
+        subject.evidence.phase === subjectPhase &&
+        subject.evidence.outcome === "applied" &&
+        subject.evidence.identity.work_item_id === tuple.work_item_id &&
+        subject.evidence.identity.goal_version === tuple.goal_version &&
+        subject.evidence.identity.input_revision === tuple.input_revision &&
+        subject.evidence.identity.attempt ===
+          stored.evidence.identity.attempt &&
+        (subjectPhase === "execute" ||
+          subject.evidence.identity.patch_cycle === tuple.patch_cycle - 1),
+    );
+    if (subjects.length !== 1) {
+      return false;
+    }
+    const subject = subjects[0]!.evidence;
 
     return subjectPhase === "execute"
       ? submission.execute_mission_content_sha256 ===
@@ -2189,16 +2278,36 @@ export function patchAttentionForItem(
   };
 
   if (state.phase === "patch") {
-    return state.attention === undefined &&
-      state.patch_cycle > 0 &&
-      activePatchMatchesReviewLineage(evidence, tuple)
-      ? {
-          mode: "patch_active",
-          action: "compile_or_import_patch",
-          attention: null,
-          patch_cycle: state.patch_cycle,
-        }
-      : hiddenPatchAttention();
+    if (
+      state.patch_cycle === 0 ||
+      !activePatchMatchesReviewLineage(evidence, tuple)
+    ) {
+      return hiddenPatchAttention();
+    }
+    if (state.attention === undefined) {
+      return {
+        mode: "patch_active",
+        action: "compile_or_import_patch",
+        attention: null,
+        patch_cycle: state.patch_cycle,
+      };
+    }
+    if (
+      state.attention.kind === "missing_permission" &&
+      state.attention.governed_tuple.goal_version === state.goal_version &&
+      state.attention.governed_tuple.input_revision === state.input_revision &&
+      state.attention.governed_tuple.attempt === state.attempt &&
+      state.attention.governed_tuple.patch_cycle === state.patch_cycle &&
+      state.attention.pins.mission_content_sha256 !== undefined
+    ) {
+      return {
+        mode: "escalation",
+        action: "resolve_escalation",
+        attention: state.attention,
+        patch_cycle: state.patch_cycle,
+      };
+    }
+    return hiddenPatchAttention();
   }
 
   const attention = state.attention;
@@ -2242,6 +2351,285 @@ export function patchAttentionForItem(
     default:
       return hiddenPatchAttention();
   }
+}
+
+function connectedProjectionAction(
+  phase: ConnectedWorkflowPhase,
+  kind: ConnectedProjectionActionKind,
+  label: string,
+  input: {
+    primary?: boolean;
+    enabled?: boolean;
+    connected_run_id?: string | null;
+  } = {},
+): ConnectedProjectionAction {
+  return {
+    kind,
+    phase,
+    label,
+    primary: input.primary ?? false,
+    enabled: input.enabled ?? true,
+    connected_run_id: input.connected_run_id ?? null,
+  };
+}
+
+function connectedAuthorizationForPhase(
+  phase: ConnectedWorkflowPhase,
+  run: ConnectedRunSummary,
+): ConnectedRunAuthorizationSummary | null {
+  if (phase === "review") {
+    return run.authorization.kind === "review_result_ingress"
+      ? run.authorization
+      : null;
+  }
+  return run.authorization.kind === "capability_envelope"
+    ? run.authorization
+    : null;
+}
+
+function hiddenConnectedPhase(
+  phase: ConnectedWorkflowPhase,
+): ConnectedPhaseProjection {
+  return {
+    phase,
+    mode: "hidden",
+    can_launch: false,
+    read_only: phase === "review",
+    permission: null,
+    run: null,
+    authorization: null,
+    actions: [],
+  };
+}
+
+function repairConnectedPhase(
+  phase: ConnectedWorkflowPhase,
+  run: ConnectedRunSummary | null,
+  authorization: ConnectedRunAuthorizationSummary | null,
+): ConnectedPhaseProjection {
+  return {
+    phase,
+    mode: "repair",
+    can_launch: false,
+    read_only: phase === "review",
+    permission: null,
+    run,
+    authorization,
+    actions: [
+      connectedProjectionAction(
+        phase,
+        "open_advanced_recovery",
+        "Open advanced recovery",
+        { primary: true },
+      ),
+    ],
+  };
+}
+
+export function connectedPhaseForItem(
+  item: {
+    source_id: string;
+    work_item: {
+      goal: {
+        work_item_id: string;
+        goal_contract?: { goal_version: number };
+      };
+      state: {
+        phase: WorkItemPhase;
+        status: WorkItemStatus;
+        goal_version?: number;
+        input_revision?: number;
+        attempt?: number;
+        patch_cycle?: number;
+        attention?: WorkItemAttention;
+      };
+    };
+  },
+  evidence: readonly BoardEvidenceProjection[],
+  phase: ConnectedWorkflowPhase,
+  context: ConnectedProjectionContext,
+): ConnectedPhaseProjection {
+  const { goal, state } = item.work_item;
+  let eligible = false;
+  let permission: Extract<
+    WorkItemAttention,
+    { kind: "missing_permission" }
+  > | null = null;
+
+  if (phase === "execute") {
+    const execute = connectedExecuteForItem(item);
+    eligible = execute.mode !== "hidden";
+    permission = execute.mode === "permission" ? execute.permission : null;
+  } else if (phase === "review") {
+    eligible =
+      reviewHandoffForItem(item, evidence).mode === "active" &&
+      patchAttentionForItem(item, evidence).mode === "hidden";
+  } else {
+    const patch = patchAttentionForItem(item, evidence);
+    eligible =
+      patch.mode === "patch_active" ||
+      (patch.mode === "escalation" &&
+        patch.attention.kind === "missing_permission");
+    permission =
+      patch.mode === "escalation" &&
+      patch.attention.kind === "missing_permission"
+        ? patch.attention
+        : null;
+  }
+  if (
+    !eligible ||
+    state.goal_version === undefined ||
+    state.input_revision === undefined ||
+    state.attempt === undefined ||
+    state.patch_cycle === undefined
+  ) {
+    return hiddenConnectedPhase(phase);
+  }
+
+  const matchingRuns = context.runs
+    .filter(
+      (run) =>
+        run.mission.identity.phase === phase &&
+        run.mission.identity.work_item_id === goal.work_item_id &&
+        run.governed_tuple.goal_version === state.goal_version &&
+        run.governed_tuple.input_revision === state.input_revision &&
+        run.governed_tuple.attempt === state.attempt &&
+        run.governed_tuple.patch_cycle === state.patch_cycle,
+    )
+    .sort(
+      (left, right) =>
+        right.lifecycle.updated_at.localeCompare(left.lifecycle.updated_at) ||
+        right.connected_run_id.localeCompare(left.connected_run_id),
+    );
+  const activeRuns = matchingRuns.filter(
+    (run) => run.lifecycle.status !== "terminal",
+  );
+  const latest = matchingRuns[0] ?? null;
+  const authorization =
+    latest === null ? null : connectedAuthorizationForPhase(phase, latest);
+  if (activeRuns.length > 1 || (latest !== null && authorization === null)) {
+    const safeRun = authorization === null ? null : latest;
+    return repairConnectedPhase(phase, safeRun, null);
+  }
+  if (activeRuns.length === 1) {
+    const active = activeRuns[0]!;
+    const activeAuthorization = connectedAuthorizationForPhase(phase, active);
+    if (activeAuthorization === null) {
+      return repairConnectedPhase(phase, null, null);
+    }
+    return {
+      phase,
+      mode: "running",
+      can_launch: false,
+      read_only: phase === "review",
+      permission: null,
+      run: active,
+      authorization: activeAuthorization,
+      actions: [
+        connectedProjectionAction(
+          phase,
+          "cancel_run",
+          `Cancel connected ${phase}`,
+          {
+            primary: true,
+            connected_run_id: active.connected_run_id,
+          },
+        ),
+      ],
+    };
+  }
+  if (permission !== null) {
+    const permissionRun = matchingRuns.find(
+      (run) => run.connected_run_id === permission.operation.connected_run_id,
+    );
+    if (
+      phase === "review" ||
+      permissionRun?.lifecycle.terminal_outcome !== "missing_permission" ||
+      connectedAuthorizationForPhase(phase, permissionRun) === null
+    ) {
+      return repairConnectedPhase(phase, null, null);
+    }
+    return {
+      phase,
+      mode: "permission",
+      can_launch: false,
+      read_only: false,
+      permission,
+      run: permissionRun,
+      authorization: connectedAuthorizationForPhase(phase, permissionRun),
+      actions: [
+        connectedProjectionAction(
+          phase,
+          "allow_once",
+          "Allow once and retry",
+          {
+            primary: true,
+            connected_run_id: permissionRun.connected_run_id,
+          },
+        ),
+        connectedProjectionAction(
+          phase,
+          "keep_denied",
+          "Keep denied",
+          { connected_run_id: permissionRun.connected_run_id },
+        ),
+      ],
+    };
+  }
+  if (latest?.lifecycle.terminal_outcome === "missing_permission") {
+    return repairConnectedPhase(phase, latest, authorization);
+  }
+  if (latest?.lifecycle.terminal_outcome === "completed") {
+    return {
+      phase,
+      mode: "finishing",
+      can_launch: false,
+      read_only: phase === "review",
+      permission: null,
+      run: latest,
+      authorization,
+      actions: [
+        connectedProjectionAction(
+          phase,
+          "wait_for_import",
+          "Waiting for governed import",
+          { primary: true, enabled: false },
+        ),
+      ],
+    };
+  }
+
+  const availability = context.models?.model_availability[phase];
+  const runtimeUnavailable = availability?.status === "unavailable";
+  const modelPicker =
+    context.models === undefined || availability === undefined
+      ? null
+      : projectModelPickerOptions(
+          phase,
+          availability,
+          context.models.model_picker_options[phase],
+        );
+  return {
+    phase,
+    mode: "launch",
+    can_launch: !runtimeUnavailable,
+    read_only: phase === "review",
+    permission: null,
+    run: latest,
+    authorization,
+    ...(modelPicker === null ? {} : { model_picker: modelPicker }),
+    ...(runtimeUnavailable
+      ? { runtime_unavailable: availability.reason ?? "runtime_unavailable" }
+      : {}),
+    actions: [
+      connectedProjectionAction(
+        phase,
+        "launch_phase",
+        `Launch connected ${phase}`,
+        { primary: true, enabled: !runtimeUnavailable },
+      ),
+    ],
+  };
 }
 
 export function boardTransitionActionsForPhase(phase: WorkItemPhase): {
