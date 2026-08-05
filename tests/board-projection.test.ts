@@ -172,6 +172,20 @@ function surfaceContext(
         }),
         modelOption("model-b"),
       ],
+      execute: [
+        modelOption("model-b", { recommended: true, preselected: true }),
+        modelOption("model-c"),
+        modelOption("model-a", {
+          used_by_seats: ["brainstorm"],
+          reuse_warning:
+            "model-a was already used by brainstorm; reuse is allowed, but an unused model improves seat independence.",
+        }),
+      ],
+    },
+    execute: {
+      status: "available",
+      reason: null,
+      available_model_ids: ["model-a", "model-b", "model-c"],
     },
   };
   return {
@@ -309,7 +323,8 @@ describe("board projection", () => {
     expect(validatePhaseTransition("learn", "ship")).toEqual({ ok: true });
     expect(resolveBoardDrop("plan", "execute")).toEqual({
       ok: false,
-      reason: "Execute approval is not part of this slice.",
+      reason:
+        "Open the item and use Approve & run Execute. Approval validates the exact Plan result and creates the governed Execute handoff.",
     });
 
     expect(validatePhaseTransition("idea", "plan")).toEqual({
@@ -360,7 +375,7 @@ describe("board projection", () => {
     [
       "plan",
       "execute",
-      "Execute approval is not part of this slice.",
+      "Open the item and use Approve & run Execute. Approval validates the exact Plan result and creates the governed Execute handoff.",
     ],
   ] as const)(
     "refuses the dedicated or closed %s drop into %s",
@@ -371,7 +386,7 @@ describe("board projection", () => {
 
   it("provides one phase-derived next action", () => {
     expect(nextActionForPhase("idea")).toBe("Brainstorm the idea");
-    expect(nextActionForPhase("plan")).toBe("Review the plan result");
+    expect(nextActionForPhase("plan")).toBe("Approve & run Execute");
     expect(nextActionForPhase("execute")).toBe("Review the result");
     expect(nextActionForPhase("patch")).toBe("Review the patch");
     expect(nextActionForPhase("ship")).toBe("Capture the learning");
@@ -659,16 +674,85 @@ describe("board projection", () => {
     }
     expect(plan.lifecycle.headline).toBe("Plan result ready");
     expect(plan.sections).not.toHaveProperty("governed_fields");
-    expect(plan.sections).not.toHaveProperty("next_step");
+    expect(plan.sections.next_step?.seat).toBe("execute");
     expect(plan.sections).toHaveProperty("checklist");
-    expect(plan.execute_approval_available).toBe(false);
-    expect(plan.execute_approval_message).toBe(
-      "Execute approval is not available in this slice",
-    );
+    expect(plan.bindings.goal_contract_sha256).toBe(SHA_D);
     expect(plan.actions.map(({ label }) => label)).toEqual([
       "Request changes",
+      "Approve & run Execute",
+      "Approve & prepare Execute",
     ]);
-    expect(JSON.stringify(plan)).not.toContain("Execute the plan");
+    expect(plan.actions.find(({ label }) => label === "Approve & run Execute"))
+      .toMatchObject({ primary: true, enabled: true });
+    expect(JSON.stringify(plan)).not.toContain(
+      "Execute approval is not available",
+    );
+  });
+
+  it("warns when every Execute model was used by a prior workflow seat", () => {
+    const reuseWarning =
+      "model-a was already used by brainstorm; reuse is allowed, but an unused model improves seat independence.";
+    const projection = shapingHandoffForItem(
+      itemFor("plan", goalContract),
+      appliedContext("plan", planResult, {
+        models: {
+          model_use: [
+            {
+              seat: "brainstorm",
+              production_id: "prod-brainstorm",
+              shaping_run_id: null,
+              requested_model: "model-a",
+              effective_model: "model-a",
+            },
+            {
+              seat: "spec",
+              production_id: "prod-spec",
+              shaping_run_id: null,
+              requested_model: "model-b",
+              effective_model: "model-b",
+            },
+            {
+              seat: "plan",
+              production_id: "prod-plan",
+              shaping_run_id: null,
+              requested_model: "model-c",
+              effective_model: "model-c",
+            },
+          ],
+          model_picker_options: {
+            ...surfaceContext().models.model_picker_options,
+            execute: [
+              modelOption("model-a", {
+                used_by_seats: ["brainstorm"],
+                saved_preference: true,
+                preselected: true,
+                reuse_warning: reuseWarning,
+              }),
+              modelOption("model-b", {
+                used_by_seats: ["spec"],
+                reuse_warning:
+                  "model-b was already used by spec; reuse is allowed, but an unused model improves seat independence.",
+              }),
+              modelOption("model-c", {
+                used_by_seats: ["plan"],
+                reuse_warning:
+                  "model-c was already used by plan; reuse is allowed, but an unused model improves seat independence.",
+              }),
+            ],
+          },
+        },
+      }),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "plan") {
+      throw new Error("expected one ready Plan projection");
+    }
+    expect(projection.sections.next_step).toMatchObject({
+      seat: "execute",
+      selected_model: "model-a",
+      recommendation_note:
+        "Every available model has already been used in this workflow.",
+      reuse_warning: reuseWarning,
+    });
   });
 
   it.each([
@@ -736,6 +820,11 @@ describe("board projection", () => {
           reason: "runtime unavailable",
           available_model_ids: [],
           model_picker_options: { brainstorm: [], spec: [], plan: [] },
+          execute: {
+            status: "unavailable" as const,
+            reason: "runtime unavailable",
+            available_model_ids: [],
+          },
         },
         connectedPrimary: false,
         pickerAvailable: false,
@@ -747,6 +836,11 @@ describe("board projection", () => {
           reason: null,
           available_model_ids: [],
           model_picker_options: { brainstorm: [], spec: [], plan: [] },
+          execute: {
+            status: "available" as const,
+            reason: null,
+            available_model_ids: [],
+          },
         },
         connectedPrimary: false,
         pickerAvailable: false,
@@ -858,6 +952,17 @@ describe("board projection", () => {
         throw new Error(`expected a ready Plan projection for ${modelCase.name}`);
       }
       expectPrimaryPair(
+        plan.actions,
+        "Approve & run Execute",
+        "Approve & prepare Execute",
+        modelCase.connectedPrimary,
+        `${modelCase.name}: Plan approval`,
+      );
+      expect(
+        "next_step" in plan.sections,
+        `${modelCase.name}: Execute picker`,
+      ).toBe(modelCase.pickerAvailable);
+      expectPrimaryPair(
         plan.request_changes.actions,
         "Request changes & rerun",
         "Request changes & prepare rerun",
@@ -966,7 +1071,12 @@ describe("board projection", () => {
     ]);
     expect(
       projection.actions.some(({ kind }) =>
-        ["approve_spec", "launch_phase", "retry_launch"].includes(kind),
+        [
+          "approve_spec",
+          "approve_plan",
+          "launch_phase",
+          "retry_launch",
+        ].includes(kind),
       ),
     ).toBe(false);
     expect(projection).not.toHaveProperty("execute_approval_available", true);

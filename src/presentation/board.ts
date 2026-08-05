@@ -12,6 +12,7 @@ import {
 import { INBOX_SOURCE_ID } from "../domain/portfolio-source";
 import type {
   ShapingModelPickerOption,
+  WorkflowModelSeat,
   WorkflowModelUse,
 } from "../domain/portfolio-preferences";
 import type { ExternalResultSubmission } from "../domain/result";
@@ -115,6 +116,7 @@ export type ShapingProjectionActionKind =
   | "cancel_run"
   | "use_brainstorm_result"
   | "approve_spec"
+  | "approve_plan"
   | "request_changes"
   | "replan_with_updated_contract"
   | "retry_launch"
@@ -139,8 +141,10 @@ export interface ShapingProjectedModelOption
   current_revision: boolean;
 }
 
-export interface ShapingModelPickerProjection {
-  seat: ShapingPhase;
+export interface ShapingModelPickerProjection<
+  TSeat extends WorkflowModelSeat = ShapingPhase,
+> {
+  seat: TSeat;
   options: ShapingProjectedModelOption[];
   selected_model: string | null;
   recommendation_note: string | null;
@@ -223,7 +227,14 @@ export interface ShapingSurfaceContext {
     model_picker_options: Record<
       ShapingPhase,
       readonly ShapingModelPickerOption[]
-    >;
+    > & {
+      execute?: readonly ShapingModelPickerOption[];
+    };
+    execute?: {
+      status: "available" | "unavailable";
+      reason: string | null;
+      available_model_ids: readonly string[];
+    };
   };
   refresh?: ShapingRefreshProjection;
   derived_goal_contract_sha256?: string | null;
@@ -336,19 +347,22 @@ export type SpecReadyProjection = ShapingReadyProjectionBase & {
 export type PlanReadyProjection = ShapingReadyProjectionBase & {
   phase: "plan";
   result: PlanResultSubmission;
+  bindings: ShapingReadyProjectionBase["bindings"] & {
+    goal_contract_sha256: string;
+  };
   sections: {
     summary: { summary: ShapingTextPreview };
     checklist: ShapingChecklistPreview;
     unresolved_questions: ShapingListPreview;
     provenance: ShapingModelUseProjection[];
+    next_step?: ShapingModelPickerProjection<"execute">;
+    runtime_unavailable?: string;
     advanced_recovery: {
       relevant_skills: string[];
       product_doc_impacts: string[];
       todo_impacts: string[];
     };
   };
-  execute_approval_available: false;
-  execute_approval_message: "Execute approval is not available in this slice";
 };
 
 export type ShapingHandoffProjection =
@@ -597,7 +611,7 @@ const NEXT_ACTION_BY_PHASE = {
   idea: "Brainstorm the idea",
   brainstorm: "Write the specification",
   spec: "Plan the work",
-  plan: "Review the plan result",
+  plan: "Approve & run Execute",
   execute: "Review the result",
   review: "Test the result",
   patch: "Review the patch",
@@ -813,7 +827,7 @@ export function shapingCardStateForItem(
           ? "Use result & run Spec"
           : phase === "spec"
             ? "Approve & run Plan"
-            : "Review the plan result";
+            : "Approve & run Execute";
     return {
       badge: `${label} · Ready`,
       next_action_label: nextAction,
@@ -948,18 +962,22 @@ function currentRevisionModel(
   return current?.effective_model ?? current?.requested_model ?? null;
 }
 
-function projectedPicker(
+function projectedPicker<TSeat extends WorkflowModelSeat>(
   context: ShapingSurfaceContext,
-  seat: ShapingPhase,
+  seat: TSeat,
   currentModel: string | null = null,
-): ShapingModelPickerProjection | null {
+): ShapingModelPickerProjection<TSeat> | null {
+  const availability =
+    seat === "execute" && context.models.execute !== undefined
+      ? context.models.execute
+      : context.models;
   if (
-    context.models.status !== "available" ||
-    context.models.available_model_ids.length === 0
+    availability.status !== "available" ||
+    availability.available_model_ids.length === 0
   ) {
     return null;
   }
-  const source = [...context.models.model_picker_options[seat]];
+  const source = [...(context.models.model_picker_options[seat] ?? [])];
   if (source.length === 0) {
     return null;
   }
@@ -1019,8 +1037,20 @@ function projectedProvenance(
   });
 }
 
-function unavailableReason(context: ShapingSurfaceContext): string {
-  return context.models.reason ?? "No connected shaping models are available.";
+function unavailableReason(
+  context: ShapingSurfaceContext,
+  seat: WorkflowModelSeat = "brainstorm",
+): string {
+  const availability =
+    seat === "execute" && context.models.execute !== undefined
+      ? context.models.execute
+      : context.models;
+  return (
+    availability.reason ??
+    (seat === "execute"
+      ? "No connected Execute models are available."
+      : "No connected shaping models are available.")
+  );
 }
 
 function requestChangesProjection(
@@ -1036,7 +1066,7 @@ function requestChangesProjection(
   return {
     feedback_required: true,
     ...(picker === null
-      ? { runtime_unavailable: unavailableReason(context) }
+      ? { runtime_unavailable: unavailableReason(context, phase) }
       : { model_picker: picker }),
     actions: [
       shapingAction("request_changes", "Request changes & rerun", {
@@ -1054,12 +1084,27 @@ function requestChangesProjection(
 
 function phaseDecisionActions(
   context: ShapingSurfaceContext,
+  phase: "plan",
+): {
+  actions: ShapingActionProjection[];
+  picker: ShapingModelPickerProjection<"execute"> | null;
+};
+function phaseDecisionActions(
+  context: ShapingSurfaceContext,
   phase: "brainstorm" | "spec",
 ): {
   actions: ShapingActionProjection[];
   picker: ShapingModelPickerProjection | null;
+};
+function phaseDecisionActions(
+  context: ShapingSurfaceContext,
+  phase: ShapingPhase,
+): {
+  actions: ShapingActionProjection[];
+  picker: ShapingModelPickerProjection<WorkflowModelSeat> | null;
 } {
-  const nextSeat = phase === "brainstorm" ? "spec" : "plan";
+  const nextSeat =
+    phase === "brainstorm" ? "spec" : phase === "spec" ? "plan" : "execute";
   const picker = projectedPicker(context, nextSeat);
   const unavailable = picker === null;
   const connected =
@@ -1069,21 +1114,32 @@ function phaseDecisionActions(
           primary: !unavailable,
           enabled: !unavailable,
         })
-      : shapingAction("approve_spec", "Approve & run Plan", {
-          launch_mode: "connected",
-          primary: !unavailable,
-          enabled: !unavailable,
-        });
+      : phase === "spec"
+        ? shapingAction("approve_spec", "Approve & run Plan", {
+            launch_mode: "connected",
+            primary: !unavailable,
+            enabled: !unavailable,
+          })
+        : shapingAction("approve_plan", "Approve & run Execute", {
+            launch_mode: "connected",
+            primary: !unavailable,
+            enabled: !unavailable,
+          });
   const manual =
     phase === "brainstorm"
       ? shapingAction("use_brainstorm_result", "Use result & prepare Spec", {
           launch_mode: "manual",
           primary: unavailable,
         })
-      : shapingAction("approve_spec", "Approve & prepare Plan", {
-          launch_mode: "manual",
-          primary: unavailable,
-        });
+      : phase === "spec"
+        ? shapingAction("approve_spec", "Approve & prepare Plan", {
+            launch_mode: "manual",
+            primary: unavailable,
+          })
+        : shapingAction("approve_plan", "Approve & prepare Execute", {
+            launch_mode: "manual",
+            primary: unavailable,
+          });
   return {
     picker,
     actions: [
@@ -1532,24 +1588,25 @@ export function shapingHandoffForItem(
         };
       }
 
-      const actions = [
-        shapingAction("request_changes", "Request changes"),
-      ];
+      const decision = phaseDecisionActions(context, phase);
       const lifecycle: ShapingLifecycleProjection = {
         state: "ready",
         card_label: "Plan · Ready",
         headline: "Plan result ready",
-        copy: "Review the plan result. Execute approval is not available in this slice.",
+        copy: "Choose an Execute model and approve the governed Plan.",
         refresh_running: false,
-        actions,
+        actions: decision.actions,
       };
       return {
         ...common,
         mode: "ready",
         phase: "plan",
         result: applied.result,
-        bindings,
-        actions,
+        bindings: {
+          ...bindings,
+          goal_contract_sha256: currentContractSha256,
+        },
+        actions: decision.actions,
         lifecycle,
         request_changes: requestChanges,
         sections: {
@@ -1559,15 +1616,15 @@ export function shapingHandoffForItem(
             applied.result.open_questions,
           ),
           provenance,
+          ...(decision.picker === null
+            ? { runtime_unavailable: unavailableReason(context, "execute") }
+            : { next_step: decision.picker }),
           advanced_recovery: {
             relevant_skills: [...applied.result.relevant_skills],
             product_doc_impacts: [...applied.result.product_doc_impacts],
             todo_impacts: [...applied.result.todo_impacts],
           },
         },
-        execute_approval_available: false,
-        execute_approval_message:
-          "Execute approval is not available in this slice",
         ...(context.refresh === undefined ? {} : { refresh: context.refresh }),
       };
     }
