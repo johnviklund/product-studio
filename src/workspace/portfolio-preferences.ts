@@ -17,7 +17,7 @@ import {
   setSeatModelPreferenceInputSchema,
   type PortfolioPreferencesV1,
   type SetSeatModelPreferenceInput,
-  type ShapingModelSeat,
+  type WorkflowModelSeat,
 } from "../domain/portfolio-preferences";
 
 export const PORTFOLIO_PREFERENCES_RELATIVE_PATH =
@@ -103,7 +103,7 @@ export class PortfolioPreferencesStore {
 
   async getPreference(
     adapterId: string,
-    seat: ShapingModelSeat,
+    seat: WorkflowModelSeat,
   ): Promise<string | null> {
     const key = setSeatModelPreferenceInputSchema.parse({
       adapter_id: adapterId,

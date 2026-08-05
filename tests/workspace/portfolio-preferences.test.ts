@@ -252,17 +252,31 @@ describe("PortfolioPreferencesStore", () => {
       seat: "brainstorm",
       requested_model: "model-brainstorm",
     });
+    await store.setPreference({
+      adapter_id: adapterId,
+      seat: "execute",
+      requested_model: "model-execute",
+    });
 
     await expect(store.read()).resolves.toEqual({
       schema_version: 1,
       preferences: {
-        [adapterId]: { brainstorm: "model-brainstorm" },
+        [adapterId]: {
+          brainstorm: "model-brainstorm",
+          execute: "model-execute",
+        },
       },
     });
     await expect(
       store.getPreference(adapterId, "brainstorm"),
     ).resolves.toBe("model-brainstorm");
     await expect(store.getPreference(adapterId, "plan")).resolves.toBeNull();
+    await expect(store.getPreference(adapterId, "execute")).resolves.toBe(
+      "model-execute",
+    );
+    await expect(readFile(store.preferencesPath, "utf8")).resolves.toContain(
+      '"execute": "model-execute"',
+    );
   });
 
   it("rejects unknown document keys and unknown seats without overwriting them", async () => {
@@ -525,5 +539,86 @@ describe("cross-seat model logic", () => {
     });
     expect(selected?.reuse_warning).toContain("spec");
     expect(options.some((option) => option.recommended)).toBe(false);
+  });
+
+  it("recommends an unused Execute model after the three shaping seats", () => {
+    const uses: WorkflowModelUse[] = [
+      {
+        seat: "plan",
+        production_id: "plan-production",
+        shaping_run_id: runIds.plan,
+        requested_model: "model-plan",
+        effective_model: null,
+      },
+      {
+        seat: "brainstorm",
+        production_id: "brainstorm-production",
+        shaping_run_id: runIds.brainstorm,
+        requested_model: "model-brainstorm",
+        effective_model: null,
+      },
+      {
+        seat: "spec",
+        production_id: "spec-production",
+        shaping_run_id: runIds.spec,
+        requested_model: "model-spec",
+        effective_model: null,
+      },
+    ];
+    const options = shapingModelPickerOptions(
+      ["model-brainstorm", "model-spec", "model-plan", "model-execute"],
+      uses,
+      null,
+    );
+
+    expect(options.find((option) => option.preselected)?.model_id).toBe(
+      "model-execute",
+    );
+    expect(options.find((option) => option.recommended)?.model_id).toBe(
+      "model-execute",
+    );
+
+    const exhausted = shapingModelPickerOptions(
+      ["model-shared"],
+      uses.map((use) => ({
+        ...use,
+        requested_model: "model-shared",
+      })),
+      "model-shared",
+    );
+    expect(exhausted[0]?.reuse_warning).toContain("brainstorm, spec, plan");
+    expect(exhausted[0]?.used_by_seats).toEqual([
+      "brainstorm",
+      "spec",
+      "plan",
+    ]);
+  });
+
+  it("orders every workflow seat in a reuse warning", () => {
+    const sharedUse = (seat: WorkflowModelUse["seat"]): WorkflowModelUse => ({
+      seat,
+      production_id: `${seat}-production`,
+      shaping_run_id: seat === "execute" ? null : runIds[seat],
+      requested_model: "model-shared",
+      effective_model: null,
+    });
+    const options = shapingModelPickerOptions(
+      ["model-shared"],
+      [
+        sharedUse("execute"),
+        sharedUse("plan"),
+        sharedUse("spec"),
+        sharedUse("brainstorm"),
+      ],
+      "model-shared",
+    );
+
+    expect(options[0]).toMatchObject({
+      used_by_seats: ["brainstorm", "spec", "plan", "execute"],
+      preselected: true,
+    });
+    expect(options[0]?.reuse_warning).toContain(
+      "brainstorm, spec, plan, execute",
+    );
   });
 });

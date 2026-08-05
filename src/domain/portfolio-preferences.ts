@@ -1,17 +1,21 @@
 import { z } from "zod";
 
-import {
-  SHAPING_PHASES,
-  type ShapingPhase,
-} from "./shaping";
+import type { ShapingPhase } from "./shaping";
 import type {
   ShapingProductionReceipt,
   ShapingRunRecordV1,
 } from "./shaping-run";
 
 export const PORTFOLIO_PREFERENCES_SCHEMA_VERSION = 1 as const;
-export const SHAPING_MODEL_SEATS = SHAPING_PHASES;
+export const WORKFLOW_MODEL_SEATS = [
+  "brainstorm",
+  "spec",
+  "plan",
+  "execute",
+] as const;
 
+export type WorkflowModelSeat = (typeof WORKFLOW_MODEL_SEATS)[number];
+/** @deprecated Prefer WorkflowModelSeat for model preferences and use. */
 export type ShapingModelSeat = ShapingPhase;
 
 const exactNonEmptyStringSchema = z
@@ -31,6 +35,7 @@ export interface AdapterSeatModelPreferences {
   brainstorm?: string;
   spec?: string;
   plan?: string;
+  execute?: string;
 }
 
 export interface PortfolioPreferencesV1 {
@@ -40,7 +45,7 @@ export interface PortfolioPreferencesV1 {
 
 export interface SetSeatModelPreferenceInput {
   adapter_id: string;
-  seat: ShapingModelSeat;
+  seat: WorkflowModelSeat;
   requested_model: string;
 }
 
@@ -50,7 +55,7 @@ export interface WorkflowShapingProduction {
 }
 
 export interface WorkflowModelUse {
-  seat: ShapingModelSeat;
+  seat: WorkflowModelSeat;
   production_id: string;
   shaping_run_id: string | null;
   requested_model: string | null;
@@ -59,7 +64,7 @@ export interface WorkflowModelUse {
 
 export interface ShapingModelPickerOption {
   model_id: string;
-  used_by_seats: ShapingModelSeat[];
+  used_by_seats: WorkflowModelSeat[];
   saved_preference: boolean;
   recommended: boolean;
   preselected: boolean;
@@ -84,6 +89,7 @@ const adapterSeatModelPreferencesSchema: z.ZodType<AdapterSeatModelPreferences> 
       brainstorm: exactNonEmptyStringSchema.optional(),
       spec: exactNonEmptyStringSchema.optional(),
       plan: exactNonEmptyStringSchema.optional(),
+      execute: exactNonEmptyStringSchema.optional(),
     })
     .refine(
       (preferences) => Object.values(preferences).length > 0,
@@ -102,7 +108,7 @@ export const portfolioPreferencesV1Schema: z.ZodType<PortfolioPreferencesV1> =
 export const setSeatModelPreferenceInputSchema: z.ZodType<SetSeatModelPreferenceInput> =
   z.strictObject({
     adapter_id: exactNonEmptyStringSchema,
-    seat: z.enum(SHAPING_MODEL_SEATS),
+    seat: z.enum(WORKFLOW_MODEL_SEATS),
     requested_model: exactNonEmptyStringSchema,
   });
 
@@ -110,8 +116,8 @@ function compareCanonical(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function seatOrder(seat: ShapingModelSeat): number {
-  return SHAPING_MODEL_SEATS.indexOf(seat);
+function seatOrder(seat: WorkflowModelSeat): number {
+  return WORKFLOW_MODEL_SEATS.indexOf(seat);
 }
 
 function configuredModels(availableModelIds: readonly string[]): string[] {
@@ -131,7 +137,7 @@ export function summarizeWorkflowModelUse(
     runsById.set(run.shaping_run_id, run);
   }
 
-  const usesBySeat = new Map<ShapingModelSeat, WorkflowModelUse>();
+  const usesBySeat = new Map<WorkflowModelSeat, WorkflowModelUse>();
   for (const production of productions) {
     if (usesBySeat.has(production.seat)) {
       throw new Error(`Duplicate production for ${production.seat} seat.`);
@@ -193,14 +199,14 @@ export function shapingModelPickerOptions(
       ? null
       : exactNonEmptyStringSchema.parse(savedPreference);
   const availableSet = new Set(available);
-  const usedByModel = new Map<string, Set<ShapingModelSeat>>();
+  const usedByModel = new Map<string, Set<WorkflowModelSeat>>();
 
   for (const use of modelUses) {
     const usedModel = use.effective_model ?? use.requested_model;
     if (usedModel === null) {
       continue;
     }
-    const seats = usedByModel.get(usedModel) ?? new Set<ShapingModelSeat>();
+    const seats = usedByModel.get(usedModel) ?? new Set<WorkflowModelSeat>();
     seats.add(use.seat);
     usedByModel.set(usedModel, seats);
   }
@@ -261,7 +267,7 @@ export function canonicalPortfolioPreferences(
       .map(([adapterId, seats]) => [
         adapterId,
         Object.fromEntries(
-          SHAPING_MODEL_SEATS.flatMap((seat) =>
+          WORKFLOW_MODEL_SEATS.flatMap((seat) =>
             seats[seat] === undefined ? [] : [[seat, seats[seat]]],
           ),
         ),
