@@ -12,6 +12,8 @@ export const WORKFLOW_MODEL_SEATS = [
   "spec",
   "plan",
   "execute",
+  "review",
+  "patch",
 ] as const;
 
 export type WorkflowModelSeat = (typeof WORKFLOW_MODEL_SEATS)[number];
@@ -36,6 +38,8 @@ export interface AdapterSeatModelPreferences {
   spec?: string;
   plan?: string;
   execute?: string;
+  review?: string;
+  patch?: string;
 }
 
 export interface PortfolioPreferencesV1 {
@@ -90,6 +94,8 @@ const adapterSeatModelPreferencesSchema: z.ZodType<AdapterSeatModelPreferences> 
       spec: exactNonEmptyStringSchema.optional(),
       plan: exactNonEmptyStringSchema.optional(),
       execute: exactNonEmptyStringSchema.optional(),
+      review: exactNonEmptyStringSchema.optional(),
+      patch: exactNonEmptyStringSchema.optional(),
     })
     .refine(
       (preferences) => Object.values(preferences).length > 0,

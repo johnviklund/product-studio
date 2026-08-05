@@ -247,6 +247,19 @@ describe("PortfolioPreferencesStore", () => {
       schema_version: 1,
       preferences: {},
     });
+    await mkdir(dirname(store.preferencesPath), { recursive: true });
+    await writeFile(
+      store.preferencesPath,
+      `${JSON.stringify({
+        schema_version: 1,
+        preferences: { [adapterId]: { plan: "legacy-plan-model" } },
+      })}\n`,
+      "utf8",
+    );
+    await expect(store.read()).resolves.toEqual({
+      schema_version: 1,
+      preferences: { [adapterId]: { plan: "legacy-plan-model" } },
+    });
     await store.setPreference({
       adapter_id: adapterId,
       seat: "brainstorm",
@@ -257,25 +270,38 @@ describe("PortfolioPreferencesStore", () => {
       seat: "execute",
       requested_model: "model-execute",
     });
+    await store.setPreference({
+      adapter_id: adapterId,
+      seat: "review",
+      requested_model: "model-review",
+    });
 
     await expect(store.read()).resolves.toEqual({
       schema_version: 1,
       preferences: {
         [adapterId]: {
           brainstorm: "model-brainstorm",
+          plan: "legacy-plan-model",
           execute: "model-execute",
+          review: "model-review",
         },
       },
     });
     await expect(
       store.getPreference(adapterId, "brainstorm"),
     ).resolves.toBe("model-brainstorm");
-    await expect(store.getPreference(adapterId, "plan")).resolves.toBeNull();
+    await expect(store.getPreference(adapterId, "plan")).resolves.toBe(
+      "legacy-plan-model",
+    );
     await expect(store.getPreference(adapterId, "execute")).resolves.toBe(
       "model-execute",
     );
+    await expect(store.getPreference(adapterId, "review")).resolves.toBe(
+      "model-review",
+    );
+    await expect(store.getPreference(adapterId, "patch")).resolves.toBeNull();
     await expect(readFile(store.preferencesPath, "utf8")).resolves.toContain(
-      '"execute": "model-execute"',
+      '"review": "model-review"',
     );
   });
 
@@ -307,7 +333,7 @@ describe("PortfolioPreferencesStore", () => {
       store.preferencesPath,
       `${JSON.stringify({
         schema_version: 1,
-        preferences: { [adapterId]: { review: "model-review" } },
+        preferences: { [adapterId]: { deploy: "model-deploy" } },
       })}\n`,
       "utf8",
     );
