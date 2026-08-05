@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { ConnectedRunRecordV2 } from "./connected-run";
 import type { ShapingPhase } from "./shaping";
 import type {
   ShapingProductionReceipt,
@@ -134,6 +135,7 @@ function configuredModels(availableModelIds: readonly string[]): string[] {
 export function summarizeWorkflowModelUse(
   runs: readonly ShapingRunRecordV1[],
   productions: readonly WorkflowShapingProduction[],
+  connectedRuns: readonly ConnectedRunRecordV2[],
 ): WorkflowModelUse[] {
   const runsById = new Map<string, ShapingRunRecordV1>();
   for (const run of runs) {
@@ -176,8 +178,29 @@ export function summarizeWorkflowModelUse(
     });
   }
 
-  return [...usesBySeat.values()].sort(
-    (left, right) => seatOrder(left.seat) - seatOrder(right.seat),
+  const uses = [...usesBySeat.values()];
+  const connectedRunIds = new Set<string>();
+  for (const run of connectedRuns) {
+    if (connectedRunIds.has(run.connected_run_id)) {
+      throw new Error(`Duplicate connected run ${run.connected_run_id}.`);
+    }
+    connectedRunIds.add(run.connected_run_id);
+    uses.push({
+      seat: run.mission.identity.phase,
+      production_id: run.connected_run_id,
+      shaping_run_id: null,
+      requested_model: run.provenance.requested_model.value,
+      effective_model:
+        run.provenance.effective_model.assurance === "adapter_attested"
+          ? run.provenance.effective_model.model_id
+          : null,
+    });
+  }
+
+  return uses.sort(
+    (left, right) =>
+      seatOrder(left.seat) - seatOrder(right.seat) ||
+      compareCanonical(left.production_id, right.production_id),
   );
 }
 

@@ -13,6 +13,14 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  resolveCapabilityEnvelope,
+  type ExecutionDefaultsV1,
+} from "../../src/domain/capability-envelope";
+import {
+  hashResolvedCapabilityEnvelope,
+  type ConnectedRunRecordV2,
+} from "../../src/domain/connected-run";
+import {
   InvalidPortfolioPreferencesError,
   portfolioPreferencesV1Schema,
   recommendUnusedModel,
@@ -166,6 +174,129 @@ function productionFor(
     result_content_sha256: resultSha256,
   };
   return { seat: run.mission.phase, receipt };
+}
+
+function connectedRunFor(
+  phase: "execute" | "review",
+  connectedRunId: string,
+  requestedModel: string,
+  effectiveModel: string | null,
+): ConnectedRunRecordV2 {
+  const identity = {
+    phase,
+    work_item_id: workItemId,
+    goal_version: 1,
+    input_revision: 1,
+    attempt: 0,
+  };
+  const executionDefaults: ExecutionDefaultsV1 = {
+    schema_version: 1,
+    approved_command_forms: [],
+    approved_url_operations: [],
+    mcp: "forbidden",
+    credentials: "forbidden",
+  };
+  const envelope = resolveCapabilityEnvelope(["src"], executionDefaults);
+  const envelopeSha256 = hashResolvedCapabilityEnvelope(envelope);
+  return {
+    schema_version: 2,
+    connected_run_id: connectedRunId,
+    mission: {
+      identity,
+      path: `.founder/missions/${workItemId}/${phase}-1-1-0/mission.json`,
+      content_sha256: missionSha256,
+      source_commit: "1".repeat(40),
+    },
+    governed_tuple: {
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 0,
+      patch_cycle: 0,
+    },
+    provenance: {
+      role: {
+        value: phase === "review" ? "reviewer" : "writer",
+        assurance: "controller_observed",
+      },
+      seat: {
+        value: phase === "review" ? "reviewer" : "executor",
+        assurance: "controller_observed",
+      },
+      requested_model: {
+        value: requestedModel,
+        assurance: "user_declared",
+      },
+      effective_model:
+        effectiveModel === null
+          ? {
+              assurance: "unknown",
+              model_id: null,
+              deployment_id: null,
+              observed_event_sha256: null,
+            }
+          : {
+              assurance: "adapter_attested",
+              model_id: effectiveModel,
+              deployment_id: null,
+              observed_event_sha256: "2".repeat(64),
+            },
+      effort: { value: "high", assurance: "user_declared" },
+      harness: {
+        value: { id: "copilot-cli", version: "1.0.0" },
+        assurance: "adapter_attested",
+      },
+      adapter_profile: {
+        value: {
+          adapter_id: adapterId,
+          adapter_version: "1.0.0",
+          profile_id: `${phase}-v1`,
+        },
+        assurance: "adapter_attested",
+      },
+      resolved_profile_sha256: {
+        value: profileSha256,
+        assurance: "controller_observed",
+      },
+      resolved_skill_set_sha256: { value: null, assurance: "unknown" },
+      authorization_sha256: {
+        value: "3".repeat(64),
+        assurance: "controller_observed",
+      },
+    },
+    authorization:
+      phase === "review"
+        ? {
+            kind: "review_result_ingress",
+            result_path: `.founder/missions/${workItemId}/review-1-1-0/result.json`,
+            policy_sha256: "4".repeat(64),
+          }
+        : {
+            kind: "capability_envelope",
+            envelope,
+            envelope_sha256: envelopeSha256,
+          },
+    acp: {
+      protocol_version: { value: 1, assurance: "adapter_attested" },
+      session_id: { value: "model-use-session", assurance: "adapter_attested" },
+    },
+    lifecycle: {
+      status: "terminal",
+      started_at: "2026-08-05T10:00:00.000Z",
+      updated_at: "2026-08-05T10:05:00.000Z",
+      completed_at: "2026-08-05T10:05:01.000Z",
+      terminal: { outcome: "completed", partial: false, reason: null },
+    },
+    limits: {
+      wall_clock_timeout_ms: 900_000,
+      max_event_count: 1_000,
+      max_event_bytes: 4_000_000,
+      max_output_bytes: 1_000_000,
+      termination_grace_ms: 5_000,
+      drain_grace_ms: 1_000,
+    },
+    process: null,
+    diagnostics: { entries: [], truncated: false },
+  };
 }
 
 interface PreferenceStoreLike {
@@ -430,6 +561,7 @@ describe("cross-seat model logic", () => {
         productionFor(specRun, null),
         productionFor(brainstormRun, "effective-brainstorm"),
       ],
+      [],
     );
 
     expect(uses).toEqual([
@@ -446,6 +578,38 @@ describe("cross-seat model logic", () => {
         shaping_run_id: specRun.shaping_run_id,
         requested_model: "requested-spec",
         effective_model: null,
+      },
+    ]);
+  });
+
+  it("summarizes connected model use with observed identity precedence and unknown preservation", () => {
+    const executeRun = connectedRunFor(
+      "execute",
+      "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7c1",
+      "requested-execute",
+      null,
+    );
+    const reviewRun = connectedRunFor(
+      "review",
+      "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7c2",
+      "requested-review",
+      "observed-review",
+    );
+
+    expect(summarizeWorkflowModelUse([], [], [reviewRun, executeRun])).toEqual([
+      {
+        seat: "execute",
+        production_id: executeRun.connected_run_id,
+        shaping_run_id: null,
+        requested_model: "requested-execute",
+        effective_model: null,
+      },
+      {
+        seat: "review",
+        production_id: reviewRun.connected_run_id,
+        shaping_run_id: null,
+        requested_model: "requested-review",
+        effective_model: "observed-review",
       },
     ]);
   });

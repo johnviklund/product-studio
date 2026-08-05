@@ -98,7 +98,7 @@ import { workspaceRelativePosixPathSchema } from "../domain/workspace-path";
 import {
   hashResolvedCapabilityEnvelope,
   summarizeConnectedRun,
-  type ConnectedRunRecordV1,
+  type ConnectedRunRecordV2,
   type ConnectedRunSummary,
 } from "../domain/connected-run";
 import {
@@ -649,7 +649,7 @@ export interface PortfolioConnectedRunResult extends PortfolioWorkItem {
 export interface ConnectedRuntimePrepareInput {
   workspace_cwd: string;
   capability_envelope: CapabilityEnvelopeV1;
-  limits: ConnectedRunRecordV1["limits"];
+  limits: ConnectedRunRecordV2["limits"];
   model_override?: string;
 }
 
@@ -734,7 +734,7 @@ export class CopilotConnectedExecuteRuntime
   }
 }
 
-const CONNECTED_RUN_LIMITS: ConnectedRunRecordV1["limits"] = {
+const CONNECTED_RUN_LIMITS: ConnectedRunRecordV2["limits"] = {
   wall_clock_timeout_ms: 900_000,
   max_event_count: 1_000,
   max_event_bytes: 1_000_000,
@@ -1829,9 +1829,15 @@ export class PortfolioService {
       );
     }
     const runs = await source.workspace.listShapingRuns(workItemId);
+    const connectedRuns = await source.workspace.listConnectedRuns(workItemId);
     const modelAvailability = this.shapingModelAvailability();
     const executeModelAvailability = this.executeModelAvailability();
-    const modelUse = this.workflowModelUse(workItemId, artifacts, runs);
+    const modelUse = this.workflowModelUse(
+      workItemId,
+      artifacts,
+      runs,
+      connectedRuns,
+    );
     const modelPickerOptions = await this.modelPickerOptions(
       modelAvailability,
       executeModelAvailability,
@@ -4540,6 +4546,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     workItemId: string,
     artifacts: StoredShapingArtifact[],
     runs: ShapingRunRecordV1[],
+    connectedRuns: ConnectedRunRecordV2[],
   ): WorkflowModelUse[] {
     const productions = SHAPING_PHASES.flatMap(
       (seat) => {
@@ -4550,7 +4557,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
           : [{ seat, receipt: tip.production_receipt }];
       },
     );
-    return summarizeWorkflowModelUse(runs, productions);
+    return summarizeWorkflowModelUse(runs, productions, connectedRuns);
   }
 
   private isPlanDecisionEligible(
@@ -4995,10 +5002,10 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
 
   private connectedRunRecord(
     mission: MissionCompilation,
-    governedTuple: ConnectedRunRecordV1["governed_tuple"],
+    governedTuple: ConnectedRunRecordV2["governed_tuple"],
     capabilityEnvelope: CapabilityEnvelopeV1,
     prepared: PreparedConnectedRuntime,
-  ): ConnectedRunRecordV1 {
+  ): ConnectedRunRecordV2 {
     const profileSha256 = this.hashConnectedValue(prepared.sanitized_profile);
     const authorizationSha256 = this.hashConnectedValue({
       mission_content_sha256: mission.mission.content_sha256,
@@ -5008,7 +5015,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     const timestamp = new Date().toISOString();
     const envelopeSha256 = hashResolvedCapabilityEnvelope(capabilityEnvelope);
     return {
-      schema_version: 1,
+      schema_version: 2,
       connected_run_id: randomUUID(),
       mission: {
         identity: mission.mission.identity,
@@ -5056,16 +5063,13 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
           assurance: "controller_observed",
         },
         resolved_skill_set_sha256: { value: null, assurance: "unknown" },
-        capability_envelope_sha256: {
-          value: envelopeSha256,
-          assurance: "controller_observed",
-        },
         authorization_sha256: {
           value: authorizationSha256,
           assurance: "controller_observed",
         },
       },
-      resolved_capability_envelope: {
+      authorization: {
+        kind: "capability_envelope",
         envelope: capabilityEnvelope,
         envelope_sha256: envelopeSha256,
       },
@@ -5091,7 +5095,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     workItemId: string,
     connectedRunId: string,
     result: AcpRunResult,
-  ): Promise<ConnectedRunRecordV1> {
+  ): Promise<ConnectedRunRecordV2> {
     const terminal = this.connectedTerminalFromResult(result);
     try {
       return await source.workspace.completeConnectedRun(
@@ -5115,7 +5119,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     source: ResolvedSource,
     workItemId: string,
     mission: MissionCompilation,
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
     result: AcpRunResult,
   ): Promise<void> {
     const missing = result.permissions.find(
@@ -5125,6 +5129,12 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       throw this.missionNotReady(
         workItemId,
         "A missing-permission run did not retain an exact denied operation.",
+      );
+    }
+    if (record.authorization.kind !== "capability_envelope") {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected permission recovery requires capability-envelope authorization.",
       );
     }
     await this.workItemController(source.workspace).recordConnectedPermissionDenial(
@@ -5141,7 +5151,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
           operation_sha256: missing.operation_sha256,
           reason: missing.reason,
           resolved_envelope_sha256:
-            record.resolved_capability_envelope.envelope_sha256,
+            record.authorization.envelope_sha256,
           connected_run_id: record.connected_run_id,
         },
       },
@@ -5270,7 +5280,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
   private governedExecuteTuple(
     workItem: WorkItem,
     identity: MissionIdentity<"execute">,
-  ): ConnectedRunRecordV1["governed_tuple"] {
+  ): ConnectedRunRecordV2["governed_tuple"] {
     if (workItem.state.patch_cycle === undefined) {
       throw this.missionNotReady(
         workItem.goal.work_item_id,
@@ -5286,7 +5296,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
   }
 
   private connectedLaunchInput(
-    governedTuple: ConnectedRunRecordV1["governed_tuple"],
+    governedTuple: ConnectedRunRecordV2["governed_tuple"],
     missionContentSha256: string,
     modelOverride: string | undefined,
   ) {

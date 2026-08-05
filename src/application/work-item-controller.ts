@@ -14,9 +14,9 @@ import {
   capabilityRequestMatchesEnvelope,
 } from "../domain/capability-envelope";
 import {
-  connectedRunRecordV1Schema,
+  connectedRunRecordV2Schema,
   launchConnectedExecuteInputSchema,
-  type ConnectedRunRecordV1,
+  type ConnectedRunRecordV2,
   type LaunchConnectedExecuteInput,
 } from "../domain/connected-run";
 import {
@@ -326,7 +326,7 @@ export interface ImportPatchResultResult {
 }
 
 export interface ConnectedLaunchResult extends ControllerMutationResult {
-  connected_run: ConnectedRunRecordV1;
+  connected_run: ConnectedRunRecordV2;
   created: boolean;
 }
 
@@ -2045,11 +2045,11 @@ export class WorkItemController {
   async launchConnectedExecute(
     workItemId: string,
     input: LaunchConnectedExecuteInput,
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
   ): Promise<ConnectedLaunchResult> {
     const validatedId = workItemIdSchema.parse(workItemId);
     const validatedInput = launchConnectedExecuteInputSchema.parse(input);
-    const validatedRecord = connectedRunRecordV1Schema.parse(record);
+    const validatedRecord = connectedRunRecordV2Schema.parse(record);
     const expectation = this.executeExpectationFromConnectedInput(
       validatedInput,
     );
@@ -2516,7 +2516,7 @@ export class WorkItemController {
     workItemId: string,
     current: WorkItem,
     input: LaunchConnectedExecuteInput,
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
   ): Promise<void> {
     this.validateExecuteExpectation(
       workItemId,
@@ -2560,7 +2560,7 @@ export class WorkItemController {
     workItemId: string,
     current: WorkItem,
     input: RecordConnectedPermissionDenialInput,
-  ): Promise<ConnectedRunRecordV1> {
+  ): Promise<ConnectedRunRecordV2> {
     this.validateExecuteExpectation(
       workItemId,
       current,
@@ -2584,9 +2584,16 @@ export class WorkItemController {
       input.governed_tuple,
       input.mission_content_sha256,
     );
+    if (record.authorization.kind !== "capability_envelope") {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Connected permission denial requires capability-envelope authorization.",
+      );
+    }
     if (
       input.operation.resolved_envelope_sha256 !==
-      record.resolved_capability_envelope.envelope_sha256
+      record.authorization.envelope_sha256
     ) {
       throw this.conflict(
         "stale_expectation",
@@ -2597,7 +2604,7 @@ export class WorkItemController {
     if (
       capabilityRequestMatchesEnvelope(
         input.operation.normalized_operation,
-        record.resolved_capability_envelope.envelope,
+        record.authorization.envelope,
       )
     ) {
       throw this.conflict(
@@ -2613,8 +2620,8 @@ export class WorkItemController {
     workItemId: string,
     current: WorkItem,
     input: ConnectedPermissionResolutionInput,
-    knownRecord?: ConnectedRunRecordV1,
-  ): Promise<ConnectedRunRecordV1> {
+    knownRecord?: ConnectedRunRecordV2,
+  ): Promise<ConnectedRunRecordV2> {
     const expectation: ExecuteExpectation = {
       expected_phase: "execute",
       expected_status: "active",
@@ -2655,12 +2662,19 @@ export class WorkItemController {
       input.governed_tuple,
       input.mission_content_sha256,
     );
+    if (record.authorization.kind !== "capability_envelope") {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Connected permission resolution requires capability-envelope authorization.",
+      );
+    }
     if (
       attention.operation.resolved_envelope_sha256 !==
-        record.resolved_capability_envelope.envelope_sha256 ||
+        record.authorization.envelope_sha256 ||
       capabilityRequestMatchesEnvelope(
         attention.operation.normalized_operation,
-        record.resolved_capability_envelope.envelope,
+        record.authorization.envelope,
       )
     ) {
       throw this.conflict(
@@ -2674,7 +2688,7 @@ export class WorkItemController {
 
   private async validateConnectedMissionReference(
     workItemId: string,
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
     governedTuple: {
       goal_version: number;
       input_revision: number;
@@ -2779,7 +2793,7 @@ export class WorkItemController {
   private async requireConnectedRun(
     workItemId: string,
     connectedRunId: string,
-  ): Promise<ConnectedRunRecordV1> {
+  ): Promise<ConnectedRunRecordV2> {
     const record = await this.repository.readConnectedRun(
       workItemId,
       connectedRunId,
@@ -2804,7 +2818,7 @@ export class WorkItemController {
       patch_cycle: number;
     },
     missionContentSha256: string,
-    record: ConnectedRunRecordV1,
+    record: ConnectedRunRecordV2,
     createdAt: string,
   ): WorkItemAttention {
     const runPath = workspaceRelativePosixPathSchema.parse(

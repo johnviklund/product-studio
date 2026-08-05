@@ -3917,7 +3917,7 @@ describe("PortfolioService", () => {
   });
 
 
-  it("launches one connected run, imports its completed result, and never spawns a duplicate", async () => {
+  it("tracks connected model use while launching one run, importing its result, and never spawning a duplicate", async () => {
     const root = await createWorkspace("Connected Execute Workspace");
     const repository = new ProductWorkspace(root, {
       git: controllerGit,
@@ -3985,6 +3985,19 @@ describe("PortfolioService", () => {
     );
     expect(fake.prepare).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledOnce();
+    await expect(
+      service.listShapingArtifacts(sourceId, created.goal.work_item_id),
+    ).resolves.toMatchObject({
+      model_use: [
+        {
+          seat: "execute",
+          production_id: first.connected_run.connected_run_id,
+          shaping_run_id: null,
+          requested_model: "copilot-default",
+          effective_model: null,
+        },
+      ],
+    });
     expect((await service.listConnectedRuns(sourceId, created.goal.work_item_id))[0])
       .toMatchObject({ lifecycle: { status: "running" } });
     expect(index.listConnectedRunSummaries()).toEqual([
