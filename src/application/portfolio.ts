@@ -107,6 +107,7 @@ import {
   isCapabilityEnvelopeNarrowing,
   type CapabilityEnvelopeV1,
 } from "../domain/capability-envelope";
+import type { ReviewRunPolicy } from "../domain/review-run-policy";
 import {
   brainstormResultSubmissionSchema,
   compileBrainstormMission as compileBrainstormMissionPackage,
@@ -646,7 +647,7 @@ export interface PortfolioConnectedRunResult extends PortfolioWorkItem {
   connected_run: ConnectedRunSummary;
 }
 
-export interface ConnectedRuntimePrepareInput {
+export interface ConnectedWritableRuntimePrepareInput {
   workspace_cwd: string;
   capability_envelope: CapabilityEnvelopeV1;
   limits: ConnectedRunRecordV2["limits"];
@@ -656,24 +657,55 @@ export interface ConnectedRuntimePrepareInput {
 export interface PreparedConnectedRuntime {
   requested_model: string;
   reasoning_effort: string;
-  sanitized_profile: CopilotSanitizedProfileEvidence;
+  sanitized_profile: Omit<
+    CopilotSanitizedProfileEvidence,
+    "adapter_id" | "profile_id"
+  > & {
+    adapter_id: string;
+    profile_id: string;
+  };
   start(
     event_sink: AcpEventSink,
     callbacks?: AcpSessionCallbacks,
   ): Promise<AcpSession>;
 }
 
-export interface ConnectedExecuteRuntime {
-  configuration(): ConnectedExecuteRuntimeConfiguration;
-  prepare(input: ConnectedRuntimePrepareInput): Promise<PreparedConnectedRuntime>;
+export interface ConnectedWritableRuntime {
+  configuration(): ConnectedRuntimeConfiguration;
+  prepare(
+    input: ConnectedWritableRuntimePrepareInput,
+  ): Promise<PreparedConnectedRuntime>;
 }
 
-export interface ConnectedExecuteRuntimeConfiguration
+export interface ConnectedReviewRuntimePrepareInput {
+  workspace_cwd: string;
+  limits: ConnectedRunRecordV2["limits"];
+  requested_model: string;
+  result_ingress_policy: ReviewRunPolicy;
+}
+
+export interface PreparedConnectedReviewRuntime
+  extends Omit<PreparedConnectedRuntime, "start"> {
+  start(
+    event_sink: AcpEventSink,
+    write_text_file: AcpWriteTextFileHandler,
+    callbacks?: AcpSessionCallbacks,
+  ): Promise<AcpSession>;
+}
+
+export interface ConnectedReviewRuntime {
+  configuration(): ConnectedRuntimeConfiguration;
+  prepare(
+    input: ConnectedReviewRuntimePrepareInput,
+  ): Promise<PreparedConnectedReviewRuntime>;
+}
+
+export interface ConnectedRuntimeConfiguration
   extends ShapingRuntimeConfiguration {
   default_model: string;
 }
 
-export interface CopilotConnectedExecuteRuntimeOptions {
+export interface CopilotConnectedWritableRuntimeOptions {
   profile: Omit<
     CopilotRuntimeProfileInput,
     | "requested_model"
@@ -686,15 +718,15 @@ export interface CopilotConnectedExecuteRuntimeOptions {
   };
 }
 
-export class CopilotConnectedExecuteRuntime
-  implements ConnectedExecuteRuntime
+export class CopilotConnectedWritableRuntime
+  implements ConnectedWritableRuntime
 {
   constructor(
     private readonly adapter: AcpClientAdapter,
-    private readonly options: CopilotConnectedExecuteRuntimeOptions,
+    private readonly options: CopilotConnectedWritableRuntimeOptions,
   ) {}
 
-  configuration(): ConnectedExecuteRuntimeConfiguration {
+  configuration(): ConnectedRuntimeConfiguration {
     return {
       adapter_id: COPILOT_ADAPTER_ID,
       adapter_version: this.options.profile.preflight.version,
@@ -705,7 +737,7 @@ export class CopilotConnectedExecuteRuntime
   }
 
   async prepare(
-    input: ConnectedRuntimePrepareInput,
+    input: ConnectedWritableRuntimePrepareInput,
   ): Promise<PreparedConnectedRuntime> {
     const requestedModel = input.model_override ?? this.options.profile.default_model;
     if (!this.configuration().available_model_ids.includes(requestedModel)) {
@@ -813,7 +845,7 @@ const shapingRuntimeConfigurationSchema: z.ZodType<ShapingRuntimeConfiguration> 
     available_model_ids: z.array(shapingRequestedModelSchema),
   });
 
-const connectedExecuteRuntimeConfigurationSchema: z.ZodType<ConnectedExecuteRuntimeConfiguration> =
+const connectedRuntimeConfigurationSchema: z.ZodType<ConnectedRuntimeConfiguration> =
   z.strictObject({
     adapter_id: shapingRequestedModelSchema,
     adapter_version: shapingRequestedModelSchema,
@@ -961,8 +993,9 @@ export class PortfolioService {
     inboxRoot: string,
     private readonly makeWorkspace: WorkspaceFactory = (workspacePath) =>
       new ProductWorkspace(workspacePath),
-    private readonly connectedRuntime?: ConnectedExecuteRuntime,
+    private readonly writableRuntime?: ConnectedWritableRuntime,
     private readonly shapingRuntime?: ConnectedShapingRuntime,
+    private readonly reviewRuntime?: ConnectedReviewRuntime,
     preferencesStore?: PortfolioPreferencesStore,
   ) {
     this.inboxRoot = resolve(inboxRoot);
@@ -1875,6 +1908,10 @@ export class PortfolioService {
     return this.executeModelAvailability();
   }
 
+  getReviewModelAvailability(): ShapingModelAvailability {
+    return this.reviewModelAvailability();
+  }
+
   async launchConnectedExecute(
     sourceId: string,
     workItemId: string,
@@ -1915,7 +1952,7 @@ export class PortfolioService {
         connected_run: summarizeConnectedRun(replay.connected_run),
       };
     }
-    if (this.connectedRuntime === undefined) {
+    if (this.writableRuntime === undefined) {
       throw this.missionNotReady(
         workItemId,
         "Connected execution is not configured for this Product Studio service.",
@@ -1940,7 +1977,7 @@ export class PortfolioService {
       validatedInput.model_override,
     );
 
-    const prepared = await this.connectedRuntime.prepare({
+    const prepared = await this.writableRuntime.prepare({
       workspace_cwd: source.workspace.workspaceRoot,
       capability_envelope: capabilityEnvelope,
       limits: CONNECTED_RUN_LIMITS,
@@ -3889,7 +3926,17 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
   }
 
   private executeModelAvailability(): ShapingModelAvailability {
-    if (this.connectedRuntime === undefined) {
+    return this.connectedModelAvailability(this.writableRuntime);
+  }
+
+  private reviewModelAvailability(): ShapingModelAvailability {
+    return this.connectedModelAvailability(this.reviewRuntime);
+  }
+
+  private connectedModelAvailability(
+    runtime: ConnectedWritableRuntime | ConnectedReviewRuntime | undefined,
+  ): ShapingModelAvailability {
+    if (runtime === undefined) {
       return {
         status: "unavailable",
         adapter_id: null,
@@ -3901,10 +3948,10 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
         reason: "runtime_unavailable",
       };
     }
-    let configuration: ConnectedExecuteRuntimeConfiguration;
+    let configuration: ConnectedRuntimeConfiguration;
     try {
-      configuration = connectedExecuteRuntimeConfigurationSchema.parse(
-        this.connectedRuntime.configuration(),
+      configuration = connectedRuntimeConfigurationSchema.parse(
+        runtime.configuration(),
       );
     } catch {
       return {

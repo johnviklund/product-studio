@@ -6,9 +6,9 @@ import { SQLitePortfolioIndex } from "../index/work-item-index";
 import { StdioAcpClientAdapter } from "../infrastructure/acp/acp-client";
 import { PortfolioRegistry } from "../workspace/portfolio-registry";
 import {
-  CopilotConnectedExecuteRuntime,
+  CopilotConnectedWritableRuntime,
   PortfolioService,
-  type ConnectedExecuteRuntime,
+  type ConnectedWritableRuntime,
   type ConnectedShapingRuntime,
 } from "./portfolio";
 import { readTrustedOriginConfig, type TrustedOriginConfig } from "./request-origin";
@@ -47,14 +47,14 @@ const copilotRuntimeProfileSchema = z.strictObject({
 });
 
 interface ConfiguredRuntimes {
-  connected: ConnectedExecuteRuntime | undefined;
+  writable: ConnectedWritableRuntime | undefined;
   shaping: ConnectedShapingRuntime | undefined;
 }
 
 function configuredRuntimes(): ConfiguredRuntimes {
   const source = process.env.PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON;
   if (source === undefined || source === "") {
-    return { connected: undefined, shaping: undefined };
+    return { writable: undefined, shaping: undefined };
   }
   let parsed: unknown;
   try {
@@ -66,7 +66,7 @@ function configuredRuntimes(): ConfiguredRuntimes {
   const { default_model: defaultModel, ...sharedProfile } = validated;
   const adapter = new StdioAcpClientAdapter();
   return {
-    connected: new CopilotConnectedExecuteRuntime(adapter, {
+    writable: new CopilotConnectedWritableRuntime(adapter, {
       profile: { ...sharedProfile, default_model: defaultModel },
     }),
     shaping: new CopilotConnectedShapingRuntime(adapter, {
@@ -90,7 +90,7 @@ export function getPortfolioService(): Promise<PortfolioService> {
       index,
       portfolioInboxRoot,
       undefined,
-      runtimes.connected,
+      runtimes.writable,
       runtimes.shaping,
     );
 

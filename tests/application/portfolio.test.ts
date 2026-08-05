@@ -14,10 +14,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
 
 import {
-  CopilotConnectedExecuteRuntime,
+  CopilotConnectedWritableRuntime,
   PortfolioService,
-  type ConnectedExecuteRuntime,
+  type ConnectedReviewRuntime,
+  type ConnectedWritableRuntime,
   type ConnectedShapingRuntime,
+  type PreparedConnectedReviewRuntime,
   type PreparedConnectedRuntime,
   type PreparedShapingRuntime,
 } from "../../src/application/portfolio";
@@ -142,7 +144,7 @@ function preparedRuntime(
   requestedModel = "copilot-default",
   onStart?: () => void,
 ): {
-  runtime: ConnectedExecuteRuntime;
+  runtime: ConnectedWritableRuntime;
   prepare: ReturnType<typeof vi.fn>;
   start: ReturnType<typeof vi.fn>;
 } {
@@ -183,7 +185,7 @@ function preparedRuntime(
     start,
   };
   const prepare = vi.fn(
-    async (input: Parameters<ConnectedExecuteRuntime["prepare"]>[0]) => {
+    async (input: Parameters<ConnectedWritableRuntime["prepare"]>[0]) => {
       void input;
       return prepared;
     },
@@ -514,8 +516,9 @@ async function createWorkspace(productName: string): Promise<string> {
 async function createService(
   index: PortfolioWorkItemIndex = new SQLitePortfolioIndex(":memory:"),
   makeWorkspace?: (workspacePath: string) => ProductWorkspace,
-  connectedRuntime?: ConnectedExecuteRuntime,
+  writableRuntime?: ConnectedWritableRuntime,
   shapingRuntime?: ConnectedShapingRuntime,
+  reviewRuntime?: ConnectedReviewRuntime,
 ) {
   const applicationRoot = await createRoot("product-studio-service-app-");
   const registry = new PortfolioRegistry(
@@ -532,8 +535,9 @@ async function createService(
           git: controllerGit,
           verificationRunner: controllerRunner,
         })),
-    connectedRuntime,
+    writableRuntime,
     shapingRuntime,
+    reviewRuntime,
   );
   const legacyService = Object.assign(service, {
     async updateWorkItemDetails(
@@ -2436,12 +2440,12 @@ describe("PortfolioService", () => {
       type: "Feature",
     });
     const failingPrepare = vi.fn(
-      async (input: Parameters<ConnectedExecuteRuntime["prepare"]>[0]) => {
+      async (input: Parameters<ConnectedWritableRuntime["prepare"]>[0]) => {
         void input;
         throw new Error("Execute adapter unavailable after approval commit");
       },
     );
-    const failingRuntime: ConnectedExecuteRuntime = {
+    const failingRuntime: ConnectedWritableRuntime = {
       configuration: () => ({
         adapter_id: "copilot-acp",
         adapter_version: "1.0.0",
@@ -2549,12 +2553,12 @@ describe("PortfolioService", () => {
     });
     const shapingRuntime = fakeArtifactOnlyRuntime();
     const executePrepare = vi.fn(
-      async (input: Parameters<ConnectedExecuteRuntime["prepare"]>[0]) => {
+      async (input: Parameters<ConnectedWritableRuntime["prepare"]>[0]) => {
         void input;
         throw new Error("Execute must not launch while reading picker options.");
       },
     );
-    const executeRuntime: ConnectedExecuteRuntime = {
+    const executeRuntime: ConnectedWritableRuntime = {
       configuration: () => ({
         adapter_id: "fake-execute-acp",
         adapter_version: "1.0.0",
@@ -4061,7 +4065,7 @@ describe("PortfolioService", () => {
     });
     await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
     const unavailableAdapter: AcpClientAdapter = { start: vi.fn() };
-    const unavailableRuntime = new CopilotConnectedExecuteRuntime(
+    const unavailableRuntime = new CopilotConnectedWritableRuntime(
       unavailableAdapter,
       {
         profile: {
@@ -4200,7 +4204,7 @@ describe("PortfolioService", () => {
     connectedIndex.close();
   });
 
-  it("reports unavailable and empty Execute runtime inventories", async () => {
+  it("reports truthful availability for distinct writable and review runtimes", async () => {
     const unavailable = await createService();
     expect(unavailable.service.getExecuteModelAvailability()).toEqual({
       status: "unavailable",
@@ -4212,9 +4216,19 @@ describe("PortfolioService", () => {
       has_three_distinct_models: false,
       reason: "runtime_unavailable",
     });
+    expect(unavailable.service.getReviewModelAvailability()).toEqual({
+      status: "unavailable",
+      adapter_id: null,
+      adapter_version: null,
+      profile_id: null,
+      available_model_ids: [],
+      distinct_model_count: 0,
+      has_three_distinct_models: false,
+      reason: "runtime_unavailable",
+    });
     unavailable.index.close();
 
-    const emptyRuntime: ConnectedExecuteRuntime = {
+    const emptyRuntime: ConnectedWritableRuntime = {
       configuration: () => ({
         adapter_id: "copilot-acp",
         adapter_version: "1.0.0",
@@ -4240,6 +4254,93 @@ describe("PortfolioService", () => {
       reason: "no_models_configured",
     });
     empty.index.close();
+
+    const preparedReview: PreparedConnectedReviewRuntime = {
+      requested_model: "review-model",
+      reasoning_effort: "high",
+      sanitized_profile: {
+        adapter_id: "copilot-acp",
+        adapter_version: "1.0.0",
+        profile_id: "noninteractive-review-v1",
+        executable: "copilot",
+        argv: ["--acp", "--stdio"],
+        requested_model: "review-model",
+        reasoning_effort: "high",
+        available_tools: ["view"],
+        excluded_tools: ["edit", "delete"],
+        authentication: "noninteractive_authenticated",
+        execution_mode: "permission_mediated_local",
+        containment_assurance: "not_independently_enforced",
+        machine_authority: "launching_user",
+        requested_mcp_server_count: 0,
+        client_fs_write_text_file: true,
+        credential_environment: "explicit_allowlist_without_credential_values",
+      },
+      start: vi.fn(async () => {
+        throw new Error("not started by this boundary test");
+      }),
+    };
+    const reviewRuntime: ConnectedReviewRuntime = {
+      configuration: () => ({
+        adapter_id: "copilot-acp",
+        adapter_version: "1.0.0",
+        profile_id: "noninteractive-review-v1",
+        available_model_ids: ["review-model"],
+        default_model: "review-model",
+      }),
+      prepare: vi.fn(async () => preparedReview),
+    };
+    const configuredReview = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      undefined,
+      emptyRuntime,
+      undefined,
+      reviewRuntime,
+    );
+    expect(configuredReview.service.getReviewModelAvailability()).toEqual({
+      status: "available",
+      adapter_id: "copilot-acp",
+      adapter_version: "1.0.0",
+      profile_id: "noninteractive-review-v1",
+      available_model_ids: ["review-model"],
+      distinct_model_count: 1,
+      has_three_distinct_models: false,
+      reason: null,
+    });
+    const prepared = await reviewRuntime.prepare({
+      workspace_cwd: "/products/review",
+      requested_model: "review-model",
+      limits: {
+        wall_clock_timeout_ms: 900_000,
+        max_event_count: 1_000,
+        max_event_bytes: 1_000_000,
+        max_output_bytes: 100_000,
+        termination_grace_ms: 5_000,
+        drain_grace_ms: 1_000,
+      },
+      result_ingress_policy: {
+        kind: "single_result_file",
+        result_path: ".founder/review/result.json",
+        mission_result_binding_sha256: "a".repeat(64),
+        commands: "forbidden",
+        urls: "forbidden",
+        mcp: "forbidden",
+        credentials: "forbidden",
+        outside_workspace_writes: "forbidden",
+        reads: "workspace_and_repository_unrestricted",
+        execution_mode: "permission_mediated_local",
+        result_assurance: "result_scope_validation",
+        containment_assurance: "not_independently_enforced",
+        machine_authority: "launching_user",
+      },
+    });
+    expect(prepared.sanitized_profile.profile_id).toBe(
+      "noninteractive-review-v1",
+    );
+    expect(prepared.sanitized_profile).not.toHaveProperty(
+      "capability_envelope",
+    );
+    configuredReview.index.close();
   });
 
   it("lists source-qualified historical evidence without controller or cache mutation", async () => {
