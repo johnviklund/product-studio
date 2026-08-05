@@ -251,10 +251,11 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 - **Status:** In progress — the guided handoff mechanism is delivered through Execute approval.
   Commits `6ca9b52`–`c0bf64f` delivered connected Brainstorm, Spec, and Plan launch, per-seat model
   selection, the Plan mission, a headed end-to-end run with three distinct adapter-observed
-  effective model identities, and the closed three-cycle review. Commits `54de9de`–`2e38f73`
+  effective model identities, and the closed three-cycle review. Commits `54de9de`–`874d7c0`
   deliver exact-result Plan approval, recoverable controller execution, Execute model selection,
-  the approval API, and the Plan decision surface. The 3.4 completion signal is not yet claimed
-  because the cycle does not reach approved implementation.
+  the approval API, the Plan decision surface, dedicated-transition enforcement inside the
+  controller, and the closed review. The 3.4 completion signal is not yet claimed because the
+  cycle does not reach approved implementation.
 - **Completion signal:** A real feature completes the version-one cycle without manual prompt or
   result assembly, uses at least two distinct recorded LLM model identities across its
   agent-driven steps, preserves every required human gate, and leaves reproducible mission, result,

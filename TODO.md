@@ -6,6 +6,36 @@ delivery phases.
 
 ## Active Initiatives
 
+### Connected model configuration settings page
+
+- **Status:** Proposed.
+- **User story:** As the founder running Product Studio locally, I want a settings page where I
+  can configure and persist the connected Copilot runtime profile (executable, model, reasoning
+  effort, tool policy), so I don't have to hand-craft and export a
+  `PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON` env var and restart the dev server every time I
+  want connected shaping/execute runs available.
+- **Purpose:** Today the only way to enable connected mode is manually constructing a JSON blob
+  for `PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON` (schema in
+  `src/application/portfolio-service.ts`) by hand, including undocumented details — required tool
+  names (`apply_patch`, `view`) and environment allowlist entries (`PATH`) — and restarting
+  `npm run dev`. This was real, measured friction: getting Copilot CLI connected during a
+  2026-08-05 session took significant trial and error (guessing model IDs, tool names, required
+  env keys) even with full codebase access.
+- **Definition of done:** A settings page persists the runtime profile durably (not just an env
+  var) — executable path/version, auth status, default model, reasoning effort, available/excluded
+  tools, environment allowlist — validated against the existing `copilotRuntimeProfileSchema`
+  shape (or its durable-storage equivalent), and takes effect without a full dev-server restart.
+  The page auto-discovers which model IDs the configured Copilot CLI/account can actually use,
+  and surfaces preflight status (executable found, authenticated, model reachable) inline.
+- **Boundary:** Scope to the existing single-adapter (Copilot ACP) profile — no multi-provider
+  picker, no credential-inheritance changes, no new adapter. Model discovery only needs to surface
+  IDs this CLI/account can use, not a cross-vendor catalog.
+- *Pointer updated 2026-08-05 (ROADMAP 3.4 Slice 2): `ConnectedExecuteRuntime` gained a
+  `configuration()` surface symmetric with the shaping runtime's — the per-runtime preflight shape
+  (executable found, authenticated, model reachable) this item's definition of done would read.
+  Groundwork only; durable config replacing the env var and model auto-discovery are untouched —
+  the item stays open as written.*
+
 ## Deferred Initiatives
 
 ### Wire the `ambiguous_goal` attention decision
@@ -27,6 +57,10 @@ delivery phases.
   *Pointer updated 2026-08-04 (ROADMAP 3.4 Slice 2): `PlanResultSubmission` now also carries
   `open_questions`, and the guided decision surfaces render unresolved questions without producing
   `ambiguous_goal` attention. This adds another candidate signal shape, not a producer — the item
+  stays open.*
+  *Pointer updated 2026-08-05 (ROADMAP 3.4 Slice 2 wrap): the Plan approval decision surface now
+  also reaches an approval gate (`Approve & run Execute`) without consuming `open_questions` into
+  an `ambiguous_goal` attention. Same candidate-signal-shape situation, one more surface — the item
   stays open.*
 
 ### Guard the 13 remaining unguarded mutating API routes
@@ -56,32 +90,13 @@ delivery phases.
   **D1's tripwire:** `readCappedJsonRequest` deliberately does *not* require a JSON `Content-Type`,
   which is safe only for as long as `assertTrustedRequestOrigin` fails closed on a missing `Origin`
   header; if that is ever relaxed to admit a non-browser client, the `Content-Type` gate becomes
-  load-bearing and must land in the same change. Note also that `[workItemId]/route.ts` PATCH is the
-  single enforcement point for the closed-transition policy (see the controller item below), so the
-  two items are worth reading together.
-
-### Enforce the dedicated-transition policy inside the controller
-
-- **Status:** Deferred — blocked on a dedicated `plan → execute` operation (patch-cycle decision D2,
-  2026-08-05; raised as a Phase 4 P2 and re-upheld in cycle 2).
-- **Idea:** `WorkItemController.transition()` validates against `ALLOWED_PHASE_TRANSITIONS` only and
-  never consults `dedicatedTransitionPolicy` (`src/domain/workflow-policy.ts:95`), whose only callers
-  are `src/application/portfolio.ts:1096` and `src/presentation/board.ts:728`. So the closed-set rule
-  is enforced one layer above the controller. AGENTS.md states "the controller owns transitions" and
-  `transition()` is public, which means the immutability guarantee for a decided revision currently
-  rests on every future caller remembering to go through the portfolio. Verified not exploitable as
-  of 3.4 Slice 2: the only production path is `[workItemId]/route.ts` PATCH →
-  `service.updateWorkItemPhase` → the guarded call at `portfolio.ts:1096-1107`.
-- **Boundary:** Cannot be made green inside Slice 2, which is why it is deferred rather than small.
-  The test setup helpers drive `["spec", "plan", "execute"]` straight through `controller.transition()`
-  (`tests/api/portfolio-routes.test.ts:222`, `tests/application/work-item-controller.test.ts:264`,
-  `tests/application/portfolio.test.ts:747`), and that chain contains both `spec → plan`
-  (`dedicated_operation_required`) and `plan → execute` (`closed_in_slice`) — for which no legitimate
-  replacement operation exists yet ("Execute approval is not part of this slice",
-  `src/domain/workflow-policy.ts:73-76`). Enforcing it earlier means either inventing the Execute
-  approval operation or weakening the test setups. Belongs to the slice that introduces a dedicated
-  `plan → execute` operation; move the check into `transition()` there, rejecting
-  `dedicated_operation_required` and `closed_in_slice`.
+  load-bearing and must land in the same change.
+  *Pointer updated 2026-08-05 (ROADMAP 3.4 Slice 2 wrap): the note that `[workItemId]/route.ts`
+  PATCH is "the single enforcement point for the closed-transition policy" is now stale —
+  `WorkItemController.transition()` enforces `dedicated_operation_required`/`closed_in_slice`
+  directly (see the delivered controller item in Archived), so that route is no longer the sole
+  point of truth for the closed-transition rule. The origin-guard and unbounded-body findings above
+  are unaffected; only the cross-reference changes.*
 
 ## Small UI Changes
 
@@ -108,6 +123,9 @@ delivery phases.
   *Pointer updated 2026-08-04 (ROADMAP 3.4 Slice 2): the guided shaping, monitoring, recovery, and
   decision surfaces substantially rewrote `detail-panel.tsx` again but still leave `tagsFromInput`
   and the free-text tags input untouched — this item still applies as written.*
+  *Pointer updated 2026-08-05 (ROADMAP 3.4 Slice 2 wrap): the Plan approval decision surface added
+  to `detail-panel.tsx` again without touching `tagsFromInput` or the tags input — this item still
+  applies as written.*
 
 ## Open Questions
 
@@ -143,6 +161,15 @@ delivery phases.
 - **Status:** Delivered — superseded by ROADMAP 3.2 (commits `84c939a`–`22d8b36`). The
   cross-project attention inbox (`app/inbox/page.tsx`, `listAttention()`) ships this as an
   alternate view over durable workflow state/evidence, per the original boundary.
+
+### Enforce the dedicated-transition policy inside the controller
+
+- **Status:** Delivered — ROADMAP 3.4 Slice 2 (commits `54de9de`–`874d7c0`). Step 9 moved the
+  `dedicated_operation_required`/`closed_in_slice` enforcement from the portfolio layer directly
+  into `WorkItemController.transition()`, rewriting the three test setup helpers that previously
+  drove transitions straight past it (`tests/api/portfolio-routes.test.ts`,
+  `tests/application/work-item-controller.test.ts`, `tests/application/portfolio.test.ts`). The
+  controller is now the single enforcement point named in AGENTS.md, not `portfolio.ts`.
 
 ### Wire the `missing_permission` attention decision (connected Execute half)
 
