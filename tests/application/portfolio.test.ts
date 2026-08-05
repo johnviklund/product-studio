@@ -173,7 +173,19 @@ function preparedRuntime(
     }),
   };
   const prepare = vi.fn(async () => prepared);
-  return { runtime: { prepare }, prepare };
+  return {
+    runtime: {
+      configuration: () => ({
+        adapter_id: "copilot-acp",
+        adapter_version: "1.0.0",
+        profile_id: "noninteractive-execute-v1",
+        available_model_ids: [requestedModel],
+        default_model: requestedModel,
+      }),
+      prepare,
+    },
+    prepare,
+  };
 }
 
 function preparedShapingRuntime(
@@ -3121,11 +3133,7 @@ describe("PortfolioService", () => {
       [spec.goal.work_item_id, "brainstorm", "Request changes"],
       [spec.goal.work_item_id, "plan", "Approve & run Plan"],
       [plan.goal.work_item_id, "spec", "Request changes"],
-      [
-        plan.goal.work_item_id,
-        "execute",
-        "Execute approval is not part of this slice",
-      ],
+      [plan.goal.work_item_id, "execute", "Approve & run Execute"],
     ] as const;
     for (const [workItemId, targetPhase, message] of cases) {
       await expect(
@@ -3312,13 +3320,27 @@ describe("PortfolioService", () => {
     );
     const registration = await unavailable.service.register({ workspace_path: root });
     const sourceId = registration.workspace.workspace_id;
+    expect(unavailable.service.getExecuteModelAvailability()).toEqual({
+      status: "available",
+      adapter_id: "copilot-acp",
+      adapter_version: "1.0.0",
+      profile_id: "noninteractive-execute-v1",
+      available_model_ids: ["copilot-default"],
+      distinct_model_count: 1,
+      has_three_distinct_models: false,
+      reason: null,
+    });
     await expect(
       unavailable.service.launchConnectedExecute(
         sourceId,
         created.goal.work_item_id,
         { model_override: "unavailable-model" },
       ),
-    ).rejects.toThrow("Requested Copilot model is unavailable.");
+    ).rejects.toMatchObject({
+      kind: "mission_not_ready",
+      reason:
+        "Requested Execute model unavailable-model is not in available_model_ids.",
+    });
     expect(unavailableAdapter.start).not.toHaveBeenCalled();
     expect(await repository.listConnectedRuns(created.goal.work_item_id)).toEqual([]);
     unavailable.index.close();
@@ -3410,6 +3432,48 @@ describe("PortfolioService", () => {
     });
     await expect(connectedService.listAttention()).resolves.toEqual([]);
     connectedIndex.close();
+  });
+
+  it("reports unavailable and empty Execute runtime inventories", async () => {
+    const unavailable = await createService();
+    expect(unavailable.service.getExecuteModelAvailability()).toEqual({
+      status: "unavailable",
+      adapter_id: null,
+      adapter_version: null,
+      profile_id: null,
+      available_model_ids: [],
+      distinct_model_count: 0,
+      has_three_distinct_models: false,
+      reason: "runtime_unavailable",
+    });
+    unavailable.index.close();
+
+    const emptyRuntime: ConnectedExecuteRuntime = {
+      configuration: () => ({
+        adapter_id: "copilot-acp",
+        adapter_version: "1.0.0",
+        profile_id: "noninteractive-execute-v1",
+        available_model_ids: [],
+        default_model: "copilot-default",
+      }),
+      prepare: vi.fn(),
+    };
+    const empty = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      undefined,
+      emptyRuntime,
+    );
+    expect(empty.service.getExecuteModelAvailability()).toEqual({
+      status: "unavailable",
+      adapter_id: "copilot-acp",
+      adapter_version: "1.0.0",
+      profile_id: "noninteractive-execute-v1",
+      available_model_ids: [],
+      distinct_model_count: 0,
+      has_three_distinct_models: false,
+      reason: "no_models_configured",
+    });
+    empty.index.close();
   });
 
   it("lists source-qualified historical evidence without controller or cache mutation", async () => {

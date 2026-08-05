@@ -154,6 +154,8 @@ import type {
   AcpWriteTextFileHandler,
 } from "../infrastructure/acp/acp-client";
 import {
+  COPILOT_ADAPTER_ID,
+  COPILOT_PROFILE_ID,
   createCopilotRuntimeProfile,
   type CopilotRuntimeProfileInput,
   type CopilotSanitizedProfileEvidence,
@@ -625,7 +627,13 @@ export interface PreparedConnectedRuntime {
 }
 
 export interface ConnectedExecuteRuntime {
+  configuration(): ConnectedExecuteRuntimeConfiguration;
   prepare(input: ConnectedRuntimePrepareInput): Promise<PreparedConnectedRuntime>;
+}
+
+export interface ConnectedExecuteRuntimeConfiguration
+  extends ShapingRuntimeConfiguration {
+  default_model: string;
 }
 
 export interface CopilotConnectedExecuteRuntimeOptions {
@@ -649,10 +657,23 @@ export class CopilotConnectedExecuteRuntime
     private readonly options: CopilotConnectedExecuteRuntimeOptions,
   ) {}
 
+  configuration(): ConnectedExecuteRuntimeConfiguration {
+    return {
+      adapter_id: COPILOT_ADAPTER_ID,
+      adapter_version: this.options.profile.preflight.version,
+      profile_id: COPILOT_PROFILE_ID,
+      available_model_ids: this.options.profile.preflight.available_model_ids,
+      default_model: this.options.profile.default_model,
+    };
+  }
+
   async prepare(
     input: ConnectedRuntimePrepareInput,
   ): Promise<PreparedConnectedRuntime> {
     const requestedModel = input.model_override ?? this.options.profile.default_model;
+    if (!this.configuration().available_model_ids.includes(requestedModel)) {
+      throw new Error("Requested Copilot model is unavailable.");
+    }
     const profile = createCopilotRuntimeProfile({
       ...this.options.profile,
       requested_model: requestedModel,
@@ -753,6 +774,15 @@ const shapingRuntimeConfigurationSchema: z.ZodType<ShapingRuntimeConfiguration> 
     adapter_version: shapingRequestedModelSchema,
     profile_id: shapingRequestedModelSchema,
     available_model_ids: z.array(shapingRequestedModelSchema),
+  });
+
+const connectedExecuteRuntimeConfigurationSchema: z.ZodType<ConnectedExecuteRuntimeConfiguration> =
+  z.strictObject({
+    adapter_id: shapingRequestedModelSchema,
+    adapter_version: shapingRequestedModelSchema,
+    profile_id: shapingRequestedModelSchema,
+    available_model_ids: z.array(shapingRequestedModelSchema),
+    default_model: shapingRequestedModelSchema,
   });
 
 const launchShapingRunRequestSchema = z.strictObject({
@@ -1736,6 +1766,10 @@ export class PortfolioService {
     return this.shapingModelAvailability();
   }
 
+  getExecuteModelAvailability(): ShapingModelAvailability {
+    return this.executeModelAvailability();
+  }
+
   async launchConnectedExecute(
     sourceId: string,
     workItemId: string,
@@ -1780,6 +1814,12 @@ export class PortfolioService {
       throw this.missionNotReady(
         workItemId,
         "Connected execution is not configured for this Product Studio service.",
+      );
+    }
+    if (validatedInput.model_override !== undefined) {
+      this.assertExecuteModelAvailable(
+        workItemId,
+        validatedInput.model_override,
       );
     }
 
@@ -3726,6 +3766,70 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     }
   }
 
+  private executeModelAvailability(): ShapingModelAvailability {
+    if (this.connectedRuntime === undefined) {
+      return {
+        status: "unavailable",
+        adapter_id: null,
+        adapter_version: null,
+        profile_id: null,
+        available_model_ids: [],
+        distinct_model_count: 0,
+        has_three_distinct_models: false,
+        reason: "runtime_unavailable",
+      };
+    }
+    let configuration: ConnectedExecuteRuntimeConfiguration;
+    try {
+      configuration = connectedExecuteRuntimeConfigurationSchema.parse(
+        this.connectedRuntime.configuration(),
+      );
+    } catch {
+      return {
+        status: "unavailable",
+        adapter_id: null,
+        adapter_version: null,
+        profile_id: null,
+        available_model_ids: [],
+        distinct_model_count: 0,
+        has_three_distinct_models: false,
+        reason: "runtime_configuration_invalid",
+      };
+    }
+    const availableModelIds = [
+      ...new Set(configuration.available_model_ids),
+    ];
+    return {
+      status: availableModelIds.length === 0 ? "unavailable" : "available",
+      adapter_id: configuration.adapter_id,
+      adapter_version: configuration.adapter_version,
+      profile_id: configuration.profile_id,
+      available_model_ids: availableModelIds,
+      distinct_model_count: availableModelIds.length,
+      has_three_distinct_models: availableModelIds.length >= 3,
+      reason: availableModelIds.length === 0 ? "no_models_configured" : null,
+    };
+  }
+
+  private assertExecuteModelAvailable(
+    workItemId: string,
+    requestedModel: string,
+  ): void {
+    const validatedModel = shapingRequestedModelSchema.parse(requestedModel);
+    const availability = this.executeModelAvailability();
+    if (
+      availability.status !== "available" ||
+      !availability.available_model_ids.includes(validatedModel)
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        availability.status === "unavailable"
+          ? "Connected Execute is not configured with any available model."
+          : `Requested Execute model ${validatedModel} is not in available_model_ids.`,
+      );
+    }
+  }
+
   private async launchPreparedShapingMission(
     source: ResolvedSource,
     missionInput: ShapingMissionPackage,
@@ -4333,7 +4437,9 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
           seat,
         );
         const priorUses = modelUse.filter(
-          (use) => seats.indexOf(use.seat) < seatIndex,
+          (use) =>
+            isShapingPhase(use.seat) &&
+            seats.indexOf(use.seat) < seatIndex,
         );
         return [
           seat,
