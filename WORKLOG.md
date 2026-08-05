@@ -5,6 +5,28 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-08-05 · Plan approval → Execute, dedicated-transition enforcement (roadmap 3.4 slice 2) · Codex GPT-5 / Copilot Claude review
+- Added an exact-result Plan approval decision (`Approve & run Execute` / manual-recovery
+  `Approve & prepare Execute`) mirroring the existing Brainstorm/Spec/Plan decision shape: durable
+  intent/manifest, canonical-hash idempotency binding that deliberately excludes launch mode and
+  requested model, no-durable-mutation-on-rejection, and commit-before-launch ordering so a failed
+  connected Execute launch never rolls back an already-decided approval.
+- Gave `ConnectedExecuteRuntime` a `configuration()`/preflight surface symmetric with the shaping
+  runtime, wired Execute model selection and picker options into the approval flow, and added the
+  `shaping/plan/approve` HTTP route through the guarded route factory.
+- Moved `dedicated_operation_required`/`closed_in_slice` enforcement from `portfolio.ts` directly
+  into `WorkItemController.transition()` — the single enforcement point AGENTS.md already claimed —
+  closing the item that previously left it one layer above the controller.
+- Verified at `874d7c0`: 34 test files / 720 tests pass; lint 0 errors / 7 pre-existing warnings;
+  typecheck clean. Four deviations (a second Plan-receipt reader discriminator, pre-lease canonical
+  state, a compiler adaptation, a separate Execute-availability field) each strengthened rather than
+  weakened the guarantees they touched; none was a scope retreat.
+- Commits: `54de9de`..`874d7c0`
+- Review: ship as-is @ `874d7c0` (cross-vendor, clean — only P2/P3 findings, none blocking)
+- Why: closes ROADMAP 3.4 Slice 2's remaining Plan approval → Execute gap so the guided handoff
+  reaches the governed Execute mission through an explicit human gate, without weakening the
+  closed-transition or no-self-approval guarantees.
+
 ## 2026-08-05 · Connected shaping and guided Spec-to-Plan handoff (roadmap 3.4 slice 2) · Codex/Copilot mixed
 - Cut shaping schema v2 across Brainstorm, Spec, and Plan: immutable feedback-bearing revisions,
   one commit-marked applied bundle per revision, durable decision intents/receipts, separate
@@ -328,16 +350,3 @@ not archived — they remain in git history).
 - Commits: c80f3ea 3698751 000208e 809a6ad 668d284 f9e79ce d57e865 ecdfc2b 8d924e7 a818e3e f432ab1 d3f716e 15e3546 b481276 1fec11a
 - Why: delivers roadmap 1.3's focused cross-project board so the founder can filter, move, and
   return to stable work across products without GitHub Projects or raw repository files.
-
-## 2026-07-17 · Portfolio registration and rebuildable index (roadmap 1.2)
-- Added a strict, atomically written v1 workspace registry as durable portfolio truth and kept
-  invalid registrations visible for repair.
-- Replaced the single-workspace cache with a versioned SQLite portfolio projection keyed by
-  workspace and work-item IDs, with atomic full replacement and deterministic ordering.
-- Added portfolio registration/rebuild coordination plus Node-runtime workspace and work-item
-  routes, shared error envelopes, and removal of ambiguous single-workspace handlers.
-- Verified all eight acceptance scenarios and reconstructed the same two-workspace projection
-  after deleting the SQLite index using only registry and `.founder/` artifacts.
-- Commits: e416789 203c556 c7759a7 5ef7bca 935a97e addb81b fc63456 3e17eea
-- Why: completes roadmap 1.2's durable portfolio seam so the focused cross-project Kanban can
-  build on registered workspaces without treating local cache state as truth.
