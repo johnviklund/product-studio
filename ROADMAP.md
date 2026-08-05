@@ -242,18 +242,19 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
   milestones.
 - **Dependencies:** 2.1–2.5 and 3.1–3.3.
 - **Slice 2 selected experience direction (2026-07-31):** Use the guided handoff defined in
-  [`DESIGN.md`](DESIGN.md#connected-shaping-and-spec-approval-roadmap-34-slice-2): connected
+  [`DESIGN.md`](DESIGN.md#connected-guided-handoff-through-execute-approval-roadmap-34-slice-2): connected
   Brainstorm, Spec, and Plan are the normal path, a ready Spec becomes one concise founder decision
   with `Approve & run Plan`, and manual artifact handoff remains collapsed recovery. The
   [directional mockup](docs/design/roadmap-3.4-slice-2-guided-handoff.png) supports the written
-  contract but does not define lifecycle state. Slice 2 is delivered through `Plan result ready`;
-  Plan approval → Execute remains pending.
-- **Status:** In progress — Slice 2 delivered, commits `6ca9b52`–`c0bf64f` (connected Brainstorm,
-  Spec, and Plan launch; per-seat model selection; the Plan mission; a headed end-to-end run with
-  three distinct adapter-observed effective model identities; and a three-cycle review that closed
-  a build-red regression and applied `assertTrustedRequestOrigin` to the slice's own
-  `mission/connected/*` mutations). Remaining: Plan approval → Execute. The 3.4 completion signal
-  is not yet claimed because the cycle does not reach approved implementation.
+  contract but does not define lifecycle state. Slice 2 now reaches the governed Execute handoff
+  through explicit Plan approval.
+- **Status:** In progress — the guided handoff mechanism is delivered through Execute approval.
+  Commits `6ca9b52`–`c0bf64f` delivered connected Brainstorm, Spec, and Plan launch, per-seat model
+  selection, the Plan mission, a headed end-to-end run with three distinct adapter-observed
+  effective model identities, and the closed three-cycle review. Commits `54de9de`–`2e38f73`
+  deliver exact-result Plan approval, recoverable controller execution, Execute model selection,
+  the approval API, and the Plan decision surface. The 3.4 completion signal is not yet claimed
+  because the cycle does not reach approved implementation.
 - **Completion signal:** A real feature completes the version-one cycle without manual prompt or
   result assembly, uses at least two distinct recorded LLM model identities across its
   agent-driven steps, preserves every required human gate, and leaves reproducible mission, result,

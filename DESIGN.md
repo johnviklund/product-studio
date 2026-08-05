@@ -480,7 +480,7 @@ link to exact evidence when available. Raw tool and provider detail remains coll
 
 For a captured idea/todo, keep refinement in a narrow structural side panel: show the immutable original thought, kind, and captured-at timestamp read-only above the editable metadata (project, type, tags, notes). This panel may additionally carry the guided shaping handoff for an item in any of the three eligible phases: `brainstorm`, `spec`, or `plan`. Give a ready Brainstorm result a first-class selection action: selecting that result is an input selection, not result approval, while a ready Spec result has its own explicit approval action. Keep compile, external `TASK.md` execution, and result import in the collapsed recovery path. Do not let this panel accrete an activity feed or reviewer findings — those stay part of the full work-item detail panel once a capture has been promoted into a governed work item.
 
-#### Connected shaping and Spec approval (ROADMAP 3.4 Slice 2)
+#### Connected guided handoff through Execute approval (ROADMAP 3.4 Slice 2)
 
 ![Directional mockup of the guided shaping handoff](docs/design/roadmap-3.4-slice-2-guided-handoff.png)
 
@@ -493,9 +493,9 @@ operations:
 
 1. Every founder action asks the controller to advance the item; it does not mutate lifecycle state
    directly in the browser. The controller commits the action first, releases its lease, and only
-   then idempotently launches the connected Brainstorm, Spec, or Plan mission. If that launch fails
-   after the commit, the decision stands and the surface shows the truthful new phase with the
-   appropriate `Start` or `Retry` recovery action.
+   then idempotently launches the connected Brainstorm, Spec, Plan, or Execute mission. If that
+   launch fails after the commit, the decision stands and the surface shows the truthful new phase
+   with the appropriate `Start` or `Retry` recovery action.
 2. While an agent works, show only truthful bounded states — queued, working, blocked, failed, or
    ready — with a concise latest update. Do not invent percentages or expose raw logs and token
    streams.
@@ -504,18 +504,19 @@ operations:
    with the phase's concise summary, governed decision fields, unresolved questions where supplied,
    and compact provenance. Keep the full metadata editor, duplicated goal-contract fields,
    model/runtime details, evidence, and recovery controls outside the default decision surface.
-4. Keep the decision footer persistent and name the five founder actions directly: `Start
-   Brainstorm`, `Use result & run Spec`, `Approve & run Plan`, `Request changes & rerun`, and
-   `Replan with updated contract`. `Start Brainstorm` is the only route from Idea into Brainstorm;
-   its connected action includes the Brainstorm model and advances and launches in one action, while
-   `Start Brainstorm without a model` is its manual recovery variant. `Request changes & rerun`
-   requires feedback and uses a current-seat model. Put the next-seat model picker on the current
-   decision surface and show every prior seat's requested and effective model, rendering an
+4. Keep the decision footer persistent and name the six founder actions directly: `Start
+   Brainstorm`, `Use result & run Spec`, `Approve & run Plan`, `Approve & run Execute`, `Request
+   changes & rerun`, and `Replan with updated contract`. `Start Brainstorm` is the only route from
+   Idea into Brainstorm; its connected action includes the Brainstorm model and advances and
+   launches in one action, while `Start Brainstorm without a model` is its manual recovery variant.
+   `Approve & prepare Execute` is the Plan approval's manual recovery variant. `Request changes &
+   rerun` requires feedback and uses a current-seat model. Put the next-seat model picker on the
+   current decision surface and show every prior seat's requested and effective model, rendering an
    unobserved model as the literal `unknown`. Recommend and preselect an unused model ahead of a
-   saved preference that was already used; warn about reuse without blocking it. The terminal state
-   here is `Plan result ready`: Execute approval is not part of this slice. The generic
-   `idea → spec`, `spec → brainstorm`, and `plan → spec` arrows are closed in favour of `Request
-   changes`.
+   saved preference that was already used; warn about reuse without blocking it. The guided handoff
+   reaches Execute only when the founder approves the exact Plan result against the current governed
+   contract; that approval creates the governed Execute handoff. The generic `idea → spec`, `spec →
+   brainstorm`, and `plan → spec` arrows are closed in favour of `Request changes`.
 5. If the Spec result changes or is replaced, invalidate the prior approval and return the item to
    an explicit decision state. An agent cannot approve its own result or advance through a human
    gate.

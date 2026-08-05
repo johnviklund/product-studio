@@ -95,12 +95,14 @@ Passing checks can make a result `review_ready`; only an authorized human or pol
 may set it to `completed`.
 
 Forward shaping transitions are reserved to their dedicated decision operations:
-`idea → brainstorm`, `brainstorm → spec`, and `spec → plan`. `Start Brainstorm`, in
+`idea → brainstorm`, `brainstorm → spec`, and `spec → plan`; the `plan → execute` workflow
+decision is likewise reserved to its dedicated Plan-approval operation. `Start Brainstorm`, in
 connected or manual-recovery mode, is the only route from Idea into Brainstorm, so entry always
-publishes a mission. The generic phase update refuses those arrows, while `idea → spec`,
-`spec → brainstorm`, `plan → spec`, and `plan → execute` are closed in this slice. Spec
-requires a real Brainstorm selection, backward movement uses phase-local `Request changes`, and
-Execute approval is not yet available.
+publishes a mission. The generic phase-update route and controller reject direct requests for those
+reserved transitions, while `idea → spec`, `spec → brainstorm`, and `plan → spec` remain closed.
+Spec requires a real Brainstorm selection, backward movement uses phase-local `Request changes`,
+and `Approve & run Execute` validates the exact Plan result and current governed contract before
+creating the governed Execute handoff.
 
 ## 7. Durable-state rule
 
