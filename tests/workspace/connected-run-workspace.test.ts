@@ -110,6 +110,7 @@ async function createWorkspace(): Promise<string> {
 function connectedRun(
   connectedRunId = firstRunId,
   overrides: {
+    phase?: "execute" | "review";
     requestedModel?: string;
     maxEventCount?: number;
     maxEventBytes?: number;
@@ -118,18 +119,19 @@ function connectedRun(
 ): ConnectedRunRecordV2 {
   const envelope = resolveCapabilityEnvelope(["src", "tests"], defaults);
   const envelopeSha256 = hashResolvedCapabilityEnvelope(envelope);
+  const phase = overrides.phase ?? "execute";
   return {
     schema_version: 2,
     connected_run_id: connectedRunId,
     mission: {
       identity: {
-        phase: "execute",
+        phase,
         work_item_id: workItemId,
         goal_version: 1,
         input_revision: 1,
         attempt: 0,
       },
-      path: `.founder/missions/${workItemId}/execute-1-1-0/mission.json`,
+      path: `.founder/missions/${workItemId}/${phase}-1-1-0/mission.json`,
       content_sha256: "a".repeat(64),
       source_commit: "b".repeat(40),
     },
@@ -140,8 +142,14 @@ function connectedRun(
       patch_cycle: 0,
     },
     provenance: {
-      role: { value: "writer", assurance: "controller_observed" },
-      seat: { value: "executor", assurance: "controller_observed" },
+      role: {
+        value: phase === "review" ? "reviewer" : "writer",
+        assurance: "controller_observed",
+      },
+      seat: {
+        value: phase === "review" ? "reviewer" : "executor",
+        assurance: "controller_observed",
+      },
       requested_model: {
         value: overrides.requestedModel ?? "copilot-default",
         assurance: "user_declared",
@@ -161,7 +169,7 @@ function connectedRun(
         value: {
           adapter_id: "copilot-acp",
           adapter_version: "1.0.0",
-          profile_id: "execute-v1",
+          profile_id: `${phase}-v1`,
         },
         assurance: "controller_observed",
       },
@@ -178,11 +186,18 @@ function connectedRun(
         assurance: "controller_observed",
       },
     },
-    authorization: {
-      kind: "capability_envelope",
-      envelope,
-      envelope_sha256: envelopeSha256,
-    },
+    authorization:
+      phase === "review"
+        ? {
+            kind: "review_result_ingress",
+            result_path: `.founder/missions/${workItemId}/review-1-1-0/result.json`,
+            policy_sha256: "f".repeat(64),
+          }
+        : {
+            kind: "capability_envelope",
+            envelope,
+            envelope_sha256: envelopeSha256,
+          },
     acp: {
       protocol_version: { value: null, assurance: "unknown" },
       session_id: { value: null, assurance: "unknown" },
@@ -285,6 +300,11 @@ describe("connected-run workspace storage", () => {
       kind: "lease_held",
       workItemId,
     });
+    await expect(
+      workspace.createConnectedRun(
+        connectedRun(secondRunId, { phase: "review" }),
+      ),
+    ).rejects.toMatchObject({ kind: "lease_held", workItemId });
   });
 
   it("rejects a launch guard whose legacy fingerprint does not bind v2 phase authorization", async () => {
@@ -315,6 +335,84 @@ describe("connected-run workspace storage", () => {
     await expect(workspace.reconcileConnectedRuns()).rejects.toThrow(
       "launch_fingerprint must hash the guarded launch identity",
     );
+  });
+
+  it("rejects a durable v1 run during direct read and reconciliation", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const current = connectedRun();
+    await workspace.createConnectedRun(current);
+    if (current.authorization.kind !== "capability_envelope") {
+      throw new Error("Expected an Execute capability authorization fixture.");
+    }
+    const legacyRecord = {
+      ...current,
+      schema_version: 1,
+      provenance: {
+        ...current.provenance,
+        capability_envelope_sha256: {
+          value: current.authorization.envelope_sha256,
+          assurance: "controller_observed",
+        },
+      },
+      resolved_capability_envelope: {
+        envelope: current.authorization.envelope,
+        envelope_sha256: current.authorization.envelope_sha256,
+      },
+    };
+    delete (legacyRecord as Partial<typeof legacyRecord>).authorization;
+    await writeFile(
+      join(runDirectory(root), "run.json"),
+      `${JSON.stringify(legacyRecord, null, 2)}\n`,
+      "utf8",
+    );
+
+    await expect(
+      workspace.readConnectedRun(workItemId, firstRunId),
+    ).rejects.toBeInstanceOf(InvalidWorkspaceError);
+    await expect(workspace.reconcileConnectedRuns()).rejects.toBeInstanceOf(
+      InvalidWorkspaceError,
+    );
+    await expect(readFile(join(runDirectory(root), "run.json"), "utf8"))
+      .resolves.toContain('"schema_version": 1');
+  });
+
+  it("records an adapter-observed model for a running Review phase", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    await workspace.createConnectedRun(
+      connectedRun(firstRunId, { phase: "review" }),
+    );
+    await workspace.startConnectedRun(
+      workItemId,
+      firstRunId,
+      {
+        protocol_version: { value: 1, assurance: "adapter_attested" },
+        session_id: { value: "review-session", assurance: "adapter_attested" },
+      },
+      {
+        pid: 3333,
+        process_group_id: 3333,
+        started_at: "2026-07-26T18:00:01.000Z",
+      },
+    );
+
+    await expect(
+      workspace.updateConnectedRunEffectiveModel(workItemId, firstRunId, {
+        assurance: "adapter_attested",
+        model_id: "review-model",
+        deployment_id: null,
+        observed_event_sha256: "9".repeat(64),
+      }),
+    ).resolves.toMatchObject({
+      mission: { identity: { phase: "review" } },
+      provenance: {
+        effective_model: {
+          assurance: "adapter_attested",
+          model_id: "review-model",
+        },
+      },
+    });
   });
 
   it("redacts retained events, enforces immutable limits, and stores strict process identity", async () => {

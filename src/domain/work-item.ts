@@ -16,7 +16,7 @@ import type {
   PatchSubject,
   ReviewMissionPackage,
 } from "./mission";
-import type { ConnectedRunRecordV1 } from "./connected-run";
+import type { ConnectedRunRecordV2 } from "./connected-run";
 import type {
   PlanApprovalExecuteTuple,
   ShapingArtifactWriteResult,
@@ -592,13 +592,13 @@ export interface WorkItemRepository {
     reviewPatchCycle?: number,
   ): Promise<MissionArtifactReadResult>;
   createConnectedRun(
-    record: ConnectedRunRecordV1,
-  ): Promise<{ record: ConnectedRunRecordV1; created: boolean }>;
+    record: ConnectedRunRecordV2,
+  ): Promise<{ record: ConnectedRunRecordV2; created: boolean }>;
   readConnectedRun(
     workItemId: string,
     connectedRunId: string,
-  ): Promise<ConnectedRunRecordV1 | null>;
-  listConnectedRuns(workItemId: string): Promise<ConnectedRunRecordV1[]>;
+  ): Promise<ConnectedRunRecordV2 | null>;
+  listConnectedRuns(workItemId: string): Promise<ConnectedRunRecordV2[]>;
   readImportEvidence(
     identity: MissionIdentity,
     importRunId: string,
