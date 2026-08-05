@@ -4885,6 +4885,7 @@ describe("PortfolioService", () => {
     });
     await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
     const missingResult = deferred<AcpRunResult>();
+    const retryResult = deferred<AcpRunResult>();
     const session: AcpSession = {
       session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7d2",
       protocol_version: 1,
@@ -4896,7 +4897,10 @@ describe("PortfolioService", () => {
         process_group_id: 4202,
         started_at: "2026-08-05T19:00:00.000Z",
       },
-      run: vi.fn(() => missingResult.promise),
+      run: vi
+        .fn()
+        .mockImplementationOnce(() => missingResult.promise)
+        .mockImplementationOnce(() => retryResult.promise),
       cancel: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined),
     };
@@ -4971,6 +4975,28 @@ describe("PortfolioService", () => {
       patch_cycle: 1,
     });
     await expect(service.listAttention()).resolves.toEqual([]);
+    const retry = await service.launchConnectedPatch(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(retry.connected_run.connected_run_id).not.toBe(
+      launched.connected_run.connected_run_id,
+    );
+    expect(retry.connected_run).toMatchObject({
+      mission: {
+        identity: { phase: "patch", attempt: 1, patch_cycle: 1 },
+      },
+      governed_tuple: { attempt: 1, patch_cycle: 1 },
+    });
+    const retryReplay = await service.launchConnectedPatch(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(retryReplay.connected_run.connected_run_id).toBe(
+      retry.connected_run.connected_run_id,
+    );
+    expect(fake.prepare).toHaveBeenCalledTimes(2);
+    expect(session.run).toHaveBeenCalledTimes(2);
     index.close();
   });
 

@@ -203,6 +203,7 @@ type WorkspaceGateway = Pick<
   | "readControllerRunManifest"
   | "findAppliedExecuteManifest"
   | "findAppliedPatchManifest"
+  | "findAppliedPatchAttemptManifest"
   | "readAppliedExecuteReviewSubject"
   | "readAppliedPatchReviewSubject"
   | "readExecutionDefaults"
@@ -2821,10 +2822,20 @@ export class PortfolioService {
       );
     }
 
+    const patchManifest = await source.workspace.findAppliedPatchManifest(
+      identity,
+    );
+    if (patchManifest === null || patchManifest.completed_at === undefined) {
+      throw this.missionNotReady(
+        workItemId,
+        "No applied patch-plan manifest matches the governed cycle and review result.",
+      );
+    }
     const appliedReview = await this.readAppliedReviewResult(
       source,
       workItem,
       identity.patch_cycle - 1,
+      patchManifest.attempt,
     );
     const patchPlanIdempotencyKey = [
       deriveControllerIdempotencyKey(
@@ -2832,23 +2843,31 @@ export class PortfolioService {
         "patch",
         identity.goal_version,
         identity.input_revision,
-        identity.attempt,
+        patchManifest.attempt,
       ),
       `cycle-${identity.patch_cycle}`,
       "accept-plan",
       appliedReview.resultContentSha256,
     ].join(":");
-    const patchManifest = await source.workspace.findAppliedPatchManifest(
-      identity,
-    );
     if (
-      patchManifest === null ||
-      patchManifest.completed_at === undefined ||
       patchManifest.idempotency_key !== patchPlanIdempotencyKey
     ) {
       throw this.missionNotReady(
         workItemId,
         "No applied patch-plan manifest matches the governed cycle and review result.",
+      );
+    }
+    const currentAttemptManifest =
+      patchManifest.attempt === identity.attempt
+        ? patchManifest
+        : await source.workspace.findAppliedPatchAttemptManifest(identity);
+    if (
+      currentAttemptManifest === null ||
+      currentAttemptManifest.completed_at === undefined
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "No applied permission-recovery manifest matches the current Patch attempt.",
       );
     }
     if (appliedReview.result.verdict !== "findings") {
@@ -2871,16 +2890,16 @@ export class PortfolioService {
       prior_review_subject: appliedReview.snapshot.mission.review_subject,
     });
     const patchRun = {
-      schema_version: patchManifest.schema_version,
-      run_id: patchManifest.run_id,
-      work_item_id: patchManifest.work_item_id,
-      idempotency_key: patchManifest.idempotency_key,
+      schema_version: currentAttemptManifest.schema_version,
+      run_id: currentAttemptManifest.run_id,
+      work_item_id: currentAttemptManifest.work_item_id,
+      idempotency_key: currentAttemptManifest.idempotency_key,
       phase: "patch" as const,
-      goal_version: patchManifest.goal_version,
-      input_revision: patchManifest.input_revision,
-      attempt: patchManifest.attempt,
-      started_at: patchManifest.started_at,
-      completed_at: patchManifest.completed_at,
+      goal_version: currentAttemptManifest.goal_version,
+      input_revision: currentAttemptManifest.input_revision,
+      attempt: currentAttemptManifest.attempt,
+      started_at: currentAttemptManifest.started_at,
+      completed_at: currentAttemptManifest.completed_at,
       outcome: "applied" as const,
     };
     const executionDefaults = await source.workspace.readExecutionDefaults();
@@ -5230,8 +5249,13 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     source: ResolvedSource,
     workItem: WorkItem,
     reviewPatchCycle: number,
+    reviewAttempt?: number,
   ) {
-    const identity = this.governedReviewIdentity(source, workItem);
+    const currentIdentity = this.governedReviewIdentity(source, workItem);
+    const identity = {
+      ...currentIdentity,
+      attempt: reviewAttempt ?? currentIdentity.attempt,
+    };
     const snapshot = await source.workspace.readMissionResult(
       identity,
       reviewPatchCycle === 0 ? undefined : reviewPatchCycle,

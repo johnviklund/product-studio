@@ -2961,15 +2961,74 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       return null;
     }
 
-    const idempotencyPrefix = [
+    const matches = (
+      await this.readControllerRunManifests(validatedIdentity.work_item_id)
+    ).filter(
+      (manifest) => {
+        const idempotencyPrefix = [
+          validatedIdentity.work_item_id,
+          "patch",
+          validatedIdentity.goal_version,
+          validatedIdentity.input_revision,
+          manifest.attempt,
+          `cycle-${validatedIdentity.patch_cycle}`,
+          "accept-plan",
+          "",
+        ].join(":");
+        return (
+          manifest.phase === "patch" &&
+          manifest.outcome === "applied" &&
+          manifest.goal_version === validatedIdentity.goal_version &&
+          manifest.input_revision === validatedIdentity.input_revision &&
+          manifest.attempt <= validatedIdentity.attempt &&
+          manifest.idempotency_key.startsWith(idempotencyPrefix)
+        );
+      },
+    );
+    if (matches.length > 1) {
+      throw new ControllerConflictError(
+        "mission_not_ready",
+        validatedIdentity.work_item_id,
+        "More than one applied patch-plan manifest matches the governed cycle.",
+      );
+    }
+    return matches[0] ?? null;
+  }
+
+  async findAppliedPatchAttemptManifest(
+    identity: MissionIdentity<"patch">,
+  ): Promise<ControllerRunManifest | null> {
+    const validatedIdentity = missionIdentitySchema.parse(identity);
+    if (validatedIdentity.phase !== "patch") {
+      throw this.missionNotReady(
+        validatedIdentity.work_item_id,
+        "Applied patch-attempt manifest lookup requires patch identity.",
+      );
+    }
+    await this.readManifest();
+    if (!(await this.hasSafeWorkItemsDirectory())) {
+      return null;
+    }
+    const current = await this.readValidated(validatedIdentity.work_item_id);
+    if (
+      current === null ||
+      current.goal.goal_contract?.goal_version !==
+        validatedIdentity.goal_version ||
+      current.state.phase !== "patch" ||
+      current.state.status !== "active" ||
+      current.state.goal_version !== validatedIdentity.goal_version ||
+      current.state.input_revision !== validatedIdentity.input_revision ||
+      current.state.attempt !== validatedIdentity.attempt ||
+      current.state.patch_cycle !== validatedIdentity.patch_cycle
+    ) {
+      return null;
+    }
+    const expectedIdempotencyKey = [
       validatedIdentity.work_item_id,
       "patch",
       validatedIdentity.goal_version,
       validatedIdentity.input_revision,
       validatedIdentity.attempt,
-      `cycle-${validatedIdentity.patch_cycle}`,
-      "accept-plan",
-      "",
     ].join(":");
     const matches = (
       await this.readControllerRunManifests(validatedIdentity.work_item_id)
@@ -2980,16 +3039,14 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         manifest.goal_version === validatedIdentity.goal_version &&
         manifest.input_revision === validatedIdentity.input_revision &&
         manifest.attempt === validatedIdentity.attempt &&
-        manifest.idempotency_key.startsWith(idempotencyPrefix),
+        manifest.idempotency_key === expectedIdempotencyKey,
     );
-    if (matches.length > 1) {
-      throw new ControllerConflictError(
-        "mission_not_ready",
-        validatedIdentity.work_item_id,
-        "More than one applied patch-plan manifest matches the governed cycle.",
-      );
-    }
-    return matches[0] ?? null;
+    return matches.sort(
+      (left, right) =>
+        (left.completed_at ?? left.started_at).localeCompare(
+          right.completed_at ?? right.started_at,
+        ) || left.run_id.localeCompare(right.run_id),
+    )[0] ?? null;
   }
 
   async writeMissionPackage(
