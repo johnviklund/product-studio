@@ -36,7 +36,10 @@ import {
   controllerRunManifestSchema,
   createCaptureInputSchema,
   createWorkItemInputSchema,
+  derivePlanApprovalId,
   parseWorkItemStateForRead,
+  planApprovalIntentSchema,
+  planApprovalManifestSchema,
   productManifestSchema,
   verificationCommandSchema,
   workItemGoalSchema,
@@ -51,6 +54,12 @@ import {
   type ControllerMutationInput,
   type ControllerMutationResult,
   type ControllerRunManifest,
+  type PlanApprovalCommitInput,
+  type PlanApprovalCommitResult,
+  type PlanApprovalIntentCaptureInput,
+  type PlanApprovalIntentV1,
+  type PlanApprovalIntentWriteResult,
+  type PlanApprovalManifestV1,
   type ProductManifest,
   type WorkItem,
   type WorkItemGoal,
@@ -128,10 +137,12 @@ import {
 import {
   brainstormResultSubmissionSchema,
   deriveShapingDecisionId,
+  hashGoalContract,
   hashShapingIngressInstruction,
   hashShapingInput,
   normalizeShapingGoalInput,
   planResultSubmissionSchema,
+  planApprovalReceiptSchema,
   renderShapingTaskMd,
   serializeShapingPackage,
   shapingAppliedMarkerSchema,
@@ -163,6 +174,7 @@ import {
   type ShapingResultSnapshot,
   type ShapingResultSubmission,
   type ShapingPhase,
+  type PlanApprovalReceipt,
   type SpecMissionPackage,
   type StoredShapingArtifact,
 } from "../domain/shaping";
@@ -191,6 +203,7 @@ const SHAPING_RUN_LAUNCH_GUARD_FILE = ".launch-guard.json";
 const SHAPING_RUN_EVENTS_LOCK_FILE = ".events.lock";
 const SHAPING_INGRESS_DIRECTORY = "shaping-ingress";
 const SHAPING_DECISIONS_DIRECTORY = "shaping-decisions";
+const PLAN_APPROVALS_DIRECTORY = "plan-approvals";
 const RUN_EVIDENCE_DIRECTORY = "run-evidence";
 const EXECUTION_DIRECTORY = "execution";
 const EXECUTION_DEFAULTS_FILE = "defaults.json";
@@ -4549,6 +4562,239 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
   }
 
+  async readPlanApprovalIntent(
+    workItemId: string,
+    approvalId: string,
+  ): Promise<PlanApprovalIntentV1 | null> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedApprovalId = SHA256_SCHEMA.parse(approvalId);
+    const paths = this.planApprovalPaths(
+      validatedWorkItemId,
+      validatedApprovalId,
+    );
+    const source = await this.readOptionalFile(paths.intent);
+    if (source === null) {
+      if ((await this.readOptionalFile(paths.manifest)) !== null) {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedWorkItemId,
+          `Plan approval ${validatedApprovalId} has a manifest without an intent.`,
+        );
+      }
+      return null;
+    }
+    const intent = this.parseJson(
+      source,
+      paths.intent,
+      planApprovalIntentSchema,
+    );
+    this.validateStoredPlanApprovalIntent(intent);
+    return intent;
+  }
+
+  async writePlanApprovalIntent(
+    lease: ControllerLease,
+    input: PlanApprovalIntentCaptureInput,
+  ): Promise<PlanApprovalIntentWriteResult> {
+    const validatedLease = this.validateControllerLease(lease);
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+    const nextGoal = workItemGoalSchema.parse(
+      input.goal ?? validatedLease.work_item.goal,
+    );
+    const nextState = workItemStateSchema.parse(input.state);
+    const receipt = this.parseCanonicalPlanApprovalReceipt(
+      input.intent.receipt_bytes,
+      workItemId,
+    );
+    const approvalId = derivePlanApprovalId(input.intent);
+    const nextGoalBytes = validatedLease.acquired_goal_bytes;
+    const nextStateBytes = `${JSON.stringify(nextState, null, 2)}\n`;
+
+    if (
+      input.intent.work_item_id !== workItemId ||
+      nextGoal.work_item_id !== workItemId ||
+      nextState.work_item_id !== workItemId ||
+      !isDeepStrictEqual(nextGoal, validatedLease.work_item.goal) ||
+      nextState.active_run !== undefined ||
+      validatedLease.work_item.state.phase !== "plan" ||
+      validatedLease.work_item.state.status !== "active" ||
+      validatedLease.work_item.goal.goal_contract === undefined ||
+      input.intent.goal_contract_sha256 !== receipt.goal_contract_sha256 ||
+      input.intent.goal_version !== receipt.goal_version ||
+      input.intent.receipt_sha256 !==
+        this.hashArtifactSource(input.intent.receipt_bytes) ||
+      !isDeepStrictEqual(input.intent.execute_tuple, receipt.execute_tuple) ||
+      nextState.phase !== "execute" ||
+      nextState.status !== "active" ||
+      nextState.goal_version !== receipt.execute_tuple.goal_version ||
+      nextState.input_revision !== receipt.execute_tuple.input_revision ||
+      nextState.attempt !== receipt.execute_tuple.attempt ||
+      nextState.patch_cycle !== validatedLease.work_item.state.patch_cycle ||
+      input.intent.expected_mission_content_sha256 !==
+        receipt.mission_content_sha256 ||
+      input.intent.expected_result_content_sha256 !==
+        receipt.result_content_sha256
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Plan approval intent must preserve the governed contract and bind one exact active Execute tuple.",
+      );
+    }
+
+    await this.assertControllerLeaseOwnership(validatedLease);
+    const replay = await this.readMatchingPlanApprovalIntent(
+      workItemId,
+      approvalId,
+      input.intent,
+      nextGoalBytes,
+      nextStateBytes,
+    );
+    if (replay !== null) {
+      return replay;
+    }
+
+    const current = await this.readValidated(workItemId);
+    if (current === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Work item ${workItemId} disappeared while its Plan approval lease was held.`,
+      );
+    }
+    if (!this.matchesLeasedItem(current, validatedLease)) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Durable goal/state changed after Plan approval preconditions were validated.",
+      );
+    }
+    const durableGoalBytes = await this.readRequiredFile(
+      join(this.workItemsDirectory, workItemId, GOAL_FILE),
+    );
+    const durableStateBytes = await this.readRequiredFile(
+      join(this.workItemsDirectory, workItemId, STATE_FILE),
+    );
+    if (
+      durableGoalBytes !== validatedLease.acquired_goal_bytes ||
+      durableStateBytes !== validatedLease.acquired_state_bytes
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Durable goal/state bytes changed between lease validation and Plan approval intent capture.",
+      );
+    }
+
+    const tip = await this.resolveCurrentMissionRevision(workItemId, "plan");
+    if (
+      tip === null ||
+      tip.decision !== null ||
+      JSON.stringify(tip.mission.identity) !==
+        JSON.stringify(receipt.identity) ||
+      tip.mission.content_sha256 !== receipt.mission_content_sha256 ||
+      tip.result?.result_content_sha256 !== receipt.result_content_sha256
+    ) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItemId,
+        "Plan approval intent must bind the undecided applied Plan tip.",
+      );
+    }
+
+    const intent = planApprovalIntentSchema.parse({
+      ...input.intent,
+      approval_id: approvalId,
+      previous_goal_bytes: validatedLease.acquired_goal_bytes,
+      previous_goal_sha256: this.hashArtifactSource(
+        validatedLease.acquired_goal_bytes,
+      ),
+      previous_state_bytes: validatedLease.acquired_state_bytes,
+      previous_state_sha256: this.hashArtifactSource(
+        validatedLease.acquired_state_bytes,
+      ),
+      next_goal_bytes: nextGoalBytes,
+      next_goal_sha256: this.hashArtifactSource(nextGoalBytes),
+      next_state_bytes: nextStateBytes,
+      next_state_sha256: this.hashArtifactSource(nextStateBytes),
+      created_at: new Date().toISOString(),
+    });
+    const paths = this.planApprovalPaths(workItemId, approvalId);
+    await this.ensureDirectory(paths.directory);
+    const source = `${JSON.stringify(intent, null, 2)}\n`;
+    try {
+      await writeFile(paths.intent, source, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      return {
+        intent,
+        intent_path: paths.intent,
+        intent_source: source,
+      };
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") {
+        const raced = await this.readMatchingPlanApprovalIntent(
+          workItemId,
+          approvalId,
+          input.intent,
+          nextGoalBytes,
+          nextStateBytes,
+        );
+        if (raced !== null) {
+          return raced;
+        }
+      }
+      throw error;
+    }
+  }
+
+  async readPlanApprovalManifest(
+    workItemId: string,
+    approvalId: string,
+  ): Promise<PlanApprovalManifestV1 | null> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedApprovalId = SHA256_SCHEMA.parse(approvalId);
+    const intent = await this.readPlanApprovalIntent(
+      validatedWorkItemId,
+      validatedApprovalId,
+    );
+    const manifest = await this.readPlanApprovalManifestFile(
+      validatedWorkItemId,
+      validatedApprovalId,
+    );
+    if (manifest === null) {
+      if (
+        intent !== null &&
+        (await this.readDurablePlanApprovalReceipt(intent)) !== null
+      ) {
+        throw new ControllerConflictError(
+          "repair_required",
+          validatedWorkItemId,
+          `Plan approval ${validatedApprovalId} has a receipt without a manifest.`,
+        );
+      }
+      return null;
+    }
+    if (intent === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        validatedWorkItemId,
+        `Plan approval ${validatedApprovalId} has a manifest without an intent.`,
+      );
+    }
+    this.assertPlanApprovalManifestMatchesIntent(manifest, intent);
+    const receipt = await this.readDurablePlanApprovalReceipt(intent);
+    if (receipt === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        validatedWorkItemId,
+        `Plan approval ${validatedApprovalId} has a manifest without its immutable Plan receipt.`,
+      );
+    }
+    return manifest;
+  }
+
   async publishLeasedShapingMission(
     lease: ControllerLease,
     identityInput: ShapingIdentity,
@@ -4852,6 +5098,235 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       completed_at: new Date().toISOString(),
     });
     await this.writeShapingDecisionManifest(appliedManifest);
+    return {
+      work_item: this.parseWorkItemBytes(
+        committedGoalBytes,
+        committedStateBytes,
+        workItemId,
+      ),
+      manifest: appliedManifest,
+    };
+  }
+
+  async commitPlanApproval(
+    lease: ControllerLease,
+    input: PlanApprovalCommitInput,
+  ): Promise<PlanApprovalCommitResult> {
+    const validatedLease = this.validateControllerLease(lease);
+    const manifest = planApprovalManifestSchema.parse(input.manifest);
+    const nextGoal = workItemGoalSchema.parse(
+      input.goal ?? validatedLease.work_item.goal,
+    );
+    const nextState = workItemStateSchema.parse(input.state);
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+    await this.assertControllerLeaseOwnership(validatedLease);
+
+    const pending = await this.findPendingPlanApprovalManifest(workItemId);
+    if (pending !== null && pending.approval_id !== manifest.approval_id) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Pending Plan approval ${pending.approval_id} must be reconciled before ${manifest.approval_id}.`,
+      );
+    }
+    const existing = await this.readPlanApprovalManifestFile(
+      workItemId,
+      manifest.approval_id,
+    );
+    if (existing !== null) {
+      if (
+        existing.outcome === "applied" &&
+        this.planApprovalManifestIdentityMatches(existing, manifest)
+      ) {
+        const intent = await this.readRequiredPlanApprovalIntent(
+          workItemId,
+          manifest.approval_id,
+        );
+        this.assertPlanApprovalManifestMatchesIntent(existing, intent);
+        await this.requireDurablePlanApprovalReceipt(intent);
+        const current = await this.readValidated(workItemId);
+        if (current === null) {
+          throw new ControllerConflictError(
+            "work_item_not_found",
+            workItemId,
+            `Work item ${workItemId} disappeared after its Plan approval committed.`,
+          );
+        }
+        return {
+          work_item: this.withoutActiveRun(current),
+          manifest: existing,
+        };
+      }
+      if (
+        existing.outcome === "pending" &&
+        this.planApprovalManifestIdentityMatches(existing, manifest)
+      ) {
+        return this.reconcilePlanApprovalCommit(
+          validatedLease,
+          manifest.approval_id,
+        );
+      }
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        `Plan approval ${manifest.approval_id} already has a non-matching durable manifest.`,
+      );
+    }
+
+    this.validatePlanApprovalCommit(
+      validatedLease,
+      nextGoal,
+      nextState,
+      manifest,
+    );
+    const current = await this.readValidated(workItemId);
+    if (current === null || !this.matchesLeasedItem(current, validatedLease)) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Durable goal/state changed after the Plan approval lease was acquired.",
+      );
+    }
+    const intent = await this.readRequiredPlanApprovalIntent(
+      workItemId,
+      manifest.approval_id,
+    );
+    this.assertPlanApprovalManifestMatchesIntent(manifest, intent);
+    await this.requireDurablePlanApprovalReceipt(intent);
+    if (
+      validatedLease.acquired_goal_bytes !== intent.next_goal_bytes ||
+      `${JSON.stringify(nextState, null, 2)}\n` !== intent.next_state_bytes
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Plan approval commit bytes differ from the durable intent.",
+      );
+    }
+
+    await this.writeInitialPlanApprovalManifest(manifest);
+    await this.writePlanApprovalArtifacts(intent);
+    const appliedManifest = planApprovalManifestSchema.parse({
+      ...manifest,
+      outcome: "applied",
+      completed_at: new Date().toISOString(),
+    });
+    await this.writePlanApprovalManifest(appliedManifest);
+    return {
+      work_item: workItemSchema.parse({ goal: nextGoal, state: nextState }),
+      manifest: appliedManifest,
+    };
+  }
+
+  async reconcilePlanApprovalCommit(
+    lease: ControllerLease,
+    approvalIdInput: string,
+  ): Promise<PlanApprovalCommitResult> {
+    const validatedLease = this.validateControllerLease(lease);
+    const approvalId = SHA256_SCHEMA.parse(approvalIdInput);
+    const workItemId = validatedLease.work_item.goal.work_item_id;
+    await this.assertControllerLeaseOwnership(validatedLease);
+
+    const pending = await this.findPendingPlanApprovalManifest(workItemId);
+    if (pending !== null && pending.approval_id !== approvalId) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Pending Plan approval ${pending.approval_id} must be reconciled before ${approvalId}.`,
+      );
+    }
+    const manifest = await this.readPlanApprovalManifestFile(
+      workItemId,
+      approvalId,
+    );
+    if (manifest === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Plan approval ${approvalId} has no durable manifest to reconcile.`,
+      );
+    }
+    const intent = await this.readRequiredPlanApprovalIntent(
+      workItemId,
+      approvalId,
+    );
+    this.assertPlanApprovalManifestMatchesIntent(manifest, intent);
+    await this.requireDurablePlanApprovalReceipt(intent);
+    if (manifest.outcome === "applied") {
+      const current = await this.readValidated(workItemId);
+      if (current === null) {
+        throw new ControllerConflictError(
+          "work_item_not_found",
+          workItemId,
+          `Work item ${workItemId} disappeared after its Plan approval committed.`,
+        );
+      }
+      return {
+        work_item: this.withoutActiveRun(current),
+        manifest,
+      };
+    }
+    if (manifest.outcome !== "pending") {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        `Plan approval ${approvalId} is ${manifest.outcome}, not pending.`,
+      );
+    }
+
+    const workItemDirectory = join(this.workItemsDirectory, workItemId);
+    const durableGoalBytes = await this.readRequiredFile(
+      join(workItemDirectory, GOAL_FILE),
+    );
+    const durableStateBytes = await this.readRequiredFile(
+      join(workItemDirectory, STATE_FILE),
+    );
+    const durableGoalSha256 = this.hashArtifactSource(durableGoalBytes);
+    const durableStateSha256 = this.hashArtifactSource(durableStateBytes);
+    const goalIsNext = durableGoalSha256 === intent.next_goal_sha256;
+    const goalIsPrevious =
+      durableGoalSha256 === intent.previous_goal_sha256;
+    const stateIsNext = durableStateSha256 === intent.next_state_sha256;
+    const stateIsPrevious =
+      durableStateSha256 === intent.previous_state_sha256;
+
+    if (!goalIsNext || !stateIsNext) {
+      if (
+        (goalIsNext || goalIsPrevious) &&
+        (stateIsNext || stateIsPrevious)
+      ) {
+        await this.writePlanApprovalArtifacts(intent);
+      } else {
+        throw new ControllerConflictError(
+          "repair_required",
+          workItemId,
+          `Durable Plan approval pair is unknown: goal ${durableGoalSha256} (next ${intent.next_goal_sha256}, previous ${intent.previous_goal_sha256}); state ${durableStateSha256} (next ${intent.next_state_sha256}, previous ${intent.previous_state_sha256}).`,
+        );
+      }
+    }
+
+    const committedGoalBytes = await this.readRequiredFile(
+      join(workItemDirectory, GOAL_FILE),
+    );
+    const committedStateBytes = await this.readRequiredFile(
+      join(workItemDirectory, STATE_FILE),
+    );
+    if (
+      this.hashArtifactSource(committedGoalBytes) !== manifest.goal_sha256 ||
+      this.hashArtifactSource(committedStateBytes) !== manifest.state_sha256
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Reconciled Plan approval bytes do not match the pending manifest.",
+      );
+    }
+    const appliedManifest = planApprovalManifestSchema.parse({
+      ...manifest,
+      outcome: "applied",
+      completed_at: new Date().toISOString(),
+    });
+    await this.writePlanApprovalManifest(appliedManifest);
     return {
       work_item: this.parseWorkItemBytes(
         committedGoalBytes,
@@ -6708,6 +7183,507 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       intent: join(directory, `${validatedDecisionId}.intent.json`),
       manifest: join(directory, `${validatedDecisionId}.json`),
     };
+  }
+
+  private planApprovalPaths(
+    workItemId: string,
+    approvalId: string,
+  ): { directory: string; intent: string; manifest: string } {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedApprovalId = SHA256_SCHEMA.parse(approvalId);
+    const directory = join(
+      this.workItemsDirectory,
+      validatedWorkItemId,
+      PLAN_APPROVALS_DIRECTORY,
+    );
+    return {
+      directory,
+      intent: join(directory, `${validatedApprovalId}.intent.json`),
+      manifest: join(directory, `${validatedApprovalId}.json`),
+    };
+  }
+
+  private parseCanonicalPlanApprovalReceipt(
+    source: string,
+    workItemId: string,
+  ): PlanApprovalReceipt {
+    let receipt: PlanApprovalReceipt;
+    try {
+      receipt = planApprovalReceiptSchema.parse(JSON.parse(source) as unknown);
+    } catch (error) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        `Plan approval receipt bytes are invalid: ${errorMessage(error)}`,
+      );
+    }
+    if (`${JSON.stringify(receipt, null, 2)}\n` !== source) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Plan approval receipt bytes are not canonical.",
+      );
+    }
+    return receipt;
+  }
+
+  private planApprovalIntentReplayIdentity(
+    intent: PlanApprovalIntentV1,
+  ): object {
+    return {
+      schema_version: intent.schema_version,
+      approval_id: intent.approval_id,
+      work_item_id: intent.work_item_id,
+      launch_mode: intent.launch_mode,
+      requested_model: intent.requested_model,
+      expected_mission_content_sha256:
+        intent.expected_mission_content_sha256,
+      expected_result_content_sha256:
+        intent.expected_result_content_sha256,
+      expected_shaping_state_sha256:
+        intent.expected_shaping_state_sha256,
+      goal_contract_sha256: intent.goal_contract_sha256,
+      goal_version: intent.goal_version,
+      next_goal_bytes: intent.next_goal_bytes,
+      next_goal_sha256: intent.next_goal_sha256,
+      next_state_bytes: intent.next_state_bytes,
+      next_state_sha256: intent.next_state_sha256,
+      receipt_bytes: intent.receipt_bytes,
+      receipt_sha256: intent.receipt_sha256,
+      execute_tuple: intent.execute_tuple,
+    };
+  }
+
+  private validateStoredPlanApprovalIntent(
+    intent: PlanApprovalIntentV1,
+  ): void {
+    let receipt: PlanApprovalReceipt;
+    let nextItem: WorkItem;
+    try {
+      receipt = this.parseCanonicalPlanApprovalReceipt(
+        intent.receipt_bytes,
+        intent.work_item_id,
+      );
+      nextItem = this.parseWorkItemBytes(
+        intent.next_goal_bytes,
+        intent.next_state_bytes,
+        intent.work_item_id,
+      );
+    } catch (error) {
+      throw new ControllerConflictError(
+        "repair_required",
+        intent.work_item_id,
+        `Stored Plan approval intent bytes need repair: ${errorMessage(error)}`,
+      );
+    }
+    if (
+      intent.approval_id !== derivePlanApprovalId(intent) ||
+      intent.previous_goal_sha256 !==
+        this.hashArtifactSource(intent.previous_goal_bytes) ||
+      intent.previous_state_sha256 !==
+        this.hashArtifactSource(intent.previous_state_bytes) ||
+      intent.next_goal_sha256 !==
+        this.hashArtifactSource(intent.next_goal_bytes) ||
+      intent.next_state_sha256 !==
+        this.hashArtifactSource(intent.next_state_bytes) ||
+      intent.receipt_sha256 !==
+        this.hashArtifactSource(intent.receipt_bytes) ||
+      receipt.identity.work_item_id !== intent.work_item_id ||
+      receipt.mission_content_sha256 !==
+        intent.expected_mission_content_sha256 ||
+      receipt.result_content_sha256 !==
+        intent.expected_result_content_sha256 ||
+      receipt.goal_contract_sha256 !== intent.goal_contract_sha256 ||
+      receipt.goal_version !== intent.goal_version ||
+      !isDeepStrictEqual(receipt.execute_tuple, intent.execute_tuple) ||
+      nextItem.goal.goal_contract === undefined ||
+      hashGoalContract(nextItem.goal.goal_contract) !==
+        intent.goal_contract_sha256 ||
+      nextItem.state.phase !== "execute" ||
+      nextItem.state.status !== "active" ||
+      nextItem.state.active_run !== undefined ||
+      nextItem.state.goal_version !== intent.execute_tuple.goal_version ||
+      nextItem.state.input_revision !==
+        intent.execute_tuple.input_revision ||
+      nextItem.state.attempt !== 0
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        intent.work_item_id,
+        "Stored Plan approval intent hashes and governed bindings do not match its durable bytes.",
+      );
+    }
+  }
+
+  private async readMatchingPlanApprovalIntent(
+    workItemId: string,
+    approvalId: string,
+    draft: PlanApprovalIntentCaptureInput["intent"],
+    nextGoalBytes: string,
+    nextStateBytes: string,
+  ): Promise<PlanApprovalIntentWriteResult | null> {
+    const paths = this.planApprovalPaths(workItemId, approvalId);
+    const source = await this.readOptionalFile(paths.intent);
+    if (source === null) {
+      return null;
+    }
+    let intent: PlanApprovalIntentV1;
+    try {
+      intent = this.parseJson(
+        source,
+        paths.intent,
+        planApprovalIntentSchema,
+      );
+      this.validateStoredPlanApprovalIntent(intent);
+    } catch (error) {
+      if (
+        error instanceof ControllerConflictError &&
+        error.kind === "repair_required"
+      ) {
+        throw error;
+      }
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Stored Plan approval intent ${approvalId} needs repair: ${errorMessage(error)}`,
+      );
+    }
+    const expectedIdentity = {
+      approval_id: approvalId,
+      ...draft,
+      next_goal_bytes: nextGoalBytes,
+      next_goal_sha256: this.hashArtifactSource(nextGoalBytes),
+      next_state_bytes: nextStateBytes,
+      next_state_sha256: this.hashArtifactSource(nextStateBytes),
+    };
+    if (
+      !isDeepStrictEqual(
+        this.planApprovalIntentReplayIdentity(intent),
+        expectedIdentity,
+      )
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        `Stored Plan approval intent ${approvalId} differs from its replay.`,
+      );
+    }
+    return {
+      intent,
+      intent_path: paths.intent,
+      intent_source: source,
+    };
+  }
+
+  private async readRequiredPlanApprovalIntent(
+    workItemId: string,
+    approvalId: string,
+  ): Promise<PlanApprovalIntentV1> {
+    const paths = this.planApprovalPaths(workItemId, approvalId);
+    const source = await this.readOptionalFile(paths.intent);
+    if (source === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Plan approval ${approvalId} has no durable intent.`,
+      );
+    }
+    try {
+      const intent = this.parseJson(
+        source,
+        paths.intent,
+        planApprovalIntentSchema,
+      );
+      this.validateStoredPlanApprovalIntent(intent);
+      return intent;
+    } catch (error) {
+      if (error instanceof ControllerConflictError) {
+        throw error;
+      }
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Stored Plan approval intent ${approvalId} needs repair: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  private async readPlanApprovalManifestFile(
+    workItemId: string,
+    approvalId: string,
+  ): Promise<PlanApprovalManifestV1 | null> {
+    const paths = this.planApprovalPaths(workItemId, approvalId);
+    const source = await this.readOptionalFile(paths.manifest);
+    return source === null
+      ? null
+      : this.parseJson(
+          source,
+          paths.manifest,
+          planApprovalManifestSchema,
+        );
+  }
+
+  private async findPendingPlanApprovalManifest(
+    workItemId: string,
+  ): Promise<PlanApprovalManifestV1 | null> {
+    const directory = join(
+      this.workItemsDirectory,
+      workItemId,
+      PLAN_APPROVALS_DIRECTORY,
+    );
+    if (!(await this.hasSafeDirectory(directory))) {
+      return null;
+    }
+    const pending: PlanApprovalManifestV1[] = [];
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.name.endsWith(".intent.json")) {
+        continue;
+      }
+      const match = /^([0-9a-f]{64})\.json$/.exec(entry.name);
+      if (match === null) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "Plan approval entry must use <approval_id>.json",
+        );
+      }
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw this.invalid(
+          join(directory, entry.name),
+          "Plan approval manifest must be a regular file",
+        );
+      }
+      const manifest = await this.readPlanApprovalManifestFile(
+        workItemId,
+        match[1],
+      );
+      if (manifest?.outcome === "pending") {
+        pending.push(manifest);
+      }
+    }
+    if (pending.length > 1) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        `Work item ${workItemId} has ${pending.length} pending Plan approvals.`,
+      );
+    }
+    return pending[0] ?? null;
+  }
+
+  private async writeInitialPlanApprovalManifest(
+    manifest: PlanApprovalManifestV1,
+  ): Promise<void> {
+    const validated = planApprovalManifestSchema.parse(manifest);
+    const paths = this.planApprovalPaths(
+      validated.work_item_id,
+      validated.approval_id,
+    );
+    await this.ensureDirectory(paths.directory);
+    await writeFile(
+      paths.manifest,
+      `${JSON.stringify(validated, null, 2)}\n`,
+      { encoding: "utf8", flag: "wx" },
+    );
+  }
+
+  private async writePlanApprovalManifest(
+    manifest: PlanApprovalManifestV1,
+  ): Promise<void> {
+    const validated = planApprovalManifestSchema.parse(manifest);
+    const paths = this.planApprovalPaths(
+      validated.work_item_id,
+      validated.approval_id,
+    );
+    await this.writeJsonAtomically(paths.manifest, validated);
+  }
+
+  private validatePlanApprovalCommit(
+    lease: ControllerLease,
+    nextGoal: WorkItemGoal,
+    nextState: WorkItemState,
+    manifest: PlanApprovalManifestV1,
+  ): void {
+    const workItemId = lease.work_item.goal.work_item_id;
+    if (
+      !isDeepStrictEqual(nextGoal, lease.work_item.goal) ||
+      nextGoal.work_item_id !== workItemId ||
+      nextGoal.goal_contract === undefined ||
+      nextState.work_item_id !== workItemId ||
+      nextState.phase !== "execute" ||
+      nextState.status !== "active" ||
+      nextState.active_run !== undefined ||
+      nextState.goal_version !== lease.work_item.state.goal_version ||
+      nextState.input_revision !== lease.work_item.state.input_revision ||
+      nextState.attempt !== 0 ||
+      nextState.patch_cycle !== lease.work_item.state.patch_cycle ||
+      manifest.outcome !== "pending" ||
+      manifest.work_item_id !== workItemId ||
+      manifest.goal_contract_sha256 !== hashGoalContract(nextGoal.goal_contract) ||
+      manifest.goal_version !== nextState.goal_version ||
+      manifest.execute_tuple.goal_version !== nextState.goal_version ||
+      manifest.execute_tuple.input_revision !== nextState.input_revision ||
+      manifest.execute_tuple.attempt !== nextState.attempt ||
+      manifest.goal_sha256 !==
+        this.hashArtifactSource(lease.acquired_goal_bytes) ||
+      manifest.state_sha256 !==
+        this.hashArtifactSource(`${JSON.stringify(nextState, null, 2)}\n`)
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Plan approval manifest must match the lease, governed contract, and exact Execute bytes.",
+      );
+    }
+  }
+
+  private planApprovalManifestIdentityMatches(
+    left: PlanApprovalManifestV1,
+    right: PlanApprovalManifestV1,
+  ): boolean {
+    const identity = (manifest: PlanApprovalManifestV1) => ({
+      schema_version: manifest.schema_version,
+      approval_id: manifest.approval_id,
+      work_item_id: manifest.work_item_id,
+      launch_mode: manifest.launch_mode,
+      requested_model: manifest.requested_model,
+      expected_mission_content_sha256:
+        manifest.expected_mission_content_sha256,
+      expected_result_content_sha256:
+        manifest.expected_result_content_sha256,
+      expected_shaping_state_sha256:
+        manifest.expected_shaping_state_sha256,
+      goal_contract_sha256: manifest.goal_contract_sha256,
+      goal_version: manifest.goal_version,
+      receipt_sha256: manifest.receipt_sha256,
+      execute_tuple: manifest.execute_tuple,
+      goal_sha256: manifest.goal_sha256,
+      state_sha256: manifest.state_sha256,
+    });
+    return isDeepStrictEqual(identity(left), identity(right));
+  }
+
+  private assertPlanApprovalManifestMatchesIntent(
+    manifest: PlanApprovalManifestV1,
+    intent: PlanApprovalIntentV1,
+  ): void {
+    if (
+      manifest.approval_id !== intent.approval_id ||
+      manifest.work_item_id !== intent.work_item_id ||
+      manifest.launch_mode !== intent.launch_mode ||
+      manifest.requested_model !== intent.requested_model ||
+      manifest.expected_mission_content_sha256 !==
+        intent.expected_mission_content_sha256 ||
+      manifest.expected_result_content_sha256 !==
+        intent.expected_result_content_sha256 ||
+      manifest.expected_shaping_state_sha256 !==
+        intent.expected_shaping_state_sha256 ||
+      manifest.goal_contract_sha256 !== intent.goal_contract_sha256 ||
+      manifest.goal_version !== intent.goal_version ||
+      manifest.receipt_sha256 !== intent.receipt_sha256 ||
+      !isDeepStrictEqual(manifest.execute_tuple, intent.execute_tuple) ||
+      manifest.goal_sha256 !== intent.next_goal_sha256 ||
+      manifest.state_sha256 !== intent.next_state_sha256
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        intent.work_item_id,
+        "Plan approval manifest does not match its durable intent.",
+      );
+    }
+  }
+
+  private async readDurablePlanApprovalReceipt(
+    intent: PlanApprovalIntentV1,
+  ): Promise<PlanApprovalReceipt | null> {
+    const expected = this.parseCanonicalPlanApprovalReceipt(
+      intent.receipt_bytes,
+      intent.work_item_id,
+    );
+    const snapshot = await this.readShapingPackageSnapshot(expected.identity);
+    const stored = await this.readStoredShapingArtifact(snapshot);
+    if (stored.decision === null) {
+      return null;
+    }
+    if (
+      stored.decision.decision_content_sha256 !== intent.receipt_sha256 ||
+      `${JSON.stringify(stored.decision.receipt, null, 2)}\n` !==
+        intent.receipt_bytes
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        intent.work_item_id,
+        "Durable Plan approval receipt differs from its intent.",
+      );
+    }
+    return planApprovalReceiptSchema.parse(stored.decision.receipt);
+  }
+
+  private async requireDurablePlanApprovalReceipt(
+    intent: PlanApprovalIntentV1,
+  ): Promise<PlanApprovalReceipt> {
+    const receipt = await this.readDurablePlanApprovalReceipt(intent);
+    if (receipt === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        intent.work_item_id,
+        `Plan approval ${intent.approval_id} has no immutable receipt.`,
+      );
+    }
+    return receipt;
+  }
+
+  private async writePlanApprovalArtifacts(
+    intent: PlanApprovalIntentV1,
+  ): Promise<void> {
+    this.validateStoredPlanApprovalIntent(intent);
+    this.parseWorkItemBytes(
+      intent.next_goal_bytes,
+      intent.next_state_bytes,
+      intent.work_item_id,
+    );
+    const workItemDirectory = join(
+      this.workItemsDirectory,
+      intent.work_item_id,
+    );
+    const suffix = randomUUID();
+    const temporaryGoalPath = join(
+      workItemDirectory,
+      `.${GOAL_FILE}.${suffix}.plan-approval.tmp`,
+    );
+    const temporaryStatePath = join(
+      workItemDirectory,
+      `.${STATE_FILE}.${suffix}.plan-approval.tmp`,
+    );
+    const goalPath = join(workItemDirectory, GOAL_FILE);
+    const statePath = join(workItemDirectory, STATE_FILE);
+    try {
+      await writeFile(temporaryGoalPath, intent.next_goal_bytes, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await writeFile(temporaryStatePath, intent.next_state_bytes, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(temporaryGoalPath, goalPath);
+      await rename(temporaryStatePath, statePath);
+    } catch (error) {
+      const cleanupErrors: unknown[] = [];
+      for (const path of [temporaryGoalPath, temporaryStatePath]) {
+        try {
+          await this.unlinkIfPresent(path);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupErrors],
+          "Plan approval write failed and temporary cleanup was incomplete",
+        );
+      }
+      throw error;
+    }
   }
 
   private assertIntentMissionBytes(

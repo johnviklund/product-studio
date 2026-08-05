@@ -68,6 +68,8 @@ import {
   type ActiveRun,
   type ControllerMutationInput,
   type ControllerRunManifest,
+  type PlanApprovalIntentDraft,
+  type PlanApprovalManifestV1,
   type ShapingDecisionIntentDraft,
   type WorkItem,
 } from "../src/domain/work-item";
@@ -520,6 +522,177 @@ async function writeAppliedShapingBundle(
     importReceipt,
     productionReceipt,
     appliedMarker,
+  };
+}
+
+async function preparePlanApprovalCommit(
+  root: string,
+  workspace: ProductWorkspace,
+) {
+  const executeItem = await writeMissionReadyWorkItem(root, firstId);
+  const item: WorkItem = {
+    ...executeItem,
+    state: {
+      ...executeItem.state,
+      phase: "plan",
+      updated_at: "2026-08-03T09:00:00.000Z",
+    },
+  };
+  await writeFile(
+    join(root, ".founder", "work-items", firstId, "state.json"),
+    `${JSON.stringify(item.state, null, 2)}\n`,
+    "utf8",
+  );
+  if (item.goal.goal_contract === undefined) {
+    throw new Error("Expected a contracted Plan work item");
+  }
+
+  const goalContractSha256 = hashGoalContract(item.goal.goal_contract);
+  const specIdentity: ShapingIdentity<"spec"> = {
+    phase: "spec",
+    work_item_id: firstId,
+    input_sha256: "1".repeat(64),
+  };
+  const specMissionContentSha256 = "2".repeat(64);
+  const specResult: SpecResultSubmission = {
+    result_schema_version: 1,
+    spec_mission_content_sha256: specMissionContentSha256,
+    identity: specIdentity,
+    proposal: {
+      purpose: item.goal.goal_contract.purpose,
+      acceptance_criteria: item.goal.goal_contract.acceptance_criteria,
+      non_goals: item.goal.goal_contract.non_goals,
+      allowed_scope: item.goal.goal_contract.allowed_scope,
+      review_ready: item.goal.goal_contract.review_ready,
+    },
+  };
+  const specApproval: SpecApprovalReceipt = {
+    shaping_schema_version: 2,
+    identity: specIdentity,
+    mission_content_sha256: specMissionContentSha256,
+    result_content_sha256: "3".repeat(64),
+    goal_contract_sha256: goalContractSha256,
+    approved_at: "2026-08-03T09:01:00.000Z",
+  };
+  const planInput = {
+    phase: "plan" as const,
+    title: item.goal.title,
+    notes: item.goal.notes,
+    spec_approval_sha256: hashSource(
+      `${JSON.stringify(specApproval, null, 2)}\n`,
+    ),
+    spec_approval: specApproval,
+    spec_result: specResult,
+    repository_base_commit: "a".repeat(40),
+    goal_contract_sha256: goalContractSha256,
+    goal_version: item.goal.goal_contract.goal_version,
+  };
+  const planIdentity: ShapingIdentity<"plan"> = {
+    phase: "plan",
+    work_item_id: firstId,
+    input_sha256: hashShapingInput(planInput),
+  };
+  const plan = await workspace.writeShapingMissionPackage(
+    planIdentity,
+    (paths) =>
+      compilePlanMission({
+        work_item_id: firstId,
+        shaping_input: planInput,
+        paths,
+      }),
+  );
+  const planResult: PlanResultSubmission = {
+    result_schema_version: 1,
+    plan_mission_content_sha256: plan.mission.content_sha256,
+    identity: planIdentity,
+    summary: "Approve one immutable Plan result into Execute.",
+    checklist: [
+      {
+        id: "step-1",
+        step: "Commit the exact Execute transition.",
+        verification_check: "Run the workspace contract test.",
+      },
+    ],
+    relevant_skills: [],
+    product_doc_impacts: [],
+    todo_impacts: [],
+    open_questions: [],
+  };
+  const appliedPlan = await writeAppliedShapingBundle(plan, planResult);
+  const receipt: PlanApprovalReceipt = {
+    shaping_schema_version: 2,
+    identity: planIdentity,
+    mission_content_sha256: plan.mission.content_sha256,
+    result_content_sha256: appliedPlan.resultContentSha256,
+    goal_contract_sha256: goalContractSha256,
+    goal_version: item.goal.goal_contract.goal_version,
+    execute_tuple: {
+      goal_version: item.state.goal_version!,
+      input_revision: item.state.input_revision!,
+      attempt: 0,
+    },
+    approved_at: "2026-08-03T09:02:00.000Z",
+  };
+  const receiptBytes = `${JSON.stringify(receipt, null, 2)}\n`;
+  const draft: PlanApprovalIntentDraft = {
+    schema_version: 1,
+    work_item_id: firstId,
+    launch_mode: "manual",
+    requested_model: null,
+    expected_mission_content_sha256: plan.mission.content_sha256,
+    expected_result_content_sha256: appliedPlan.resultContentSha256,
+    expected_shaping_state_sha256: "4".repeat(64),
+    goal_contract_sha256: goalContractSha256,
+    goal_version: item.goal.goal_contract.goal_version,
+    receipt_bytes: receiptBytes,
+    receipt_sha256: hashSource(receiptBytes),
+    execute_tuple: receipt.execute_tuple,
+  };
+  const nextState = {
+    ...item.state,
+    phase: "execute" as const,
+    updated_at: "2026-08-03T09:03:00.000Z",
+    attempt: 0,
+  };
+  const run = activeRun(firstRunId, `${firstId}:approve-plan`);
+  const lease = await workspace.acquireControllerLease(firstId, run);
+  if (lease === null) {
+    throw new Error("Expected Plan approval lease");
+  }
+  const writtenIntent = await workspace.writePlanApprovalIntent(lease, {
+    intent: draft,
+    state: nextState,
+  });
+  const writtenReceipt = await workspace.writeShapingDecisionReceipt(receipt);
+  const manifest: PlanApprovalManifestV1 = {
+    schema_version: 1,
+    approval_id: writtenIntent.intent.approval_id,
+    work_item_id: firstId,
+    launch_mode: draft.launch_mode,
+    requested_model: draft.requested_model,
+    expected_mission_content_sha256:
+      draft.expected_mission_content_sha256,
+    expected_result_content_sha256: draft.expected_result_content_sha256,
+    expected_shaping_state_sha256: draft.expected_shaping_state_sha256,
+    goal_contract_sha256: draft.goal_contract_sha256,
+    goal_version: draft.goal_version,
+    receipt_sha256: writtenReceipt.receipt_content_sha256,
+    execute_tuple: draft.execute_tuple,
+    goal_sha256: writtenIntent.intent.next_goal_sha256,
+    state_sha256: writtenIntent.intent.next_state_sha256,
+    started_at: "2026-08-03T09:04:00.000Z",
+    outcome: "pending",
+  };
+  return {
+    item,
+    plan,
+    receipt,
+    draft,
+    nextState,
+    run,
+    lease,
+    writtenIntent,
+    manifest,
   };
 }
 
@@ -2001,6 +2174,140 @@ describe("ProductWorkspace", () => {
         competing.writtenIntent.intent.decision_id,
       ),
     });
+  });
+
+  it("commits exact Plan approval bytes and replays the applied manifest", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const prepared = await preparePlanApprovalCommit(root, workspace);
+
+    const committed = await workspace.commitPlanApproval(prepared.lease, {
+      state: prepared.nextState,
+      manifest: prepared.manifest,
+    });
+    expect(committed).toMatchObject({
+      work_item: {
+        goal: prepared.item.goal,
+        state: { phase: "execute", status: "active", attempt: 0 },
+      },
+      manifest: {
+        approval_id: prepared.writtenIntent.intent.approval_id,
+        outcome: "applied",
+      },
+    });
+    expect(
+      await readFile(
+        join(root, ".founder", "work-items", firstId, "goal.yaml"),
+        "utf8",
+      ),
+    ).toBe(prepared.writtenIntent.intent.next_goal_bytes);
+    expect(
+      await readFile(
+        join(root, ".founder", "work-items", firstId, "state.json"),
+        "utf8",
+      ),
+    ).toBe(prepared.writtenIntent.intent.next_state_bytes);
+    await expect(
+      workspace.readPlanApprovalManifest(
+        firstId,
+        prepared.writtenIntent.intent.approval_id,
+      ),
+    ).resolves.toEqual(committed.manifest);
+    await workspace.releaseControllerLease(prepared.lease);
+
+    const replayLease = await workspace.acquireControllerLease(
+      firstId,
+      prepared.run,
+    );
+    if (replayLease === null) {
+      throw new Error("Expected Plan approval replay lease");
+    }
+    await expect(
+      workspace.commitPlanApproval(replayLease, {
+        state: prepared.nextState,
+        manifest: {
+          ...prepared.manifest,
+          started_at: "2026-08-03T10:00:00.000Z",
+        },
+      }),
+    ).resolves.toEqual(committed);
+    await workspace.releaseControllerLease(replayLease);
+  });
+
+  it("fails closed when a Plan approval manifest has no intent", async () => {
+    const root = await createWorkspace();
+    const approvalId = "a".repeat(64);
+    const directory = join(
+      root,
+      ".founder",
+      "work-items",
+      firstId,
+      "plan-approvals",
+    );
+    const manifest: PlanApprovalManifestV1 = {
+      schema_version: 1,
+      approval_id: approvalId,
+      work_item_id: firstId,
+      launch_mode: "manual",
+      requested_model: null,
+      expected_mission_content_sha256: "b".repeat(64),
+      expected_result_content_sha256: "c".repeat(64),
+      expected_shaping_state_sha256: "d".repeat(64),
+      goal_contract_sha256: "e".repeat(64),
+      goal_version: 1,
+      receipt_sha256: "f".repeat(64),
+      execute_tuple: { goal_version: 1, input_revision: 1, attempt: 0 },
+      goal_sha256: "1".repeat(64),
+      state_sha256: "2".repeat(64),
+      started_at: "2026-08-03T09:04:00.000Z",
+      outcome: "pending",
+    };
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, `${approvalId}.json`),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8",
+    );
+
+    await expect(
+      new ProductWorkspace(root).readPlanApprovalManifest(firstId, approvalId),
+    ).rejects.toMatchObject({
+      kind: "repair_required",
+      reason: expect.stringContaining("manifest without an intent"),
+    });
+  });
+
+  it("refuses Plan approval intent bytes outside the exact Execute contract", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const prepared = await preparePlanApprovalCommit(root, workspace);
+
+    await expect(
+      workspace.writePlanApprovalIntent(prepared.lease, {
+        intent: prepared.draft,
+        state: { ...prepared.nextState, phase: "plan" },
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    await expect(
+      workspace.writePlanApprovalIntent(prepared.lease, {
+        intent: prepared.draft,
+        goal: {
+          ...prepared.item.goal,
+          goal_contract: {
+            ...prepared.item.goal.goal_contract!,
+            purpose: "Change the approved contract bytes.",
+          },
+        },
+        state: prepared.nextState,
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    await expect(
+      workspace.readPlanApprovalIntent(
+        firstId,
+        prepared.writtenIntent.intent.approval_id,
+      ),
+    ).resolves.toEqual(prepared.writtenIntent.intent);
+    await workspace.releaseControllerLease(prepared.lease);
   });
 
   it("persists an applied manifest and returns it on idempotent replay", async () => {

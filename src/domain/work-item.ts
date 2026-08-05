@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 import {
@@ -388,6 +390,16 @@ export interface PlanApprovalIntentV1 {
   execute_tuple: PlanApprovalExecuteTuple;
   created_at: string;
 }
+
+export type PlanApprovalIdInput = Pick<
+  PlanApprovalIntentV1,
+  | "work_item_id"
+  | "expected_mission_content_sha256"
+  | "expected_result_content_sha256"
+  | "expected_shaping_state_sha256"
+  | "goal_contract_sha256"
+  | "goal_version"
+>;
 
 export interface PlanApprovalManifestV1 {
   schema_version: 1;
@@ -1358,6 +1370,44 @@ export const approvePlanResultInputSchema: z.ZodType<ApprovePlanResultInput> = z
     goal_contract_sha256: sha256Schema,
   })
   .superRefine(validatePlanApprovalLaunchBinding);
+
+export function derivePlanApprovalId(input: PlanApprovalIdInput): string {
+  const parsed = z
+    .strictObject({
+      work_item_id: workItemIdSchema,
+      expected_mission_content_sha256: sha256Schema,
+      expected_result_content_sha256: sha256Schema,
+      expected_shaping_state_sha256: sha256Schema,
+      goal_contract_sha256: sha256Schema,
+      goal_version: positiveSafeIntegerSchema,
+    })
+    .parse({
+      work_item_id: input.work_item_id,
+      expected_mission_content_sha256:
+        input.expected_mission_content_sha256,
+      expected_result_content_sha256:
+        input.expected_result_content_sha256,
+      expected_shaping_state_sha256:
+        input.expected_shaping_state_sha256,
+      goal_contract_sha256: input.goal_contract_sha256,
+      goal_version: input.goal_version,
+    });
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        work_item_id: parsed.work_item_id,
+        expected_mission_content_sha256:
+          parsed.expected_mission_content_sha256,
+        expected_result_content_sha256:
+          parsed.expected_result_content_sha256,
+        expected_shaping_state_sha256:
+          parsed.expected_shaping_state_sha256,
+        goal_contract_sha256: parsed.goal_contract_sha256,
+        goal_version: parsed.goal_version,
+      }),
+    )
+    .digest("hex");
+}
 
 export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
   z.strictObject({
