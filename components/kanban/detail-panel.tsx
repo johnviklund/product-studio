@@ -19,6 +19,7 @@ import {
 
 import type {
   BrainstormMissionCompilation,
+  ConnectedModelListing,
   ManualShapingIngressResult,
   MissionCompilation,
   PatchMissionCompilation,
@@ -72,6 +73,7 @@ import { canUpdateGoalContract } from "@/src/domain/workflow-policy";
 import {
   boardTransitionActionsForPhase,
   connectedExecuteForItem,
+  connectedPhaseForItem,
   detailPanelModeForItem,
   missionHandoffModeForItem,
   nextActionForPhase,
@@ -80,6 +82,8 @@ import {
   shapingHandoffForItem,
   type BoardColumnId,
   type ConnectedExecuteProjection,
+  type ConnectedPhaseProjection,
+  type ConnectedWorkflowPhase,
   type DecisionFirstShapingHandoffProjection,
   type PatchAttentionProjection,
   type ShapingActionProjection,
@@ -175,6 +179,19 @@ interface ConnectedRunState {
   result: ConnectedRunSummary[];
   loading: boolean;
   error: string | null;
+}
+
+interface ConnectedModelState {
+  itemKey: string;
+  result: ConnectedModelListing | null;
+  loading: boolean;
+  error: string | null;
+}
+
+interface ConnectedModelSelectionState {
+  itemKey: string;
+  phase: ConnectedWorkflowPhase;
+  model: string;
 }
 
 interface ShapingArtifactState {
@@ -490,7 +507,11 @@ interface ShapingCopiedState {
   target: ShapingCopyTarget;
 }
 
-type ConnectedMutation = "launching" | "allowing_once" | "keeping_denied";
+type ConnectedMutation =
+  | "launching"
+  | "cancelling"
+  | "allowing_once"
+  | "keeping_denied";
 
 interface RunEvidenceSectionProps {
   fieldId: string;
@@ -638,13 +659,18 @@ async function requestRunEvidence(
 async function requestConnectedRuns(
   sourceId: string,
   workItemId: string,
+  phase: ConnectedWorkflowPhase,
   signal?: AbortSignal,
 ): Promise<
   { result: ConnectedRunSummary[] | null; error: string | null } | null
 > {
   try {
+    const connectedPath =
+      phase === "execute"
+        ? "mission/connected/run"
+        : `mission/${phase}/connected/run`;
     const response = await fetch(
-      `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/mission/connected/run`,
+      `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/${connectedPath}`,
       { signal },
     );
     const body = (await response.json()) as
@@ -670,6 +696,45 @@ async function requestConnectedRuns(
     return {
       result: null,
       error: "Connected run status could not be loaded. Check the local server and try again.",
+    };
+  }
+}
+
+async function requestConnectedModels(
+  sourceId: string,
+  workItemId: string,
+  signal?: AbortSignal,
+): Promise<
+  { result: ConnectedModelListing | null; error: string | null } | null
+> {
+  try {
+    const response = await fetch(
+      `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/mission/connected/models`,
+      { signal },
+    );
+    const body = (await response.json()) as
+      | ConnectedModelListing
+      | MutationErrorResponse;
+    if (signal?.aborted) {
+      return null;
+    }
+    if (!response.ok || !("model_availability" in body)) {
+      return {
+        result: null,
+        error:
+          "error" in body
+            ? body.error?.message ?? "Connected models could not be loaded."
+            : "Connected models could not be loaded.",
+      };
+    }
+    return { result: body, error: null };
+  } catch {
+    if (signal?.aborted) {
+      return null;
+    }
+    return {
+      result: null,
+      error: "Connected models could not be loaded. Check the local server and try again.",
     };
   }
 }
@@ -3983,6 +4048,317 @@ export function ConnectedExecuteSection({
   );
 }
 
+interface ConnectedReviewSubjectView {
+  phase: "execute" | "patch";
+  commit: string | null;
+  mission_path: string;
+  evidence_path: string;
+}
+
+interface ConnectedPhaseSectionProps {
+  fieldId: string;
+  projection: ConnectedPhaseProjection;
+  subject?: ConnectedReviewSubjectView;
+  reviewAttested: boolean;
+  selectedModel: string | null;
+  loading: boolean;
+  modelsLoading: boolean;
+  error: string | null;
+  mutation: ConnectedMutation | null;
+  manualRecovery?: ReactNode;
+  onReviewAttestedChange: (checked: boolean) => void;
+  onSelectModel: (model: string) => void;
+  onLaunch: () => void;
+  onCancel: () => void;
+  onAllowOnce: () => void;
+  onKeepDenied: () => void;
+}
+
+export function ConnectedPhaseSection({
+  fieldId,
+  projection,
+  subject,
+  reviewAttested,
+  selectedModel,
+  loading,
+  modelsLoading,
+  error,
+  mutation,
+  manualRecovery,
+  onReviewAttestedChange,
+  onSelectModel,
+  onLaunch,
+  onCancel,
+  onAllowOnce,
+  onKeepDenied,
+}: ConnectedPhaseSectionProps) {
+  if (projection.mode === "hidden") {
+    return null;
+  }
+  const phaseLabel = shapingPhaseLabel(projection.phase);
+  const busy = mutation !== null;
+  const primaryAction = projection.actions.find((action) => action.primary);
+  const canLaunch =
+    projection.mode === "launch" &&
+    projection.can_launch &&
+    !modelsLoading &&
+    (!projection.read_only || reviewAttested) &&
+    (projection.model_picker === undefined || selectedModel !== null);
+  const run = projection.run;
+  const status =
+    projection.read_only
+      ? "Read only"
+      : projection.mode === "permission"
+        ? "Permission required"
+        : projection.mode === "finishing"
+          ? "Importing"
+          : projection.mode === "repair"
+            ? "Needs recovery"
+            : run === null
+              ? "Ready"
+              : connectedStatusLabel(run.lifecycle.status);
+
+  return (
+    <section
+      aria-labelledby={`${fieldId}-connected-${projection.phase}`}
+      data-connected-phase={projection.phase}
+      data-connected-mode={projection.mode}
+      className="border-y py-4"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3
+            id={`${fieldId}-connected-${projection.phase}`}
+            className="text-xs font-medium"
+          >
+            Connected {phaseLabel}
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {projection.read_only
+              ? "Review the pinned immutable subject and publish only the strict review result."
+              : "Run the accepted Patch plan with its bounded capability authorization."}
+          </p>
+        </div>
+        <span className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
+          {status}
+        </span>
+      </div>
+
+      {projection.read_only ? (
+        <p className="mt-3 border-l-2 border-border bg-background px-3 py-2.5 text-[11px] leading-5 text-muted-foreground">
+          Read only. Commands, URLs, MCP, credentials, and workspace edits are forbidden; only the pinned review result path is accepted.
+        </p>
+      ) : null}
+
+      {subject === undefined ? null : (
+        <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-y py-3 text-[11px]">
+          <div>
+            <dt className="text-muted-foreground">Pinned subject</dt>
+            <dd className="mt-0.5 capitalize">{subject.phase}</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Subject commit</dt>
+            <dd className="mt-0.5 truncate" title={subject.commit ?? undefined}>
+              {subject.commit?.slice(0, 12) ?? "Unavailable"}
+            </dd>
+          </div>
+          <div className="col-span-2">
+            <dt className="text-muted-foreground">Immutable mission</dt>
+            <dd className="mt-0.5 break-all leading-5">
+              {subject.mission_path}
+            </dd>
+          </div>
+          <div className="col-span-2">
+            <dt className="text-muted-foreground">Immutable evidence</dt>
+            <dd className="mt-0.5 break-all leading-5">
+              {subject.evidence_path}
+            </dd>
+          </div>
+        </dl>
+      )}
+
+      {projection.mode === "launch" ? (
+        <div className="mt-4 space-y-3">
+          {projection.read_only ? (
+            <label className="flex cursor-pointer items-start gap-2.5 text-xs leading-5">
+              <input
+                type="checkbox"
+                checked={reviewAttested}
+                onChange={(event) =>
+                  onReviewAttestedChange(event.target.checked)
+                }
+                className="mt-0.5 size-4 accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              />
+              <span>
+                I attest that this reviewer is independent from the Execute or Patch writer.
+              </span>
+            </label>
+          ) : null}
+          {projection.model_picker === undefined || selectedModel === null ? (
+            <p className="text-xs leading-5 text-muted-foreground">
+              {modelsLoading
+                ? "Loading connected model preflight…"
+                : projection.runtime_unavailable ??
+                  "No connected model is currently available."}
+            </p>
+          ) : (
+            <div>
+              <p className="text-[11px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
+                {phaseLabel} model
+              </p>
+              <ModelPicker
+                picker={projection.model_picker}
+                selectedModel={selectedModel}
+                busy={busy}
+                onSelectModel={onSelectModel}
+                compact
+              />
+            </div>
+          )}
+          <button
+            type="button"
+            data-primary-action="true"
+            disabled={busy || !canLaunch || primaryAction?.enabled === false}
+            onClick={onLaunch}
+            className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {mutation === "launching"
+              ? "Launching…"
+              : `Launch connected ${projection.phase}`}
+          </button>
+        </div>
+      ) : null}
+
+      {projection.mode === "running" && run !== null ? (
+        <button
+          type="button"
+          data-primary-action="true"
+          disabled={busy || primaryAction?.enabled === false}
+          onClick={onCancel}
+          className="mt-4 h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {mutation === "cancelling"
+            ? "Cancelling…"
+            : `Cancel connected ${projection.phase}`}
+        </button>
+      ) : null}
+
+      {projection.mode === "permission" &&
+      !projection.read_only &&
+      projection.permission !== null ? (
+        <div className="mt-4 border-l-2 border-warning bg-background px-3 py-3">
+          <p className="text-xs font-medium">Permission required</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {projection.permission.question}
+          </p>
+          <p className="mt-2 break-all text-[11px] text-muted-foreground">
+            Exact operation hash · {projection.permission.operation.operation_sha256}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-primary-action="true"
+              disabled={busy}
+              onClick={onAllowOnce}
+              className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "allowing_once"
+                ? "Allowing…"
+                : "Allow once and retry"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onKeepDenied}
+              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "keeping_denied"
+                ? "Keeping denied…"
+                : "Keep denied"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {run === null ? null : (
+        <div className="mt-4 border-l-2 border-border bg-background px-3 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-medium">Latest sanitized run</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {run.connected_run_id.slice(0, 12)} · updated {runCompletedAtFormatter.format(new Date(run.lifecycle.updated_at))}
+              </p>
+            </div>
+            <span className="shrink-0 text-[11px] font-medium text-muted-foreground capitalize">
+              {connectedStatusLabel(
+                run.lifecycle.terminal_outcome ?? run.lifecycle.status,
+              )}
+            </span>
+          </div>
+          <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-y py-3 text-[11px]">
+            <div>
+              <dt className="text-muted-foreground">Runtime</dt>
+              <dd className="mt-0.5 break-words">
+                {connectedHarnessValue(run.provenance.harness)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Effective model</dt>
+              <dd className="mt-0.5 break-words">
+                {effectiveModelValue(run.provenance.effective_model)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Authorization</dt>
+              <dd className="mt-0.5 break-words">
+                {run.authorization.kind === "review_result_ingress"
+                  ? "Result-only ingress"
+                  : `Capability envelope · ${run.authorization.envelope_sha256.slice(0, 12)}`}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Bounded diagnostics</dt>
+              <dd className="mt-0.5">
+                {run.diagnostics.count}
+                {run.diagnostics.truncated ? " (truncated)" : ""}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      )}
+
+      {loading && run === null ? (
+        <p className="mt-3 text-xs text-muted-foreground" role="status">
+          Loading connected {projection.phase} status…
+        </p>
+      ) : null}
+      {error === null ? null : (
+        <p
+          className="mt-3 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-foreground"
+          role="alert"
+        >
+          {error}
+        </p>
+      )}
+      {manualRecovery === undefined ? null : (
+        <details
+          data-region="governed-advanced-recovery"
+          className="mt-4 border-t pt-3"
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
+            Advanced recovery
+            <ChevronDown
+              className="size-4 text-muted-foreground"
+              strokeWidth={1.75}
+            />
+          </summary>
+          <div className="mt-4">{manualRecovery}</div>
+        </details>
+      )}
+    </section>
+  );
+}
+
 export function DetailPanel({
   item,
   workspaces,
@@ -4046,6 +4422,10 @@ export function DetailPanel({
     useState<ExpandedRunEvidenceState | null>(null);
   const [connectedRunState, setConnectedRunState] =
     useState<ConnectedRunState | null>(null);
+  const [connectedModelState, setConnectedModelState] =
+    useState<ConnectedModelState | null>(null);
+  const [connectedModelSelectionState, setConnectedModelSelectionState] =
+    useState<ConnectedModelSelectionState | null>(null);
   const [connectedModelOverride, setConnectedModelOverride] = useState("");
   const [connectedMutation, setConnectedMutation] =
     useState<ConnectedMutation | null>(null);
@@ -4423,9 +4803,16 @@ export function DetailPanel({
       ? missionImportState.result
       : null;
   const runEvidenceItemKey = `${item.source_id}:${goal.work_item_id}`;
+  const connectedWorkflowPhase: ConnectedWorkflowPhase | null =
+    state.phase === "execute" ||
+    state.phase === "review" ||
+    state.phase === "patch"
+      ? state.phase
+      : null;
   const connectedRunItemKey = [
     item.source_id,
     goal.work_item_id,
+    connectedWorkflowPhase,
     state.goal_version,
     state.input_revision,
     state.attempt,
@@ -4447,6 +4834,20 @@ export function DetailPanel({
     mode === "governed" &&
     connectedRunState?.itemKey === connectedRunItemKey
       ? connectedRunState.error
+      : null;
+  const connectedModels =
+    mode === "governed" &&
+    connectedModelState?.itemKey === connectedRunItemKey
+      ? connectedModelState.result
+      : null;
+  const connectedModelsLoading =
+    mode === "governed" &&
+    (connectedModelState?.itemKey !== connectedRunItemKey ||
+      connectedModelState.loading);
+  const connectedModelsError =
+    mode === "governed" &&
+    connectedModelState?.itemKey === connectedRunItemKey
+      ? connectedModelState.error
       : null;
   const patchAttention = patchAttentionForItem(item, runEvidence);
   const reviewHandoff = reviewHandoffForItem(item, runEvidence);
@@ -4485,6 +4886,37 @@ export function DetailPanel({
         (stored.evidence.phase === "patch" &&
           stored.evidence.identity.patch_cycle === state.patch_cycle)),
   );
+  const connectedPhaseProjection =
+    connectedWorkflowPhase === "review" || connectedWorkflowPhase === "patch"
+      ? connectedPhaseForItem(
+          item,
+          runEvidence,
+          connectedWorkflowPhase,
+          {
+            runs: connectedRuns,
+            ...(connectedModels === null ? {} : { models: connectedModels }),
+          },
+        )
+      : null;
+  const connectedPhasePicker = connectedPhaseProjection?.model_picker;
+  const selectedConnectedPhaseModel =
+    connectedWorkflowPhase !== null &&
+    connectedModelSelectionState?.itemKey === connectedRunItemKey &&
+    connectedModelSelectionState.phase === connectedWorkflowPhase &&
+    connectedPhasePicker?.options.some(
+      (option) => option.model_id === connectedModelSelectionState.model,
+    )
+      ? connectedModelSelectionState.model
+      : connectedPhasePicker?.selected_model ?? null;
+  const connectedReviewSubject: ConnectedReviewSubjectView | undefined =
+    connectedWorkflowPhase === "review" && appliedReviewSubject !== undefined
+      ? {
+          phase: appliedReviewSubject.evidence.phase as "execute" | "patch",
+          commit: appliedReviewSubject.evidence.result_commit ?? null,
+          mission_path: `.founder/missions/${goal.work_item_id}/${appliedReviewSubject.evidence.phase}-${appliedReviewSubject.evidence.identity.goal_version}-${appliedReviewSubject.evidence.identity.input_revision}-${appliedReviewSubject.evidence.identity.attempt}${appliedReviewSubject.evidence.phase === "patch" ? `-${appliedReviewSubject.evidence.identity.patch_cycle}` : ""}/mission.json`,
+          evidence_path: appliedReviewSubject.summary.evidence_path,
+        }
+      : undefined;
   const runEvidenceLoading =
     mode === "governed" &&
     (runEvidenceState?.itemKey !== runEvidenceItemKey ||
@@ -4550,12 +4982,23 @@ export function DetailPanel({
 
   const loadConnectedRuns = useCallback(
     async (signal?: AbortSignal) => {
-      const loaded = await requestConnectedRuns(
-        item.source_id,
-        goal.work_item_id,
-        signal,
-      );
-      if (loaded === null) {
+      if (connectedWorkflowPhase === null) {
+        return;
+      }
+      const [loaded, loadedModels] = await Promise.all([
+        requestConnectedRuns(
+          item.source_id,
+          goal.work_item_id,
+          connectedWorkflowPhase,
+          signal,
+        ),
+        requestConnectedModels(
+          item.source_id,
+          goal.work_item_id,
+          signal,
+        ),
+      ]);
+      if (loaded === null || loadedModels === null) {
         return;
       }
       setConnectedRunState((current) => ({
@@ -4566,8 +5009,23 @@ export function DetailPanel({
         loading: false,
         error: loaded.error,
       }));
+      setConnectedModelState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          loadedModels.result ??
+          (current?.itemKey === connectedRunItemKey
+            ? current.result
+            : null),
+        loading: false,
+        error: loadedModels.error,
+      }));
     },
-    [connectedRunItemKey, goal.work_item_id, item.source_id],
+    [
+      connectedRunItemKey,
+      connectedWorkflowPhase,
+      goal.work_item_id,
+      item.source_id,
+    ],
   );
 
   const markConnectedRunsLoading = useCallback(() => {
@@ -4575,6 +5033,13 @@ export function DetailPanel({
       itemKey: connectedRunItemKey,
       result:
         current?.itemKey === connectedRunItemKey ? current.result : [],
+      loading: true,
+      error: null,
+    }));
+    setConnectedModelState((current) => ({
+      itemKey: connectedRunItemKey,
+      result:
+        current?.itemKey === connectedRunItemKey ? current.result : null,
       loading: true,
       error: null,
     }));
@@ -4915,32 +5380,15 @@ export function DetailPanel({
   }, [goal.work_item_id, item.source_id, mode, runEvidenceItemKey]);
 
   useEffect(() => {
-    if (mode !== "governed") {
+    if (mode !== "governed" || connectedWorkflowPhase === null) {
       return;
     }
     const controller = new AbortController();
-    void requestConnectedRuns(
-      item.source_id,
-      goal.work_item_id,
-      controller.signal,
-    ).then((loaded) => {
-      if (loaded === null) {
-        return;
-      }
-      setConnectedRunState((current) => ({
-        itemKey: connectedRunItemKey,
-        result:
-          loaded.result ??
-          (current?.itemKey === connectedRunItemKey ? current.result : []),
-        loading: false,
-        error: loaded.error,
-      }));
-    });
+    void loadConnectedRuns(controller.signal);
     return () => controller.abort();
   }, [
-    connectedRunItemKey,
-    goal.work_item_id,
-    item.source_id,
+    connectedWorkflowPhase,
+    loadConnectedRuns,
     mode,
   ]);
 
@@ -6271,6 +6719,228 @@ export function DetailPanel({
     }
   }
 
+  async function handleLaunchConnectedPhase() {
+    if (
+      connectedMutationRef.current ||
+      connectedPhaseProjection?.mode !== "launch" ||
+      !connectedPhaseProjection.can_launch ||
+      connectedWorkflowPhase === null ||
+      connectedWorkflowPhase === "execute" ||
+      connectedModels === null ||
+      connectedModelsLoading ||
+      selectedConnectedPhaseModel === null ||
+      (connectedWorkflowPhase === "review" && !reviewAttested)
+    ) {
+      return;
+    }
+    connectedMutationRef.current = true;
+    setConnectedMutation("launching");
+    markConnectedRunsLoading();
+    const connectedPath = `mission/${connectedWorkflowPhase}/connected/launch`;
+    const requestBody =
+      connectedWorkflowPhase === "review"
+        ? {
+            independence_attested: true as const,
+            model_override: selectedConnectedPhaseModel,
+          }
+        : { model_override: selectedConnectedPhaseModel };
+
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/${connectedPath}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(requestBody),
+        },
+      );
+      const body = (await response.json()) as
+        | ConnectedRunSummary
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setConnectedRunState((current) => ({
+          itemKey: connectedRunItemKey,
+          result:
+            current?.itemKey === connectedRunItemKey ? current.result : [],
+          loading: false,
+          error:
+            "error" in body
+              ? body.error?.message ??
+                `The connected ${connectedWorkflowPhase} run could not be launched.`
+              : `The connected ${connectedWorkflowPhase} run could not be launched.`,
+        }));
+        return;
+      }
+      const launchedRun = body as ConnectedRunSummary;
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result: [
+          ...(current?.itemKey === connectedRunItemKey
+            ? current.result.filter(
+                (run) =>
+                  run.connected_run_id !== launchedRun.connected_run_id,
+              )
+            : []),
+          launchedRun,
+        ],
+        loading: false,
+        error: null,
+      }));
+      setConnectedModelState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          current?.itemKey === connectedRunItemKey ? current.result : null,
+        loading: false,
+        error: null,
+      }));
+    } catch {
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          current?.itemKey === connectedRunItemKey ? current.result : [],
+        loading: false,
+        error: `The connected ${connectedWorkflowPhase} run could not be launched. Check the local server and try again.`,
+      }));
+    } finally {
+      connectedMutationRef.current = false;
+      setConnectedMutation(null);
+    }
+  }
+
+  async function handleCancelConnectedPhase() {
+    if (
+      connectedMutationRef.current ||
+      connectedPhaseProjection?.mode !== "running" ||
+      connectedPhaseProjection.run === null ||
+      connectedWorkflowPhase === null ||
+      connectedWorkflowPhase === "execute"
+    ) {
+      return;
+    }
+    connectedMutationRef.current = true;
+    setConnectedMutation("cancelling");
+    const connectedRunId = connectedPhaseProjection.run.connected_run_id;
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/${connectedWorkflowPhase}/connected/cancel`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ connected_run_id: connectedRunId }),
+        },
+      );
+      const body = (await response.json()) as
+        | ConnectedRunSummary
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setConnectedRunState((current) => ({
+          itemKey: connectedRunItemKey,
+          result:
+            current?.itemKey === connectedRunItemKey ? current.result : [],
+          loading: false,
+          error:
+            "error" in body
+              ? body.error?.message ?? "The connected run could not be cancelled."
+              : "The connected run could not be cancelled.",
+        }));
+        return;
+      }
+      const cancelledRun = body as ConnectedRunSummary;
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result: [
+          ...(current?.itemKey === connectedRunItemKey
+            ? current.result.filter(
+                (run) =>
+                  run.connected_run_id !== cancelledRun.connected_run_id,
+              )
+            : []),
+          cancelledRun,
+        ],
+        loading: false,
+        error: null,
+      }));
+    } catch {
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          current?.itemKey === connectedRunItemKey ? current.result : [],
+        loading: false,
+        error: "The connected run could not be cancelled. Check the local server and try again.",
+      }));
+    } finally {
+      connectedMutationRef.current = false;
+      setConnectedMutation(null);
+    }
+  }
+
+  async function handleConnectedPatchPermission(
+    decision: "allow_once" | "keep_denied",
+  ) {
+    if (
+      connectedMutationRef.current ||
+      connectedWorkflowPhase !== "patch" ||
+      connectedPhaseProjection?.mode !== "permission" ||
+      connectedPhaseProjection.permission === null
+    ) {
+      return;
+    }
+    connectedMutationRef.current = true;
+    setConnectedMutation(
+      decision === "allow_once" ? "allowing_once" : "keeping_denied",
+    );
+    const permission = connectedPhaseProjection.permission;
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/patch/connected/permission`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            connected_run_id: permission.operation.connected_run_id,
+            operation_sha256: permission.operation.operation_sha256,
+            decision,
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | PortfolioWorkItem
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setConnectedRunState((current) => ({
+          itemKey: connectedRunItemKey,
+          result:
+            current?.itemKey === connectedRunItemKey ? current.result : [],
+          loading: false,
+          error:
+            "error" in body
+              ? body.error?.message ??
+                "The Patch permission decision could not be recorded."
+              : "The Patch permission decision could not be recorded.",
+        }));
+        return;
+      }
+      const updatedItem = body as PortfolioWorkItem;
+      onUpdated(
+        updatedItem,
+        decision === "allow_once"
+          ? "Exact Patch permission allowed once; a fresh attempt is ready."
+          : "Exact Patch permission remains denied.",
+      );
+    } catch {
+      setConnectedRunState((current) => ({
+        itemKey: connectedRunItemKey,
+        result:
+          current?.itemKey === connectedRunItemKey ? current.result : [],
+        loading: false,
+        error: "The Patch permission decision could not be recorded. Check the local server and try again.",
+      }));
+    } finally {
+      connectedMutationRef.current = false;
+      setConnectedMutation(null);
+    }
+  }
+
   async function handleConnectedPermission(
     decision: "allow_once" | "keep_denied",
   ) {
@@ -6341,6 +7011,109 @@ export function DetailPanel({
   const transitionActions = boardTransitionActionsForPhase(state.phase);
   const displayedNextAction =
     patchWorkflowNextAction(patchAttention) ?? nextActionForPhase(state.phase);
+  const reviewManualRecovery =
+    connectedWorkflowPhase !== "review" ? undefined : (
+      <div className="space-y-4">
+        <p className="text-xs leading-5 text-muted-foreground">
+          Compile or import the immutable Review mission manually when the connected path cannot be used.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={reviewBusy || !reviewAttested}
+            onClick={() => void handleCompileReviewMission()}
+            className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {compilingReviewMission ? "Compiling…" : "Compile review mission"}
+          </button>
+          <button
+            type="button"
+            disabled={reviewBusy}
+            onClick={() => void handleImportReviewResult()}
+            className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {importingReviewResult ? "Importing…" : "Import review findings"}
+          </button>
+        </div>
+        {reviewMissionImport ? (
+          <div
+            className={`border-l-2 px-3 py-3 text-xs ${
+              reviewMissionImport.evidence.outcome === "applied"
+                ? "border-success bg-success/10"
+                : "border-destructive bg-destructive/10"
+            }`}
+            role="status"
+          >
+            {reviewMissionImport.evidence.outcome === "applied"
+              ? reviewMissionImport.result?.verdict === "findings"
+                ? `${reviewMissionImport.result.findings.length} review finding${reviewMissionImport.result.findings.length === 1 ? "" : "s"} imported`
+                : "Clean review imported"
+              : "Review import rejected"}
+          </div>
+        ) : null}
+        {reviewMissionCompilation ? (
+          <div className="border-l-2 border-border bg-background px-3 py-3">
+            <dl className="space-y-3 text-xs">
+              <div>
+                <dt className="text-muted-foreground">TASK.md</dt>
+                <dd className="mt-1 break-all leading-5">
+                  {reviewMissionCompilation.task_path}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Mission JSON</dt>
+                <dd className="mt-1 break-all leading-5">
+                  {reviewMissionCompilation.mission_path}
+                </dd>
+              </div>
+            </dl>
+            <button
+              type="button"
+              onClick={() =>
+                void handleCopyLaunchInstruction(
+                  reviewMissionCompilation,
+                  reviewMissionItemKey,
+                )
+              }
+              className="mt-4 h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            >
+              Copy review instruction
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  const patchManualRecovery =
+    connectedWorkflowPhase !== "patch" || patchAttention.mode !== "patch_active"
+      ? undefined
+      : (
+          <PatchWorkflowSection
+            fieldId={`${fieldId}-advanced`}
+            projection={patchAttention}
+            patchCycle={state.patch_cycle ?? null}
+            mutation={patchMutation}
+            compilation={patchMissionCompilation}
+            importedEvidence={patchMissionImport}
+            copied={copiedMissionKey === patchMissionItemKey}
+            onAcceptPatchPlan={() => void handleAcceptPatchPlan()}
+            onCompilePatch={() => void handleCompilePatchMission()}
+            onImportPatch={() => void handleImportPatchResult()}
+            onCopyLaunchInstruction={() => {
+              if (patchMissionCompilation !== null) {
+                void handleCopyLaunchInstruction(
+                  patchMissionCompilation,
+                  patchMissionItemKey,
+                );
+              }
+            }}
+          />
+        );
+  const connectedManualRecovery =
+    connectedWorkflowPhase === "review"
+      ? reviewManualRecovery
+      : connectedWorkflowPhase === "patch"
+        ? patchManualRecovery
+        : undefined;
   const goalContractFields: Array<[string, string[] | undefined]> = [
     ["Acceptance criteria", goalContract?.acceptance_criteria],
     ["Non-goals", goalContract?.non_goals],
@@ -6754,23 +7527,25 @@ export function DetailPanel({
 
                   {shapingSection}
 
-                  <ConnectedExecuteSection
-                    fieldId={fieldId}
-                    projection={connectedExecute}
-                    runs={connectedRuns}
-                    loading={connectedRunsLoading}
-                    error={connectedRunsError}
-                    modelOverride={connectedModelOverride}
-                    mutation={connectedMutation}
-                    onModelOverrideChange={setConnectedModelOverride}
-                    onLaunch={() => void handleLaunchConnectedRun()}
-                    onAllowOnce={() =>
-                      void handleConnectedPermission("allow_once")
-                    }
-                    onKeepDenied={() =>
-                      void handleConnectedPermission("keep_denied")
-                    }
-                  />
+                  {connectedWorkflowPhase === "execute" ? (
+                    <ConnectedExecuteSection
+                      fieldId={fieldId}
+                      projection={connectedExecute}
+                      runs={connectedRuns}
+                      loading={connectedRunsLoading}
+                      error={connectedRunsError}
+                      modelOverride={connectedModelOverride}
+                      mutation={connectedMutation}
+                      onModelOverrideChange={setConnectedModelOverride}
+                      onLaunch={() => void handleLaunchConnectedRun()}
+                      onAllowOnce={() =>
+                        void handleConnectedPermission("allow_once")
+                      }
+                      onKeepDenied={() =>
+                        void handleConnectedPermission("keep_denied")
+                      }
+                    />
+                  ) : null}
 
                   {missionEligible || repairEligible || missionImport ? (
                     <section
@@ -6904,28 +7679,71 @@ export function DetailPanel({
                     </section>
                   ) : null}
 
-                  <PatchWorkflowSection
-                    fieldId={fieldId}
-                    projection={patchAttention}
-                    patchCycle={state.patch_cycle ?? null}
-                    mutation={patchMutation}
-                    compilation={patchMissionCompilation}
-                    importedEvidence={patchMissionImport}
-                    copied={copiedMissionKey === patchMissionItemKey}
-                    onAcceptPatchPlan={() => void handleAcceptPatchPlan()}
-                    onCompilePatch={() => void handleCompilePatchMission()}
-                    onImportPatch={() => void handleImportPatchResult()}
-                    onCopyLaunchInstruction={() => {
-                      if (patchMissionCompilation !== null) {
-                        void handleCopyLaunchInstruction(
-                          patchMissionCompilation,
-                          patchMissionItemKey,
-                        );
-                      }
-                    }}
-                  />
+                  {patchAttention.mode === "patch_active" ? null : (
+                    <PatchWorkflowSection
+                      fieldId={fieldId}
+                      projection={patchAttention}
+                      patchCycle={state.patch_cycle ?? null}
+                      mutation={patchMutation}
+                      compilation={patchMissionCompilation}
+                      importedEvidence={patchMissionImport}
+                      copied={copiedMissionKey === patchMissionItemKey}
+                      onAcceptPatchPlan={() => void handleAcceptPatchPlan()}
+                      onCompilePatch={() => void handleCompilePatchMission()}
+                      onImportPatch={() => void handleImportPatchResult()}
+                      onCopyLaunchInstruction={() => {
+                        if (patchMissionCompilation !== null) {
+                          void handleCopyLaunchInstruction(
+                            patchMissionCompilation,
+                            patchMissionItemKey,
+                          );
+                        }
+                      }}
+                    />
+                  )}
 
-                  {reviewEligible && appliedReviewSubject ? (
+                  {connectedPhaseProjection === null ? null : (
+                    <ConnectedPhaseSection
+                      fieldId={fieldId}
+                      projection={connectedPhaseProjection}
+                      subject={connectedReviewSubject}
+                      reviewAttested={reviewAttested}
+                      selectedModel={selectedConnectedPhaseModel}
+                      loading={connectedRunsLoading}
+                      modelsLoading={connectedModelsLoading}
+                      error={connectedRunsError ?? connectedModelsError}
+                      mutation={connectedMutation}
+                      manualRecovery={connectedManualRecovery}
+                      onReviewAttestedChange={(checked) =>
+                        setReviewAttestationState({
+                          itemKey: reviewMissionItemKey,
+                          checked,
+                        })
+                      }
+                      onSelectModel={(model) => {
+                        if (connectedWorkflowPhase === null) {
+                          return;
+                        }
+                        setConnectedModelSelectionState({
+                          itemKey: connectedRunItemKey,
+                          phase: connectedWorkflowPhase,
+                          model,
+                        });
+                      }}
+                      onLaunch={() => void handleLaunchConnectedPhase()}
+                      onCancel={() => void handleCancelConnectedPhase()}
+                      onAllowOnce={() =>
+                        void handleConnectedPatchPermission("allow_once")
+                      }
+                      onKeepDenied={() =>
+                        void handleConnectedPatchPermission("keep_denied")
+                      }
+                    />
+                  )}
+
+                  {connectedPhaseProjection === null &&
+                  reviewEligible &&
+                  appliedReviewSubject ? (
                     <section
                       aria-labelledby={`${fieldId}-review-handoff`}
                       className="border-y py-4"

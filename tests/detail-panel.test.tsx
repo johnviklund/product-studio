@@ -6,6 +6,7 @@ import {
   canEditGoalContractFromFullWorkItem,
   clearShapingStateForExecuteHandoff,
   ConnectedExecuteSection,
+  ConnectedPhaseSection,
   dispatchShapingManualRecoveryAction,
   PatchWorkflowSection,
   retainedControllerLeaseRepairForConflict,
@@ -42,6 +43,7 @@ import type { ShapingRunSummary } from "../src/domain/shaping-run";
 import type { GoalContract, WorkItemPhase } from "../src/domain/work-item";
 import {
   shapingHandoffForItem,
+  type ConnectedPhaseProjection,
   type DecisionFirstShapingHandoffProjection,
   type ShapingHandoffItemProjectionInput,
   type ShapingRunProjectionInput,
@@ -756,6 +758,104 @@ const connectedRun: ConnectedRunSummary = {
   },
   diagnostics: { count: 1, truncated: false },
 };
+
+const connectedReviewRun: ConnectedRunSummary = {
+  ...connectedRun,
+  mission: {
+    ...connectedRun.mission,
+    identity: { ...connectedRun.mission.identity, phase: "review" },
+  },
+  provenance: {
+    ...connectedRun.provenance,
+    role: { value: "reviewer", assurance: "controller_observed" },
+    seat: { value: "reviewer", assurance: "controller_observed" },
+    adapter_profile: {
+      value: {
+        adapter_id: "copilot-acp",
+        adapter_version: "1",
+        profile_id: "review-v1",
+      },
+      assurance: "controller_observed",
+    },
+  },
+  authorization: {
+    kind: "review_result_ingress",
+    policy_sha256: "f".repeat(64),
+  },
+};
+
+const connectedPatchRun: ConnectedRunSummary = {
+  ...connectedRun,
+  mission: {
+    ...connectedRun.mission,
+    identity: {
+      ...connectedRun.mission.identity,
+      phase: "patch",
+      patch_cycle: 1,
+    },
+  },
+  governed_tuple: { ...connectedRun.governed_tuple, patch_cycle: 1 },
+};
+
+const reviewModelPicker = {
+  seat: "review" as const,
+  options: [
+    {
+      ...decisionModelOption("review-model", {
+        recommended: true,
+        preselected: true,
+      }),
+      current_revision: false,
+    },
+  ],
+  selected_model: "review-model",
+  recommendation_note: null,
+  reuse_warning: null,
+};
+
+const patchModelPicker = {
+  ...reviewModelPicker,
+  seat: "patch" as const,
+  options: [
+    {
+      ...decisionModelOption("patch-model", {
+        recommended: true,
+        preselected: true,
+      }),
+      current_revision: false,
+    },
+  ],
+  selected_model: "patch-model",
+};
+
+function renderConnectedPhase(
+  projection: ConnectedPhaseProjection,
+  overrides: Partial<ComponentProps<typeof ConnectedPhaseSection>> = {},
+): string {
+  return renderToStaticMarkup(
+    <ConnectedPhaseSection
+      fieldId="detail"
+      projection={projection}
+      reviewAttested={false}
+      selectedModel={projection.model_picker?.selected_model ?? null}
+      loading={false}
+      modelsLoading={false}
+      error={null}
+      mutation={null}
+      onReviewAttestedChange={noop}
+      onSelectModel={noop}
+      onLaunch={noop}
+      onCancel={noop}
+      onAllowOnce={noop}
+      onKeepDenied={noop}
+      {...overrides}
+    />,
+  );
+}
+
+function primaryActionCount(html: string): number {
+  return html.match(/data-primary-action="true"/g)?.length ?? 0;
+}
 
 describe("detail panel shaping workflow", () => {
   it("renders the eligible Brainstorm controls and an explicit empty state", () => {
@@ -3098,6 +3198,206 @@ describe("detail panel connected execution", () => {
     expect(html).toContain("Allow once and retry");
     expect(html).toContain("Keep denied");
     expect(html).not.toContain("Launch connected run");
+  });
+});
+
+describe("detail panel connected Review and Patch", () => {
+  const reviewReady: ConnectedPhaseProjection = {
+    phase: "review",
+    mode: "launch",
+    can_launch: true,
+    read_only: true,
+    permission: null,
+    run: null,
+    authorization: null,
+    model_picker: reviewModelPicker,
+    actions: [
+      {
+        kind: "launch_phase",
+        phase: "review",
+        label: "Launch connected review",
+        primary: true,
+        enabled: true,
+        connected_run_id: null,
+      },
+    ],
+  };
+  const patchReady: ConnectedPhaseProjection = {
+    ...reviewReady,
+    phase: "patch",
+    read_only: false,
+    model_picker: patchModelPicker,
+    actions: [
+      {
+        kind: "launch_phase",
+        phase: "patch",
+        label: "Launch connected patch",
+        primary: true,
+        enabled: true,
+        connected_run_id: null,
+      },
+    ],
+  };
+
+  it("leads Review with the pinned subject, read-only attestation, and one model-backed launch", () => {
+    const subject = {
+      phase: "execute" as const,
+      commit: gitCommit,
+      mission_path: `.founder/missions/${workItemId}/execute-1-1-0/mission.json`,
+      evidence_path: evidencePath,
+    };
+    const unattested = renderConnectedPhase(reviewReady, {
+      subject,
+      manualRecovery: <p>Compile review mission manually</p>,
+    });
+    const attested = renderConnectedPhase(reviewReady, {
+      subject,
+      reviewAttested: true,
+      manualRecovery: <p>Compile review mission manually</p>,
+    });
+
+    expect(unattested).toContain("Connected Review");
+    expect(unattested).toContain("Read only");
+    expect(unattested).toContain("Pinned subject");
+    expect(unattested).toContain(subject.mission_path);
+    expect(unattested).toContain(subject.evidence_path);
+    expect(unattested).toContain("review-model · unused");
+    expect(buttonAttributes(unattested, "Launch connected review")).toContain(
+      'disabled=""',
+    );
+    expect(buttonAttributes(attested, "Launch connected review")).not.toContain(
+      'disabled=""',
+    );
+    expect(primaryActionCount(attested)).toBe(1);
+    expect(attested).toContain("Advanced recovery");
+    expect(attested).toContain("Compile review mission manually");
+    expect(attested).not.toContain("Allow once and retry");
+    expect(attested).not.toContain("Capability envelope");
+    expect(attested).not.toContain("raw ACP");
+    expect(attested).not.toContain("terminal output");
+  });
+
+  it("shows bounded running and failed states with phase-safe cancellation or retry", () => {
+    const reviewRunning = renderConnectedPhase({
+      ...reviewReady,
+      mode: "running",
+      can_launch: false,
+      run: connectedReviewRun,
+      authorization: connectedReviewRun.authorization,
+      model_picker: undefined,
+      actions: [
+        {
+          kind: "cancel_run",
+          phase: "review",
+          label: "Cancel connected review",
+          primary: true,
+          enabled: true,
+          connected_run_id: connectedReviewRun.connected_run_id,
+        },
+      ],
+    });
+    const failedPatchRun: ConnectedRunSummary = {
+      ...connectedPatchRun,
+      lifecycle: {
+        ...connectedPatchRun.lifecycle,
+        status: "terminal",
+        completed_at: "2026-07-26T12:02:00.000Z",
+        terminal_outcome: "failed",
+        partial: true,
+      },
+    };
+    const patchFailed = renderConnectedPhase({
+      ...patchReady,
+      run: failedPatchRun,
+      authorization: failedPatchRun.authorization,
+    });
+
+    expect(reviewRunning).toContain("Cancel connected review");
+    expect(primaryActionCount(reviewRunning)).toBe(1);
+    expect(reviewRunning).toContain("Result-only ingress");
+    expect(reviewRunning).toContain("Latest sanitized run");
+    expect(reviewRunning).not.toContain("Allow once and retry");
+    expect(patchFailed).toContain("failed");
+    expect(patchFailed).toContain("Launch connected patch");
+    expect(patchFailed).toContain("Capability envelope");
+    expect(primaryActionCount(patchFailed)).toBe(1);
+    expect(patchFailed).not.toContain("Cancel connected review");
+  });
+
+  it("keeps clean and findings recovery inside the collapsed manual handoff", () => {
+    const clean = renderConnectedPhase(reviewReady, {
+      reviewAttested: true,
+      manualRecovery: <p>Clean review imported</p>,
+    });
+    const findings = renderConnectedPhase(reviewReady, {
+      reviewAttested: true,
+      manualRecovery: <p>2 review findings imported</p>,
+    });
+
+    expect(clean).toContain("Advanced recovery");
+    expect(clean).toContain("Clean review imported");
+    expect(findings).toContain("Advanced recovery");
+    expect(findings).toContain("2 review findings imported");
+    expect(clean).toContain("Launch connected review");
+    expect(findings).toContain("Launch connected review");
+  });
+
+  it("renders exact permission recovery for Patch only", () => {
+    const patchPermission: ConnectedPhaseProjection = {
+      phase: "patch",
+      mode: "permission",
+      can_launch: false,
+      read_only: false,
+      permission: {
+        ...missingPermissionAttention,
+        governed_tuple: connectedPatchRun.governed_tuple,
+      },
+      run: {
+        ...connectedPatchRun,
+        lifecycle: {
+          ...connectedPatchRun.lifecycle,
+          status: "terminal",
+          completed_at: "2026-07-26T12:02:00.000Z",
+          terminal_outcome: "missing_permission",
+          partial: true,
+        },
+      },
+      authorization: connectedPatchRun.authorization,
+      actions: [
+        {
+          kind: "allow_once",
+          phase: "patch",
+          label: "Allow once and retry",
+          primary: true,
+          enabled: true,
+          connected_run_id: connectedPatchRun.connected_run_id,
+        },
+        {
+          kind: "keep_denied",
+          phase: "patch",
+          label: "Keep denied",
+          primary: false,
+          enabled: true,
+          connected_run_id: connectedPatchRun.connected_run_id,
+        },
+      ],
+    };
+    const patch = renderConnectedPhase(patchPermission);
+    const impossibleReview = renderConnectedPhase({
+      ...patchPermission,
+      phase: "review",
+      read_only: true,
+      run: connectedReviewRun,
+      authorization: connectedReviewRun.authorization,
+      actions: [],
+    });
+
+    expect(patch).toContain(missingPermissionAttention.operation.operation_sha256);
+    expect(patch).toContain("Allow once and retry");
+    expect(patch).toContain("Keep denied");
+    expect(primaryActionCount(patch)).toBe(1);
+    expect(impossibleReview).not.toContain("Allow once and retry");
+    expect(impossibleReview).not.toContain("Keep denied");
   });
 });
 
