@@ -5261,6 +5261,51 @@ describe("PortfolioService", () => {
     expect(prepared.sanitized_profile).not.toHaveProperty(
       "capability_envelope",
     );
+    const modelRoot = await createWorkspace("Connected Model Options Workspace");
+    const modelRepository = new ProductWorkspace(modelRoot);
+    const modelItem = await modelRepository.create({
+      title: "Inspect connected model options",
+      type: "Feature",
+    });
+    const modelRegistration = await configuredReview.service.register({
+      workspace_path: modelRoot,
+    });
+    await expect(
+      configuredReview.service.getConnectedModelOptions(
+        modelRegistration.workspace.workspace_id,
+        modelItem.goal.work_item_id,
+      ),
+    ).resolves.toMatchObject({
+      model_availability: {
+        execute: {
+          status: "unavailable",
+          reason: "no_models_configured",
+        },
+        review: {
+          status: "available",
+          available_model_ids: ["review-model"],
+          reason: null,
+        },
+        patch: {
+          status: "unavailable",
+          reason: "no_models_configured",
+        },
+      },
+      model_picker_options: {
+        execute: [],
+        review: [
+          {
+            model_id: "review-model",
+            used_by_seats: [],
+            saved_preference: false,
+            recommended: true,
+            preselected: true,
+            reuse_warning: null,
+          },
+        ],
+        patch: [],
+      },
+    });
     configuredReview.index.close();
   });
 

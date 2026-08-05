@@ -19,7 +19,11 @@ export async function GET(
     const service = await getPortfolioService();
 
     return Response.json(
-      await service.listConnectedRuns(sourceId, workItemId),
+      await service.listConnectedRunsForPhase(
+        sourceId,
+        workItemId,
+        "execute",
+      ),
     );
   } catch (error) {
     return errorResponse(error);

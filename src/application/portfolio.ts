@@ -454,6 +454,14 @@ export interface ShapingModelAvailability {
   reason: string | null;
 }
 
+export interface ConnectedModelListing {
+  model_availability: Record<ConnectedRunPhase, ShapingModelAvailability>;
+  model_picker_options: Record<
+    ConnectedRunPhase,
+    ShapingModelPickerOption[]
+  >;
+}
+
 export interface ShapingRuntimePrepareInput {
   workspace_cwd: string;
   mission: ShapingMissionPackage;
@@ -2036,6 +2044,64 @@ export class PortfolioService {
 
   getPatchModelAvailability(): ShapingModelAvailability {
     return this.patchModelAvailability();
+  }
+
+  async getConnectedModelOptions(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<ConnectedModelListing> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const [artifacts, shapingRuns, connectedRuns] = await Promise.all([
+      source.workspace.listShapingArtifacts(workItemId),
+      source.workspace.listShapingRuns(workItemId),
+      source.workspace.listConnectedRuns(workItemId),
+    ]);
+    const modelUse = this.workflowModelUse(
+      workItemId,
+      artifacts,
+      shapingRuns,
+      connectedRuns,
+    );
+    const modelAvailability = {
+      execute: this.executeModelAvailability(),
+      review: this.reviewModelAvailability(),
+      patch: this.patchModelAvailability(),
+    } satisfies Record<ConnectedRunPhase, ShapingModelAvailability>;
+    const optionEntries = await Promise.all(
+      (Object.keys(modelAvailability) as ConnectedRunPhase[]).map(
+        async (seat) => {
+          const availability = modelAvailability[seat];
+          if (
+            availability.status === "unavailable" ||
+            availability.adapter_id === null
+          ) {
+            return [seat, []] as const;
+          }
+          const saved = await this.preferencesStore.getPreference(
+            availability.adapter_id,
+            seat,
+          );
+          return [
+            seat,
+            shapingModelPickerOptions(
+              availability.available_model_ids,
+              modelUse,
+              saved,
+            ),
+          ] as const;
+        },
+      ),
+    );
+    return {
+      model_availability: modelAvailability,
+      model_picker_options: Object.fromEntries(optionEntries) as Record<
+        ConnectedRunPhase,
+        ShapingModelPickerOption[]
+      >,
+    };
   }
 
   async launchConnectedExecute(

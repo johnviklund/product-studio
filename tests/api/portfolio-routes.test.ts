@@ -61,6 +61,14 @@ import * as portfolioConnectedLaunchRoute from "../../app/api/portfolio/work-ite
 import * as portfolioConnectedRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/run/route";
 import * as portfolioConnectedCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/cancel/route";
 import * as portfolioConnectedPermissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/permission/route";
+import * as portfolioConnectedModelsRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/connected/models/route";
+import * as portfolioConnectedReviewLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/launch/route";
+import * as portfolioConnectedReviewRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/run/route";
+import * as portfolioConnectedReviewCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/cancel/route";
+import * as portfolioConnectedPatchLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/connected/launch/route";
+import * as portfolioConnectedPatchRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/connected/run/route";
+import * as portfolioConnectedPatchCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/connected/cancel/route";
+import * as portfolioConnectedPatchPermissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/connected/permission/route";
 import * as portfolioShapingRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/route";
 import * as portfolioBrainstormMissionRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/mission/route";
 import * as portfolioBrainstormImportRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/brainstorm/import/route";
@@ -117,6 +125,15 @@ const launchPortfolioConnectedMission = portfolioConnectedLaunchRoute.POST;
 const getPortfolioConnectedRuns = portfolioConnectedRunRoute.GET;
 const cancelPortfolioConnectedRun = portfolioConnectedCancelRoute.POST;
 const decidePortfolioConnectedPermission = portfolioConnectedPermissionRoute.POST;
+const getPortfolioConnectedModels = portfolioConnectedModelsRoute.GET;
+const launchPortfolioConnectedReview = portfolioConnectedReviewLaunchRoute.POST;
+const getPortfolioConnectedReviewRuns = portfolioConnectedReviewRunRoute.GET;
+const cancelPortfolioConnectedReview = portfolioConnectedReviewCancelRoute.POST;
+const launchPortfolioConnectedPatch = portfolioConnectedPatchLaunchRoute.POST;
+const getPortfolioConnectedPatchRuns = portfolioConnectedPatchRunRoute.GET;
+const cancelPortfolioConnectedPatch = portfolioConnectedPatchCancelRoute.POST;
+const decidePortfolioConnectedPatchPermission =
+  portfolioConnectedPatchPermissionRoute.POST;
 const listPortfolioShaping = portfolioShapingRoute.GET;
 
 const createdRoots: string[] = [];
@@ -460,6 +477,13 @@ function connectedRunRequest(): Request {
   );
 }
 
+function connectedGetRequest(relativePath: string): Request {
+  return new Request(
+    `http://localhost/api/portfolio/work-items/source/item/${relativePath}`,
+    { method: "GET" },
+  );
+}
+
 function phaseUpdateContext(sourceId: string, workItemId: string) {
   return { params: Promise.resolve({ sourceId, workItemId }) };
 }
@@ -489,6 +513,7 @@ interface ShapingGetCase {
 interface ConnectedPostCase {
   name: string;
   action: "launch" | "cancel" | "permission";
+  relativePath: string;
   handler: ApiRouteHandler;
   body: Record<string, unknown>;
   serviceMethod: string;
@@ -522,6 +547,7 @@ const CONNECTED_POST_CASES: ConnectedPostCase[] = [
   {
     name: "connected permission",
     action: "permission",
+    relativePath: "mission/connected/permission",
     handler: decidePortfolioConnectedPermission,
     body: {
       connected_run_id: SHAPING_RUN_ID,
@@ -534,6 +560,7 @@ const CONNECTED_POST_CASES: ConnectedPostCase[] = [
   {
     name: "connected launch",
     action: "launch",
+    relativePath: "mission/connected/launch",
     handler: launchPortfolioConnectedMission,
     body: { model_override: "model-current" },
     serviceMethod: "launchConnectedExecute",
@@ -542,10 +569,63 @@ const CONNECTED_POST_CASES: ConnectedPostCase[] = [
   {
     name: "connected cancel",
     action: "cancel",
+    relativePath: "mission/connected/cancel",
     handler: cancelPortfolioConnectedRun,
     body: { connected_run_id: SHAPING_RUN_ID },
     serviceMethod: "cancelConnectedRun",
     serviceResult: { connected_run: { status: "cancelled" } },
+  },
+  {
+    name: "connected Review launch",
+    action: "launch",
+    relativePath: "mission/review/connected/launch",
+    handler: launchPortfolioConnectedReview,
+    body: {
+      independence_attested: true,
+      model_override: "model-review",
+    },
+    serviceMethod: "launchConnectedReview",
+    serviceResult: { connected_run: { status: "running" } },
+  },
+  {
+    name: "connected Review cancel",
+    action: "cancel",
+    relativePath: "mission/review/connected/cancel",
+    handler: cancelPortfolioConnectedReview,
+    body: { connected_run_id: SHAPING_RUN_ID },
+    serviceMethod: "cancelConnectedReviewRun",
+    serviceResult: { connected_run: { status: "cancelled" } },
+  },
+  {
+    name: "connected Patch launch",
+    action: "launch",
+    relativePath: "mission/patch/connected/launch",
+    handler: launchPortfolioConnectedPatch,
+    body: { model_override: "model-patch" },
+    serviceMethod: "launchConnectedPatch",
+    serviceResult: { connected_run: { status: "running" } },
+  },
+  {
+    name: "connected Patch cancel",
+    action: "cancel",
+    relativePath: "mission/patch/connected/cancel",
+    handler: cancelPortfolioConnectedPatch,
+    body: { connected_run_id: SHAPING_RUN_ID },
+    serviceMethod: "cancelConnectedPatchRun",
+    serviceResult: { connected_run: { status: "cancelled" } },
+  },
+  {
+    name: "connected Patch permission",
+    action: "permission",
+    relativePath: "mission/patch/connected/permission",
+    handler: decidePortfolioConnectedPatchPermission,
+    body: {
+      connected_run_id: SHAPING_RUN_ID,
+      operation_sha256: SHA_A,
+      decision: "keep_denied",
+    },
+    serviceMethod: "decideConnectedPermission",
+    serviceResult: { decision: "kept_denied" },
   },
 ];
 
@@ -1304,7 +1384,7 @@ describe("portfolio API routes", () => {
       connected_run: summary,
       raw_runtime_token: "must-not-cross-http",
     });
-    const listConnectedRuns = vi.fn().mockResolvedValue([summary]);
+    const listConnectedRunsForPhase = vi.fn().mockResolvedValue([summary]);
     const cancelConnectedRun = vi.fn().mockResolvedValue({
       source_id: sourceId,
       work_item: { state: { phase: "execute", status: "active" } },
@@ -1318,7 +1398,7 @@ describe("portfolio API routes", () => {
     });
     getService.mockResolvedValue({
       launchConnectedExecute,
-      listConnectedRuns,
+      listConnectedRunsForPhase,
       cancelConnectedRun,
       decideConnectedPermission,
     });
@@ -1361,7 +1441,11 @@ describe("portfolio API routes", () => {
     expect(launchConnectedExecute).toHaveBeenCalledWith(sourceId, workItemId, {
       model_override: "one-run-model",
     });
-    expect(listConnectedRuns).toHaveBeenCalledWith(sourceId, workItemId);
+    expect(listConnectedRunsForPhase).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      "execute",
+    );
     expect(cancelConnectedRun).toHaveBeenCalledWith(
       sourceId,
       workItemId,
@@ -1392,6 +1476,203 @@ describe("portfolio API routes", () => {
     expect(portfolioConnectedRunRoute.runtime).toBe("nodejs");
     expect(portfolioConnectedCancelRoute.runtime).toBe("nodejs");
     expect(portfolioConnectedPermissionRoute.runtime).toBe("nodejs");
+  });
+
+  it("routes phase-qualified Review and Patch runs plus connected model preflight", async () => {
+    const sourceId = "ws_550e8400-e29b-41d4-a716-446655440000";
+    const workItemId = "wi_123e4567-e89b-12d3-a456-426614174000";
+    const context = phaseUpdateContext(sourceId, workItemId);
+    const reviewSummary = {
+      schema_version: 2,
+      connected_run_id: SHAPING_RUN_ID,
+      mission: { identity: { phase: "review" } },
+      authorization: { kind: "review_result_ingress" },
+      lifecycle: { status: "running" },
+    };
+    const patchSummary = {
+      schema_version: 2,
+      connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2",
+      mission: { identity: { phase: "patch" } },
+      authorization: { kind: "capability_envelope" },
+      lifecycle: { status: "running" },
+    };
+    const models = {
+      model_availability: {
+        execute: { status: "available" },
+        review: { status: "available" },
+        patch: { status: "available" },
+      },
+      model_picker_options: {
+        execute: [{ model_id: "model-execute" }],
+        review: [{ model_id: "model-review" }],
+        patch: [{ model_id: "model-patch" }],
+      },
+    };
+    const launchConnectedReview = vi.fn().mockResolvedValue({
+      connected_run: reviewSummary,
+      raw_runtime_token: "must-not-cross-http",
+    });
+    const launchConnectedPatch = vi.fn().mockResolvedValue({
+      connected_run: patchSummary,
+      raw_runtime_token: "must-not-cross-http",
+    });
+    const listConnectedRunsForPhase = vi.fn(
+      async (_sourceId: string, _workItemId: string, phase: string) =>
+        phase === "review" ? [reviewSummary] : [patchSummary],
+    );
+    const cancelConnectedReviewRun = vi.fn().mockResolvedValue({
+      connected_run: reviewSummary,
+      process: { pid: 9998 },
+    });
+    const cancelConnectedPatchRun = vi.fn().mockResolvedValue({
+      connected_run: patchSummary,
+      process: { pid: 9999 },
+    });
+    const decideConnectedPermission = vi.fn().mockResolvedValue({
+      decision: "kept_denied",
+    });
+    const getConnectedModelOptions = vi.fn().mockResolvedValue(models);
+    getService.mockResolvedValue({
+      launchConnectedReview,
+      launchConnectedPatch,
+      listConnectedRunsForPhase,
+      cancelConnectedReviewRun,
+      cancelConnectedPatchRun,
+      decideConnectedPermission,
+      getConnectedModelOptions,
+    });
+
+    const reviewLaunchBody = {
+      independence_attested: true,
+      model_override: "model-review",
+    };
+    const patchLaunchBody = { model_override: "model-patch" };
+    const reviewLaunch = await launchPortfolioConnectedReview(
+      guardedWorkItemPostRequest(
+        "mission/review/connected/launch",
+        reviewLaunchBody,
+      ),
+      context,
+    );
+    const reviewReplay = await launchPortfolioConnectedReview(
+      guardedWorkItemPostRequest(
+        "mission/review/connected/launch",
+        reviewLaunchBody,
+      ),
+      context,
+    );
+    const patchLaunch = await launchPortfolioConnectedPatch(
+      guardedWorkItemPostRequest(
+        "mission/patch/connected/launch",
+        patchLaunchBody,
+      ),
+      context,
+    );
+    const patchReplay = await launchPortfolioConnectedPatch(
+      guardedWorkItemPostRequest(
+        "mission/patch/connected/launch",
+        patchLaunchBody,
+      ),
+      context,
+    );
+    const reviewRuns = await getPortfolioConnectedReviewRuns(
+      connectedGetRequest("mission/review/connected/run"),
+      context,
+    );
+    const patchRuns = await getPortfolioConnectedPatchRuns(
+      connectedGetRequest("mission/patch/connected/run"),
+      context,
+    );
+    const connectedModels = await getPortfolioConnectedModels(
+      connectedGetRequest("mission/connected/models"),
+      context,
+    );
+    const reviewCancel = await cancelPortfolioConnectedReview(
+      guardedWorkItemPostRequest("mission/review/connected/cancel", {
+        connected_run_id: reviewSummary.connected_run_id,
+      }),
+      context,
+    );
+    const patchCancel = await cancelPortfolioConnectedPatch(
+      guardedWorkItemPostRequest("mission/patch/connected/cancel", {
+        connected_run_id: patchSummary.connected_run_id,
+      }),
+      context,
+    );
+    const patchPermission = await decidePortfolioConnectedPatchPermission(
+      guardedWorkItemPostRequest("mission/patch/connected/permission", {
+        connected_run_id: patchSummary.connected_run_id,
+        operation_sha256: SHA_A,
+        decision: "keep_denied",
+      }),
+      context,
+    );
+
+    await expect(reviewLaunch.json()).resolves.toEqual(reviewSummary);
+    await expect(reviewReplay.json()).resolves.toEqual(reviewSummary);
+    await expect(patchLaunch.json()).resolves.toEqual(patchSummary);
+    await expect(patchReplay.json()).resolves.toEqual(patchSummary);
+    await expect(reviewRuns.json()).resolves.toEqual([reviewSummary]);
+    await expect(patchRuns.json()).resolves.toEqual([patchSummary]);
+    await expect(connectedModels.json()).resolves.toEqual(models);
+    await expect(reviewCancel.json()).resolves.toEqual(reviewSummary);
+    await expect(patchCancel.json()).resolves.toEqual(patchSummary);
+    await expect(patchPermission.json()).resolves.toEqual({
+      decision: "kept_denied",
+    });
+    expect(launchConnectedReview).toHaveBeenCalledTimes(2);
+    expect(launchConnectedReview).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      reviewLaunchBody,
+    );
+    expect(launchConnectedPatch).toHaveBeenCalledTimes(2);
+    expect(launchConnectedPatch).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      patchLaunchBody,
+    );
+    expect(listConnectedRunsForPhase).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      "review",
+    );
+    expect(listConnectedRunsForPhase).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      "patch",
+    );
+    expect(getConnectedModelOptions).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+    );
+    expect(cancelConnectedReviewRun).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      reviewSummary.connected_run_id,
+    );
+    expect(cancelConnectedPatchRun).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      patchSummary.connected_run_id,
+    );
+    expect(decideConnectedPermission).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      {
+        connected_run_id: patchSummary.connected_run_id,
+        operation_sha256: SHA_A,
+        decision: "keep_denied",
+      },
+    );
+    expect(
+      existsSync(
+        join(
+          process.cwd(),
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/permission/route.ts",
+        ),
+      ),
+    ).toBe(false);
   });
 
   it("rejects malformed, oversized, and foreign connected-route payloads", async () => {
@@ -1458,6 +1739,106 @@ describe("portfolio API routes", () => {
     expect(decideConnectedPermission).not.toHaveBeenCalled();
   });
 
+  it("strictly validates every phase-qualified connected mutation body", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const newRoutes = CONNECTED_POST_CASES.filter((route) =>
+      route.relativePath.includes("mission/review/") ||
+      route.relativePath.includes("mission/patch/"),
+    );
+
+    for (const route of newRoutes) {
+      const action = vi.fn();
+      getService.mockReset();
+      getService.mockResolvedValue({ [route.serviceMethod]: action });
+      const invalidRequests = [
+        guardedWorkItemPostRequest(route.relativePath, {
+          ...route.body,
+          unknown_contract_key: true,
+        }),
+        guardedWorkItemPostRequest(route.relativePath, "{malformed", {
+          raw_body: true,
+        }),
+        guardedWorkItemPostRequest(route.relativePath, {
+          oversized: "x".repeat(5_000),
+        }),
+      ];
+      for (const request of invalidRequests) {
+        const response = await route.handler(request, context);
+        expect(response.status, route.name).toBe(400);
+        expect(await response.json()).toEqual({
+          error: { code: "invalid_request", message: "Invalid request" },
+        });
+      }
+      expect(action).not.toHaveBeenCalled();
+    }
+
+    const launchConnectedReview = vi.fn();
+    getService.mockResolvedValue({ launchConnectedReview });
+    for (const body of [
+      { independence_attested: false },
+      { model_override: "model-review" },
+      { independence_attested: true, model_override: "" },
+    ]) {
+      const response = await launchPortfolioConnectedReview(
+        guardedWorkItemPostRequest(
+          "mission/review/connected/launch",
+          body,
+        ),
+        context,
+      );
+      expect(response.status).toBe(400);
+    }
+    expect(launchConnectedReview).not.toHaveBeenCalled();
+
+    const launchConnectedPatch = vi.fn();
+    getService.mockResolvedValue({ launchConnectedPatch });
+    const invalidPatchModel = await launchPortfolioConnectedPatch(
+      guardedWorkItemPostRequest("mission/patch/connected/launch", {
+        model_override: "",
+      }),
+      context,
+    );
+    expect(invalidPatchModel.status).toBe(400);
+    expect(launchConnectedPatch).not.toHaveBeenCalled();
+  });
+
+  it("maps phase mismatches and stale connected bindings to conflict responses", async () => {
+    const context = phaseUpdateContext("source", "item");
+    for (const route of CONNECTED_POST_CASES.filter((candidate) =>
+      candidate.relativePath.includes("mission/review/") ||
+      candidate.relativePath.includes("mission/patch/"),
+    )) {
+      const action = vi.fn().mockRejectedValue(
+        new ControllerConflictError(
+          route.action === "launch"
+            ? "mission_not_ready"
+            : "stale_expectation",
+          "item",
+          route.action === "launch"
+            ? "The immutable mission binding is stale."
+            : "The connected run belongs to a different phase.",
+        ),
+      );
+      getService.mockReset();
+      getService.mockResolvedValue({ [route.serviceMethod]: action });
+
+      const response = await route.handler(
+        guardedWorkItemPostRequest(route.relativePath, route.body),
+        context,
+      );
+
+      expect(response.status, route.name).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: {
+          code:
+            route.action === "launch"
+              ? "mission_not_ready"
+              : "stale_expectation",
+        },
+      });
+    }
+  });
+
   it("rejects un-originated connected POSTs before body or service access", async () => {
     const context = phaseUpdateContext("source", "item");
 
@@ -1467,7 +1848,7 @@ describe("portfolio API routes", () => {
         [route.serviceMethod]: vi.fn().mockResolvedValue(route.serviceResult),
       });
       const request = new Request(
-        `http://localhost/api/portfolio/work-items/source/item/mission/connected/${route.action}`,
+        `http://localhost/api/portfolio/work-items/source/item/${route.relativePath}`,
         {
           method: "POST",
           headers: {
