@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { stringify } from "yaml";
@@ -413,6 +413,133 @@ describe("connected-run workspace storage", () => {
         },
       },
     });
+  });
+
+  it("publishes only the bounded exact Review result with immutable replay", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const review = connectedRun(firstRunId, {
+      phase: "review",
+      maxOutputBytes: 64,
+    });
+    if (review.authorization.kind !== "review_result_ingress") {
+      throw new Error("Expected a Review result-ingress fixture.");
+    }
+    const resultPath = join(
+      root,
+      ...review.authorization.result_path.split("/"),
+    );
+    await mkdir(dirname(resultPath), { recursive: true });
+    await workspace.createConnectedRun(review);
+    await expect(
+      workspace.writeConnectedReviewResult(
+        workItemId,
+        firstRunId,
+        resultPath,
+        '{"verdict":"clean"}\n',
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_transition" });
+    await workspace.startConnectedRun(
+      workItemId,
+      firstRunId,
+      {
+        protocol_version: { value: 1, assurance: "adapter_attested" },
+        session_id: { value: "review-write-session", assurance: "adapter_attested" },
+      },
+      {
+        pid: 4444,
+        process_group_id: 4444,
+        started_at: "2026-07-26T18:00:01.000Z",
+      },
+    );
+    const source = '{"verdict":"clean"}\n';
+
+    await expect(
+      workspace.writeConnectedReviewResult(
+        workItemId,
+        firstRunId,
+        resultPath,
+        source,
+      ),
+    ).resolves.toEqual({ written: true });
+    await expect(
+      workspace.writeConnectedReviewResult(
+        workItemId,
+        firstRunId,
+        resultPath,
+        source,
+      ),
+    ).resolves.toEqual({ written: false });
+    await expect(
+      workspace.writeConnectedReviewResult(
+        workItemId,
+        firstRunId,
+        resultPath,
+        '{"verdict":"findings"}\n',
+      ),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+    await expect(
+      workspace.writeConnectedReviewResult(
+        workItemId,
+        firstRunId,
+        join(dirname(resultPath), "sibling.json"),
+        source,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      workspace.writeConnectedReviewResult(
+        workItemId,
+        firstRunId,
+        resultPath,
+        "",
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(
+      workspace.writeConnectedReviewResult(
+        workItemId,
+        firstRunId,
+        resultPath,
+        "x".repeat(65),
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    await expect(readFile(resultPath, "utf8")).resolves.toBe(source);
+  });
+
+  it("rejects a symlinked Review result parent", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const review = connectedRun(firstRunId, { phase: "review" });
+    if (review.authorization.kind !== "review_result_ingress") {
+      throw new Error("Expected a Review result-ingress fixture.");
+    }
+    const missionsRoot = join(root, ".founder", "missions");
+    const outside = join(root, "outside-review-parent");
+    await mkdir(missionsRoot, { recursive: true });
+    await mkdir(outside);
+    await symlink(outside, join(missionsRoot, workItemId), "dir");
+    await workspace.createConnectedRun(review);
+    await workspace.startConnectedRun(
+      workItemId,
+      firstRunId,
+      {
+        protocol_version: { value: 1, assurance: "adapter_attested" },
+        session_id: { value: "review-symlink-session", assurance: "adapter_attested" },
+      },
+      {
+        pid: 5555,
+        process_group_id: 5555,
+        started_at: "2026-07-26T18:00:01.000Z",
+      },
+    );
+
+    await expect(
+      workspace.writeConnectedReviewResult(
+        workItemId,
+        firstRunId,
+        join(root, ...review.authorization.result_path.split("/")),
+        '{"verdict":"clean"}\n',
+      ),
+    ).rejects.toBeInstanceOf(InvalidWorkspaceError);
   });
 
   it("redacts retained events, enforces immutable limits, and stores strict process identity", async () => {

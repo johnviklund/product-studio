@@ -1463,6 +1463,200 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
   }
 
+  async writeConnectedReviewResult(
+    workItemId: string,
+    connectedRunId: string,
+    requestedPath: string,
+    content: string,
+    signal?: AbortSignal,
+  ): Promise<{ written: boolean }> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
+    const record = await this.requireConnectedRun(
+      validatedWorkItemId,
+      validatedRunId,
+    );
+    if (
+      record.mission.identity.phase !== "review" ||
+      record.authorization.kind !== "review_result_ingress"
+    ) {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "Connected Review result writes require Review result-ingress authorization.",
+      );
+    }
+    if (record.lifecycle.status !== "running") {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "Connected Review result writes require a running Review run.",
+      );
+    }
+    if (abortWasRequested(signal)) {
+      throw new ControllerConflictError(
+        "invalid_transition",
+        validatedWorkItemId,
+        "Connected Review result write was interrupted before publication.",
+      );
+    }
+
+    const resultPath = join(
+      this.workspaceRoot,
+      ...record.authorization.result_path.split("/"),
+    );
+    if (
+      !isAbsolute(requestedPath) ||
+      resolve(requestedPath) !== resultPath ||
+      requestedPath !== resultPath
+    ) {
+      throw new ControllerConflictError(
+        "mission_not_ready",
+        validatedWorkItemId,
+        "Connected Review write path does not match the exact result path.",
+      );
+    }
+    const contentBytes = Buffer.from(content, "utf8");
+    if (
+      contentBytes.byteLength === 0 ||
+      contentBytes.byteLength > record.limits.max_output_bytes
+    ) {
+      throw new ControllerConflictError(
+        "mission_not_ready",
+        validatedWorkItemId,
+        `Connected Review result must contain 1-${record.limits.max_output_bytes} bytes.`,
+      );
+    }
+    await this.assertSafeWorkspaceDirectoryComponents(
+      posix.dirname(record.authorization.result_path),
+    );
+
+    const stagingPath = `${resultPath}.${randomUUID()}.acp-write.tmp`;
+    let descriptor: number | null = null;
+    let persistenceError: unknown = null;
+    try {
+      if (abortWasRequested(signal)) {
+        throw new Error("Connected Review result write was interrupted before staging.");
+      }
+      descriptor = openSync(
+        stagingPath,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          fsConstants.O_NOFOLLOW,
+        0o600,
+      );
+      writeFileSync(descriptor, contentBytes);
+      fsyncSync(descriptor);
+    } catch (error) {
+      persistenceError = error;
+    } finally {
+      if (descriptor !== null) {
+        try {
+          closeSync(descriptor);
+        } catch (error) {
+          persistenceError ??= error;
+        }
+      }
+    }
+    if (persistenceError !== null) {
+      const failure = new ControllerConflictError(
+        "mission_not_ready",
+        validatedWorkItemId,
+        `Connected Review result staging failed: ${errorMessage(persistenceError)}`,
+      );
+      try {
+        unlinkFileSyncIfPresent(stagingPath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [failure, cleanupError],
+          "Connected Review result staging failed and cleanup was incomplete",
+        );
+      }
+      throw failure;
+    }
+
+    let outcome: { written: boolean };
+    try {
+      if (abortWasRequested(signal)) {
+        throw new ControllerConflictError(
+          "mission_not_ready",
+          validatedWorkItemId,
+          "Connected Review result write was interrupted before publication.",
+        );
+      }
+      try {
+        linkSync(stagingPath, resultPath);
+        outcome = { written: true };
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "EEXIST") {
+          throw new ControllerConflictError(
+            "mission_not_ready",
+            validatedWorkItemId,
+            `Connected Review result publication failed: ${errorMessage(error)}`,
+          );
+        }
+        let handle;
+        try {
+          handle = await open(
+            resultPath,
+            fsConstants.O_RDONLY |
+              fsConstants.O_NOFOLLOW |
+              fsConstants.O_NONBLOCK,
+          );
+          const stats = await handle.stat();
+          if (
+            !stats.isFile() ||
+            stats.size === 0 ||
+            stats.size > record.limits.max_output_bytes
+          ) {
+            throw new Error("existing result is not a bounded regular file");
+          }
+          const existing = await handle.readFile();
+          if (!existing.equals(contentBytes)) {
+            throw new ControllerConflictError(
+              "idempotency_conflict",
+              validatedWorkItemId,
+              "Existing Review result bytes differ from the connected write replay.",
+            );
+          }
+        } catch (readError) {
+          if (readError instanceof ControllerConflictError) {
+            throw readError;
+          }
+          throw new ControllerConflictError(
+            "mission_not_ready",
+            validatedWorkItemId,
+            `Existing Review result is unsafe or unreadable: ${errorMessage(readError)}`,
+          );
+        } finally {
+          await handle?.close();
+        }
+        outcome = { written: false };
+      }
+    } catch (error) {
+      try {
+        unlinkFileSyncIfPresent(stagingPath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Connected Review result publication failed and cleanup was incomplete",
+        );
+      }
+      throw error;
+    }
+    try {
+      unlinkFileSyncIfPresent(stagingPath);
+    } catch (error) {
+      throw new ControllerConflictError(
+        "mission_not_ready",
+        validatedWorkItemId,
+        `Connected Review result staging cleanup failed: ${errorMessage(error)}`,
+      );
+    }
+    return outcome;
+  }
+
   async reconcileConnectedRuns(): Promise<ConnectedRunRecordV2[]> {
     await this.readManifest();
     const connectedRunsDirectory = join(
