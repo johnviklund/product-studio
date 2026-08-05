@@ -54,7 +54,7 @@ describe("workflow transition policy", () => {
     expect(ALLOWED_PHASE_TRANSITIONS.idea).toEqual(["brainstorm", "spec"]);
   });
 
-  it("routes the three shaping advances through their dedicated operations", () => {
+  it("routes the four governed advances through their dedicated operations", () => {
     expect(CONTROLLER_ONLY_PHASE_TRANSITIONS).toEqual([
       {
         from: "idea",
@@ -75,6 +75,13 @@ describe("workflow transition policy", () => {
         action_label: "Approve & run Plan",
         explanation: "Approval writes the governed goal contract.",
       },
+      {
+        from: "plan",
+        to: "execute",
+        action_label: "Approve & run Execute",
+        explanation:
+          "Approval validates the exact Plan result and creates the governed Execute handoff.",
+      },
     ]);
 
     for (const transition of CONTROLLER_ONLY_PHASE_TRANSITIONS) {
@@ -83,10 +90,15 @@ describe("workflow transition policy", () => {
         action_label: transition.action_label,
         explanation: transition.explanation,
       });
+      expect(
+        (
+          ALLOWED_PHASE_TRANSITIONS[transition.from] as readonly WorkItemPhase[]
+        ).includes(transition.to),
+      ).toBe(true);
     }
   });
 
-  it("closes the four shaping arrows that have no safe generic owner", () => {
+  it("keeps the three shaping arrows without a safe generic owner closed", () => {
     expect(CLOSED_IN_SLICE_PHASE_TRANSITIONS).toEqual([
       {
         from: "idea",
@@ -108,12 +120,6 @@ describe("workflow transition policy", () => {
         explanation:
           "Use Request changes on Plan; it creates a new revision in place instead of reopening a decided one.",
         alternative_action_label: "Request changes",
-      },
-      {
-        from: "plan",
-        to: "execute",
-        explanation: "Execute approval is not part of this slice.",
-        alternative_action_label: null,
       },
     ]);
 

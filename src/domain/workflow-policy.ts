@@ -47,6 +47,13 @@ export const CONTROLLER_ONLY_PHASE_TRANSITIONS = [
     action_label: "Approve & run Plan",
     explanation: "Approval writes the governed goal contract.",
   },
+  {
+    from: "plan",
+    to: "execute",
+    action_label: "Approve & run Execute",
+    explanation:
+      "Approval validates the exact Plan result and creates the governed Execute handoff.",
+  },
 ] as const satisfies readonly ControllerOnlyPhaseTransition[];
 
 export const CLOSED_IN_SLICE_PHASE_TRANSITIONS = [
@@ -70,12 +77,6 @@ export const CLOSED_IN_SLICE_PHASE_TRANSITIONS = [
     explanation:
       "Use Request changes on Plan; it creates a new revision in place instead of reopening a decided one.",
     alternative_action_label: "Request changes",
-  },
-  {
-    from: "plan",
-    to: "execute",
-    explanation: "Execute approval is not part of this slice.",
-    alternative_action_label: null,
   },
 ] as const satisfies readonly ClosedInSlicePhaseTransition[];
 
