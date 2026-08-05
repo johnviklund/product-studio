@@ -16,6 +16,7 @@ import type {
 } from "./mission";
 import type { ConnectedRunRecordV1 } from "./connected-run";
 import type {
+  PlanApprovalExecuteTuple,
   ShapingArtifactWriteResult,
   ShapingDecisionIntentV1,
   ShapingDecisionManifestV1,
@@ -113,6 +114,15 @@ export type WorkItemAttentionKind =
 export type ControllerRunOutcome = (typeof CONTROLLER_RUN_OUTCOMES)[number];
 export type ControllerConflictKind =
   (typeof CONTROLLER_CONFLICT_KINDS)[number];
+
+export const PLAN_APPROVAL_MANIFEST_OUTCOMES = [
+  "pending",
+  "applied",
+  "failed",
+] as const;
+
+export type PlanApprovalManifestOutcome =
+  (typeof PLAN_APPROVAL_MANIFEST_OUTCOMES)[number];
 
 export interface VerificationCommand {
   name: string;
@@ -345,6 +355,60 @@ export interface RetryExecuteAttemptInput {
   attempt: number;
 }
 
+export interface ApprovePlanResultInput {
+  launch_mode: "connected" | "manual";
+  requested_model: string | null;
+  expected_mission_content_sha256: string;
+  expected_result_content_sha256: string;
+  expected_shaping_state_sha256: string;
+  goal_contract_sha256: string;
+}
+
+export interface PlanApprovalIntentV1 {
+  schema_version: 1;
+  approval_id: string;
+  work_item_id: string;
+  launch_mode: "connected" | "manual";
+  requested_model: string | null;
+  expected_mission_content_sha256: string;
+  expected_result_content_sha256: string;
+  expected_shaping_state_sha256: string;
+  goal_contract_sha256: string;
+  goal_version: number;
+  previous_goal_bytes: string;
+  previous_goal_sha256: string;
+  previous_state_bytes: string;
+  previous_state_sha256: string;
+  next_goal_bytes: string;
+  next_goal_sha256: string;
+  next_state_bytes: string;
+  next_state_sha256: string;
+  receipt_bytes: string;
+  receipt_sha256: string;
+  execute_tuple: PlanApprovalExecuteTuple;
+  created_at: string;
+}
+
+export interface PlanApprovalManifestV1 {
+  schema_version: 1;
+  approval_id: string;
+  work_item_id: string;
+  launch_mode: "connected" | "manual";
+  requested_model: string | null;
+  expected_mission_content_sha256: string;
+  expected_result_content_sha256: string;
+  expected_shaping_state_sha256: string;
+  goal_contract_sha256: string;
+  goal_version: number;
+  receipt_sha256: string;
+  execute_tuple: PlanApprovalExecuteTuple;
+  goal_sha256: string;
+  state_sha256: string;
+  started_at: string;
+  completed_at?: string;
+  outcome: PlanApprovalManifestOutcome;
+}
+
 export interface ControllerRunManifest {
   schema_version: 1;
   run_id: string;
@@ -412,6 +476,43 @@ export interface ShapingDecisionCommitInput {
 export interface ShapingDecisionCommitResult {
   work_item: WorkItem;
   manifest: ShapingDecisionManifestV1;
+}
+
+export type PlanApprovalIntentDraft = Omit<
+  PlanApprovalIntentV1,
+  | "approval_id"
+  | "previous_goal_bytes"
+  | "previous_goal_sha256"
+  | "previous_state_bytes"
+  | "previous_state_sha256"
+  | "next_goal_bytes"
+  | "next_goal_sha256"
+  | "next_state_bytes"
+  | "next_state_sha256"
+  | "created_at"
+>;
+
+export interface PlanApprovalIntentCaptureInput {
+  intent: PlanApprovalIntentDraft;
+  goal?: WorkItemGoal;
+  state: WorkItemState;
+}
+
+export interface PlanApprovalIntentWriteResult {
+  intent: PlanApprovalIntentV1;
+  intent_path: string;
+  intent_source: string;
+}
+
+export interface PlanApprovalCommitInput {
+  goal?: WorkItemGoal;
+  state: WorkItemState;
+  manifest: PlanApprovalManifestV1;
+}
+
+export interface PlanApprovalCommitResult {
+  work_item: WorkItem;
+  manifest: PlanApprovalManifestV1;
 }
 
 export interface RetainedControllerLeaseRepairResult {
@@ -526,6 +627,26 @@ export interface WorkItemRepository {
     lease: ControllerLease,
     decisionId: string,
   ): Promise<ShapingDecisionCommitResult>;
+  writePlanApprovalIntent(
+    lease: ControllerLease,
+    input: PlanApprovalIntentCaptureInput,
+  ): Promise<PlanApprovalIntentWriteResult>;
+  readPlanApprovalIntent(
+    workItemId: string,
+    approvalId: string,
+  ): Promise<PlanApprovalIntentV1 | null>;
+  readPlanApprovalManifest(
+    workItemId: string,
+    approvalId: string,
+  ): Promise<PlanApprovalManifestV1 | null>;
+  commitPlanApproval(
+    lease: ControllerLease,
+    input: PlanApprovalCommitInput,
+  ): Promise<PlanApprovalCommitResult>;
+  reconcilePlanApprovalCommit(
+    lease: ControllerLease,
+    approvalId: string,
+  ): Promise<PlanApprovalCommitResult>;
   releaseControllerLease(lease: ControllerLease): Promise<void>;
 }
 
@@ -708,6 +829,99 @@ export const governedTupleSchema: z.ZodType<GovernedTuple> = z.strictObject({
   attempt: nonNegativeSafeIntegerSchema,
   patch_cycle: nonNegativeSafeIntegerSchema,
 });
+
+const planApprovalExecuteTupleSchema: z.ZodType<PlanApprovalExecuteTuple> =
+  z.strictObject({
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: z.literal(0),
+  });
+
+function validatePlanApprovalLaunchBinding(
+  input: { launch_mode: "connected" | "manual"; requested_model: string | null },
+  context: z.RefinementCtx,
+): void {
+  if ((input.launch_mode === "connected") !== (input.requested_model !== null)) {
+    context.addIssue({
+      code: "custom",
+      message:
+        input.launch_mode === "connected"
+          ? "connected launch mode requires one requested model"
+          : "manual launch mode forbids a requested model",
+      path: ["requested_model"],
+      input: input.requested_model,
+    });
+  }
+}
+
+function validatePlanApprovalGoalVersion(
+  input: { goal_version: number; execute_tuple: PlanApprovalExecuteTuple },
+  context: z.RefinementCtx,
+): void {
+  if (input.goal_version !== input.execute_tuple.goal_version) {
+    context.addIssue({
+      code: "custom",
+      message: "Execute tuple goal version must match approval goal version",
+      path: ["execute_tuple", "goal_version"],
+      input: input.execute_tuple.goal_version,
+    });
+  }
+}
+
+export const planApprovalIntentSchema: z.ZodType<PlanApprovalIntentV1> = z
+  .strictObject({
+    schema_version: z.literal(1),
+    approval_id: sha256Schema,
+    work_item_id: workItemIdSchema,
+    launch_mode: z.enum(["connected", "manual"]),
+    requested_model: nonEmptyIdentifierSchema.nullable(),
+    expected_mission_content_sha256: sha256Schema,
+    expected_result_content_sha256: sha256Schema,
+    expected_shaping_state_sha256: sha256Schema,
+    goal_contract_sha256: sha256Schema,
+    goal_version: positiveSafeIntegerSchema,
+    previous_goal_bytes: z.string(),
+    previous_goal_sha256: sha256Schema,
+    previous_state_bytes: z.string(),
+    previous_state_sha256: sha256Schema,
+    next_goal_bytes: z.string(),
+    next_goal_sha256: sha256Schema,
+    next_state_bytes: z.string(),
+    next_state_sha256: sha256Schema,
+    receipt_bytes: z.string(),
+    receipt_sha256: sha256Schema,
+    execute_tuple: planApprovalExecuteTupleSchema,
+    created_at: z.iso.datetime(),
+  })
+  .superRefine((intent, context) => {
+    validatePlanApprovalLaunchBinding(intent, context);
+    validatePlanApprovalGoalVersion(intent, context);
+  });
+
+export const planApprovalManifestSchema: z.ZodType<PlanApprovalManifestV1> = z
+  .strictObject({
+    schema_version: z.literal(1),
+    approval_id: sha256Schema,
+    work_item_id: workItemIdSchema,
+    launch_mode: z.enum(["connected", "manual"]),
+    requested_model: nonEmptyIdentifierSchema.nullable(),
+    expected_mission_content_sha256: sha256Schema,
+    expected_result_content_sha256: sha256Schema,
+    expected_shaping_state_sha256: sha256Schema,
+    goal_contract_sha256: sha256Schema,
+    goal_version: positiveSafeIntegerSchema,
+    receipt_sha256: sha256Schema,
+    execute_tuple: planApprovalExecuteTupleSchema,
+    goal_sha256: sha256Schema,
+    state_sha256: sha256Schema,
+    started_at: z.iso.datetime(),
+    completed_at: z.iso.datetime().optional(),
+    outcome: z.enum(PLAN_APPROVAL_MANIFEST_OUTCOMES),
+  })
+  .superRefine((manifest, context) => {
+    validatePlanApprovalLaunchBinding(manifest, context);
+    validatePlanApprovalGoalVersion(manifest, context);
+  });
 
 export const workItemAttentionPinsSchema: z.ZodType<WorkItemAttentionPins> =
   z.strictObject({
@@ -1133,6 +1347,17 @@ export const retryExecuteAttemptInputSchema: z.ZodType<RetryExecuteAttemptInput>
     expected_input_revision: positiveSafeIntegerSchema,
     attempt: nonNegativeSafeIntegerSchema,
   });
+
+export const approvePlanResultInputSchema: z.ZodType<ApprovePlanResultInput> = z
+  .strictObject({
+    launch_mode: z.enum(["connected", "manual"]),
+    requested_model: nonEmptyIdentifierSchema.nullable(),
+    expected_mission_content_sha256: sha256Schema,
+    expected_result_content_sha256: sha256Schema,
+    expected_shaping_state_sha256: sha256Schema,
+    goal_contract_sha256: sha256Schema,
+  })
+  .superRefine(validatePlanApprovalLaunchBinding);
 
 export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
   z.strictObject({

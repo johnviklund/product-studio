@@ -8,6 +8,7 @@ import {
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
   acceptPatchPlanInputSchema,
+  approvePlanResultInputSchema,
   connectedPermissionResolutionInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
@@ -18,6 +19,8 @@ import {
   importPatchResultInputSchema,
   importReviewResultInputSchema,
   parseWorkItemStateForRead,
+  planApprovalIntentSchema,
+  planApprovalManifestSchema,
   productManifestSchema,
   recordConnectedPermissionDenialInputSchema,
   retryExecuteAttemptInputSchema,
@@ -26,6 +29,8 @@ import {
   workItemAttentionSchema,
   workItemSchema,
   workItemStateSchema,
+  type PlanApprovalIntentV1,
+  type PlanApprovalManifestV1,
 } from "../../src/domain/work-item";
 
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
@@ -79,6 +84,57 @@ const productManifest = {
       },
     ] as const,
   },
+};
+
+const planApprovalIntent: PlanApprovalIntentV1 = {
+  schema_version: 1,
+  approval_id: "a".repeat(64),
+  work_item_id: workItemId,
+  launch_mode: "connected",
+  requested_model: "gpt-5.6-sol",
+  expected_mission_content_sha256: "b".repeat(64),
+  expected_result_content_sha256: "c".repeat(64),
+  expected_shaping_state_sha256: "d".repeat(64),
+  goal_contract_sha256: "e".repeat(64),
+  goal_version: 1,
+  previous_goal_bytes: "goal-before\n",
+  previous_goal_sha256: "1".repeat(64),
+  previous_state_bytes: "state-before\n",
+  previous_state_sha256: "2".repeat(64),
+  next_goal_bytes: "goal-before\n",
+  next_goal_sha256: "1".repeat(64),
+  next_state_bytes: "state-after\n",
+  next_state_sha256: "3".repeat(64),
+  receipt_bytes: "receipt\n",
+  receipt_sha256: "4".repeat(64),
+  execute_tuple: {
+    goal_version: 1,
+    input_revision: 1,
+    attempt: 0,
+  },
+  created_at: "2026-08-05T12:00:00.000Z",
+};
+
+const planApprovalManifest: PlanApprovalManifestV1 = {
+  schema_version: 1,
+  approval_id: planApprovalIntent.approval_id,
+  work_item_id: workItemId,
+  launch_mode: planApprovalIntent.launch_mode,
+  requested_model: planApprovalIntent.requested_model,
+  expected_mission_content_sha256:
+    planApprovalIntent.expected_mission_content_sha256,
+  expected_result_content_sha256:
+    planApprovalIntent.expected_result_content_sha256,
+  expected_shaping_state_sha256:
+    planApprovalIntent.expected_shaping_state_sha256,
+  goal_contract_sha256: planApprovalIntent.goal_contract_sha256,
+  goal_version: planApprovalIntent.goal_version,
+  receipt_sha256: planApprovalIntent.receipt_sha256,
+  execute_tuple: planApprovalIntent.execute_tuple,
+  goal_sha256: planApprovalIntent.next_goal_sha256,
+  state_sha256: planApprovalIntent.next_state_sha256,
+  started_at: planApprovalIntent.created_at,
+  outcome: "pending",
 };
 
 describe("durable work-item schemas", () => {
@@ -734,6 +790,97 @@ describe("durable work-item schemas", () => {
         expected_patch_cycle: 0,
       }),
     ).toThrow();
+  });
+});
+
+describe("Plan approval contracts", () => {
+  it("round-trips strict intent and manifest schemas", () => {
+    expect(planApprovalIntentSchema.parse(planApprovalIntent)).toEqual(
+      planApprovalIntent,
+    );
+    expect(planApprovalManifestSchema.parse(planApprovalManifest)).toEqual(
+      planApprovalManifest,
+    );
+
+    expect(() =>
+      planApprovalIntentSchema.parse({
+        ...planApprovalIntent,
+        decision_id: "5".repeat(64),
+      }),
+    ).toThrow();
+    expect(() =>
+      planApprovalManifestSchema.parse({
+        ...planApprovalManifest,
+        decision_id: "5".repeat(64),
+      }),
+    ).toThrow();
+  });
+
+  it("requires the model binding to match the launch mode", () => {
+    const binding = {
+      expected_mission_content_sha256:
+        planApprovalIntent.expected_mission_content_sha256,
+      expected_result_content_sha256:
+        planApprovalIntent.expected_result_content_sha256,
+      expected_shaping_state_sha256:
+        planApprovalIntent.expected_shaping_state_sha256,
+      goal_contract_sha256: planApprovalIntent.goal_contract_sha256,
+    };
+
+    expect(
+      approvePlanResultInputSchema.parse({
+        ...binding,
+        launch_mode: "connected",
+        requested_model: "gpt-5.6-sol",
+      }),
+    ).toMatchObject({ launch_mode: "connected" });
+    expect(
+      approvePlanResultInputSchema.parse({
+        ...binding,
+        launch_mode: "manual",
+        requested_model: null,
+      }),
+    ).toMatchObject({ launch_mode: "manual" });
+    expect(() =>
+      approvePlanResultInputSchema.parse({
+        ...binding,
+        launch_mode: "connected",
+        requested_model: null,
+      }),
+    ).toThrow("connected launch mode requires one requested model");
+    expect(() =>
+      approvePlanResultInputSchema.parse({
+        ...binding,
+        launch_mode: "manual",
+        requested_model: "gpt-5.6-sol",
+      }),
+    ).toThrow("manual launch mode forbids a requested model");
+    expect(() =>
+      approvePlanResultInputSchema.parse({
+        ...binding,
+        launch_mode: "manual",
+        requested_model: null,
+        unknown: true,
+      }),
+    ).toThrow();
+  });
+
+  it("requires the initial Execute tuple", () => {
+    expect(() =>
+      planApprovalIntentSchema.parse({
+        ...planApprovalIntent,
+        execute_tuple: { ...planApprovalIntent.execute_tuple, attempt: 1 },
+      }),
+    ).toThrow();
+    expect(() =>
+      planApprovalManifestSchema.parse({
+        ...planApprovalManifest,
+        execute_tuple: {
+          ...planApprovalManifest.execute_tuple,
+          goal_version: 2,
+        },
+      }),
+    ).toThrow("Execute tuple goal version must match");
   });
 });
 
