@@ -2560,6 +2560,24 @@ export class WorkItemController {
       this.connectedExpectationFromInput(input),
     );
     this.validateGovernedTuple(workItemId, current, input.governed_tuple);
+    const priorRuns = await this.repository.listConnectedRuns(workItemId);
+    if (priorRuns.some((run) => run.lifecycle.status !== "terminal")) {
+      throw this.conflict(
+        "lease_held",
+        workItemId,
+        "A different connected run is already active for this work item.",
+      );
+    }
+    if (
+      priorRuns.filter((run) => run.lifecycle.status === "terminal").length !==
+      input.run_ordinal
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        "Connected launch ordinal does not match durable run history.",
+      );
+    }
     if (current.state.attention !== undefined) {
       throw this.conflict(
         "invalid_transition",

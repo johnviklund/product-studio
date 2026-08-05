@@ -107,7 +107,11 @@ import {
   isCapabilityEnvelopeNarrowing,
   type CapabilityEnvelopeV1,
 } from "../domain/capability-envelope";
-import type { ReviewRunPolicy } from "../domain/review-run-policy";
+import {
+  deriveReviewMissionResultBindingSha256,
+  hashReviewRunPolicy,
+  type ReviewRunPolicy,
+} from "../domain/review-run-policy";
 import {
   brainstormResultSubmissionSchema,
   compileBrainstormMission as compileBrainstormMissionPackage,
@@ -241,6 +245,7 @@ type WorkspaceGateway = Pick<
   | "startConnectedRun"
   | "updateConnectedRunEffectiveModel"
   | "appendConnectedRunEvent"
+  | "writeConnectedReviewResult"
   | "completeConnectedRun"
   | "reconcileConnectedRuns"
   | "readImportEvidence"
@@ -645,6 +650,11 @@ export interface LaunchConnectedExecuteRequest {
   narrowed_capability_envelope?: CapabilityEnvelopeV1;
 }
 
+export interface LaunchConnectedReviewRequest {
+  independence_attested: true;
+  model_override?: string;
+}
+
 export interface PortfolioConnectedRunResult extends PortfolioWorkItem {
   connected_run: ConnectedRunSummary;
 }
@@ -850,6 +860,12 @@ const launchConnectedExecuteRequestSchema: z.ZodType<LaunchConnectedExecuteReque
   z.strictObject({
     model_override: z.string().trim().min(1).max(200).optional(),
     narrowed_capability_envelope: capabilityEnvelopeV1Schema.optional(),
+  });
+
+const launchConnectedReviewRequestSchema: z.ZodType<LaunchConnectedReviewRequest> =
+  z.strictObject({
+    independence_attested: z.literal(true),
+    model_override: z.string().trim().min(1).max(200).optional(),
   });
 
 export interface ConnectedPermissionDecisionRequest {
@@ -1993,7 +2009,11 @@ export class PortfolioService {
     const identity = this.governedExecuteIdentity(source, workItem);
     const governedTuple = this.governedExecuteTuple(workItem, identity);
     const controller = this.workItemController(source.workspace);
-    const activeRuns = (await source.workspace.listConnectedRuns(workItemId)).filter(
+    const connectedRuns = await source.workspace.listConnectedRuns(workItemId);
+    const runOrdinal = connectedRuns.filter(
+      (record) => record.lifecycle.status === "terminal",
+    ).length;
+    const activeRuns = connectedRuns.filter(
       (record) => record.lifecycle.status !== "terminal",
     );
     if (activeRuns.length > 1) {
@@ -2011,6 +2031,7 @@ export class PortfolioService {
           governedTuple,
           activeRun.mission.content_sha256,
           validatedInput.model_override,
+          runOrdinal,
         ),
         activeRun,
       );
@@ -2042,6 +2063,7 @@ export class PortfolioService {
       governedTuple,
       mission.mission.content_sha256,
       validatedInput.model_override,
+      runOrdinal,
     );
 
     const prepared = await this.writableRuntime.prepare({
@@ -2161,6 +2183,225 @@ export class PortfolioService {
     return {
       ...this.toPortfolioItem(source, launched.work_item),
       connected_run: summarizeConnectedRun(running),
+    };
+  }
+
+  async launchConnectedReview(
+    sourceId: string,
+    workItemId: string,
+    input: LaunchConnectedReviewRequest,
+  ): Promise<PortfolioConnectedRunResult> {
+    const validatedInput = launchConnectedReviewRequestSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedReviewIdentity(source, workItem);
+    if (
+      workItem.state.phase !== "review" ||
+      workItem.state.status !== "active"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected Review requires an assigned, governed item in active review.",
+      );
+    }
+    const governedTuple = this.governedReviewTuple(workItem, identity);
+    const controller = this.workItemController(source.workspace);
+    const connectedRuns = await source.workspace.listConnectedRuns(workItemId);
+    const runOrdinal = connectedRuns.filter(
+      (record) => record.lifecycle.status === "terminal",
+    ).length;
+    const activeRuns = connectedRuns.filter(
+      (record) => record.lifecycle.status !== "terminal",
+    );
+    if (activeRuns.length > 1) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Only one connected run may be active for a governed item.",
+      );
+    }
+    if (activeRuns.length === 1) {
+      const activeRun = activeRuns[0]!;
+      const replay = await controller.launchConnectedRun(
+        workItemId,
+        this.connectedReviewLaunchInput(
+          governedTuple,
+          activeRun.mission.content_sha256,
+          validatedInput.model_override,
+          runOrdinal,
+        ),
+        activeRun,
+      );
+      return {
+        ...this.toPortfolioItem(source, replay.work_item),
+        connected_run: summarizeConnectedRun(replay.connected_run),
+      };
+    }
+    const mission = await this.compileReviewMission(sourceId, workItemId, {
+      independence_attested: validatedInput.independence_attested,
+    });
+    if (this.reviewRuntime === undefined) {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected Review is not configured for this Product Studio service.",
+      );
+    }
+
+    const configuration = connectedRuntimeConfigurationSchema.parse(
+      this.reviewRuntime.configuration(),
+    );
+    const requestedModel =
+      validatedInput.model_override ?? configuration.default_model;
+    this.assertReviewModelAvailable(workItemId, requestedModel);
+    const policy = this.connectedReviewPolicy(mission);
+    const prepared = await this.reviewRuntime.prepare({
+      workspace_cwd: source.workspace.workspaceRoot,
+      limits: CONNECTED_RUN_LIMITS,
+      requested_model: requestedModel,
+      result_ingress_policy: policy,
+    });
+    if (
+      prepared.requested_model !== requestedModel ||
+      prepared.sanitized_profile.requested_model !== requestedModel ||
+      prepared.sanitized_profile.adapter_id !== configuration.adapter_id ||
+      prepared.sanitized_profile.adapter_version !==
+        configuration.adapter_version ||
+      prepared.sanitized_profile.profile_id !== configuration.profile_id
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Prepared Review runtime provenance does not match the validated launch request.",
+      );
+    }
+    this.assertReviewModelAvailable(workItemId, requestedModel);
+    const launchInput = this.connectedReviewLaunchInput(
+      governedTuple,
+      mission.mission.content_sha256,
+      validatedInput.model_override,
+      runOrdinal,
+    );
+    const record = this.connectedReviewRunRecord(
+      mission,
+      governedTuple,
+      policy,
+      prepared,
+    );
+    const launched = await controller.launchConnectedRun(
+      workItemId,
+      launchInput,
+      record,
+    );
+    await this.preferencesStore.setPreference({
+      adapter_id: configuration.adapter_id,
+      seat: "review",
+      requested_model: requestedModel,
+    });
+    if (!launched.created) {
+      return {
+        ...this.toPortfolioItem(source, launched.work_item),
+        connected_run: summarizeConnectedRun(launched.connected_run),
+      };
+    }
+
+    const eventSink: AcpEventSink = {
+      append: (event, signal) =>
+        source.workspace.appendConnectedRunEvent(
+          workItemId,
+          launched.connected_run.connected_run_id,
+          event,
+          signal,
+        ),
+    };
+    const key = this.connectedSessionKey(
+      source.source_id,
+      workItemId,
+      launched.connected_run.connected_run_id,
+    );
+    const started = await startConnectedAcpRun({
+      start_session: (callbacks) =>
+        prepared.start(
+          eventSink,
+          (request, signal) =>
+            source.workspace
+              .writeConnectedReviewResult(
+                workItemId,
+                launched.connected_run.connected_run_id,
+                request.path,
+                request.content,
+                signal,
+              )
+              .then(() => undefined),
+          callbacks,
+        ),
+      mark_running: (session) =>
+        source.workspace.startConnectedRun(
+          workItemId,
+          launched.connected_run.connected_run_id,
+          {
+            protocol_version: {
+              value: session.protocol_version,
+              assurance: "adapter_attested",
+            },
+            session_id: {
+              value: session.session_id,
+              assurance: "adapter_attested",
+            },
+          },
+          session.process,
+        ),
+      persist_effective_model: (effectiveModel, signal) =>
+        source.workspace
+          .updateConnectedRunEffectiveModel(
+            workItemId,
+            launched.connected_run.connected_run_id,
+            effectiveModel,
+            signal,
+          )
+          .then(() => undefined),
+      prompt: `Review the exact immutable subject in ${mission.mission.task_path}. Write only the strict JSON review result to ${mission.mission.result_contract.output_path}. Do not modify any other path, run commands, use URLs, or make approval decisions.`,
+      complete: (result) =>
+        this.completeObservedConnectedRun(
+          source,
+          workItemId,
+          launched.connected_run.connected_run_id,
+          result,
+        ),
+      fail: async () => {
+        await source.workspace
+          .completeConnectedRun(
+            workItemId,
+            launched.connected_run.connected_run_id,
+            this.failedConnectedTerminal(),
+          )
+          .catch(() => undefined);
+        await this.rebuild().catch(() => undefined);
+      },
+      started: (handle) => {
+        this.liveConnectedSessions.set(key, handle);
+      },
+      after_complete: async (result, terminal) => {
+        if (terminal.lifecycle.terminal?.outcome !== result.outcome) {
+          return;
+        }
+        if (result.outcome === "completed") {
+          await this.importReviewResult(source.source_id, workItemId);
+        }
+        await this.rebuild();
+      },
+      settled: async (session) => {
+        if (this.liveConnectedSessions.get(key)?.session === session) {
+          this.liveConnectedSessions.delete(key);
+        }
+      },
+    });
+    void started.completion;
+    await this.rebuild();
+    return {
+      ...this.toPortfolioItem(source, launched.work_item),
+      connected_run: summarizeConnectedRun(started.running),
     };
   }
 
@@ -4067,6 +4308,25 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     }
   }
 
+  private assertReviewModelAvailable(
+    workItemId: string,
+    requestedModel: string,
+  ): void {
+    const validatedModel = shapingRequestedModelSchema.parse(requestedModel);
+    const availability = this.reviewModelAvailability();
+    if (
+      availability.status !== "available" ||
+      !availability.available_model_ids.includes(validatedModel)
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        availability.status === "unavailable"
+          ? "Connected Review is not configured with any available model."
+          : `Requested Review model ${validatedModel} is not in available_model_ids.`,
+      );
+    }
+  }
+
   private async launchPreparedShapingMission(
     source: ResolvedSource,
     missionInput: ShapingMissionPackage,
@@ -5205,6 +5465,119 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     };
   }
 
+  private connectedReviewPolicy(
+    mission: ReviewMissionCompilation,
+  ): ReviewRunPolicy {
+    const resultPath = mission.mission.result_contract.output_path;
+    return {
+      kind: "single_result_file",
+      result_path: resultPath,
+      mission_result_binding_sha256:
+        deriveReviewMissionResultBindingSha256(
+          mission.mission.content_sha256,
+          resultPath,
+        ),
+      commands: "forbidden",
+      urls: "forbidden",
+      mcp: "forbidden",
+      credentials: "forbidden",
+      outside_workspace_writes: "forbidden",
+      reads: "workspace_and_repository_unrestricted",
+      execution_mode: "permission_mediated_local",
+      result_assurance: "result_scope_validation",
+      containment_assurance: "not_independently_enforced",
+      machine_authority: "launching_user",
+    };
+  }
+
+  private connectedReviewRunRecord(
+    mission: ReviewMissionCompilation,
+    governedTuple: ConnectedRunRecordV2["governed_tuple"],
+    policy: ReviewRunPolicy,
+    prepared: PreparedConnectedReviewRuntime,
+  ): ConnectedRunRecordV2 {
+    const policySha256 = hashReviewRunPolicy(policy);
+    const authorizationSha256 = this.hashConnectedValue({
+      mission_content_sha256: mission.mission.content_sha256,
+      result_path: policy.result_path,
+      policy_sha256: policySha256,
+      requested_model: prepared.requested_model,
+    });
+    const timestamp = new Date().toISOString();
+    return {
+      schema_version: 2,
+      connected_run_id: randomUUID(),
+      mission: {
+        identity: mission.mission.identity,
+        path: mission.mission_path.slice(mission.workspace_path.length + 1),
+        content_sha256: mission.mission.content_sha256,
+        source_commit: mission.mission.source_revision.git_base_commit,
+      },
+      governed_tuple: governedTuple,
+      provenance: {
+        role: { value: "reviewer", assurance: "controller_observed" },
+        seat: { value: "reviewer", assurance: "controller_observed" },
+        requested_model: {
+          value: prepared.requested_model,
+          assurance: "user_declared",
+        },
+        effective_model: {
+          assurance: "unknown",
+          model_id: null,
+          deployment_id: null,
+          observed_event_sha256: null,
+        },
+        effort: {
+          value: prepared.reasoning_effort,
+          assurance: "user_declared",
+        },
+        harness: {
+          value: {
+            id: prepared.sanitized_profile.adapter_id,
+            version: prepared.sanitized_profile.adapter_version,
+          },
+          assurance: "adapter_attested",
+        },
+        adapter_profile: {
+          value: {
+            adapter_id: prepared.sanitized_profile.adapter_id,
+            adapter_version: prepared.sanitized_profile.adapter_version,
+            profile_id: prepared.sanitized_profile.profile_id,
+          },
+          assurance: "adapter_attested",
+        },
+        resolved_profile_sha256: {
+          value: this.hashConnectedValue(prepared.sanitized_profile),
+          assurance: "controller_observed",
+        },
+        resolved_skill_set_sha256: { value: null, assurance: "unknown" },
+        authorization_sha256: {
+          value: authorizationSha256,
+          assurance: "controller_observed",
+        },
+      },
+      authorization: {
+        kind: "review_result_ingress",
+        result_path: policy.result_path,
+        policy_sha256: policySha256,
+      },
+      acp: {
+        protocol_version: { value: null, assurance: "unknown" },
+        session_id: { value: null, assurance: "unknown" },
+      },
+      lifecycle: {
+        status: "starting",
+        started_at: timestamp,
+        updated_at: timestamp,
+        completed_at: null,
+        terminal: null,
+      },
+      limits: CONNECTED_RUN_LIMITS,
+      process: null,
+      diagnostics: { entries: [], truncated: false },
+    };
+  }
+
   private async completeObservedConnectedRun(
     source: ResolvedSource,
     workItemId: string,
@@ -5414,11 +5787,48 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     governedTuple: ConnectedRunRecordV2["governed_tuple"],
     missionContentSha256: string,
     modelOverride: string | undefined,
+    runOrdinal: number,
   ) {
     return {
       expected_phase: "execute" as const,
       expected_status: "active" as const,
       expected_schema_version: 2 as const,
+      run_ordinal: runOrdinal,
+      governed_tuple: governedTuple,
+      mission_content_sha256: missionContentSha256,
+      ...(modelOverride === undefined ? {} : { model_override: modelOverride }),
+    };
+  }
+
+  private governedReviewTuple(
+    workItem: WorkItem,
+    identity: MissionIdentity<"review">,
+  ): ConnectedRunRecordV2["governed_tuple"] {
+    if (workItem.state.patch_cycle === undefined) {
+      throw this.missionNotReady(
+        workItem.goal.work_item_id,
+        "Connected Review requires an explicit patch-cycle pin.",
+      );
+    }
+    return {
+      goal_version: identity.goal_version,
+      input_revision: identity.input_revision,
+      attempt: identity.attempt,
+      patch_cycle: workItem.state.patch_cycle,
+    };
+  }
+
+  private connectedReviewLaunchInput(
+    governedTuple: ConnectedRunRecordV2["governed_tuple"],
+    missionContentSha256: string,
+    modelOverride: string | undefined,
+    runOrdinal: number,
+  ) {
+    return {
+      expected_phase: "review" as const,
+      expected_status: "active" as const,
+      expected_schema_version: 2 as const,
+      run_ordinal: runOrdinal,
       governed_tuple: governedTuple,
       mission_content_sha256: missionContentSha256,
       ...(modelOverride === undefined ? {} : { model_override: modelOverride }),

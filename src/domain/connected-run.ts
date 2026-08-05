@@ -221,6 +221,7 @@ export interface LaunchConnectedInput {
   expected_phase: MissionPhase;
   expected_status: "active";
   expected_schema_version: 2;
+  run_ordinal: number;
   governed_tuple: GovernedTuple;
   mission_content_sha256: string;
   model_override?: string;
@@ -699,6 +700,7 @@ export const launchConnectedInputSchema: z.ZodType<LaunchConnectedInput> =
     expected_phase: z.enum(MISSION_PHASES),
     expected_status: z.literal("active"),
     expected_schema_version: z.literal(2),
+    run_ordinal: nonNegativeSafeIntegerSchema,
     governed_tuple: governedTupleSchema,
     mission_content_sha256: sha256Schema,
     model_override: exactNonEmptyStringSchema.optional(),

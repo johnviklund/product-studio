@@ -71,6 +71,7 @@ import type {
 } from "../../src/domain/verification";
 import { SQLitePortfolioIndex } from "../../src/index/work-item-index";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
+import { PortfolioPreferencesStore } from "../../src/workspace/portfolio-preferences";
 import { PortfolioRegistry } from "../../src/workspace/portfolio-registry";
 import type {
   AcpClientAdapter,
@@ -78,6 +79,7 @@ import type {
   AcpRuntimeProfile,
   AcpRunResult,
   AcpSession,
+  AcpWriteTextFileHandler,
 } from "../../src/infrastructure/acp/acp-client";
 import { StdioAcpClientAdapter } from "../../src/infrastructure/acp/acp-client";
 
@@ -203,6 +205,84 @@ function preparedRuntime(
     },
     prepare,
     start,
+  };
+}
+
+function preparedReviewRuntime(
+  session: AcpSession,
+  requestedModel = "review-model",
+  failStartCount = 0,
+): {
+  runtime: ConnectedReviewRuntime;
+  prepare: ReturnType<typeof vi.fn>;
+  start: ReturnType<typeof vi.fn>;
+  write(path: string, content: string): Promise<void>;
+} {
+  let writer: AcpWriteTextFileHandler | null = null;
+  let startCount = 0;
+  const start = vi.fn(
+    async (
+      _eventSink: AcpEventSink,
+      writeTextFile: AcpWriteTextFileHandler,
+    ) => {
+      startCount += 1;
+      if (startCount <= failStartCount) {
+        throw new Error("Review adapter unavailable after durable launch");
+      }
+      writer = writeTextFile;
+      return session;
+    },
+  );
+  const prepared: PreparedConnectedReviewRuntime = {
+    requested_model: requestedModel,
+    reasoning_effort: "high",
+    sanitized_profile: {
+      adapter_id: "copilot-acp",
+      adapter_version: "1.0.0",
+      profile_id: "noninteractive-review-v1",
+      executable: "copilot",
+      argv: ["--acp", "--stdio"],
+      requested_model: requestedModel,
+      reasoning_effort: "high",
+      available_tools: ["view"],
+      excluded_tools: ["apply_patch", "execute"],
+      authentication: "noninteractive_authenticated",
+      execution_mode: "permission_mediated_local",
+      containment_assurance: "not_independently_enforced",
+      machine_authority: "launching_user",
+      requested_mcp_server_count: 0,
+      client_fs_write_text_file: true,
+      credential_environment: "explicit_allowlist_without_credential_values",
+    },
+    start,
+  };
+  const prepare = vi.fn(async () => prepared);
+  return {
+    runtime: {
+      configuration: () => ({
+        adapter_id: "copilot-acp",
+        adapter_version: "1.0.0",
+        profile_id: "noninteractive-review-v1",
+        available_model_ids: [requestedModel],
+        default_model: requestedModel,
+      }),
+      prepare,
+    },
+    prepare,
+    start,
+    async write(path, content) {
+      if (writer === null) {
+        throw new Error("Review runtime writer is not active.");
+      }
+      await writer(
+        {
+          sessionId: session.session_id,
+          path,
+          content,
+        } as never,
+        new AbortController().signal,
+      );
+    },
   };
 }
 
@@ -916,6 +996,34 @@ async function governWorkItemThrough(
   }
 
   return { workItem: current, manifests };
+}
+
+async function prepareConnectedReviewItem(
+  service: PortfolioService,
+  sourceId: string,
+  workItem: WorkItem,
+) {
+  const executeMission = await service.compileMission(
+    sourceId,
+    workItem.goal.work_item_id,
+  );
+  await writeFile(
+    join(dirname(executeMission.task_path), "result.json"),
+    serializeExternalResult({
+      result_schema_version: 2,
+      mission_content_sha256: executeMission.mission.content_sha256,
+      identity: executeMission.mission.identity,
+      commit: "a".repeat(40),
+      summary: "Prepared one exact subject for connected Review.",
+      changed_files: ["src/application/portfolio.ts"],
+      verification: [{ name: "Tests", status: "passed" }],
+    }),
+    "utf8",
+  );
+  await service.importResult(sourceId, workItem.goal.work_item_id);
+  return service.compileReviewMission(sourceId, workItem.goal.work_item_id, {
+    independence_attested: true,
+  });
 }
 
 async function writeTransferJournal(
@@ -4053,6 +4161,385 @@ describe("PortfolioService", () => {
     rebuiltIndex.close();
   });
 
+  it("launches connected review read-only, terminals before import, and replays without duplicate spawn", async () => {
+    const root = await createWorkspace("Connected Review Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Run an independent connected review",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const result = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7c1",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4101,
+        process_group_id: 4101,
+        started_at: "2026-08-05T18:00:00.000Z",
+      },
+      run: vi.fn(() => result.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedReviewRuntime(session);
+    const order: string[] = [];
+    let connectedRunId: string | null = null;
+    const completeConnectedRun =
+      repository.completeConnectedRun.bind(repository);
+    repository.completeConnectedRun = async (...args) => {
+      const completed = await completeConnectedRun(...args);
+      if (completed.lifecycle.terminal?.outcome === "completed") {
+        order.push("terminal");
+      }
+      return completed;
+    };
+    const writeImportEvidence = repository.writeImportEvidence.bind(repository);
+    repository.writeImportEvidence = async (input) => {
+      if (input.evidence.phase === "review") {
+        if (connectedRunId === null) {
+          throw new Error("Review import requires a connected run id.");
+        }
+        const run = await repository.readConnectedRun(
+          created.goal.work_item_id,
+          connectedRunId,
+        );
+        expect(run?.lifecycle).toMatchObject({
+          status: "terminal",
+          terminal: { outcome: "completed" },
+        });
+        order.push("import");
+      }
+      return writeImportEvidence(input);
+    };
+    const { inboxRoot, index, service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+
+    await expect(
+      service.launchConnectedReview(sourceId, created.goal.work_item_id, {
+        independence_attested: true,
+      }),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    const executeMission = await service.compileMission(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    await writeFile(
+      join(dirname(executeMission.task_path), "result.json"),
+      serializeExternalResult({
+        result_schema_version: 2,
+        mission_content_sha256: executeMission.mission.content_sha256,
+        identity: executeMission.mission.identity,
+        commit: "a".repeat(40),
+        summary: "Implemented the connected Review boundary.",
+        changed_files: ["src/application/portfolio.ts"],
+        verification: [{ name: "Tests", status: "passed" }],
+      }),
+      "utf8",
+    );
+    await service.importResult(sourceId, created.goal.work_item_id);
+    await expect(
+      service.launchConnectedReview(sourceId, created.goal.work_item_id, {
+        independence_attested: false,
+      } as never),
+    ).rejects.toMatchObject({ name: "ZodError" });
+
+    const reviewMission = await service.compileReviewMission(
+      sourceId,
+      created.goal.work_item_id,
+      { independence_attested: true },
+    );
+    const launched = await service.launchConnectedReview(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        independence_attested: true,
+        model_override: "review-model",
+      },
+    );
+    connectedRunId = launched.connected_run.connected_run_id;
+    const replay = await service.launchConnectedReview(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        independence_attested: true,
+        model_override: "review-model",
+      },
+    );
+    expect(replay.connected_run.connected_run_id).toBe(connectedRunId);
+    expect(fake.prepare).toHaveBeenCalledOnce();
+    expect(fake.start).toHaveBeenCalledOnce();
+    expect(session.run).toHaveBeenCalledOnce();
+    expect(launched.connected_run).toMatchObject({
+      mission: { identity: { phase: "review" } },
+      authorization: { kind: "review_result_ingress" },
+      provenance: {
+        role: { value: "reviewer" },
+        seat: { value: "reviewer" },
+      },
+      lifecycle: { status: "running" },
+    });
+    expect(fake.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requested_model: "review-model",
+        result_ingress_policy: expect.objectContaining({
+          kind: "single_result_file",
+          result_path: reviewMission.mission.result_contract.output_path,
+        }),
+      }),
+    );
+    if (reviewMission.mission.review_subject.source !== "execute") {
+      throw new Error("Initial connected Review must bind Execute evidence.");
+    }
+    await fake.write(
+      join(root, reviewMission.mission.result_contract.output_path),
+      serializeExternalResult({
+        result_schema_version: 2,
+        review_mission_content_sha256:
+          reviewMission.mission.content_sha256,
+        identity: reviewMission.mission.identity,
+        execute_mission_content_sha256:
+          reviewMission.mission.review_subject
+            .execute_mission_content_sha256,
+        execute_result_content_sha256:
+          reviewMission.mission.review_subject
+            .execute_result_content_sha256,
+        git_base_commit:
+          reviewMission.mission.review_subject.git_base_commit,
+        accepted_result_commit:
+          reviewMission.mission.review_subject.accepted_result_commit,
+        summary: "Independent review found no blocking issue.",
+        verdict: "clean",
+        findings: [],
+      }),
+    );
+    result.resolve({
+      outcome: "completed",
+      partial: false,
+      stop_reason: "end_turn",
+      permissions: [],
+    });
+    await expect.poll(async () => {
+      const item = (await service.list()).find(
+        (candidate) =>
+          candidate.source_id === sourceId &&
+          candidate.work_item.goal.work_item_id ===
+            created.goal.work_item_id,
+      );
+      return item?.work_item.state.attention?.kind;
+    }).toBe("review_ready");
+    await expect.poll(async () => {
+      const runs = await service.listConnectedRuns(
+        sourceId,
+        created.goal.work_item_id,
+      );
+      return runs[0]?.lifecycle.terminal_outcome;
+    }).toBe("completed");
+    expect(order).toEqual(["terminal", "import"]);
+    const preferences = new PortfolioPreferencesStore(
+      dirname(dirname(inboxRoot)),
+    );
+    await expect(
+      preferences.getPreference("copilot-acp", "review"),
+    ).resolves.toBe("review-model");
+    index.close();
+  });
+
+  it("rejects connected review when the governed tuple changes during runtime preparation", async () => {
+    const root = await createWorkspace("Stale Connected Review Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Reject a stale connected Review launch",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7c2",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4102,
+        process_group_id: 4102,
+        started_at: "2026-08-05T18:00:00.000Z",
+      },
+      run: vi.fn(),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedReviewRuntime(session);
+    const prepare = fake.runtime.prepare.bind(fake.runtime);
+    const staleRuntime: ConnectedReviewRuntime = {
+      configuration: fake.runtime.configuration,
+      prepare: vi.fn(async (input) => {
+        const current = await repository.read(created.goal.work_item_id);
+        if (current === null) {
+          throw new Error("Stale Review fixture requires its work item.");
+        }
+        const activeRun = {
+          run_id: "84000000-0000-4000-8000-000000000001",
+          idempotency_key: "stale-review-runtime-preparation",
+          acquired_at: "2026-08-05T18:00:00.000Z",
+        };
+        const lease = await repository.acquireControllerLease(
+          created.goal.work_item_id,
+          activeRun,
+        );
+        if (lease === null) {
+          throw new Error("Stale Review fixture requires a controller lease.");
+        }
+        try {
+          await repository.commitControllerMutation(lease, {
+            goal: lease.work_item.goal,
+            state: {
+              ...lease.work_item.state,
+              input_revision: lease.work_item.state.input_revision! + 1,
+              updated_at: "2026-08-05T18:00:01.000Z",
+            },
+            manifest: {
+              schema_version: 1,
+              run_id: activeRun.run_id,
+              work_item_id: created.goal.work_item_id,
+              idempotency_key: activeRun.idempotency_key,
+              phase: "review",
+              goal_version: lease.work_item.state.goal_version!,
+              input_revision: lease.work_item.state.input_revision! + 1,
+              attempt: lease.work_item.state.attempt!,
+              started_at: activeRun.acquired_at,
+              outcome: "pending",
+            },
+          });
+        } finally {
+          await repository.releaseControllerLease(lease);
+        }
+        return prepare(input);
+      }),
+    };
+    const { index, service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      undefined,
+      staleRuntime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    await prepareConnectedReviewItem(service, sourceId, created);
+
+    await expect(
+      service.launchConnectedReview(sourceId, created.goal.work_item_id, {
+        independence_attested: true,
+      }),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    expect(fake.start).not.toHaveBeenCalled();
+    await expect(
+      repository.listConnectedRuns(created.goal.work_item_id),
+    ).resolves.toEqual([]);
+    index.close();
+  });
+
+  it("keeps connected review retry truthful after adapter start failure without duplicate spawn", async () => {
+    const root = await createWorkspace("Retry Connected Review Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Retry a connected Review launch",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const pending = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7c3",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4103,
+        process_group_id: 4103,
+        started_at: "2026-08-05T18:00:00.000Z",
+      },
+      run: vi.fn(() => pending.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedReviewRuntime(session, "review-model", 1);
+    const { index, service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    await prepareConnectedReviewItem(service, sourceId, created);
+
+    await expect(
+      service.launchConnectedReview(sourceId, created.goal.work_item_id, {
+        independence_attested: true,
+      }),
+    ).rejects.toThrow("Review adapter unavailable after durable launch");
+    expect((await repository.read(created.goal.work_item_id))?.state).toMatchObject({
+      phase: "review",
+      status: "active",
+    });
+    expect(await service.listConnectedRuns(sourceId, created.goal.work_item_id))
+      .toEqual([
+        expect.objectContaining({
+          lifecycle: expect.objectContaining({
+            status: "terminal",
+            terminal_outcome: "failed",
+          }),
+        }),
+      ]);
+
+    const retry = await service.launchConnectedReview(
+      sourceId,
+      created.goal.work_item_id,
+      { independence_attested: true },
+    );
+    const replay = await service.launchConnectedReview(
+      sourceId,
+      created.goal.work_item_id,
+      { independence_attested: true },
+    );
+    expect(retry.connected_run.lifecycle.status).toBe("running");
+    expect(replay.connected_run.connected_run_id).toBe(
+      retry.connected_run.connected_run_id,
+    );
+    expect(fake.start).toHaveBeenCalledTimes(2);
+    expect(session.run).toHaveBeenCalledOnce();
+    const runs = await service.listConnectedRuns(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(runs).toHaveLength(2);
+    expect(runs.filter((run) => run.lifecycle.status !== "terminal")).toHaveLength(
+      1,
+    );
+    index.close();
+  });
+
   it("fails an unavailable model before ACP spawn and surfaces exact missing permission attention", async () => {
     const root = await createWorkspace("Connected Permission Workspace");
     const repository = new ProductWorkspace(root, {
@@ -5324,7 +5811,7 @@ describe("PortfolioService", () => {
     index.close();
   });
 
-  it("rejects review compilation when a newer execute import makes the subject ambiguous", async () => {
+  it("rejects connected review when a newer execute import makes the subject ambiguous", async () => {
     const root = await createWorkspace("Stale Review Subject");
     const repository = new ProductWorkspace(root);
     const created = await repository.create({
@@ -5392,7 +5879,7 @@ describe("PortfolioService", () => {
     });
 
     await expect(
-      service.compileReviewMission(sourceId, created.goal.work_item_id, {
+      service.launchConnectedReview(sourceId, created.goal.work_item_id, {
         independence_attested: true,
       }),
     ).rejects.toMatchObject({

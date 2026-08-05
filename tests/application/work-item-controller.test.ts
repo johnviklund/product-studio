@@ -384,6 +384,7 @@ async function createImportFixture(options?: {
     expected_phase: "execute";
     expected_status: "active";
     expected_schema_version: 2;
+    run_ordinal: number;
     expected_goal_version: number;
     expected_input_revision: number;
     attempt: number;
@@ -1724,6 +1725,7 @@ async function createConnectedFixture(): Promise<{
     expected_phase: "execute" as const,
     expected_status: "active" as const,
     expected_schema_version: 2 as const,
+    run_ordinal: 0,
     governed_tuple: {
       goal_version: identity.goal_version,
       input_revision: identity.input_revision,
@@ -1829,6 +1831,7 @@ async function createPhaseConnectedFixture(
     expected_phase: MissionPhase;
     expected_status: "active";
     expected_schema_version: 2;
+    run_ordinal: number;
     governed_tuple: {
       goal_version: number;
       input_revision: number;
@@ -2078,11 +2081,20 @@ async function createPhaseConnectedFixture(
       expected_phase: phase,
       expected_status: "active",
       expected_schema_version: 2,
+      run_ordinal: 0,
       governed_tuple: governedTuple,
       mission_content_sha256: mission.content_sha256,
     },
     record,
   };
+}
+
+function withoutRunOrdinal<TInput extends { run_ordinal: number }>(
+  input: TInput,
+): Omit<TInput, "run_ordinal"> {
+  const { run_ordinal: _runOrdinal, ...expectation } = input;
+  void _runOrdinal;
+  return expectation;
 }
 
 afterEach(async () => {
@@ -2290,7 +2302,7 @@ describe("WorkItemController", () => {
     };
     const denied = await patch.controller.recordConnectedPermissionDenial(
       patch.workItem.goal.work_item_id,
-      { ...patch.input, expected_phase: "patch", operation },
+      { ...withoutRunOrdinal(patch.input), expected_phase: "patch", operation },
     );
     expect(denied.work_item.state).toMatchObject({
       phase: "patch",
@@ -2377,7 +2389,7 @@ describe("WorkItemController", () => {
 
     const denied = await fixture.controller.recordConnectedPermissionDenial(
       fixture.workItem.goal.work_item_id,
-      { ...fixture.input, operation },
+      { ...withoutRunOrdinal(fixture.input), operation },
     );
 
     expect(denied.work_item.state).toMatchObject({
@@ -2432,7 +2444,10 @@ describe("WorkItemController", () => {
     await expect(
       fixture.controller.recordConnectedPermissionDenial(
         fixture.workItem.goal.work_item_id,
-        { ...fixture.input, operation: inEnvelopeOperation },
+        {
+          ...withoutRunOrdinal(fixture.input),
+          operation: inEnvelopeOperation,
+        },
       ),
     ).rejects.toMatchObject({ kind: "invalid_transition" });
     expect(
@@ -2469,7 +2484,7 @@ describe("WorkItemController", () => {
     };
     const denied = await fixture.controller.recordConnectedPermissionDenial(
       fixture.workItem.goal.work_item_id,
-      { ...fixture.input, operation },
+      { ...withoutRunOrdinal(fixture.input), operation },
     );
     const decision = {
       expected_phase: "execute" as const,
