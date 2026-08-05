@@ -21,7 +21,10 @@ import {
   type PreparedConnectedRuntime,
   type PreparedShapingRuntime,
 } from "../../src/application/portfolio";
-import { WorkItemController } from "../../src/application/work-item-controller";
+import {
+  WorkItemController,
+  deriveControllerIdempotencyKey,
+} from "../../src/application/work-item-controller";
 import {
   createImportRunId,
   hashResultContent,
@@ -756,19 +759,55 @@ async function governWorkItemThrough(
   let current = contracted.work_item;
   const manifests = [contracted.manifest];
 
-  for (const targetPhase of targetPhases) {
-    const result = await controller.transition(current.goal.work_item_id, {
-      target_phase: targetPhase,
-      target_status: "active",
-      expected_phase: current.state.phase,
-      expected_status: current.state.status,
-      expected_schema_version: 2,
-      expected_goal_version: current.state.goal_version!,
-      expected_input_revision: current.state.input_revision!,
-      attempt: current.state.attempt!,
-    });
-    current = result.work_item;
-    manifests.push(result.manifest);
+  for (const [index, targetPhase] of targetPhases.entries()) {
+    const runId = `83000000-0000-4000-8000-0000000000${String(index).padStart(2, "0")}`;
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      current.goal.work_item_id,
+      targetPhase,
+      current.state.goal_version!,
+      current.state.input_revision!,
+      current.state.attempt!,
+    );
+    const activeRun = {
+      run_id: runId,
+      idempotency_key: idempotencyKey,
+      acquired_at: "2026-07-22T12:00:00.000Z",
+    };
+    const lease = await repository.acquireControllerLease(
+      current.goal.work_item_id,
+      activeRun,
+    );
+    if (lease === null) {
+      throw new Error("Expected explicit portfolio fixture lease");
+    }
+    try {
+      const result = await repository.commitControllerMutation(lease, {
+        goal: current.goal,
+        state: {
+          ...current.state,
+          phase: targetPhase,
+          updated_at: new Date(
+            Date.parse(current.state.updated_at) + 1,
+          ).toISOString(),
+        },
+        manifest: {
+          schema_version: 1,
+          run_id: runId,
+          work_item_id: current.goal.work_item_id,
+          idempotency_key: idempotencyKey,
+          phase: targetPhase,
+          goal_version: current.state.goal_version!,
+          input_revision: current.state.input_revision!,
+          attempt: current.state.attempt!,
+          started_at: activeRun.acquired_at,
+          outcome: "pending",
+        },
+      });
+      current = result.work_item;
+      manifests.push(result.manifest);
+    } finally {
+      await repository.releaseControllerLease(lease);
+    }
   }
 
   return { workItem: current, manifests };

@@ -8,7 +8,10 @@ import { stringify } from "yaml";
 
 import { PortfolioService } from "../../src/application/portfolio";
 import { UntrustedRequestOriginError } from "../../src/application/request-origin";
-import { WorkItemController } from "../../src/application/work-item-controller";
+import {
+  WorkItemController,
+  deriveControllerIdempotencyKey,
+} from "../../src/application/work-item-controller";
 import type { StoredImportEvidence } from "../../src/domain/result";
 import {
   InvalidWorkItemTransitionError,
@@ -219,19 +222,60 @@ async function createMissionReadyWorkspace(): Promise<{
       },
     })
   ).work_item;
-  for (const targetPhase of ["spec", "plan", "execute"] as const) {
-    current = (
-      await controller.transition(current.goal.work_item_id, {
-        target_phase: targetPhase,
-        target_status: "active",
-        expected_phase: current.state.phase,
-        expected_status: current.state.status,
-        expected_schema_version: 2,
-        expected_goal_version: current.state.goal_version!,
-        expected_input_revision: current.state.input_revision!,
-        attempt: current.state.attempt!,
-      })
-    ).work_item;
+  for (const [index, targetPhase] of [
+    "spec",
+    "plan",
+    "execute",
+  ].entries()) {
+    const phase = targetPhase as "spec" | "plan" | "execute";
+    const runId = `82000000-0000-4000-8000-00000000000${index}`;
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      current.goal.work_item_id,
+      phase,
+      current.state.goal_version!,
+      current.state.input_revision!,
+      current.state.attempt!,
+    );
+    const activeRun = {
+      run_id: runId,
+      idempotency_key: idempotencyKey,
+      acquired_at: "2026-07-22T12:00:00.000Z",
+    };
+    const lease = await repository.acquireControllerLease(
+      current.goal.work_item_id,
+      activeRun,
+    );
+    if (lease === null) {
+      throw new Error("Expected explicit mission fixture lease");
+    }
+    try {
+      current = (
+        await repository.commitControllerMutation(lease, {
+          goal: current.goal,
+          state: {
+            ...current.state,
+            phase,
+            updated_at: new Date(
+              Date.parse(current.state.updated_at) + 1,
+            ).toISOString(),
+          },
+          manifest: {
+            schema_version: 1,
+            run_id: runId,
+            work_item_id: current.goal.work_item_id,
+            idempotency_key: idempotencyKey,
+            phase,
+            goal_version: current.state.goal_version!,
+            input_revision: current.state.input_revision!,
+            attempt: current.state.attempt!,
+            started_at: activeRun.acquired_at,
+            outcome: "pending",
+          },
+        })
+      ).work_item;
+    } finally {
+      await repository.releaseControllerLease(lease);
+    }
   }
   return { workspacePath, workItemId: item.goal.work_item_id };
 }

@@ -123,6 +123,7 @@ import {
 } from "../domain/work-item";
 import {
   canUpdateGoalContract,
+  dedicatedTransitionPolicy,
   validateWorkItemTransition,
 } from "../domain/workflow-policy";
 import {
@@ -1190,6 +1191,20 @@ export class WorkItemController {
           "idempotency_conflict",
           validatedId,
           `Run ${runId} already has a non-matching durable result.`,
+        );
+      }
+
+      const dedicatedPolicy = dedicatedTransitionPolicy(
+        lease.work_item.state.phase,
+        validatedInput.target_phase,
+      );
+      if (dedicatedPolicy.kind !== "generic_allowed") {
+        throw this.conflict(
+          "invalid_transition",
+          validatedId,
+          dedicatedPolicy.kind === "dedicated_operation_required"
+            ? `${dedicatedPolicy.action_label} — ${dedicatedPolicy.explanation}`
+            : dedicatedPolicy.explanation,
         );
       }
 

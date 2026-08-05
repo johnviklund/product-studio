@@ -67,6 +67,10 @@ import {
   type StoredShapingArtifact,
 } from "../../src/domain/shaping";
 import { deriveManualShapingProductionId } from "../../src/domain/shaping-run";
+import {
+  CLOSED_IN_SLICE_PHASE_TRANSITIONS,
+  CONTROLLER_ONLY_PHASE_TRANSITIONS,
+} from "../../src/domain/workflow-policy";
 import type {
   GitVerificationAdapter,
   VerificationRunner,
@@ -262,17 +266,58 @@ async function governToExecute(
     created.goal.work_item_id,
     firstContract,
   );
-  for (const targetPhase of ["spec", "plan", "execute"] as const) {
-    mutation = await controller.transition(created.goal.work_item_id, {
-      target_phase: targetPhase,
-      target_status: "active",
-      expected_phase: mutation.work_item.state.phase,
-      expected_status: mutation.work_item.state.status,
-      expected_schema_version: 2,
-      expected_goal_version: mutation.work_item.state.goal_version!,
-      expected_input_revision: mutation.work_item.state.input_revision!,
-      attempt: mutation.work_item.state.attempt!,
-    });
+  for (const [index, targetPhase] of [
+    "spec",
+    "plan",
+    "execute",
+  ].entries()) {
+    const current = mutation.work_item;
+    const runId = `81000000-0000-4000-8000-00000000000${index}`;
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      created.goal.work_item_id,
+      targetPhase as "spec" | "plan" | "execute",
+      current.state.goal_version!,
+      current.state.input_revision!,
+      current.state.attempt!,
+    );
+    const activeRun = {
+      run_id: runId,
+      idempotency_key: idempotencyKey,
+      acquired_at: "2026-07-21T21:00:00.000Z",
+    };
+    const lease = await repository.acquireControllerLease(
+      created.goal.work_item_id,
+      activeRun,
+    );
+    if (lease === null) {
+      throw new Error("Expected explicit governed fixture lease");
+    }
+    try {
+      mutation = await repository.commitControllerMutation(lease, {
+        goal: current.goal,
+        state: {
+          ...current.state,
+          phase: targetPhase as "spec" | "plan" | "execute",
+          updated_at: new Date(
+            Date.parse(current.state.updated_at) + 1,
+          ).toISOString(),
+        },
+        manifest: {
+          schema_version: 1,
+          run_id: runId,
+          work_item_id: created.goal.work_item_id,
+          idempotency_key: idempotencyKey,
+          phase: targetPhase as "spec" | "plan" | "execute",
+          goal_version: current.state.goal_version!,
+          input_revision: current.state.input_revision!,
+          attempt: current.state.attempt!,
+          started_at: activeRun.acquired_at,
+          outcome: "pending",
+        },
+      });
+    } finally {
+      await repository.releaseControllerLease(lease);
+    }
   }
   return { workItem: mutation.work_item, manifest: mutation.manifest };
 }
@@ -2011,38 +2056,20 @@ describe("WorkItemController", () => {
 
   it("rejects goal-contract updates in execute without mutating or retaining its lease", async () => {
     const { root, repository } = await createWorkspace();
-    const created = await createUncontractedItem(repository);
+    const { workItem } = await governToExecute(repository);
     const controller = createController(repository);
-    let mutation = await controller.updateGoalContract(
-      created.goal.work_item_id,
-      firstContract,
-    );
-
-    for (const targetPhase of ["spec", "plan", "execute"] as const) {
-      mutation = await controller.transition(created.goal.work_item_id, {
-        target_phase: targetPhase,
-        target_status: "active",
-        expected_phase: mutation.work_item.state.phase,
-        expected_status: mutation.work_item.state.status,
-        expected_schema_version: 2,
-        expected_goal_version: mutation.work_item.state.goal_version!,
-        expected_input_revision: mutation.work_item.state.input_revision!,
-        attempt: mutation.work_item.state.attempt!,
-      });
-    }
-
-    const before = await repository.read(created.goal.work_item_id);
+    const before = await repository.read(workItem.goal.work_item_id);
     const runsPath = join(
       root,
       ".founder",
       "work-items",
-      created.goal.work_item_id,
+      workItem.goal.work_item_id,
       "runs",
     );
     const runsBefore = await readdir(runsPath);
 
     await expect(
-      controller.updateGoalContract(created.goal.work_item_id, {
+      controller.updateGoalContract(workItem.goal.work_item_id, {
         ...firstContract,
         acceptance_criteria: ["Execute contracts stay fixed"],
         expected_goal_version: 1,
@@ -2052,11 +2079,11 @@ describe("WorkItemController", () => {
       name: "ControllerConflictError",
       kind: "goal_contract_locked",
     });
-    expect(await repository.read(created.goal.work_item_id)).toEqual(before);
+    expect(await repository.read(workItem.goal.work_item_id)).toEqual(before);
     expect(await readdir(runsPath)).toEqual(runsBefore);
 
-    const afterRejectedUpdate = await repository.read(created.goal.work_item_id);
-    const transitioned = await controller.transition(created.goal.work_item_id, {
+    const afterRejectedUpdate = await repository.read(workItem.goal.work_item_id);
+    const transitioned = await controller.transition(workItem.goal.work_item_id, {
       target_phase: "review",
       target_status: "active",
       expected_phase: afterRejectedUpdate!.state.phase,
@@ -2069,15 +2096,80 @@ describe("WorkItemController", () => {
     expect(transitioned.work_item.state.phase).toBe("review");
   });
 
+  it("rejects every dedicated and closed shaping arrow at the controller boundary", async () => {
+    const transitions = [
+      ...CONTROLLER_ONLY_PHASE_TRANSITIONS.map((transition) => ({
+        ...transition,
+        reason: `${transition.action_label} — ${transition.explanation}`,
+      })),
+      ...CLOSED_IN_SLICE_PHASE_TRANSITIONS.map((transition) => ({
+        ...transition,
+        reason: transition.explanation,
+      })),
+    ];
+    expect(transitions).toHaveLength(7);
+
+    for (const transition of transitions) {
+      const { root, repository } = await createWorkspace();
+      const created = await createUncontractedItem(repository);
+      const contracted = (
+        await createController(repository).updateGoalContract(
+          created.goal.work_item_id,
+          firstContract,
+        )
+      ).work_item;
+      const itemDirectory = join(
+        root,
+        ".founder",
+        "work-items",
+        created.goal.work_item_id,
+      );
+      const state = {
+        ...contracted.state,
+        phase: transition.from,
+        status: "active" as const,
+        updated_at: "2026-08-05T11:00:00.000Z",
+      };
+      await writeFile(
+        join(itemDirectory, "state.json"),
+        `${JSON.stringify(state, null, 2)}\n`,
+        "utf8",
+      );
+      const goalBefore = await readFile(join(itemDirectory, "goal.yaml"), "utf8");
+      const stateBefore = await readFile(join(itemDirectory, "state.json"), "utf8");
+
+      await expect(
+        createController(repository).transition(created.goal.work_item_id, {
+          target_phase: transition.to,
+          target_status: "active",
+          expected_phase: transition.from,
+          expected_status: "active",
+          expected_schema_version: 2,
+          expected_goal_version: state.goal_version!,
+          expected_input_revision: state.input_revision!,
+          attempt: state.attempt!,
+        }),
+      ).rejects.toMatchObject({
+        kind: "invalid_transition",
+        reason: transition.reason,
+      });
+      expect(await readFile(join(itemDirectory, "goal.yaml"), "utf8")).toBe(
+        goalBefore,
+      );
+      expect(await readFile(join(itemDirectory, "state.json"), "utf8")).toBe(
+        stateBefore,
+      );
+    }
+  });
+
   it("applies and replays an exact transition without changing durable state twice", async () => {
     const { root, repository } = await createWorkspace();
-    const created = await createUncontractedItem(repository);
+    const { workItem } = await governToExecute(repository);
     const controller = createController(repository);
-    await controller.updateGoalContract(created.goal.work_item_id, firstContract);
     const input = {
-      target_phase: "spec" as const,
+      target_phase: "review" as const,
       target_status: "active" as const,
-      expected_phase: "idea" as const,
+      expected_phase: "execute" as const,
       expected_status: "active" as const,
       expected_schema_version: 2 as const,
       expected_goal_version: 1,
@@ -2085,19 +2177,19 @@ describe("WorkItemController", () => {
       attempt: 0,
     };
 
-    const applied = await controller.transition(created.goal.work_item_id, input);
+    const applied = await controller.transition(workItem.goal.work_item_id, input);
     expect(applied.work_item.state).toMatchObject({
-      phase: "spec",
+      phase: "review",
       status: "active",
       goal_version: 1,
       input_revision: 1,
       attempt: 0,
     });
-    const durableAfterFirst = await repository.read(created.goal.work_item_id);
+    const durableAfterFirst = await repository.read(workItem.goal.work_item_id);
 
-    const replay = await controller.transition(created.goal.work_item_id, input);
+    const replay = await controller.transition(workItem.goal.work_item_id, input);
     expect(replay).toEqual(applied);
-    expect(await repository.read(created.goal.work_item_id)).toEqual(
+    expect(await repository.read(workItem.goal.work_item_id)).toEqual(
       durableAfterFirst,
     );
     expect(
@@ -2106,11 +2198,11 @@ describe("WorkItemController", () => {
           root,
           ".founder",
           "work-items",
-          created.goal.work_item_id,
+          workItem.goal.work_item_id,
           "runs",
         ),
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(5);
   });
 
   it("rejects missing contracts, stale expectations, invalid moves, and attempt conflicts", async () => {
@@ -2120,8 +2212,8 @@ describe("WorkItemController", () => {
 
     await expect(
       controller.transition(created.goal.work_item_id, {
-        target_phase: "spec",
-        target_status: "active",
+        target_phase: "idea",
+        target_status: "paused",
         expected_phase: "idea",
         expected_status: "active",
         expected_schema_version: 2,
@@ -2138,8 +2230,8 @@ describe("WorkItemController", () => {
       {
         kind: "stale_expectation",
         input: {
-          target_phase: "spec" as const,
-          target_status: "active" as const,
+          target_phase: "idea" as const,
+          target_status: "paused" as const,
           expected_phase: "plan" as const,
           expected_status: "active" as const,
           expected_schema_version: 2 as const,
@@ -2164,8 +2256,8 @@ describe("WorkItemController", () => {
       {
         kind: "attempt_conflict",
         input: {
-          target_phase: "spec" as const,
-          target_status: "active" as const,
+          target_phase: "idea" as const,
+          target_status: "paused" as const,
           expected_phase: "idea" as const,
           expected_status: "active" as const,
           expected_schema_version: 2 as const,
@@ -3928,26 +4020,39 @@ describe("WorkItemController", () => {
       wrongPhaseWorkspace.repository,
     );
     const wrongPhaseItem = wrongPhase.approved.work_item;
-    const transitioned = await createController(
-      wrongPhaseWorkspace.repository,
-    ).transition(wrongPhaseItem.goal.work_item_id, {
-      target_phase: "execute",
-      target_status: "active",
-      expected_phase: "plan",
-      expected_status: "active",
-      expected_schema_version: 2,
-      expected_goal_version: wrongPhaseItem.state.goal_version!,
-      expected_input_revision: wrongPhaseItem.state.input_revision!,
-      attempt: 0,
-    });
+    await writeFile(
+      join(
+        wrongPhaseWorkspace.repository.workspaceRoot,
+        ".founder",
+        "work-items",
+        wrongPhaseItem.goal.work_item_id,
+        "state.json",
+      ),
+      `${JSON.stringify(
+        {
+          ...wrongPhaseItem.state,
+          phase: "execute",
+          updated_at: "2026-08-05T10:00:00.000Z",
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    const transitioned = await wrongPhaseWorkspace.repository.read(
+      wrongPhaseItem.goal.work_item_id,
+    );
+    if (transitioned === null) {
+      throw new Error("Expected explicit wrong-phase fixture state");
+    }
     await expectPlanApprovalRejectionWithoutMutation(
       wrongPhaseWorkspace.repository,
-      transitioned.work_item.goal.work_item_id,
+      transitioned.goal.work_item_id,
       {
         ...wrongPhase.input,
         expected_shaping_state_sha256: await currentShapingStateHash(
           wrongPhaseWorkspace.repository,
-          transitioned.work_item,
+          transitioned,
         ),
       },
       "stale_expectation",
