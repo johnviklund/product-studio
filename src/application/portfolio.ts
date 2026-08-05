@@ -656,6 +656,11 @@ export interface LaunchConnectedReviewRequest {
   model_override?: string;
 }
 
+export interface LaunchConnectedPatchRequest {
+  model_override?: string;
+  narrowed_capability_envelope?: CapabilityEnvelopeV1;
+}
+
 export interface PortfolioConnectedRunResult extends PortfolioWorkItem {
   connected_run: ConnectedRunSummary;
 }
@@ -867,6 +872,12 @@ const launchConnectedReviewRequestSchema: z.ZodType<LaunchConnectedReviewRequest
   z.strictObject({
     independence_attested: z.literal(true),
     model_override: z.string().trim().min(1).max(200).optional(),
+  });
+
+const launchConnectedPatchRequestSchema: z.ZodType<LaunchConnectedPatchRequest> =
+  z.strictObject({
+    model_override: z.string().trim().min(1).max(200).optional(),
+    narrowed_capability_envelope: capabilityEnvelopeV1Schema.optional(),
   });
 
 export interface ConnectedPermissionDecisionRequest {
@@ -1996,6 +2007,10 @@ export class PortfolioService {
     return this.reviewModelAvailability();
   }
 
+  getPatchModelAvailability(): ShapingModelAvailability {
+    return this.patchModelAvailability();
+  }
+
   async launchConnectedExecute(
     sourceId: string,
     workItemId: string,
@@ -2184,6 +2199,237 @@ export class PortfolioService {
     return {
       ...this.toPortfolioItem(source, launched.work_item),
       connected_run: summarizeConnectedRun(running),
+    };
+  }
+
+  async launchConnectedPatch(
+    sourceId: string,
+    workItemId: string,
+    input: LaunchConnectedPatchRequest = {},
+  ): Promise<PortfolioConnectedRunResult> {
+    const validatedInput = launchConnectedPatchRequestSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedPatchIdentity(source, workItem);
+    if (workItem.state.phase !== "patch" || workItem.state.status !== "active") {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected Patch requires an assigned, governed item in active patch.",
+      );
+    }
+    const governedTuple = this.governedPatchTuple(workItem, identity);
+    const controller = this.workItemController(source.workspace);
+    const connectedRuns = await source.workspace.listConnectedRuns(workItemId);
+    const runOrdinal = connectedRuns.filter(
+      (record) => record.lifecycle.status === "terminal",
+    ).length;
+    const activeRuns = connectedRuns.filter(
+      (record) => record.lifecycle.status !== "terminal",
+    );
+    if (activeRuns.length > 1) {
+      throw new ControllerConflictError(
+        "repair_required",
+        workItemId,
+        "Only one connected run may be active for a governed item.",
+      );
+    }
+    if (activeRuns.length === 1) {
+      const activeRun = activeRuns[0]!;
+      const mission = await this.compilePatchMission(sourceId, workItemId);
+      const capabilityEnvelope = this.resolveConnectedCapabilityEnvelope(
+        workItemId,
+        mission.mission.capability_envelope,
+        validatedInput.narrowed_capability_envelope,
+      );
+      if (
+        activeRun.authorization.kind !== "capability_envelope" ||
+        activeRun.authorization.envelope_sha256 !==
+          hashResolvedCapabilityEnvelope(capabilityEnvelope)
+      ) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          workItemId,
+          "An active connected Patch run has a different authorization binding.",
+        );
+      }
+      const replay = await controller.launchConnectedRun(
+        workItemId,
+        this.connectedPatchLaunchInput(
+          governedTuple,
+          mission.mission.content_sha256,
+          validatedInput.model_override,
+          runOrdinal,
+        ),
+        activeRun,
+      );
+      return {
+        ...this.toPortfolioItem(source, replay.work_item),
+        connected_run: summarizeConnectedRun(replay.connected_run),
+      };
+    }
+
+    const mission = await this.compilePatchMission(sourceId, workItemId);
+    if (this.writableRuntime === undefined) {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected Patch is not configured for this Product Studio service.",
+      );
+    }
+    const configuration = connectedRuntimeConfigurationSchema.parse(
+      this.writableRuntime.configuration(),
+    );
+    const requestedModel =
+      validatedInput.model_override ?? configuration.default_model;
+    this.assertPatchModelAvailable(workItemId, requestedModel);
+    const capabilityEnvelope = this.resolveConnectedCapabilityEnvelope(
+      workItemId,
+      mission.mission.capability_envelope,
+      validatedInput.narrowed_capability_envelope,
+    );
+    const prepared = await this.writableRuntime.prepare({
+      workspace_cwd: source.workspace.workspaceRoot,
+      capability_envelope: capabilityEnvelope,
+      limits: CONNECTED_RUN_LIMITS,
+      ...(validatedInput.model_override === undefined
+        ? {}
+        : { model_override: validatedInput.model_override }),
+    });
+    if (
+      prepared.requested_model !== requestedModel ||
+      prepared.sanitized_profile.requested_model !== requestedModel ||
+      prepared.sanitized_profile.adapter_id !== configuration.adapter_id ||
+      prepared.sanitized_profile.adapter_version !==
+        configuration.adapter_version ||
+      prepared.sanitized_profile.profile_id !== configuration.profile_id
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Prepared Patch runtime provenance does not match the validated launch request.",
+      );
+    }
+    this.assertPatchModelAvailable(workItemId, requestedModel);
+    const launchInput = this.connectedPatchLaunchInput(
+      governedTuple,
+      mission.mission.content_sha256,
+      validatedInput.model_override,
+      runOrdinal,
+    );
+    const record = this.connectedRunRecord(
+      mission,
+      governedTuple,
+      capabilityEnvelope,
+      prepared,
+    );
+    const launched = await controller.launchConnectedRun(
+      workItemId,
+      launchInput,
+      record,
+    );
+    await this.preferencesStore.setPreference({
+      adapter_id: configuration.adapter_id,
+      seat: "patch",
+      requested_model: requestedModel,
+    });
+    if (!launched.created) {
+      return {
+        ...this.toPortfolioItem(source, launched.work_item),
+        connected_run: summarizeConnectedRun(launched.connected_run),
+      };
+    }
+
+    const eventSink: AcpEventSink = {
+      append: (event, signal) =>
+        source.workspace.appendConnectedRunEvent(
+          workItemId,
+          launched.connected_run.connected_run_id,
+          event,
+          signal,
+        ),
+    };
+    const key = this.connectedSessionKey(
+      source.source_id,
+      workItemId,
+      launched.connected_run.connected_run_id,
+    );
+    const started = await startConnectedAcpRun({
+      start_session: (callbacks) => prepared.start(eventSink, callbacks),
+      mark_running: (session) =>
+        source.workspace.startConnectedRun(
+          workItemId,
+          launched.connected_run.connected_run_id,
+          {
+            protocol_version: {
+              value: session.protocol_version,
+              assurance: "adapter_attested",
+            },
+            session_id: {
+              value: session.session_id,
+              assurance: "adapter_attested",
+            },
+          },
+          session.process,
+        ),
+      persist_effective_model: (effectiveModel, signal) =>
+        source.workspace
+          .updateConnectedRunEffectiveModel(
+            workItemId,
+            launched.connected_run.connected_run_id,
+            effectiveModel,
+            signal,
+          )
+          .then(() => undefined),
+      prompt: `Apply the governed Patch task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
+      complete: (result) =>
+        this.completeObservedConnectedRun(
+          source,
+          workItemId,
+          launched.connected_run.connected_run_id,
+          result,
+        ),
+      fail: async () => {
+        await source.workspace
+          .completeConnectedRun(
+            workItemId,
+            launched.connected_run.connected_run_id,
+            this.failedConnectedTerminal(),
+          )
+          .catch(() => undefined);
+        await this.rebuild().catch(() => undefined);
+      },
+      started: (handle) => {
+        this.liveConnectedSessions.set(key, handle);
+      },
+      after_complete: async (result, terminal) => {
+        if (terminal.lifecycle.terminal?.outcome !== result.outcome) {
+          return;
+        }
+        if (result.outcome === "missing_permission") {
+          await this.recordMissingPermission(
+            source,
+            workItemId,
+            mission,
+            launched.connected_run,
+            result,
+          );
+        } else if (result.outcome === "completed") {
+          await this.importPatchResult(source.source_id, workItemId);
+        }
+        await this.rebuild();
+      },
+      settled: async (session) => {
+        if (this.liveConnectedSessions.get(key)?.session === session) {
+          this.liveConnectedSessions.delete(key);
+        }
+      },
+    });
+    void started.completion;
+    await this.rebuild();
+    return {
+      ...this.toPortfolioItem(source, launched.work_item),
+      connected_run: summarizeConnectedRun(started.running),
     };
   }
 
@@ -2499,8 +2745,6 @@ export class PortfolioService {
     if (workItem === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
-    const identity = this.governedExecuteIdentity(source, workItem);
-    const governedTuple = this.governedExecuteTuple(workItem, identity);
     const attention = workItem.state.attention;
     if (attention?.kind !== "missing_permission") {
       throw this.missionNotReady(
@@ -2508,6 +2752,23 @@ export class PortfolioService {
         "A connected permission decision requires active missing-permission attention.",
       );
     }
+    const phase = workItem.state.phase;
+    if (phase !== "execute" && phase !== "patch") {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected permission decisions are valid only for Execute or Patch.",
+      );
+    }
+    const governedTuple =
+      phase === "execute"
+        ? this.governedExecuteTuple(
+            workItem,
+            this.governedExecuteIdentity(source, workItem),
+          )
+        : this.governedPatchTuple(
+            workItem,
+            this.governedPatchIdentity(source, workItem),
+          );
     const missionContentSha256 = attention.pins.mission_content_sha256;
     if (missionContentSha256 === undefined) {
       throw this.missionNotReady(
@@ -2519,7 +2780,7 @@ export class PortfolioService {
       source.workspace,
     ).resolveConnectedPermission(workItemId, {
       decision: validatedInput.decision,
-      expected_phase: "execute",
+      expected_phase: phase,
       governed_tuple: governedTuple,
       connected_run_id: validatedInput.connected_run_id,
       operation_sha256: validatedInput.operation_sha256,
@@ -4247,6 +4508,10 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     return this.connectedModelAvailability(this.reviewRuntime);
   }
 
+  private patchModelAvailability(): ShapingModelAvailability {
+    return this.connectedModelAvailability(this.writableRuntime);
+  }
+
   private connectedModelAvailability(
     runtime: ConnectedWritableRuntime | ConnectedReviewRuntime | undefined,
   ): ShapingModelAvailability {
@@ -4328,6 +4593,25 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
         availability.status === "unavailable"
           ? "Connected Review is not configured with any available model."
           : `Requested Review model ${validatedModel} is not in available_model_ids.`,
+      );
+    }
+  }
+
+  private assertPatchModelAvailable(
+    workItemId: string,
+    requestedModel: string,
+  ): void {
+    const validatedModel = shapingRequestedModelSchema.parse(requestedModel);
+    const availability = this.patchModelAvailability();
+    if (
+      availability.status !== "available" ||
+      !availability.available_model_ids.includes(validatedModel)
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        availability.status === "unavailable"
+          ? "Connected Patch is not configured with any available model."
+          : `Requested Patch model ${validatedModel} is not in available_model_ids.`,
       );
     }
   }
@@ -5381,7 +5665,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
   }
 
   private connectedRunRecord(
-    mission: MissionCompilation,
+    mission: MissionCompilation | PatchMissionCompilation,
     governedTuple: ConnectedRunRecordV2["governed_tuple"],
     capabilityEnvelope: CapabilityEnvelopeV1,
     prepared: PreparedConnectedRuntime,
@@ -5611,7 +5895,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
   private async recordMissingPermission(
     source: ResolvedSource,
     workItemId: string,
-    mission: MissionCompilation,
+    mission: MissionCompilation | PatchMissionCompilation,
     record: ConnectedRunRecordV2,
     result: AcpRunResult,
   ): Promise<void> {
@@ -5630,10 +5914,20 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
         "Connected permission recovery requires capability-envelope authorization.",
       );
     }
+    const phase = record.mission.identity.phase;
+    if (
+      (phase !== "execute" && phase !== "patch") ||
+      mission.mission.identity.phase !== phase
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected permission recovery requires an exact writable mission phase.",
+      );
+    }
     await this.workItemController(source.workspace).recordConnectedPermissionDenial(
       workItemId,
       {
-        expected_phase: "execute",
+        expected_phase: phase,
         expected_status: "active",
         expected_schema_version: 2,
         governed_tuple: record.governed_tuple,
@@ -5831,6 +6125,35 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
   ) {
     return {
       expected_phase: "review" as const,
+      expected_status: "active" as const,
+      expected_schema_version: 2 as const,
+      run_ordinal: runOrdinal,
+      governed_tuple: governedTuple,
+      mission_content_sha256: missionContentSha256,
+      ...(modelOverride === undefined ? {} : { model_override: modelOverride }),
+    };
+  }
+
+  private governedPatchTuple(
+    workItem: WorkItem,
+    identity: MissionIdentity<"patch">,
+  ): ConnectedRunRecordV2["governed_tuple"] {
+    return {
+      goal_version: identity.goal_version,
+      input_revision: identity.input_revision,
+      attempt: identity.attempt,
+      patch_cycle: identity.patch_cycle,
+    };
+  }
+
+  private connectedPatchLaunchInput(
+    governedTuple: ConnectedRunRecordV2["governed_tuple"],
+    missionContentSha256: string,
+    modelOverride: string | undefined,
+    runOrdinal: number,
+  ) {
+    return {
+      expected_phase: "patch" as const,
       expected_status: "active" as const,
       expected_schema_version: 2 as const,
       run_ordinal: runOrdinal,

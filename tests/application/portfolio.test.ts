@@ -54,7 +54,10 @@ import {
   evaluateShapingPermissionRequest,
   type ShapingRunWritePolicy,
 } from "../../src/domain/shaping-run";
-import type { CanonicalCapabilityRequest } from "../../src/domain/capability-envelope";
+import {
+  resolveCapabilityEnvelope,
+  type CanonicalCapabilityRequest,
+} from "../../src/domain/capability-envelope";
 import {
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
@@ -1024,6 +1027,57 @@ async function prepareConnectedReviewItem(
   return service.compileReviewMission(sourceId, workItem.goal.work_item_id, {
     independence_attested: true,
   });
+}
+
+async function prepareConnectedPatchReview(
+  service: PortfolioService,
+  sourceId: string,
+  workItem: WorkItem,
+) {
+  const reviewMission = await prepareConnectedReviewItem(
+    service,
+    sourceId,
+    workItem,
+  );
+  if (reviewMission.mission.review_subject.source !== "execute") {
+    throw new Error("Initial Patch preparation must bind Execute evidence.");
+  }
+  await writeFile(
+    join(dirname(reviewMission.task_path), "result.json"),
+    serializeExternalResult({
+      result_schema_version: 2,
+      review_mission_content_sha256: reviewMission.mission.content_sha256,
+      identity: reviewMission.mission.identity,
+      execute_mission_content_sha256:
+        reviewMission.mission.review_subject.execute_mission_content_sha256,
+      execute_result_content_sha256:
+        reviewMission.mission.review_subject.execute_result_content_sha256,
+      git_base_commit: reviewMission.mission.review_subject.git_base_commit,
+      accepted_result_commit:
+        reviewMission.mission.review_subject.accepted_result_commit,
+      summary: "Connected Review found one bounded Patch requirement.",
+      verdict: "findings",
+      findings: [
+        {
+          finding_id: "F-connected-patch",
+          severity: "P1",
+          title: "Keep Patch authority mission-bound",
+          evidence: {
+            path: "src/application/portfolio.ts",
+            summary: "Patch must use the immutable mission envelope.",
+          },
+          required_action: "Launch Patch with narrowing-only authority.",
+          link: {
+            type: "acceptance_criteria",
+            criterion: "The mission package is reproducible",
+          },
+        },
+      ],
+    }),
+    "utf8",
+  );
+  await service.importReviewResult(sourceId, workItem.goal.work_item_id);
+  return reviewMission;
 }
 
 async function writeTransferJournal(
@@ -4542,6 +4596,354 @@ describe("PortfolioService", () => {
     expect(runs.filter((run) => run.lifecycle.status !== "terminal")).toHaveLength(
       1,
     );
+    index.close();
+  });
+
+  it("launches connected patch with mission-bound narrowing and terminals before import", async () => {
+    const root = await createWorkspace("Connected Patch Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Run a connected Patch mission",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const result = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7d1",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4201,
+        process_group_id: 4201,
+        started_at: "2026-08-05T19:00:00.000Z",
+      },
+      run: vi.fn(() => result.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedRuntime(session, "patch-model");
+    const { inboxRoot, index, service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const reviewMission = await prepareConnectedPatchReview(
+      service,
+      sourceId,
+      created,
+    );
+
+    const executionDefaults = {
+      schema_version: 1 as const,
+      approved_command_forms: [
+        { executable: "npm", args: ["run", "test"] },
+      ],
+      approved_url_operations: [],
+      mcp: "forbidden" as const,
+      credentials: "forbidden" as const,
+    };
+    const executionDirectory = join(root, ".founder", "execution");
+    await mkdir(executionDirectory, { recursive: true });
+    await writeFile(
+      join(executionDirectory, "defaults.json"),
+      `${JSON.stringify(executionDefaults, null, 2)}\n`,
+      "utf8",
+    );
+
+    const accepted = await service.acceptPatchPlan(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const patchManifestPath = join(
+      root,
+      ".founder",
+      "work-items",
+      created.goal.work_item_id,
+      "runs",
+      `${accepted.controller_run.run_id}.json`,
+    );
+    const patchManifestSource = await readFile(patchManifestPath, "utf8");
+    await unlink(patchManifestPath);
+    await expect(
+      service.launchConnectedPatch(sourceId, created.goal.work_item_id),
+    ).rejects.toThrow("No applied patch-plan manifest");
+    await writeFile(patchManifestPath, patchManifestSource, "utf8");
+    await writeFile(
+      patchManifestPath,
+      `${JSON.stringify(
+        {
+          ...accepted.controller_run,
+          idempotency_key: `${accepted.controller_run.idempotency_key.slice(0, -64)}${"f".repeat(64)}`,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await expect(
+      service.launchConnectedPatch(sourceId, created.goal.work_item_id),
+    ).rejects.toThrow("governed cycle and review result");
+    await writeFile(patchManifestPath, patchManifestSource, "utf8");
+    const reviewResultPath = join(dirname(reviewMission.task_path), "result.json");
+    const reviewResultSource = await readFile(reviewResultPath, "utf8");
+    const changedReviewResult = JSON.parse(reviewResultSource) as {
+      findings: Array<{ required_action: string }>;
+    };
+    changedReviewResult.findings[0]!.required_action =
+      "A different finding lineage must not launch.";
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(changedReviewResult, null, 2)}\n`,
+      "utf8",
+    );
+    await expect(
+      service.launchConnectedPatch(sourceId, created.goal.work_item_id),
+    ).rejects.toThrow("Applied review mission, result, and evidence do not match");
+    await writeFile(reviewResultPath, reviewResultSource, "utf8");
+
+    const current = await repository.read(created.goal.work_item_id);
+    if (current?.goal.goal_contract === undefined) {
+      throw new Error("Connected Patch requires a governed goal contract.");
+    }
+    const widenedEnvelope = resolveCapabilityEnvelope(
+      current.goal.goal_contract.allowed_scope,
+      {
+        ...executionDefaults,
+        approved_command_forms: [
+          ...executionDefaults.approved_command_forms,
+          { executable: "git", args: ["status"] },
+        ],
+      },
+    );
+    await expect(
+      service.launchConnectedPatch(sourceId, created.goal.work_item_id, {
+        narrowed_capability_envelope: widenedEnvelope,
+      }),
+    ).rejects.toThrow("may only narrow the compiled mission envelope");
+    expect(fake.prepare).not.toHaveBeenCalled();
+
+    const narrowedEnvelope = resolveCapabilityEnvelope(
+      current.goal.goal_contract.allowed_scope,
+      {
+        ...executionDefaults,
+        approved_command_forms: [],
+      },
+    );
+    const patchMission = await service.compilePatchMission(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const order: string[] = [];
+    const completeConnectedRun =
+      repository.completeConnectedRun.bind(repository);
+    repository.completeConnectedRun = async (...args) => {
+      const completed = await completeConnectedRun(...args);
+      if (completed.lifecycle.terminal?.outcome === "completed") {
+        order.push("terminal");
+      }
+      return completed;
+    };
+    const writeImportEvidence = repository.writeImportEvidence.bind(repository);
+    repository.writeImportEvidence = async (input) => {
+      if (input.evidence.phase === "patch") {
+        const runs = await repository.listConnectedRuns(
+          created.goal.work_item_id,
+        );
+        expect(runs.at(-1)?.lifecycle).toMatchObject({
+          status: "terminal",
+          terminal: { outcome: "completed" },
+        });
+        order.push("import");
+      }
+      return writeImportEvidence(input);
+    };
+    await writeFile(
+      join(dirname(patchMission.task_path), "result.json"),
+      serializeExternalResult({
+        result_schema_version: 2,
+        patch_mission_content_sha256: patchMission.mission.content_sha256,
+        identity: patchMission.mission.identity,
+        commit: "a".repeat(40),
+        summary: "Applied the connected Patch repair.",
+        changed_files: ["src/application/portfolio.ts"],
+        verification: [{ name: "Tests", status: "passed" }],
+      }),
+      "utf8",
+    );
+
+    const launched = await service.launchConnectedPatch(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        model_override: "patch-model",
+        narrowed_capability_envelope: narrowedEnvelope,
+      },
+    );
+    const replay = await service.launchConnectedPatch(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        model_override: "patch-model",
+        narrowed_capability_envelope: narrowedEnvelope,
+      },
+    );
+    expect(replay.connected_run.connected_run_id).toBe(
+      launched.connected_run.connected_run_id,
+    );
+    expect(fake.prepare).toHaveBeenCalledOnce();
+    expect(fake.start).toHaveBeenCalledOnce();
+    expect(session.run).toHaveBeenCalledOnce();
+    expect(launched.connected_run).toMatchObject({
+      mission: { identity: { phase: "patch", patch_cycle: 1 } },
+      authorization: { kind: "capability_envelope" },
+      provenance: {
+        role: { value: "writer" },
+        seat: { value: "executor" },
+      },
+      lifecycle: { status: "running" },
+    });
+    expect(fake.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ capability_envelope: narrowedEnvelope }),
+    );
+    await expect(
+      service.launchConnectedPatch(sourceId, created.goal.work_item_id, {
+        model_override: "patch-model",
+        narrowed_capability_envelope: patchMission.mission.capability_envelope,
+      }),
+    ).rejects.toMatchObject({ kind: "idempotency_conflict" });
+
+    result.resolve({
+      outcome: "completed",
+      partial: false,
+      stop_reason: "end_turn",
+      permissions: [],
+    });
+    await expect.poll(async () => {
+      const item = await repository.read(created.goal.work_item_id);
+      return item?.state.phase;
+    }).toBe("review");
+    await expect.poll(async () => {
+      const runs = await service.listConnectedRuns(
+        sourceId,
+        created.goal.work_item_id,
+      );
+      return runs.at(-1)?.lifecycle.terminal_outcome;
+    }).toBe("completed");
+    expect(order).toEqual(["terminal", "import"]);
+    const preferences = new PortfolioPreferencesStore(
+      dirname(dirname(inboxRoot)),
+    );
+    await expect(
+      preferences.getPreference("copilot-acp", "patch"),
+    ).resolves.toBe("patch-model");
+    index.close();
+  });
+
+  it("binds connected patch missing permission to the exact phase and operation", async () => {
+    const root = await createWorkspace("Connected Patch Permission Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Recover one connected Patch permission",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const missingResult = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7d2",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4202,
+        process_group_id: 4202,
+        started_at: "2026-08-05T19:00:00.000Z",
+      },
+      run: vi.fn(() => missingResult.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedRuntime(session, "patch-model");
+    const { index, service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    await prepareConnectedPatchReview(service, sourceId, created);
+    await service.acceptPatchPlan(sourceId, created.goal.work_item_id);
+
+    const launched = await service.launchConnectedPatch(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const deniedOperation = {
+      schema_version: 1 as const,
+      kind: "outside_workspace_write" as const,
+      path: "/tmp/outside-product-studio-patch",
+    };
+    const { hashCanonicalCapabilityRequest } = await import(
+      "../../src/domain/capability-envelope"
+    );
+    const operationSha256 =
+      hashCanonicalCapabilityRequest(deniedOperation);
+    missingResult.resolve({
+      outcome: "missing_permission",
+      partial: true,
+      stop_reason: "end_turn",
+      permissions: [
+        {
+          kind: "missing_permission",
+          request: deniedOperation,
+          operation_sha256: operationSha256,
+          reason: "outside_capability_envelope",
+        },
+      ],
+    });
+    await expect.poll(async () => {
+      const item = await repository.read(created.goal.work_item_id);
+      return item?.state.attention?.kind;
+    }).toBe("missing_permission");
+    const attention = (await repository.read(created.goal.work_item_id))?.state
+      .attention;
+    expect(attention).toMatchObject({
+      kind: "missing_permission",
+      governed_tuple: { patch_cycle: 1 },
+      pins: {
+        mission_content_sha256: launched.connected_run.mission.content_sha256,
+      },
+      operation: {
+        connected_run_id: launched.connected_run.connected_run_id,
+        operation_sha256: operationSha256,
+      },
+    });
+    const decision = await service.decideConnectedPermission(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        decision: "allow_once",
+        connected_run_id: launched.connected_run.connected_run_id,
+        operation_sha256: operationSha256,
+      },
+    );
+    expect(decision.work_item.state).toMatchObject({
+      phase: "patch",
+      status: "active",
+      attempt: 1,
+      patch_cycle: 1,
+    });
+    await expect(service.listAttention()).resolves.toEqual([]);
     index.close();
   });
 
