@@ -26,6 +26,7 @@ import type {
   PortfolioImportResult,
   PortfolioPatchImportResult,
   PortfolioPatchPlanResult,
+  PortfolioPlanApprovalResult,
   PortfolioReviewImportResult,
   PortfolioRetryResult,
   PortfolioShapingDecisionResult,
@@ -48,6 +49,7 @@ import type {
 } from "@/src/domain/result";
 import type { ConnectedRunSummary } from "@/src/domain/connected-run";
 import type { ShapingRunSummary } from "@/src/domain/shaping-run";
+import type { WorkflowModelSeat } from "@/src/domain/portfolio-preferences";
 import {
   isShapingPhase,
   type BrainstormResultSubmission,
@@ -1002,6 +1004,12 @@ function shapingSurfaceContext(
       available_model_ids: listing.model_availability.available_model_ids,
       model_use: listing.model_use,
       model_picker_options: listing.model_picker_options,
+      execute: {
+        status: listing.execute_model_availability.status,
+        reason: listing.execute_model_availability.reason,
+        available_model_ids:
+          listing.execute_model_availability.available_model_ids,
+      },
     },
     derived_goal_contract_sha256: state.derivedGoalContractSha256,
     current_goal_contract_sha256: state.currentGoalContractSha256,
@@ -1032,6 +1040,31 @@ function shapingItemStateKey(item: PortfolioWorkItem): string {
     goal.notes ?? null,
     goal.goal_contract ?? null,
   ]);
+}
+
+interface PlanApprovalExecuteHandoff {
+  stopShapingRefresh: () => void;
+  clearShapingRefreshIdentity: () => void;
+  clearShapingRefreshBinding: () => void;
+  setShapingLaunchFailureState: (value: null) => void;
+  setShapingNewAttemptState: (value: null) => void;
+  setShowFullWorkItem: (value: false) => void;
+}
+
+export function clearShapingStateForExecuteHandoff({
+  stopShapingRefresh,
+  clearShapingRefreshIdentity,
+  clearShapingRefreshBinding,
+  setShapingLaunchFailureState,
+  setShapingNewAttemptState,
+  setShowFullWorkItem,
+}: PlanApprovalExecuteHandoff): void {
+  stopShapingRefresh();
+  clearShapingRefreshIdentity();
+  clearShapingRefreshBinding();
+  setShapingLaunchFailureState(null);
+  setShapingNewAttemptState(null);
+  setShowFullWorkItem(false);
 }
 
 function formatDuration(durationMs: number): string {
@@ -1896,13 +1929,13 @@ export function ShapingSection({
   );
 }
 
-function shapingPhaseLabel(phase: ShapingPhase): string {
+function shapingPhaseLabel(phase: WorkflowModelSeat): string {
   return `${phase[0]?.toUpperCase()}${phase.slice(1)}`;
 }
 
 function projectionPicker(
   projection: DecisionFirstShapingHandoffProjection,
-): ShapingModelPickerProjection | null {
+): ShapingModelPickerProjection<WorkflowModelSeat> | null {
   if (
     projection.mode === "idea" ||
     projection.mode === "pre_ready" ||
@@ -1923,7 +1956,7 @@ function projectionPicker(
 }
 
 export function selectedModelForShapingPicker(
-  picker: ShapingModelPickerProjection | null,
+  picker: ShapingModelPickerProjection<WorkflowModelSeat> | null,
   storedModel: string | null,
 ): string | null {
   if (picker === null) {
@@ -2260,7 +2293,7 @@ function ModelPicker({
   onSelectModel,
   compact = false,
 }: {
-  picker: ShapingModelPickerProjection;
+  picker: ShapingModelPickerProjection<WorkflowModelSeat>;
   selectedModel: string;
   busy: boolean;
   onSelectModel: (model: string) => void;
@@ -2943,9 +2976,6 @@ export function ShapingDecisionView({
                 marker="question"
               />
             </DecisionRegion>
-            <p className="border-t px-5 py-4 text-xs leading-5 text-muted-foreground">
-              Execute approval is not part of this slice.
-            </p>
           </>
         ) : null}
 
@@ -5596,6 +5626,7 @@ export function DetailPanel({
       }
     }
     setShapingActionError(null);
+    let crossedIntoExecute = false;
     try {
       const response = await fetch(request.route, {
         method: request.method,
@@ -5603,6 +5634,7 @@ export function DetailPanel({
         body: JSON.stringify(request.body),
       });
       const body = (await response.json()) as
+        | PortfolioPlanApprovalResult
         | PortfolioShapingDecisionResult
         | PortfolioShapingLaunchResult
         | MutationErrorResponse;
@@ -5641,7 +5673,9 @@ export function DetailPanel({
       setRetainedControllerLeaseRepairState(null);
 
       if ("work_item" in body) {
-        const decision = body as PortfolioShapingDecisionResult;
+        const decision = body as
+          | PortfolioPlanApprovalResult
+          | PortfolioShapingDecisionResult;
         const decidedGoal = decision.work_item.goal;
         const decidedContract = decidedGoal.goal_contract;
         setTitle(decidedGoal.title);
@@ -5657,6 +5691,31 @@ export function DetailPanel({
         setNonGoals(goalContractLines(decidedContract?.non_goals));
         setAllowedScope(goalContractLines(decidedContract?.allowed_scope));
         setReviewReady(goalContractLines(decidedContract?.review_ready));
+        if ("approval_id" in decision) {
+          crossedIntoExecute = true;
+          clearShapingStateForExecuteHandoff({
+            stopShapingRefresh: () =>
+              shapingRefreshControllerRef.current?.stop(),
+            clearShapingRefreshIdentity: () => {
+              shapingRefreshControllerIdentityRef.current = null;
+            },
+            clearShapingRefreshBinding: () => {
+              shapingRefreshBindingRef.current = null;
+            },
+            setShapingLaunchFailureState,
+            setShapingNewAttemptState,
+            setShowFullWorkItem,
+          });
+          onUpdated(
+            decision,
+            decision.next_launch.status === "manual"
+              ? "Plan approved; Execute is ready for manual recovery."
+              : decision.next_launch.status === "failed"
+                ? "Plan approved; Execute launch needs attention."
+                : "Plan approved and Execute started.",
+          );
+          return;
+        }
         setShowFullWorkItem(false);
         setShapingNewAttemptState(null);
         if (
@@ -5719,7 +5778,10 @@ export function DetailPanel({
       setShapingDecisionBusyIdentities(
         new Set(shapingDecisionBusyRef.current),
       );
-      if (shapingItemKeyRef.current === operationItemKey) {
+      if (
+        !crossedIntoExecute &&
+        shapingItemKeyRef.current === operationItemKey
+      ) {
         setShapingRefreshRestartVersion((current) => current + 1);
       }
     }

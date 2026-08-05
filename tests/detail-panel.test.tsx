@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   canEditGoalContractFromFullWorkItem,
+  clearShapingStateForExecuteHandoff,
   ConnectedExecuteSection,
   dispatchShapingManualRecoveryAction,
   PatchWorkflowSection,
@@ -390,6 +391,22 @@ function decisionSurfaceContext(
           reuse_warning: "model-a was already used by brainstorm.",
         }),
       ],
+      execute: [
+        decisionModelOption("model-b", {
+          recommended: true,
+          preselected: true,
+        }),
+        decisionModelOption("model-c"),
+        decisionModelOption("model-a", {
+          used_by_seats: ["brainstorm"],
+          reuse_warning: "model-a was already used by brainstorm.",
+        }),
+      ],
+    },
+    execute: {
+      status: "available",
+      reason: null,
+      available_model_ids: ["model-a", "model-b", "model-c"],
     },
   };
   return {
@@ -1799,7 +1816,7 @@ describe("detail panel decision-first shaping", () => {
     }
   });
 
-  it("ends Plan at an explicit Execute boundary with no primary or next-seat control", () => {
+  it("renders ready Plan approval with an Execute picker and persistent primary action", () => {
     const projection = shapingHandoffForItem(
       decisionItem("plan", decisionGoalContract),
       appliedDecisionContext("plan", planResult),
@@ -1808,7 +1825,7 @@ describe("detail panel decision-first shaping", () => {
       throw new Error("expected a ready Plan projection");
     }
 
-    const html = renderDecision(projection);
+    const html = renderDecision(projection, "model-a");
     const visible = visibleMarkup(html);
 
     expect(regionNames(html)).toEqual([
@@ -1817,6 +1834,7 @@ describe("detail panel decision-first shaping", () => {
       "criteria",
       "unresolved-questions",
       "provenance",
+      "next-step",
       "advanced-recovery",
       "footer",
     ]);
@@ -1825,10 +1843,16 @@ describe("detail panel decision-first shaping", () => {
     expect(visible).toContain("Show all 7");
     expect(visible).not.toContain("Plan checklist step 7");
     expect(visible).not.toContain("Governed fields");
-    expect(visible).not.toContain("Next step");
-    expect(html).not.toContain("<select");
-    expect(html).not.toContain('data-action-priority="primary"');
-    expect(visible).toContain("Execute approval is not part of this slice.");
+    expect(visible).toContain("Next step");
+    expect(html).toContain('<select aria-label="Execute model"');
+    expect(visible).toContain("model-a was already used by brainstorm.");
+    expect(buttonAttributes(html, "Approve & run Execute")).toContain(
+      'data-action-priority="primary"',
+    );
+    expect(html).toMatch(
+      /<footer data-region="footer" data-shaping-footer="persistent" class="[^"]*shrink-0[^"]*"/u,
+    );
+    expect(visible).not.toContain("Execute approval is not part of this slice.");
     expect(visible).not.toContain("Execute the plan");
     expect(advancedRecoveryMarkup(html)).toContain(
       "Request changes & prepare rerun",
@@ -1855,6 +1879,59 @@ describe("detail panel decision-first shaping", () => {
       "Verification · The short verification stays visible",
     );
     expect(shortVisible).not.toContain("Show all");
+  });
+
+  it("promotes manual Execute preparation when the connected runtime is unavailable", () => {
+    const projection = shapingHandoffForItem(
+      decisionItem("plan", decisionGoalContract),
+      appliedDecisionContext("plan", planResult, {
+        models: {
+          execute: {
+            status: "unavailable",
+            reason: "The Execute runtime is unavailable.",
+            available_model_ids: [],
+          },
+        },
+      }),
+    );
+    if (projection.mode !== "ready" || projection.phase !== "plan") {
+      throw new Error("expected a ready Plan projection");
+    }
+
+    const html = renderDecision(projection);
+    const visible = visibleMarkup(html);
+
+    expect(visible).toContain("The Execute runtime is unavailable.");
+    expect(html).not.toContain('<select aria-label="Execute model"');
+    expect(exactButtonCount(html, "Approve & run Execute")).toBe(0);
+    expect(buttonAttributes(html, "Approve & prepare Execute")).toContain(
+      'data-action-priority="primary"',
+    );
+  });
+
+  it("clears shaping-only state before handing Plan approval to Execute", () => {
+    const stopShapingRefresh = vi.fn();
+    const clearShapingRefreshIdentity = vi.fn();
+    const clearShapingRefreshBinding = vi.fn();
+    const setShapingLaunchFailureState = vi.fn();
+    const setShapingNewAttemptState = vi.fn();
+    const setShowFullWorkItem = vi.fn();
+
+    clearShapingStateForExecuteHandoff({
+      stopShapingRefresh,
+      clearShapingRefreshIdentity,
+      clearShapingRefreshBinding,
+      setShapingLaunchFailureState,
+      setShapingNewAttemptState,
+      setShowFullWorkItem,
+    });
+
+    expect(stopShapingRefresh).toHaveBeenCalledOnce();
+    expect(clearShapingRefreshIdentity).toHaveBeenCalledOnce();
+    expect(clearShapingRefreshBinding).toHaveBeenCalledOnce();
+    expect(setShapingLaunchFailureState).toHaveBeenCalledWith(null);
+    expect(setShapingNewAttemptState).toHaveBeenCalledWith(null);
+    expect(setShowFullWorkItem).toHaveBeenCalledWith(false);
   });
 
   it.each([
