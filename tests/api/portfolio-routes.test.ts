@@ -89,6 +89,7 @@ import * as planImportRoute from "../../app/api/portfolio/work-items/[sourceId]/
 import * as planRequestChangesRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/request-changes/route";
 import * as planRetryLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/retry-launch/route";
 import * as planReplanRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/replan/route";
+import * as planApproveRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/plan/approve/route";
 import * as startBrainstormRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/start-brainstorm/route";
 import * as shapingModelsRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/models/route";
 import * as repairControllerLeaseRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/repair-controller-lease/route";
@@ -722,6 +723,21 @@ const SHAPING_POST_CASES: ShapingPostCase[] = [
       sourceId,
       workItemId,
       { ...controllerDecisionBody, goal_contract_sha256: SHA_C },
+    ],
+  },
+  {
+    name: "approve plan result",
+    relativePath: "shaping/plan/approve",
+    handler: planApproveRoute.POST,
+    body: { ...decisionBody, goal_contract_sha256: SHA_C },
+    serviceMethod: "approvePlanResult",
+    expectedArgs: (sourceId, workItemId) => [
+      sourceId,
+      workItemId,
+      {
+        ...decisionBody,
+        goal_contract_sha256: SHA_C,
+      },
     ],
   },
   {
@@ -1754,6 +1770,7 @@ describe("portfolio API routes", () => {
         "startBrainstorm",
         "useBrainstormResult",
         "approveSpecResult",
+        "approvePlanResult",
         "requestShapingChanges",
         "replanWithUpdatedContract",
       ].includes(route.serviceMethod),
@@ -1793,10 +1810,11 @@ describe("portfolio API routes", () => {
         200, 200, 400, 400,
       ]);
       expect(action).toHaveBeenCalledTimes(2);
-      expect(action.mock.calls[1]?.[2]).toMatchObject({
-        launch_mode: "manual",
-        next_requested_model: null,
-      });
+      expect(action.mock.calls[1]?.[2]).toMatchObject(
+        route.serviceMethod === "approvePlanResult"
+          ? { launch_mode: "manual", requested_model: null }
+          : { launch_mode: "manual", next_requested_model: null },
+      );
     }
   });
 
@@ -1814,6 +1832,9 @@ describe("portfolio API routes", () => {
     const replan = SHAPING_POST_CASES.find(
       (route) => route.serviceMethod === "replanWithUpdatedContract",
     )!;
+    const approvePlan = SHAPING_POST_CASES.find(
+      (route) => route.serviceMethod === "approvePlanResult",
+    )!;
     const requestChanges = SHAPING_POST_CASES.find(
       (route) => route.serviceMethod === "requestShapingChanges",
     )!;
@@ -1823,6 +1844,10 @@ describe("portfolio API routes", () => {
       [useResult, { ...useResult.body, expected_mission_content_sha256: null }],
       [useResult, { ...useResult.body, expected_result_content_sha256: null }],
       [approve, { ...approve.body, goal_contract_sha256: undefined }],
+      [
+        approvePlan,
+        { ...approvePlan.body, goal_contract_sha256: undefined },
+      ],
       [replan, { ...replan.body, goal_contract_sha256: undefined }],
       [useResult, { ...useResult.body, goal_contract_sha256: SHA_C }],
       [requestChanges, { ...requestChanges.body, goal_contract_sha256: SHA_C }],
@@ -1926,6 +1951,7 @@ describe("portfolio API routes", () => {
       "shaping/plan/connected/cancel/route.ts",
       "shaping/brainstorm/use-result/route.ts",
       "shaping/spec/approve/route.ts",
+      "shaping/plan/approve/route.ts",
       "shaping/plan/replan/route.ts",
       "shaping/models/route.ts",
       "repair-controller-lease/route.ts",
@@ -1934,7 +1960,6 @@ describe("portfolio API routes", () => {
       "shaping/[phase]",
       "shaping/brainstorm/accept/route.ts",
       "shaping/brainstorm/approve/route.ts",
-      "shaping/plan/approve/route.ts",
       "shaping/spec/use-result/route.ts",
       "shaping/plan/use-result/route.ts",
       "shaping/brainstorm/replan/route.ts",
@@ -1974,6 +1999,7 @@ describe("portfolio API routes", () => {
       planRequestChangesRoute,
       planRetryLaunchRoute,
       planReplanRoute,
+      planApproveRoute,
       startBrainstormRoute,
       repairControllerLeaseRoute,
     ];
@@ -1983,7 +2009,7 @@ describe("portfolio API routes", () => {
       planConnectedRunRoute,
       shapingModelsRoute,
     ];
-    expect(postModules).toHaveLength(26);
+    expect(postModules).toHaveLength(27);
     expect(getModules).toHaveLength(4);
     for (const routeModule of postModules) {
       expect(Object.keys(routeModule).sort()).toEqual(["POST", "runtime"]);
