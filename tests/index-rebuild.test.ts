@@ -62,7 +62,7 @@ function portfolioItem(
 
 function connectedRunSummary(workItemId: string): ConnectedRunSummary {
   return {
-    schema_version: 1,
+    schema_version: 2,
     connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
     mission: {
       identity: {
@@ -105,7 +105,10 @@ function connectedRunSummary(workItemId: string): ConnectedRunSummary {
         assurance: "controller_observed",
       },
     },
-    capability_envelope_sha256: "d".repeat(64),
+    authorization: {
+      kind: "capability_envelope",
+      envelope_sha256: "d".repeat(64),
+    },
     acp_protocol_version: { value: 1, assurance: "adapter_attested" },
     lifecycle: {
       status: "running",
@@ -153,6 +156,9 @@ describe("SQLitePortfolioIndex", () => {
 
     expect(index.list()).toEqual(expected);
     expect(index.listConnectedRunSummaries()).toEqual(summaries);
+    expect(
+      index.listConnectedRunSummaries()[0]?.connected_run.mission.identity.phase,
+    ).toBe("execute");
     index.close();
     await rm(databasePath);
 
@@ -277,40 +283,35 @@ describe("SQLitePortfolioIndex", () => {
     index.close();
   });
 
-  it("drops and recreates a stale v5 cache instead of migrating its rows", async () => {
+  it("drops a stale v7 cache and its v1 summary blob before v2 parsing", async () => {
     const databasePath = await createDatabasePath();
     const oldDatabase = new Database(databasePath);
     oldDatabase.exec(`
       CREATE TABLE portfolio_work_items (
         source_id TEXT NOT NULL,
-        project_workspace_id TEXT,
-        project_workspace_path TEXT,
-        project_name TEXT,
-        project_registered_at TEXT,
         work_item_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        type TEXT,
-        capture_kind TEXT,
-        capture_original_title TEXT,
-        capture_captured_at TEXT,
-        priority TEXT,
-        tags TEXT,
-        notes TEXT,
-        phase TEXT NOT NULL,
-        status TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (source_id, work_item_id)
+        connected_run_summary TEXT
       );
-      PRAGMA user_version = 5;
+      INSERT INTO portfolio_work_items (
+        source_id,
+        work_item_id,
+        connected_run_summary
+      ) VALUES (
+        'ws_123e4567-e89b-12d3-a456-426614174000',
+        'wi_123e4567-e89b-12d3-a456-426614174000',
+        '{"schema_version":1,"legacy":"must-not-be-parsed"}'
+      );
+      PRAGMA user_version = 7;
     `);
     oldDatabase.close();
 
     const index = new SQLitePortfolioIndex(databasePath);
     expect(index.list()).toEqual([]);
+    expect(index.listConnectedRunSummaries()).toEqual([]);
     index.close();
 
     const inspected = new Database(databasePath, { readonly: true });
-    expect(inspected.pragma("user_version", { simple: true })).toBe(7);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(8);
     expect(
       inspected
         .prepare(
