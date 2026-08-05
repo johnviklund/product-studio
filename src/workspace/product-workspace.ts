@@ -4608,6 +4608,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     );
     const approvalId = derivePlanApprovalId(input.intent);
     const nextGoalBytes = validatedLease.acquired_goal_bytes;
+    const previousStateBytes = `${JSON.stringify(
+      validatedLease.work_item.state,
+      null,
+      2,
+    )}\n`;
     const nextStateBytes = `${JSON.stringify(nextState, null, 2)}\n`;
 
     if (
@@ -4709,9 +4714,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       previous_goal_sha256: this.hashArtifactSource(
         validatedLease.acquired_goal_bytes,
       ),
-      previous_state_bytes: validatedLease.acquired_state_bytes,
+      previous_state_bytes: previousStateBytes,
       previous_state_sha256: this.hashArtifactSource(
-        validatedLease.acquired_state_bytes,
+        previousStateBytes,
       ),
       next_goal_bytes: nextGoalBytes,
       next_goal_sha256: this.hashArtifactSource(nextGoalBytes),
@@ -5205,7 +5210,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
 
     await this.writeInitialPlanApprovalManifest(manifest);
-    await this.writePlanApprovalArtifacts(intent);
+    await this.afterPlanApprovalPendingManifestWritten();
+    await this.writePlanApprovalArtifacts(intent, true);
+    await this.beforePlanApprovalAppliedManifestWritten();
     const appliedManifest = planApprovalManifestSchema.parse({
       ...manifest,
       outcome: "applied",
@@ -5282,7 +5289,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       join(workItemDirectory, STATE_FILE),
     );
     const durableGoalSha256 = this.hashArtifactSource(durableGoalBytes);
-    const durableStateSha256 = this.hashArtifactSource(durableStateBytes);
+    const durableStateSha256 = this.hashArtifactSource(
+      `${JSON.stringify(validatedLease.work_item.state, null, 2)}\n`,
+    );
+    const leasedDurableStateSha256 =
+      this.hashArtifactSource(durableStateBytes);
     const goalIsNext = durableGoalSha256 === intent.next_goal_sha256;
     const goalIsPrevious =
       durableGoalSha256 === intent.previous_goal_sha256;
@@ -5290,12 +5301,15 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const stateIsPrevious =
       durableStateSha256 === intent.previous_state_sha256;
 
-    if (!goalIsNext || !stateIsNext) {
+    if (
+      !goalIsNext ||
+      leasedDurableStateSha256 !== intent.next_state_sha256
+    ) {
       if (
         (goalIsNext || goalIsPrevious) &&
         (stateIsNext || stateIsPrevious)
       ) {
-        await this.writePlanApprovalArtifacts(intent);
+        await this.writePlanApprovalArtifacts(intent, false);
       } else {
         throw new ControllerConflictError(
           "repair_required",
@@ -5522,6 +5536,18 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   protected async afterShapingDecisionStateReplaced(): Promise<void> {
+    return;
+  }
+
+  protected async afterPlanApprovalPendingManifestWritten(): Promise<void> {
+    return;
+  }
+
+  protected async afterPlanApprovalStateReplaced(): Promise<void> {
+    return;
+  }
+
+  protected async beforePlanApprovalAppliedManifestWritten(): Promise<void> {
     return;
   }
 
@@ -7634,6 +7660,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
   private async writePlanApprovalArtifacts(
     intent: PlanApprovalIntentV1,
+    injectFailure: boolean,
   ): Promise<void> {
     this.validateStoredPlanApprovalIntent(intent);
     this.parseWorkItemBytes(
@@ -7667,6 +7694,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       });
       await rename(temporaryGoalPath, goalPath);
       await rename(temporaryStatePath, statePath);
+      if (injectFailure) {
+        await this.afterPlanApprovalStateReplaced();
+      }
     } catch (error) {
       const cleanupErrors: unknown[] = [];
       for (const path of [temporaryGoalPath, temporaryStatePath]) {

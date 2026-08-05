@@ -57,6 +57,7 @@ import {
   hashGoalInput,
   hashShapingDecisionState,
   isShapingPhase,
+  shapingDecisionReceiptSchema,
   type BrainstormMissionPackage,
   type BrainstormResultSubmission,
   type PlanShapingInput,
@@ -242,6 +243,47 @@ class BoundaryFailingShapingDecisionWorkspace extends ProductWorkspace {
     if (this.failureBoundary === "applied_manifest") {
       this.failureBoundary = null;
       throw new Error("injected failure before applied decision manifest");
+    }
+  }
+}
+
+type PlanApprovalCommitFailureBoundary =
+  | "pending_manifest"
+  | "state_replaced"
+  | "before_applied_manifest";
+
+class BoundaryFailingPlanApprovalWorkspace extends ProductWorkspace {
+  private failureBoundary: PlanApprovalCommitFailureBoundary | null = null;
+
+  constructor(root: string) {
+    super(root, {
+      git: passingGit,
+      verificationRunner: passingRunner,
+    });
+  }
+
+  armFailure(boundary: PlanApprovalCommitFailureBoundary): void {
+    this.failureBoundary = boundary;
+  }
+
+  protected override async afterPlanApprovalPendingManifestWritten(): Promise<void> {
+    if (this.failureBoundary === "pending_manifest") {
+      this.failureBoundary = null;
+      throw new Error("injected failure after Plan approval pending manifest");
+    }
+  }
+
+  protected override async afterPlanApprovalStateReplaced(): Promise<void> {
+    if (this.failureBoundary === "state_replaced") {
+      this.failureBoundary = null;
+      throw new Error("injected failure after Plan approval state replace");
+    }
+  }
+
+  protected override async beforePlanApprovalAppliedManifestWritten(): Promise<void> {
+    if (this.failureBoundary === "before_applied_manifest") {
+      this.failureBoundary = null;
+      throw new Error("injected failure before Plan approval applied manifest");
     }
   }
 }
@@ -1413,6 +1455,36 @@ async function expectPlanApprovalRejectionWithoutMutation(
   expect(
     await capturePlanApprovalDurableState(repository, workItemId),
   ).toEqual(before);
+}
+
+function injectPlanApprovalResponseLoss(
+  repository: ProductWorkspace,
+  boundary: "after_intent" | "after_receipt",
+): void {
+  if (boundary === "after_intent") {
+    const writeIntent = repository.writePlanApprovalIntent.bind(repository);
+    let fail = true;
+    repository.writePlanApprovalIntent = async (lease, input) => {
+      const written = await writeIntent(lease, input);
+      if (fail) {
+        fail = false;
+        throw new Error("injected response loss after Plan approval intent");
+      }
+      return written;
+    };
+    return;
+  }
+
+  const writeReceipt = repository.writeShapingDecisionReceipt.bind(repository);
+  let fail = true;
+  repository.writeShapingDecisionReceipt = async (receipt) => {
+    const written = await writeReceipt(receipt);
+    if (fail && written.receipt.identity.phase === "plan") {
+      fail = false;
+      throw new Error("injected response loss after Plan approval receipt");
+    }
+    return written;
+  };
 }
 
 type ShapingResponseLossBoundary =
@@ -4081,6 +4153,282 @@ describe("WorkItemController", () => {
       "repair_required",
     );
     await retainedWorkspace.repository.releaseControllerLease(retainedLease);
+  });
+
+  it.each([
+    "after_intent",
+    "after_receipt",
+    "pending_manifest",
+    "state_replaced",
+    "before_applied_manifest",
+  ] as const)(
+    "recovers one exact Plan approval after %s failure",
+    async (boundary) => {
+      const { repository } = await createWorkspaceWith(
+        (root) => new BoundaryFailingPlanApprovalWorkspace(root),
+      );
+      const fixture = await createAppliedPlanDecisionFixture(repository);
+      const workItemId = fixture.approved.work_item.goal.work_item_id;
+      if (boundary === "after_intent" || boundary === "after_receipt") {
+        injectPlanApprovalResponseLoss(repository, boundary);
+      } else {
+        repository.armFailure(boundary);
+      }
+
+      await expect(
+        createController(repository).approvePlanResult(
+          workItemId,
+          fixture.input,
+        ),
+      ).rejects.toThrow(/injected/u);
+      const interrupted = await repository.read(workItemId);
+      expect(interrupted?.goal).toEqual(fixture.approved.work_item.goal);
+      expect(["plan", "execute"]).toContain(interrupted?.state.phase);
+
+      const recovered = await createControllerAt(
+        repository,
+        "2026-08-05T13:00:00.000Z",
+      ).approvePlanResult(workItemId, fixture.input);
+      expect(recovered).toMatchObject({
+        work_item: {
+          goal: fixture.approved.work_item.goal,
+          state: {
+            phase: "execute",
+            status: "active",
+            goal_version: fixture.approved.work_item.state.goal_version,
+            input_revision: fixture.approved.work_item.state.input_revision,
+            attempt: 0,
+          },
+        },
+        manifest: { outcome: "applied" },
+      });
+      await expect(
+        createControllerAt(
+          repository,
+          "2026-08-05T14:00:00.000Z",
+        ).approvePlanResult(workItemId, fixture.input),
+      ).resolves.toEqual(recovered);
+
+      const approvalDirectory = join(
+        repository.workspaceRoot,
+        ".founder",
+        "work-items",
+        workItemId,
+        "plan-approvals",
+      );
+      expect((await readdir(approvalDirectory)).sort()).toEqual(
+        [
+          `${recovered.approval_id}.intent.json`,
+          `${recovered.approval_id}.json`,
+        ].sort(),
+      );
+      const planArtifacts = (
+        await repository.listShapingArtifacts(workItemId)
+      ).filter(
+        (artifact) => artifact.mission.identity.phase === "plan",
+      );
+      expect(
+        planArtifacts.filter((artifact) => artifact.decision !== null),
+      ).toHaveLength(1);
+      const itemEntries = await readdir(
+        join(
+          repository.workspaceRoot,
+          ".founder",
+          "work-items",
+          workItemId,
+        ),
+      );
+      expect(itemEntries).not.toContain(".controller.lock");
+      expect(itemEntries.some((entry) => entry.endsWith(".tmp"))).toBe(false);
+    },
+  );
+
+  it("fails closed on contradictory Plan approval receipt, manifest, and state combinations", async () => {
+    const createIntentOnly = async () => {
+      const { repository } = await createWorkspaceWith(
+        (root) => new BoundaryFailingPlanApprovalWorkspace(root),
+      );
+      const fixture = await createAppliedPlanDecisionFixture(repository);
+      const workItemId = fixture.approved.work_item.goal.work_item_id;
+      injectPlanApprovalResponseLoss(repository, "after_intent");
+      await expect(
+        createController(repository).approvePlanResult(
+          workItemId,
+          fixture.input,
+        ),
+      ).rejects.toThrow(/after Plan approval intent/u);
+      const approvalDirectory = join(
+        repository.workspaceRoot,
+        ".founder",
+        "work-items",
+        workItemId,
+        "plan-approvals",
+      );
+      const intentEntry = (await readdir(approvalDirectory)).find((entry) =>
+        entry.endsWith(".intent.json"),
+      );
+      if (intentEntry === undefined) {
+        throw new Error("Expected a durable Plan approval intent");
+      }
+      const approvalId = intentEntry.replace(/\.intent\.json$/u, "");
+      const intent = await repository.readPlanApprovalIntent(
+        workItemId,
+        approvalId,
+      );
+      if (intent === null) {
+        throw new Error("Expected a readable Plan approval intent");
+      }
+      return {
+        repository,
+        fixture,
+        workItemId,
+        approvalDirectory,
+        approvalId,
+        intent,
+      };
+    };
+
+    const missingReceipt = await createIntentOnly();
+    await writeFile(
+      join(
+        missingReceipt.approvalDirectory,
+        `${missingReceipt.approvalId}.json`,
+      ),
+      `${JSON.stringify(
+        {
+          schema_version: 1,
+          approval_id: missingReceipt.approvalId,
+          work_item_id: missingReceipt.workItemId,
+          launch_mode: missingReceipt.intent.launch_mode,
+          requested_model: missingReceipt.intent.requested_model,
+          expected_mission_content_sha256:
+            missingReceipt.intent.expected_mission_content_sha256,
+          expected_result_content_sha256:
+            missingReceipt.intent.expected_result_content_sha256,
+          expected_shaping_state_sha256:
+            missingReceipt.intent.expected_shaping_state_sha256,
+          goal_contract_sha256:
+            missingReceipt.intent.goal_contract_sha256,
+          goal_version: missingReceipt.intent.goal_version,
+          receipt_sha256: missingReceipt.intent.receipt_sha256,
+          execute_tuple: missingReceipt.intent.execute_tuple,
+          goal_sha256: missingReceipt.intent.next_goal_sha256,
+          state_sha256: missingReceipt.intent.next_state_sha256,
+          started_at: missingReceipt.intent.created_at,
+          outcome: "pending",
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await expect(
+      createController(missingReceipt.repository).approvePlanResult(
+        missingReceipt.workItemId,
+        missingReceipt.fixture.input,
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+
+    const stateWithoutManifest = await createIntentOnly();
+    await writeFile(
+      join(
+        stateWithoutManifest.repository.workspaceRoot,
+        ".founder",
+        "work-items",
+        stateWithoutManifest.workItemId,
+        "state.json",
+      ),
+      stateWithoutManifest.intent.next_state_bytes,
+      "utf8",
+    );
+    await expect(
+      createController(stateWithoutManifest.repository).approvePlanResult(
+        stateWithoutManifest.workItemId,
+        stateWithoutManifest.fixture.input,
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+
+    const conflictingReceipt = await createIntentOnly();
+    const receipt = shapingDecisionReceiptSchema.parse(
+      JSON.parse(conflictingReceipt.intent.receipt_bytes) as unknown,
+    );
+    if (receipt.identity.phase !== "plan") {
+      throw new Error("Expected a Plan approval receipt");
+    }
+    await conflictingReceipt.repository.writeShapingDecisionReceipt({
+      ...receipt,
+      approved_at: "2026-08-05T15:00:00.000Z",
+    });
+    await expect(
+      createController(conflictingReceipt.repository).approvePlanResult(
+        conflictingReceipt.workItemId,
+        conflictingReceipt.fixture.input,
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
+
+    const unknownPairWorkspace = await createWorkspaceWith(
+      (root) => new BoundaryFailingPlanApprovalWorkspace(root),
+    );
+    const unknownPair = await createAppliedPlanDecisionFixture(
+      unknownPairWorkspace.repository,
+    );
+    const unknownWorkItemId =
+      unknownPair.approved.work_item.goal.work_item_id;
+    unknownPairWorkspace.repository.armFailure("pending_manifest");
+    await expect(
+      createController(unknownPairWorkspace.repository).approvePlanResult(
+        unknownWorkItemId,
+        unknownPair.input,
+      ),
+    ).rejects.toThrow(/pending manifest/u);
+    const unknownApprovalEntry = (
+      await readdir(
+        join(
+          unknownPairWorkspace.repository.workspaceRoot,
+          ".founder",
+          "work-items",
+          unknownWorkItemId,
+          "plan-approvals",
+        ),
+      )
+    ).find((entry) => entry.endsWith(".intent.json"));
+    if (unknownApprovalEntry === undefined) {
+      throw new Error("Expected pending Plan approval intent");
+    }
+    const unknownIntent = await unknownPairWorkspace.repository.readPlanApprovalIntent(
+      unknownWorkItemId,
+      unknownApprovalEntry.replace(/\.intent\.json$/u, ""),
+    );
+    if (unknownIntent === null) {
+      throw new Error("Expected pending Plan approval intent bytes");
+    }
+    const unexpectedState = JSON.parse(
+      unknownIntent.previous_state_bytes,
+    ) as WorkItem["state"];
+    await writeFile(
+      join(
+        unknownPairWorkspace.repository.workspaceRoot,
+        ".founder",
+        "work-items",
+        unknownWorkItemId,
+        "state.json",
+      ),
+      `${JSON.stringify(
+        {
+          ...unexpectedState,
+          updated_at: "2026-08-05T15:30:00.000Z",
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await expect(
+      createController(unknownPairWorkspace.repository).approvePlanResult(
+        unknownWorkItemId,
+        unknownPair.input,
+      ),
+    ).rejects.toMatchObject({ kind: "repair_required" });
   });
 
   it("fails closed on a retained controller lease without claiming it", async () => {
