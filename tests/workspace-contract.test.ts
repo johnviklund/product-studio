@@ -52,6 +52,7 @@ import {
   serializeShapingPackage,
   SHAPING_INGRESS_MAX_BYTES,
   type BrainstormResultSubmission,
+  type PlanApprovalReceipt,
   type PlanResultSubmission,
   type ShapingArtifactWriteResult,
   type ShapingIdentity,
@@ -2419,7 +2420,41 @@ describe("ProductWorkspace", () => {
       todo_impacts: [],
       open_questions: [],
     };
-    await writeAppliedShapingBundle(plan, planResult);
+    const appliedPlan = await writeAppliedShapingBundle(plan, planResult);
+    const planApproval: PlanApprovalReceipt = {
+      shaping_schema_version: 2,
+      identity: planIdentity,
+      mission_content_sha256: plan.mission.content_sha256,
+      result_content_sha256: appliedPlan.resultContentSha256,
+      goal_contract_sha256: goalContractSha256,
+      goal_version: 1,
+      execute_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+      },
+      approved_at: "2026-07-29T00:06:00.000Z",
+    };
+    const writtenPlanApproval =
+      await workspace.writeShapingDecisionReceipt(planApproval);
+    await expect(
+      workspace.writeShapingDecisionReceipt(planApproval),
+    ).resolves.toEqual(writtenPlanApproval);
+    await expect(
+      workspace.writeShapingDecisionReceipt({
+        ...planApproval,
+        approved_at: "2026-07-29T00:07:00.000Z",
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    await expect(
+      workspace.writeShapingDecisionReceipt({
+        ...planApproval,
+        identity: specIdentity,
+      } as unknown as PlanApprovalReceipt),
+    ).rejects.toThrow();
+    expect(writtenPlanApproval.receipt_path).toBe(
+      join(dirname(plan.mission_path), "decision.json"),
+    );
 
     expect(spec.mission.input).toMatchObject({
       brainstorm_selection_sha256: accepted.receipt_content_sha256,

@@ -3526,11 +3526,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   ): Promise<ShapingReceiptWriteResult<TReceipt>> {
     const receipt = shapingDecisionReceiptSchema.parse(input) as TReceipt;
     const snapshot = await this.readShapingPackageSnapshot(receipt.identity);
-    const isSelection = "selected_at" in receipt;
-    if (
-      (isSelection && snapshot.mission.identity.phase !== "brainstorm") ||
-      (!isSelection && snapshot.mission.identity.phase !== "spec")
-    ) {
+    if (receipt.identity.phase !== snapshot.mission.identity.phase) {
       throw this.invalid(
         snapshot.missionDirectory,
         "shaping decision receipt phase must match its immutable mission",
@@ -6309,9 +6305,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     if (
       decisionReceipt !== null &&
       (applied === null ||
-        (("selected_at" in decisionReceipt) !==
-          (snapshot.mission.identity.phase === "brainstorm")) ||
-        snapshot.mission.identity.phase === "plan" ||
+        decisionReceipt.identity.phase !== snapshot.mission.identity.phase ||
         JSON.stringify(decisionReceipt.identity) !==
           JSON.stringify(snapshot.mission.identity) ||
         decisionReceipt.mission_content_sha256 !==
