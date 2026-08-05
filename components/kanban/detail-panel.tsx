@@ -5384,8 +5384,13 @@ export function DetailPanel({
       return;
     }
     const controller = new AbortController();
-    void loadConnectedRuns(controller.signal);
-    return () => controller.abort();
+    const requestHandle = window.setTimeout(() => {
+      void loadConnectedRuns(controller.signal);
+    }, 0);
+    return () => {
+      window.clearTimeout(requestHandle);
+      controller.abort();
+    };
   }, [
     connectedWorkflowPhase,
     loadConnectedRuns,
