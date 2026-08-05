@@ -4330,6 +4330,33 @@ describe("PortfolioService", () => {
       },
     );
     connectedRunId = launched.connected_run.connected_run_id;
+    await expect(
+      service.cancelConnectedRun(
+        sourceId,
+        created.goal.work_item_id,
+        connectedRunId,
+      ),
+    ).rejects.toMatchObject({
+      kind: "stale_expectation",
+      message: expect.stringContaining(
+        "cannot target a durable review run",
+      ),
+    });
+    expect(session.cancel).not.toHaveBeenCalled();
+    await expect(
+      service.listConnectedRunsForPhase(
+        sourceId,
+        created.goal.work_item_id,
+        "execute",
+      ),
+    ).resolves.toEqual([]);
+    await expect(
+      service.listConnectedRunsForPhase(
+        sourceId,
+        created.goal.work_item_id,
+        "review",
+      ),
+    ).resolves.toHaveLength(1);
     const replay = await service.launchConnectedReview(
       sourceId,
       created.goal.work_item_id,

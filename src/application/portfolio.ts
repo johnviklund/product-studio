@@ -100,6 +100,7 @@ import {
   summarizeConnectedRun,
   type ConnectedRunRecordV2,
   type ConnectedRunSummary,
+  type LaunchConnectedInput,
 } from "../domain/connected-run";
 import {
   capabilityRequestMatchesEnvelope,
@@ -663,6 +664,32 @@ export interface LaunchConnectedPatchRequest {
 
 export interface PortfolioConnectedRunResult extends PortfolioWorkItem {
   connected_run: ConnectedRunSummary;
+}
+
+type ConnectedRunPhase = "execute" | "review" | "patch";
+
+interface PreparedConnectedLaunch {
+  source: ResolvedSource;
+  work_item_id: string;
+  controller: WorkItemController;
+  launch_input: LaunchConnectedInput;
+  record: ConnectedRunRecordV2;
+  prompt: string;
+  start_session: (
+    event_sink: AcpEventSink,
+    callbacks: AcpSessionCallbacks,
+    connected_run_id: string,
+  ) => Promise<AcpSession>;
+  preference?: {
+    adapter_id: string;
+    seat: Extract<WorkflowModelSeat, "review" | "patch">;
+    requested_model: string;
+  };
+  after_complete: (
+    result: AcpRunResult,
+    terminal: ConnectedRunRecordV2,
+    launched: ConnectedRunRecordV2,
+  ) => Promise<void>;
 }
 
 export interface ConnectedWritableRuntimePrepareInput {
@@ -2041,7 +2068,7 @@ export class PortfolioService {
     }
     if (activeRuns.length === 1) {
       const activeRun = activeRuns[0]!;
-      const replay = await controller.launchConnectedExecute(
+      const replay = await controller.launchConnectedRun(
         workItemId,
         this.connectedLaunchInput(
           governedTuple,
@@ -2096,81 +2123,16 @@ export class PortfolioService {
       capabilityEnvelope,
       prepared,
     );
-    const launched = await controller.launchConnectedExecute(
-      workItemId,
-      launchInput,
+    return this.launchPreparedConnectedRun({
+      source,
+      work_item_id: workItemId,
+      controller,
+      launch_input: launchInput,
       record,
-    );
-    if (!launched.created) {
-      return {
-        ...this.toPortfolioItem(source, launched.work_item),
-        connected_run: summarizeConnectedRun(launched.connected_run),
-      };
-    }
-
-    const eventSink: AcpEventSink = {
-      append: (event, signal) =>
-        source.workspace.appendConnectedRunEvent(
-          workItemId,
-          launched.connected_run.connected_run_id,
-          event,
-          signal,
-        ),
-    };
-    const key = this.connectedSessionKey(
-      source.source_id,
-      workItemId,
-      launched.connected_run.connected_run_id,
-    );
-    const started = await startConnectedAcpRun({
-      start_session: (callbacks) => prepared.start(eventSink, callbacks),
-      mark_running: (session) =>
-        source.workspace.startConnectedRun(
-          workItemId,
-          launched.connected_run.connected_run_id,
-          {
-            protocol_version: {
-              value: session.protocol_version,
-              assurance: "adapter_attested",
-            },
-            session_id: {
-              value: session.session_id,
-              assurance: "adapter_attested",
-            },
-          },
-          session.process,
-        ),
-      persist_effective_model: (effectiveModel, signal) =>
-        source.workspace
-          .updateConnectedRunEffectiveModel(
-            workItemId,
-            launched.connected_run.connected_run_id,
-            effectiveModel,
-            signal,
-          )
-          .then(() => undefined),
       prompt: `Execute the governed task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
-      complete: (result) =>
-        this.completeObservedConnectedRun(
-          source,
-          workItemId,
-          launched.connected_run.connected_run_id,
-          result,
-        ),
-      fail: async () => {
-        await source.workspace
-          .completeConnectedRun(
-            workItemId,
-            launched.connected_run.connected_run_id,
-            this.failedConnectedTerminal(),
-          )
-          .catch(() => undefined);
-        await this.rebuild().catch(() => undefined);
-      },
-      started: (handle) => {
-        this.liveConnectedSessions.set(key, handle);
-      },
-      after_complete: async (result, terminal) => {
+      start_session: (eventSink, callbacks) =>
+        prepared.start(eventSink, callbacks),
+      after_complete: async (result, terminal, launched) => {
         if (terminal.lifecycle.terminal?.outcome !== result.outcome) {
           return;
         }
@@ -2179,7 +2141,7 @@ export class PortfolioService {
             source,
             workItemId,
             mission,
-            launched.connected_run,
+            launched,
             result,
           );
         } else if (result.outcome === "completed") {
@@ -2187,19 +2149,7 @@ export class PortfolioService {
         }
         await this.rebuild();
       },
-      settled: async (session) => {
-        if (this.liveConnectedSessions.get(key)?.session === session) {
-          this.liveConnectedSessions.delete(key);
-        }
-      },
     });
-    const running = started.running;
-    void started.completion;
-    await this.rebuild();
-    return {
-      ...this.toPortfolioItem(source, launched.work_item),
-      connected_run: summarizeConnectedRun(running),
-    };
   }
 
   async launchConnectedPatch(
@@ -2323,86 +2273,21 @@ export class PortfolioService {
       capabilityEnvelope,
       prepared,
     );
-    const launched = await controller.launchConnectedRun(
-      workItemId,
-      launchInput,
+    return this.launchPreparedConnectedRun({
+      source,
+      work_item_id: workItemId,
+      controller,
+      launch_input: launchInput,
       record,
-    );
-    await this.preferencesStore.setPreference({
-      adapter_id: configuration.adapter_id,
-      seat: "patch",
-      requested_model: requestedModel,
-    });
-    if (!launched.created) {
-      return {
-        ...this.toPortfolioItem(source, launched.work_item),
-        connected_run: summarizeConnectedRun(launched.connected_run),
-      };
-    }
-
-    const eventSink: AcpEventSink = {
-      append: (event, signal) =>
-        source.workspace.appendConnectedRunEvent(
-          workItemId,
-          launched.connected_run.connected_run_id,
-          event,
-          signal,
-        ),
-    };
-    const key = this.connectedSessionKey(
-      source.source_id,
-      workItemId,
-      launched.connected_run.connected_run_id,
-    );
-    const started = await startConnectedAcpRun({
-      start_session: (callbacks) => prepared.start(eventSink, callbacks),
-      mark_running: (session) =>
-        source.workspace.startConnectedRun(
-          workItemId,
-          launched.connected_run.connected_run_id,
-          {
-            protocol_version: {
-              value: session.protocol_version,
-              assurance: "adapter_attested",
-            },
-            session_id: {
-              value: session.session_id,
-              assurance: "adapter_attested",
-            },
-          },
-          session.process,
-        ),
-      persist_effective_model: (effectiveModel, signal) =>
-        source.workspace
-          .updateConnectedRunEffectiveModel(
-            workItemId,
-            launched.connected_run.connected_run_id,
-            effectiveModel,
-            signal,
-          )
-          .then(() => undefined),
       prompt: `Apply the governed Patch task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
-      complete: (result) =>
-        this.completeObservedConnectedRun(
-          source,
-          workItemId,
-          launched.connected_run.connected_run_id,
-          result,
-        ),
-      fail: async () => {
-        await source.workspace
-          .completeConnectedRun(
-            workItemId,
-            launched.connected_run.connected_run_id,
-            this.failedConnectedTerminal(),
-          )
-          .catch(() => undefined);
-        await this.rebuild().catch(() => undefined);
+      start_session: (eventSink, callbacks) =>
+        prepared.start(eventSink, callbacks),
+      preference: {
+        adapter_id: configuration.adapter_id,
+        seat: "patch",
+        requested_model: requestedModel,
       },
-      started: (handle) => {
-        this.liveConnectedSessions.set(key, handle);
-      },
-      after_complete: async (result, terminal) => {
+      after_complete: async (result, terminal, launched) => {
         if (terminal.lifecycle.terminal?.outcome !== result.outcome) {
           return;
         }
@@ -2411,7 +2296,7 @@ export class PortfolioService {
             source,
             workItemId,
             mission,
-            launched.connected_run,
+            launched,
             result,
           );
         } else if (result.outcome === "completed") {
@@ -2419,18 +2304,7 @@ export class PortfolioService {
         }
         await this.rebuild();
       },
-      settled: async (session) => {
-        if (this.liveConnectedSessions.get(key)?.session === session) {
-          this.liveConnectedSessions.delete(key);
-        }
-      },
     });
-    void started.completion;
-    await this.rebuild();
-    return {
-      ...this.toPortfolioItem(source, launched.work_item),
-      connected_run: summarizeConnectedRun(started.running),
-    };
   }
 
   async launchConnectedReview(
@@ -2536,46 +2410,21 @@ export class PortfolioService {
       policy,
       prepared,
     );
-    const launched = await controller.launchConnectedRun(
-      workItemId,
-      launchInput,
+    return this.launchPreparedConnectedRun({
+      source,
+      work_item_id: workItemId,
+      controller,
+      launch_input: launchInput,
       record,
-    );
-    await this.preferencesStore.setPreference({
-      adapter_id: configuration.adapter_id,
-      seat: "review",
-      requested_model: requestedModel,
-    });
-    if (!launched.created) {
-      return {
-        ...this.toPortfolioItem(source, launched.work_item),
-        connected_run: summarizeConnectedRun(launched.connected_run),
-      };
-    }
-
-    const eventSink: AcpEventSink = {
-      append: (event, signal) =>
-        source.workspace.appendConnectedRunEvent(
-          workItemId,
-          launched.connected_run.connected_run_id,
-          event,
-          signal,
-        ),
-    };
-    const key = this.connectedSessionKey(
-      source.source_id,
-      workItemId,
-      launched.connected_run.connected_run_id,
-    );
-    const started = await startConnectedAcpRun({
-      start_session: (callbacks) =>
+      prompt: `Review the exact immutable subject in ${mission.mission.task_path}. Write only the strict JSON review result to ${mission.mission.result_contract.output_path}. Do not modify any other path, run commands, use URLs, or make approval decisions.`,
+      start_session: (eventSink, callbacks, connectedRunId) =>
         prepared.start(
           eventSink,
           (request, signal) =>
             source.workspace
               .writeConnectedReviewResult(
                 workItemId,
-                launched.connected_run.connected_run_id,
+                connectedRunId,
                 request.path,
                 request.content,
                 signal,
@@ -2583,51 +2432,10 @@ export class PortfolioService {
               .then(() => undefined),
           callbacks,
         ),
-      mark_running: (session) =>
-        source.workspace.startConnectedRun(
-          workItemId,
-          launched.connected_run.connected_run_id,
-          {
-            protocol_version: {
-              value: session.protocol_version,
-              assurance: "adapter_attested",
-            },
-            session_id: {
-              value: session.session_id,
-              assurance: "adapter_attested",
-            },
-          },
-          session.process,
-        ),
-      persist_effective_model: (effectiveModel, signal) =>
-        source.workspace
-          .updateConnectedRunEffectiveModel(
-            workItemId,
-            launched.connected_run.connected_run_id,
-            effectiveModel,
-            signal,
-          )
-          .then(() => undefined),
-      prompt: `Review the exact immutable subject in ${mission.mission.task_path}. Write only the strict JSON review result to ${mission.mission.result_contract.output_path}. Do not modify any other path, run commands, use URLs, or make approval decisions.`,
-      complete: (result) =>
-        this.completeObservedConnectedRun(
-          source,
-          workItemId,
-          launched.connected_run.connected_run_id,
-          result,
-        ),
-      fail: async () => {
-        await source.workspace
-          .completeConnectedRun(
-            workItemId,
-            launched.connected_run.connected_run_id,
-            this.failedConnectedTerminal(),
-          )
-          .catch(() => undefined);
-        await this.rebuild().catch(() => undefined);
-      },
-      started: (handle) => {
-        this.liveConnectedSessions.set(key, handle);
+      preference: {
+        adapter_id: configuration.adapter_id,
+        seat: "review",
+        requested_model: requestedModel,
       },
       after_complete: async (result, terminal) => {
         if (terminal.lifecycle.terminal?.outcome !== result.outcome) {
@@ -2638,37 +2446,78 @@ export class PortfolioService {
         }
         await this.rebuild();
       },
-      settled: async (session) => {
-        if (this.liveConnectedSessions.get(key)?.session === session) {
-          this.liveConnectedSessions.delete(key);
-        }
-      },
     });
-    void started.completion;
-    await this.rebuild();
-    return {
-      ...this.toPortfolioItem(source, launched.work_item),
-      connected_run: summarizeConnectedRun(started.running),
-    };
   }
 
   async listConnectedRuns(
     sourceId: string,
     workItemId: string,
   ): Promise<ConnectedRunSummary[]> {
+    return this.listConnectedRunsForPhase(sourceId, workItemId);
+  }
+
+  async listConnectedRunsForPhase(
+    sourceId: string,
+    workItemId: string,
+    expectedPhase?: ConnectedRunPhase,
+  ): Promise<ConnectedRunSummary[]> {
     const source = await this.resolveSource(sourceId);
     if ((await source.workspace.read(workItemId)) === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
-    return (await source.workspace.listConnectedRuns(workItemId)).map(
-      summarizeConnectedRun,
-    );
+    return (await source.workspace.listConnectedRuns(workItemId))
+      .filter(
+        (record) =>
+          expectedPhase === undefined ||
+          record.mission.identity.phase === expectedPhase,
+      )
+      .map(summarizeConnectedRun);
   }
 
   async cancelConnectedRun(
     sourceId: string,
     workItemId: string,
     connectedRunId: string,
+  ): Promise<PortfolioConnectedRunResult> {
+    return this.cancelConnectedRunForPhase(
+      sourceId,
+      workItemId,
+      connectedRunId,
+      "execute",
+    );
+  }
+
+  async cancelConnectedReviewRun(
+    sourceId: string,
+    workItemId: string,
+    connectedRunId: string,
+  ): Promise<PortfolioConnectedRunResult> {
+    return this.cancelConnectedRunForPhase(
+      sourceId,
+      workItemId,
+      connectedRunId,
+      "review",
+    );
+  }
+
+  async cancelConnectedPatchRun(
+    sourceId: string,
+    workItemId: string,
+    connectedRunId: string,
+  ): Promise<PortfolioConnectedRunResult> {
+    return this.cancelConnectedRunForPhase(
+      sourceId,
+      workItemId,
+      connectedRunId,
+      "patch",
+    );
+  }
+
+  private async cancelConnectedRunForPhase(
+    sourceId: string,
+    workItemId: string,
+    connectedRunId: string,
+    expectedPhase: ConnectedRunPhase,
   ): Promise<PortfolioConnectedRunResult> {
     const validatedRunId = controllerRunIdSchema.parse(connectedRunId);
     const source = await this.resolveSource(sourceId);
@@ -2682,6 +2531,13 @@ export class PortfolioService {
     );
     if (record === null) {
       throw this.missionNotReady(workItemId, "Connected run was not found.");
+    }
+    if (record.mission.identity.phase !== expectedPhase) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItemId,
+        `Connected ${expectedPhase} cancellation cannot target a durable ${record.mission.identity.phase} run.`,
+      );
     }
     if (record.lifecycle.status === "terminal") {
       return {
@@ -5864,6 +5720,104 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       limits: CONNECTED_RUN_LIMITS,
       process: null,
       diagnostics: { entries: [], truncated: false },
+    };
+  }
+
+  private async launchPreparedConnectedRun(
+    input: PreparedConnectedLaunch,
+  ): Promise<PortfolioConnectedRunResult> {
+    const launched = await input.controller.launchConnectedRun(
+      input.work_item_id,
+      input.launch_input,
+      input.record,
+    );
+    if (input.preference !== undefined) {
+      await this.preferencesStore.setPreference(input.preference);
+    }
+    if (!launched.created) {
+      return {
+        ...this.toPortfolioItem(input.source, launched.work_item),
+        connected_run: summarizeConnectedRun(launched.connected_run),
+      };
+    }
+
+    const connectedRunId = launched.connected_run.connected_run_id;
+    const eventSink: AcpEventSink = {
+      append: (event, signal) =>
+        input.source.workspace.appendConnectedRunEvent(
+          input.work_item_id,
+          connectedRunId,
+          event,
+          signal,
+        ),
+    };
+    const key = this.connectedSessionKey(
+      input.source.source_id,
+      input.work_item_id,
+      connectedRunId,
+    );
+    const started = await startConnectedAcpRun({
+      start_session: (callbacks) =>
+        input.start_session(eventSink, callbacks, connectedRunId),
+      mark_running: (session) =>
+        input.source.workspace.startConnectedRun(
+          input.work_item_id,
+          connectedRunId,
+          {
+            protocol_version: {
+              value: session.protocol_version,
+              assurance: "adapter_attested",
+            },
+            session_id: {
+              value: session.session_id,
+              assurance: "adapter_attested",
+            },
+          },
+          session.process,
+        ),
+      persist_effective_model: (effectiveModel, signal) =>
+        input.source.workspace
+          .updateConnectedRunEffectiveModel(
+            input.work_item_id,
+            connectedRunId,
+            effectiveModel,
+            signal,
+          )
+          .then(() => undefined),
+      prompt: input.prompt,
+      complete: (result) =>
+        this.completeObservedConnectedRun(
+          input.source,
+          input.work_item_id,
+          connectedRunId,
+          result,
+        ),
+      fail: async () => {
+        await input.source.workspace
+          .completeConnectedRun(
+            input.work_item_id,
+            connectedRunId,
+            this.failedConnectedTerminal(),
+          )
+          .catch(() => undefined);
+        await this.rebuild().catch(() => undefined);
+      },
+      started: (handle) => {
+        this.liveConnectedSessions.set(key, handle);
+      },
+      after_complete: (result, terminal) =>
+        input.after_complete(result, terminal, launched.connected_run),
+      settled: async (session) => {
+        if (this.liveConnectedSessions.get(key)?.session === session) {
+          this.liveConnectedSessions.delete(key);
+        }
+      },
+    });
+    void started.completion;
+    await this.rebuild();
+    return {
+      ...this.toPortfolioItem(input.source, launched.work_item),
+      connected_run: summarizeConnectedRun(started.running),
     };
   }
 
