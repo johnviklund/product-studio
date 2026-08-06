@@ -235,6 +235,59 @@ function containsOnlyShellLiteralBracketTokens(command: string): boolean {
   return true;
 }
 
+const FORBIDDEN_SHELL_WORD_CHARACTERS =
+  /[\u0000-\u001f\u007f|&;<>()`$\\"*?{}!~#]/u;
+
+function parseRestrictedShellWords(command: string): string[] | null {
+  if (/[\u0000-\u001f\u007f]/u.test(command)) {
+    return null;
+  }
+  const input = command.trim();
+  if (input === "") {
+    return null;
+  }
+
+  const words: string[] = [];
+  let index = 0;
+  while (index < input.length) {
+    if (input[index] === " ") {
+      index += 1;
+      continue;
+    }
+
+    if (input[index] === "'") {
+      const closingQuote = input.indexOf("'", index + 1);
+      if (closingQuote === -1) {
+        return null;
+      }
+      const word = input.slice(index + 1, closingQuote);
+      if (
+        FORBIDDEN_SHELL_WORD_CHARACTERS.test(word) ||
+        (closingQuote + 1 < input.length && input[closingQuote + 1] !== " ")
+      ) {
+        return null;
+      }
+      words.push(word);
+      index = closingQuote + 1;
+      continue;
+    }
+
+    const nextSpace = input.indexOf(" ", index);
+    const end = nextSpace === -1 ? input.length : nextSpace;
+    const word = input.slice(index, end);
+    if (
+      word.includes("'") ||
+      FORBIDDEN_SHELL_WORD_CHARACTERS.test(word) ||
+      !containsOnlyShellLiteralBracketTokens(word)
+    ) {
+      return null;
+    }
+    words.push(word);
+    index = end;
+  }
+  return words;
+}
+
 function commandFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | null {
   if (!isRecord(rawInput) || typeof rawInput.command !== "string") {
     return null;
@@ -246,14 +299,11 @@ function commandFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | nu
   ) {
     return null;
   }
-  if (
-    rawInput.command.trim() === "" ||
-    !containsOnlyShellLiteralBracketTokens(rawInput.command) ||
-    /[\u0000-\u001f\u007f|&;<>()`$\\'"*?{}!~]/u.test(rawInput.command)
-  ) {
+  const words = parseRestrictedShellWords(rawInput.command);
+  if (words === null) {
     return null;
   }
-  const [executable, ...args] = rawInput.command.trim().split(/\s+/u);
+  const [executable, ...args] = words;
   try {
     return {
       schema_version: 1,

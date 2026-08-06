@@ -38,6 +38,27 @@ const limits: ConnectedRunLimits = {
 };
 const workspaceCwd = "/workspace/product-studio";
 const eventSha256 = "a".repeat(64);
+const quotedStagePaths = [
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+  "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+  "app/api/portfolio/work-items/route.ts",
+  "app/api/request-body.ts",
+  "app/api/work-items/rebuild/route.ts",
+  "app/api/workspaces/route.ts",
+  "tests/api/portfolio-routes.test.ts",
+] as const;
+const quotedStageCommand = `git add -- ${quotedStagePaths
+  .map((path) => `'${path}'`)
+  .join(" ")}`;
 
 function input(
   overrides: Partial<CopilotRuntimeProfileInput> = {},
@@ -477,8 +498,99 @@ describe("Copilot ACP runtime profile", () => {
         permission({
           kind: "execute",
           rawInput: {
+            command: quotedStageCommand,
+            commands: [quotedStageCommand],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toEqual({
+      schema_version: 1,
+      kind: "command",
+      executable: "git",
+      args: ["add", "--", ...quotedStagePaths],
+    });
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
+            command:
+              "git commit -m 'Guard the remaining 13 mutating API routes'",
+            commands: [
+              "git commit -m 'Guard the remaining 13 mutating API routes'",
+            ],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toEqual({
+      schema_version: 1,
+      kind: "command",
+      executable: "git",
+      args: ["commit", "-m", "Guard the remaining 13 mutating API routes"],
+    });
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
             command: "git add -- src/[sourceId]/route.ts",
             commands: ["git add -- src/[sourceId]/route.ts"],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toBeNull();
+    for (const command of [
+      "git add -- 'src/*'",
+      "echo '$(id)'",
+      "echo 'src\\file'",
+      "npm test # ignored",
+      "\tnpm test",
+      "npm test\n",
+    ]) {
+      expect(
+        normalizeCopilotPermission(
+          permission({
+            kind: "execute",
+            rawInput: { command, commands: [command] },
+          }),
+          workspaceCwd,
+        ),
+      ).toBeNull();
+    }
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
+            command: "git add -- 'src/file.ts",
+            commands: ["git add -- 'src/file.ts"],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toBeNull();
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
+            command: "git add -- 'src/file.ts'next",
+            commands: ["git add -- 'src/file.ts'next"],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toBeNull();
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
+            command: 'git commit -m "Guard the routes"',
+            commands: ['git commit -m "Guard the routes"'],
           },
         }),
         workspaceCwd,
