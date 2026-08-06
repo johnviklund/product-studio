@@ -4178,6 +4178,20 @@ export class WorkItemController {
         args: ["commit", "-m", item.goal.title],
       },
     ];
+    if (
+      commands.every((command) =>
+        capabilityRequestMatchesEnvelope(
+          command,
+          mission.capability_envelope,
+        ),
+      )
+    ) {
+      throw this.conflict(
+        "mission_not_ready",
+        item.goal.work_item_id,
+        "The current writable mission already authorizes every proposed command.",
+      );
+    }
     const content = {
       schema_version: 1 as const,
       phase,

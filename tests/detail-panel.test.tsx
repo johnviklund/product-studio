@@ -6,6 +6,7 @@ import {
   canEditGoalContractFromFullWorkItem,
   clearShapingStateForExecuteHandoff,
   CommandAuthorizationSection,
+  commandAuthorizationPreflightEligible,
   ConnectedExecuteSection,
   ConnectedPhaseSection,
   dispatchShapingManualRecoveryAction,
@@ -3125,6 +3126,79 @@ describe("detail panel patch workflow", () => {
 });
 
 describe("detail panel connected execution", () => {
+  it("ends preflight after approval until the fresh tuple completes", () => {
+    const completedPriorRun: ConnectedRunSummary = {
+      ...connectedRun,
+      lifecycle: {
+        ...connectedRun.lifecycle,
+        status: "terminal",
+        completed_at: "2026-08-06T12:00:00.000Z",
+        terminal_outcome: "completed",
+        partial: false,
+      },
+    };
+    const correctedState = {
+      phase: "execute" as const,
+      status: "active" as const,
+      goal_version: 2,
+      input_revision: 2,
+      attempt: 0,
+      patch_cycle: 0,
+    };
+
+    expect(
+      commandAuthorizationPreflightEligible(correctedState, [
+        completedPriorRun,
+      ]),
+    ).toBe(true);
+    expect(
+      commandAuthorizationPreflightEligible(
+        { ...correctedState, attempt: 1 },
+        [completedPriorRun],
+      ),
+    ).toBe(false);
+
+    const completedFreshRun: ConnectedRunSummary = {
+      ...completedPriorRun,
+      mission: {
+        ...completedPriorRun.mission,
+        identity: {
+          ...completedPriorRun.mission.identity,
+          goal_version: 2,
+          input_revision: 2,
+          attempt: 1,
+        },
+      },
+      governed_tuple: {
+        goal_version: 2,
+        input_revision: 2,
+        attempt: 1,
+        patch_cycle: 0,
+      },
+      lifecycle: {
+        ...completedPriorRun.lifecycle,
+        updated_at: "2026-08-06T12:05:00.000Z",
+        completed_at: "2026-08-06T12:05:00.000Z",
+      },
+    };
+    expect(
+      commandAuthorizationPreflightEligible(
+        { ...correctedState, attempt: 1 },
+        [completedPriorRun, completedFreshRun],
+      ),
+    ).toBe(true);
+    expect(
+      commandAuthorizationPreflightEligible(
+        {
+          ...correctedState,
+          phase: "review",
+          attempt: 1,
+        },
+        [completedFreshRun],
+      ),
+    ).toBe(false);
+  });
+
   it("shows every exact preflight command at the visible founder gate", () => {
     const commandAttention: Extract<
       WorkItemAttention,

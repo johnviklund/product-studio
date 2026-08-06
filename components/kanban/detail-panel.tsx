@@ -71,6 +71,7 @@ import {
   type WorkItemAttention,
   type WorkItemPhase,
   type WorkItemPriority,
+  type WorkItemState,
   type WorkItemType,
 } from "@/src/domain/work-item";
 import { canUpdateGoalContract } from "@/src/domain/workflow-policy";
@@ -579,6 +580,53 @@ function latestConnectedRun(
     }
     return latest;
   }, null);
+}
+
+export function commandAuthorizationPreflightEligible(
+  state: Pick<
+    WorkItemState,
+    | "phase"
+    | "status"
+    | "attention"
+    | "goal_version"
+    | "input_revision"
+    | "attempt"
+    | "patch_cycle"
+  >,
+  runs: readonly ConnectedRunSummary[],
+): boolean {
+  if (
+    (state.phase !== "execute" && state.phase !== "patch") ||
+    state.status !== "active" ||
+    state.attention !== undefined ||
+    state.goal_version === undefined ||
+    state.input_revision === undefined ||
+    state.attempt === undefined ||
+    state.patch_cycle === undefined
+  ) {
+    return false;
+  }
+  const latest = latestConnectedRun(
+    runs.filter((run) => run.mission.identity.phase === state.phase),
+  );
+  if (
+    latest?.lifecycle.status !== "terminal" ||
+    latest.lifecycle.terminal_outcome !== "completed" ||
+    latest.lifecycle.partial
+  ) {
+    return false;
+  }
+  const currentTupleMatches =
+    latest.governed_tuple.goal_version === state.goal_version &&
+    latest.governed_tuple.input_revision === state.input_revision &&
+    latest.governed_tuple.attempt === state.attempt &&
+    latest.governed_tuple.patch_cycle === state.patch_cycle;
+  const correctedExecuteRestart =
+    state.phase === "execute" &&
+    state.attempt === 0 &&
+    latest.governed_tuple.goal_version < state.goal_version &&
+    latest.governed_tuple.input_revision < state.input_revision;
+  return currentTupleMatches || correctedExecuteRestart;
 }
 
 function connectedStatusLabel(value: string): string {
@@ -5000,18 +5048,8 @@ export function DetailPanel({
     state.attention?.kind === "command_authorization"
       ? state.attention
       : null;
-  const latestWritableRun = latestConnectedRun(
-    connectedRuns.filter(
-      (run) => run.mission.identity.phase === state.phase,
-    ),
-  );
   const canPrepareCommandAuthorization =
-    (state.phase === "execute" || state.phase === "patch") &&
-    state.status === "active" &&
-    state.attention === undefined &&
-    latestWritableRun?.lifecycle.status === "terminal" &&
-    latestWritableRun.lifecycle.terminal_outcome === "completed" &&
-    !latestWritableRun.lifecycle.partial;
+    commandAuthorizationPreflightEligible(state, connectedRuns);
   const commandPreflightActive =
     canPrepareCommandAuthorization || commandAuthorizationAttention !== null;
   const connectedRunsLoading =

@@ -5761,6 +5761,26 @@ describe("WorkItemController", () => {
         decision,
       ),
     ).resolves.toEqual(applied);
+
+    if (applied.manifest === null) {
+      throw new Error("Expected the command decision manifest.");
+    }
+    const nextIdentity = {
+      phase: "execute" as const,
+      work_item_id: fixture.workItem.goal.work_item_id,
+      goal_version: applied.work_item.state.goal_version!,
+      input_revision: applied.work_item.state.input_revision!,
+      attempt: applied.work_item.state.attempt!,
+    };
+    await fixture.repository.writeMissionPackage(nextIdentity, (paths) =>
+      compileMission(applied.work_item, applied.manifest!, paths),
+    );
+    await expect(
+      controller.prepareCommandAuthorization(
+        fixture.workItem.goal.work_item_id,
+        "execute",
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
   });
 
   it("keeps an exact command authorization denied without advancing state", async () => {
