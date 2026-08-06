@@ -1411,8 +1411,37 @@ export class PortfolioService {
       );
     }
 
+    const capabilityGrant = executeManifest.capability_grant;
+    if (capabilityGrant !== undefined) {
+      if (identity.attempt < 1) {
+        throw this.missionNotReady(
+          workItemId,
+          "An initial Execute attempt cannot carry a permission-recovery grant.",
+        );
+      }
+      const prior = await source.workspace.readMissionPackage({
+        ...identity,
+        attempt: identity.attempt - 1,
+      });
+      if (
+        prior.mission.identity.phase !== "execute" ||
+        prior.mission.content_sha256 !==
+          capabilityGrant.source_mission_content_sha256
+      ) {
+        throw this.missionNotReady(
+          workItemId,
+          "The Execute capability grant does not bind the immediately prior mission.",
+        );
+      }
+    }
+
     return source.workspace.writeMissionPackage(identity, (paths) =>
-      compileMissionPackage(workItem, executeManifest, paths),
+      compileMissionPackage(
+        workItem,
+        executeManifest,
+        paths,
+        capabilityGrant?.execution_defaults,
+      ),
     ) as Promise<MissionCompilation>;
   }
 
@@ -2963,7 +2992,32 @@ export class PortfolioService {
       completed_at: currentAttemptManifest.completed_at,
       outcome: "applied" as const,
     };
-    const executionDefaults = await source.workspace.readExecutionDefaults();
+    const capabilityGrant = currentAttemptManifest.capability_grant;
+    if (capabilityGrant !== undefined) {
+      if (identity.attempt < 1) {
+        throw this.missionNotReady(
+          workItemId,
+          "An initial Patch attempt cannot carry a permission-recovery grant.",
+        );
+      }
+      const prior = await source.workspace.readMissionPackage(
+        { ...identity, attempt: identity.attempt - 1 },
+        identity.patch_cycle,
+      );
+      if (
+        prior.mission.identity.phase !== "patch" ||
+        prior.mission.content_sha256 !==
+          capabilityGrant.source_mission_content_sha256
+      ) {
+        throw this.missionNotReady(
+          workItemId,
+          "The Patch capability grant does not bind the immediately prior mission.",
+        );
+      }
+    }
+    const executionDefaults =
+      capabilityGrant?.execution_defaults ??
+      (await source.workspace.readExecutionDefaults());
 
     return source.workspace.writePatchMissionPackage(
       identity,

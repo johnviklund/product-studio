@@ -2206,13 +2206,29 @@ export function compileMission(
   workItem: WorkItem,
   executeManifest: ControllerRunManifest,
   paths: MissionPaths,
-  executionDefaults: ExecutionDefaultsV1 = FAIL_CLOSED_EXECUTION_DEFAULTS,
+  executionDefaults?: ExecutionDefaultsV1,
 ): ExecuteMissionPackage {
+  const missionControllerManifest = {
+    schema_version: executeManifest.schema_version,
+    run_id: executeManifest.run_id,
+    work_item_id: executeManifest.work_item_id,
+    idempotency_key: executeManifest.idempotency_key,
+    phase: executeManifest.phase,
+    goal_version: executeManifest.goal_version,
+    input_revision: executeManifest.input_revision,
+    attempt: executeManifest.attempt,
+    started_at: executeManifest.started_at,
+    completed_at: executeManifest.completed_at,
+    outcome: executeManifest.outcome,
+  };
   const input = missionCompileInputSchema.parse({
     work_item: workItem,
-    execute_manifest: executeManifest,
+    execute_manifest: missionControllerManifest,
     paths,
-    execution_defaults: executionDefaults,
+    execution_defaults:
+      executionDefaults ??
+      executeManifest.capability_grant?.execution_defaults ??
+      FAIL_CLOSED_EXECUTION_DEFAULTS,
   });
   const content: Omit<ExecuteMissionPackage, "content_sha256"> = {
     mission_schema_version: MISSION_SCHEMA_VERSION,

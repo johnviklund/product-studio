@@ -416,6 +416,60 @@ export function resolveCapabilityEnvelope(
   });
 }
 
+export function executionDefaultsFromCapabilityEnvelope(
+  envelope: CapabilityEnvelopeV1,
+): ExecutionDefaultsV1 {
+  const validated = capabilityEnvelopeV1Schema.parse(envelope);
+  return executionDefaultsV1Schema.parse({
+    schema_version: CAPABILITY_SCHEMA_VERSION,
+    approved_command_forms: validated.runtime.approved_command_forms,
+    approved_url_operations: validated.runtime.approved_url_operations,
+    mcp: validated.runtime.mcp,
+    credentials: validated.runtime.credentials,
+  });
+}
+
+export function extendExecutionDefaultsWithRequest(
+  defaults: ExecutionDefaultsV1,
+  request: CanonicalCapabilityRequest,
+): ExecutionDefaultsV1 {
+  const validatedDefaults = executionDefaultsV1Schema.parse(defaults);
+  const canonicalRequest = canonicalizeCapabilityRequest(request);
+  if (canonicalRequest.kind !== "command" && canonicalRequest.kind !== "url") {
+    throw new Error(
+      "Only exact command and URL operations can extend execution defaults.",
+    );
+  }
+
+  const commandForms = [...validatedDefaults.approved_command_forms];
+  const urlOperations = [...validatedDefaults.approved_url_operations];
+  if (canonicalRequest.kind === "command") {
+    const next = normalizeApprovedCommandForm(
+      canonicalRequest.executable,
+      canonicalRequest.args,
+    );
+    if (!commandForms.some((form) => canonicalCommandForm(form) === canonicalCommandForm(next))) {
+      commandForms.push(next);
+    }
+  } else {
+    const next = approvedUrlOperationSchema.parse({
+      method: canonicalRequest.method,
+      protocol: canonicalRequest.protocol,
+      host: canonicalRequest.host,
+      path: canonicalRequest.path,
+    });
+    if (!urlOperations.some((operation) => canonicalUrlOperation(operation) === canonicalUrlOperation(next))) {
+      urlOperations.push(next);
+    }
+  }
+
+  return executionDefaultsV1Schema.parse({
+    ...validatedDefaults,
+    approved_command_forms: sortCommandForms(commandForms),
+    approved_url_operations: sortUrlOperations(urlOperations),
+  });
+}
+
 export function capabilityRequestMatchesEnvelope(
   request: CanonicalCapabilityRequest,
   envelope: CapabilityEnvelopeV1,

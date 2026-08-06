@@ -5030,8 +5030,9 @@ describe("PortfolioService", () => {
     );
     const deniedOperation = {
       schema_version: 1 as const,
-      kind: "outside_workspace_write" as const,
-      path: "/tmp/outside-product-studio-patch",
+      kind: "command" as const,
+      executable: "git",
+      args: ["status"],
     };
     const { hashCanonicalCapabilityRequest } = await import(
       "../../src/domain/capability-envelope"
@@ -5105,6 +5106,18 @@ describe("PortfolioService", () => {
       retry.connected_run.connected_run_id,
     );
     expect(fake.prepare).toHaveBeenCalledTimes(2);
+    expect(fake.prepare).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        capability_envelope: expect.objectContaining({
+          runtime: expect.objectContaining({
+            approved_command_forms: [
+              { executable: "git", args: ["status"] },
+            ],
+          }),
+        }),
+      }),
+    );
     expect(session.run).toHaveBeenCalledTimes(2);
     index.close();
   });
@@ -5203,8 +5216,9 @@ describe("PortfolioService", () => {
     );
     const deniedOperation = {
       schema_version: 1 as const,
-      kind: "outside_workspace_write" as const,
-      path: "/tmp/outside-product-studio",
+      kind: "command" as const,
+      executable: "git",
+      args: ["status"],
     };
     const { hashCanonicalCapabilityRequest } = await import(
       "../../src/domain/capability-envelope"
@@ -5256,6 +5270,13 @@ describe("PortfolioService", () => {
       status: "active",
       attempt: 1,
     });
+    const retryMission = await connectedService.compileMission(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(
+      retryMission.mission.capability_envelope.runtime.approved_command_forms,
+    ).toEqual([{ executable: "git", args: ["status"] }]);
     await expect(connectedService.listAttention()).resolves.toEqual([]);
     connectedIndex.close();
   });

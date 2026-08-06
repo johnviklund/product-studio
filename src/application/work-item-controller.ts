@@ -13,6 +13,8 @@ import {
 } from "../domain/mission";
 import {
   capabilityRequestMatchesEnvelope,
+  executionDefaultsFromCapabilityEnvelope,
+  extendExecutionDefaultsWithRequest,
 } from "../domain/capability-envelope";
 import {
   connectedRunRecordV2Schema,
@@ -84,6 +86,7 @@ import {
   InvalidWorkspaceError,
   acceptPatchPlanInputSchema,
   approvePlanResultInputSchema,
+  createControllerCapabilityGrant,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   connectedPermissionResolutionInputSchema,
@@ -104,6 +107,7 @@ import {
   type AcceptPatchPlanInput,
   type ApprovePlanResultInput,
   type ControllerLease,
+  type ControllerCapabilityGrant,
   type ControllerMutationResult,
   type ControllerRunManifest,
   type ControllerTransitionInput,
@@ -413,6 +417,7 @@ function manifestMatches(
     goal_version: number;
     input_revision: number;
     attempt: number;
+    capability_grant?: ControllerCapabilityGrant;
   },
 ): boolean {
   return (
@@ -423,7 +428,9 @@ function manifestMatches(
     manifest.phase === input.phase &&
     manifest.goal_version === input.goal_version &&
     manifest.input_revision === input.input_revision &&
-    manifest.attempt === input.attempt
+    manifest.attempt === input.attempt &&
+    (input.capability_grant === undefined ||
+      isDeepStrictEqual(manifest.capability_grant, input.capability_grant))
   );
 }
 
@@ -2365,6 +2372,8 @@ export class WorkItemController {
         if (existing !== null) {
           if (
             manifestMatches(existing, manifestIdentity) &&
+            existing.capability_grant?.source_mission_content_sha256 ===
+              validatedInput.mission_content_sha256 &&
             this.matchesActiveConnectedState(
               lease.work_item,
               {
@@ -2399,12 +2408,19 @@ export class WorkItemController {
       if (validatedInput.decision === "keep_denied") {
         return { work_item: lease.work_item, manifest: null };
       }
+      const capabilityGrant = this.connectedCapabilityGrant(
+        lease.work_item,
+        record,
+      );
       const mutation = await this.retryConnectedAttemptWithLease({
         work_item_id: validatedId,
         phase: validatedInput.expected_phase,
         lease,
         active_run: activeRun,
-        manifest_identity: manifestIdentity,
+        manifest_identity: {
+          ...manifestIdentity,
+          capability_grant: capabilityGrant,
+        },
         next_attempt: nextAttempt,
         clear_attention: true,
         validate_current: async () => {
@@ -2741,6 +2757,39 @@ export class WorkItemController {
       );
     }
     return record;
+  }
+
+  private connectedCapabilityGrant(
+    current: WorkItem,
+    record: ConnectedRunRecordV2,
+  ): ControllerCapabilityGrant {
+    const attention = current.state.attention;
+    if (
+      attention?.kind !== "missing_permission" ||
+      record.authorization.kind !== "capability_envelope"
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        current.goal.work_item_id,
+        "Connected capability grant requires exact missing-permission attention.",
+      );
+    }
+    const operation = attention.operation.normalized_operation;
+    if (operation.kind !== "command" && operation.kind !== "url") {
+      throw this.conflict(
+        "invalid_transition",
+        current.goal.work_item_id,
+        "Only an exact command or URL operation can be allowed on a fresh attempt.",
+      );
+    }
+    const executionDefaults = extendExecutionDefaultsWithRequest(
+      executionDefaultsFromCapabilityEnvelope(record.authorization.envelope),
+      operation,
+    );
+    return createControllerCapabilityGrant({
+      source_mission_content_sha256: record.mission.content_sha256,
+      execution_defaults: executionDefaults,
+    });
   }
 
   private async validateConnectedMissionReference(

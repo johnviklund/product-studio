@@ -4,8 +4,10 @@ import { z } from "zod";
 
 import {
   canonicalCapabilityRequestSchema,
+  executionDefaultsV1Schema,
   hashCanonicalCapabilityRequest,
   type CanonicalCapabilityRequest,
+  type ExecutionDefaultsV1,
 } from "./capability-envelope";
 import type {
   MissionArtifactReadResult,
@@ -434,6 +436,14 @@ export interface ControllerRunManifest {
   started_at: string;
   completed_at?: string;
   outcome: ControllerRunOutcome;
+  capability_grant?: ControllerCapabilityGrant;
+}
+
+export interface ControllerCapabilityGrant {
+  schema_version: 1;
+  source_mission_content_sha256: string;
+  execution_defaults: ExecutionDefaultsV1;
+  grant_sha256: string;
 }
 
 export interface ControllerLease {
@@ -1432,6 +1442,29 @@ export function deriveControllerRunId(
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
 }
 
+export const controllerCapabilityGrantSchema: z.ZodType<ControllerCapabilityGrant> =
+  z
+    .strictObject({
+      schema_version: z.literal(1),
+      source_mission_content_sha256: sha256Schema,
+      execution_defaults: executionDefaultsV1Schema,
+      grant_sha256: sha256Schema,
+    })
+    .superRefine((grant, context) => {
+      const expected = hashControllerCapabilityGrant({
+        source_mission_content_sha256: grant.source_mission_content_sha256,
+        execution_defaults: grant.execution_defaults,
+      });
+      if (grant.grant_sha256 !== expected) {
+        context.addIssue({
+          code: "custom",
+          message: "grant_sha256 must hash the capability grant content",
+          path: ["grant_sha256"],
+          input: grant.grant_sha256,
+        });
+      }
+    });
+
 export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
   z.strictObject({
     schema_version: z.literal(1),
@@ -1445,7 +1478,41 @@ export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
     started_at: z.iso.datetime(),
     completed_at: z.iso.datetime().optional(),
     outcome: z.enum(CONTROLLER_RUN_OUTCOMES),
+    capability_grant: controllerCapabilityGrantSchema.optional(),
   });
+
+export function hashControllerCapabilityGrant(input: {
+  source_mission_content_sha256: string;
+  execution_defaults: ExecutionDefaultsV1;
+}): string {
+  const content = {
+    schema_version: 1,
+    source_mission_content_sha256: sha256Schema.parse(
+      input.source_mission_content_sha256,
+    ),
+    execution_defaults: executionDefaultsV1Schema.parse(
+      input.execution_defaults,
+    ),
+  } as const;
+  return createHash("sha256")
+    .update(`${JSON.stringify(content, null, 2)}\n`)
+    .digest("hex");
+}
+
+export function createControllerCapabilityGrant(input: {
+  source_mission_content_sha256: string;
+  execution_defaults: ExecutionDefaultsV1;
+}): ControllerCapabilityGrant {
+  const content = {
+    schema_version: 1 as const,
+    source_mission_content_sha256: input.source_mission_content_sha256,
+    execution_defaults: input.execution_defaults,
+  };
+  return controllerCapabilityGrantSchema.parse({
+    ...content,
+    grant_sha256: hashControllerCapabilityGrant(content),
+  });
+}
 
 export const createWorkItemInputSchema: z.ZodType<CreateWorkItemInput> =
   z.strictObject({

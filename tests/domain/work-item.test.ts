@@ -12,6 +12,7 @@ import {
   connectedPermissionResolutionInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
+  createControllerCapabilityGrant,
   createCaptureInputSchema,
   createWorkItemInputSchema,
   saveWorkItemInputSchema,
@@ -791,6 +792,46 @@ describe("durable work-item schemas", () => {
         expected_patch_cycle: 0,
       }),
     ).toThrow();
+  });
+
+  it("hash-binds additive controller capability grants", () => {
+    const capabilityGrant = createControllerCapabilityGrant({
+      source_mission_content_sha256: "a".repeat(64),
+      execution_defaults: {
+        schema_version: 1,
+        approved_command_forms: [
+          { executable: "npm", args: ["run", "test"] },
+        ],
+        approved_url_operations: [],
+        mcp: "forbidden",
+        credentials: "forbidden",
+      },
+    });
+    const manifest = controllerRunManifestSchema.parse({
+      schema_version: 1,
+      run_id: runId,
+      work_item_id: workItemId,
+      idempotency_key: `${workItemId}:execute:1:1:1`,
+      phase: "execute",
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 1,
+      started_at: "2026-07-21T20:00:00.000Z",
+      completed_at: "2026-07-21T20:00:01.000Z",
+      outcome: "applied",
+      capability_grant: capabilityGrant,
+    });
+
+    expect(manifest.capability_grant).toEqual(capabilityGrant);
+    expect(() =>
+      controllerRunManifestSchema.parse({
+        ...manifest,
+        capability_grant: {
+          ...capabilityGrant,
+          source_mission_content_sha256: "b".repeat(64),
+        },
+      }),
+    ).toThrow("grant_sha256 must hash");
   });
 });
 

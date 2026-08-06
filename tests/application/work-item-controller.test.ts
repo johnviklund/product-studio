@@ -2549,6 +2549,18 @@ describe("WorkItemController", () => {
     if (retried.manifest === null) {
       throw new Error("Allow once must commit a fresh execute attempt.");
     }
+    expect(retried.manifest.capability_grant).toMatchObject({
+      source_mission_content_sha256: fixture.input.mission_content_sha256,
+      execution_defaults: {
+        approved_command_forms: [
+          { executable: "git", args: ["status"] },
+          { executable: "npm", args: ["run", "test"] },
+        ],
+        approved_url_operations: [],
+        mcp: "forbidden",
+        credentials: "forbidden",
+      },
+    });
     const retriedIdentity = {
       phase: "execute" as const,
       work_item_id: retried.work_item.goal.work_item_id,
@@ -2563,6 +2575,58 @@ describe("WorkItemController", () => {
     expect(retriedMission.mission.content_sha256).not.toBe(
       fixture.input.mission_content_sha256,
     );
+    expect(
+      retriedMission.mission.capability_envelope.runtime
+        .approved_command_forms,
+    ).toEqual([
+      { executable: "git", args: ["status"] },
+      { executable: "npm", args: ["run", "test"] },
+    ]);
+  });
+
+  it("never turns forbidden capability kinds into fresh-attempt grants", async () => {
+    const fixture = await createConnectedFixture();
+    await fixture.controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    const request = {
+      schema_version: 1 as const,
+      kind: "outside_workspace_write" as const,
+      path: "/tmp/outside.txt",
+    };
+    const operation = {
+      normalized_operation: request,
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest(request),
+      reason: "outside_capability_envelope",
+      resolved_envelope_sha256:
+        fixture.record.authorization.envelope_sha256,
+      connected_run_id: fixture.record.connected_run_id,
+    };
+    await fixture.controller.recordConnectedPermissionDenial(
+      fixture.workItem.goal.work_item_id,
+      { ...withoutRunOrdinal(fixture.input), operation },
+    );
+
+    await expect(
+      fixture.controller.resolveConnectedPermission(
+        fixture.workItem.goal.work_item_id,
+        {
+          decision: "allow_once",
+          expected_phase: "execute",
+          governed_tuple: fixture.input.governed_tuple,
+          operation_sha256: operation.operation_sha256,
+          connected_run_id: operation.connected_run_id,
+          mission_content_sha256: fixture.input.mission_content_sha256,
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "invalid_transition" });
+    expect(
+      (await fixture.repository.read(fixture.workItem.goal.work_item_id))?.state
+        .attention,
+    ).toMatchObject({ kind: "missing_permission", operation });
   });
 
   it("activates and updates a goal contract exactly once per expected revision", async () => {

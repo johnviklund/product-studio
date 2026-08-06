@@ -7,7 +7,9 @@ import {
   capabilityEnvelopeV1Schema,
   capabilityRequestMatchesEnvelope,
   deriveAllowedScopeDigest,
+  executionDefaultsFromCapabilityEnvelope,
   executionDefaultsV1Schema,
+  extendExecutionDefaultsWithRequest,
   hashCanonicalCapabilityRequest,
   isCapabilityEnvelopeNarrowing,
   normalizeApprovedCommandForm,
@@ -94,6 +96,53 @@ describe("capability envelope domain", () => {
         "https://registry.npmjs.org/package#section",
       ),
     ).toThrow();
+  });
+
+  it("extends exact execution defaults without widening forbidden capabilities", () => {
+    const base = executionDefaultsFromCapabilityEnvelope(
+      resolveCapabilityEnvelope(["src"], {
+        ...defaults,
+        approved_command_forms: [testCommand],
+        approved_url_operations: [],
+      }),
+    );
+    const withCommand = extendExecutionDefaultsWithRequest(base, {
+      schema_version: 1,
+      kind: "command",
+      executable: "git",
+      args: ["status"],
+    });
+    const withUrl = extendExecutionDefaultsWithRequest(withCommand, {
+      schema_version: 1,
+      kind: "url",
+      ...testUrl,
+    });
+
+    expect(withUrl).toEqual({
+      schema_version: 1,
+      approved_command_forms: [
+        { executable: "git", args: ["status"] },
+        testCommand,
+      ],
+      approved_url_operations: [testUrl],
+      mcp: "forbidden",
+      credentials: "forbidden",
+    });
+    expect(
+      extendExecutionDefaultsWithRequest(withUrl, {
+        schema_version: 1,
+        kind: "command",
+        executable: "git",
+        args: ["status"],
+      }),
+    ).toEqual(withUrl);
+    expect(() =>
+      extendExecutionDefaultsWithRequest(base, {
+        schema_version: 1,
+        kind: "credential",
+        source: "environment",
+      }),
+    ).toThrow("Only exact command and URL operations");
   });
 
   it("matches only exact in-envelope operations", () => {
