@@ -899,6 +899,9 @@ const SHAPING_RUN_LIMITS: ShapingRunRecordV1["limits"] = {
   max_output_bytes: 100_000,
 };
 
+const WRITABLE_PERMISSION_REQUEST_GUIDANCE =
+  "Pre-approved operations and permission requests are distinct. When the task requires a command that is not listed in the capability envelope, invoke the available command tool with the exact command so the controller can mediate a founder decision. The request does not authorize the command: do not bypass a denial or claim the command ran.";
+
 const launchConnectedExecuteRequestSchema: z.ZodType<LaunchConnectedExecuteRequest> =
   z.strictObject({
     model_override: z.string().trim().min(1).max(200).optional(),
@@ -2201,7 +2204,7 @@ export class PortfolioService {
       controller,
       launch_input: launchInput,
       record,
-      prompt: `Execute the governed task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
+      prompt: `Execute the governed task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}. ${WRITABLE_PERMISSION_REQUEST_GUIDANCE}`,
       start_session: (eventSink, callbacks) =>
         prepared.start(eventSink, callbacks),
       after_complete: async (result, terminal, launched) => {
@@ -2241,6 +2244,8 @@ export class PortfolioService {
     const mission = snapshot.mission;
     if (
       mission.mission_schema_version !== MISSION_SCHEMA_VERSION ||
+      !("capability_envelope" in mission) ||
+      "patch_subject" in mission ||
       mission.identity.phase !== "execute"
     ) {
       throw new ControllerConflictError(
@@ -2402,7 +2407,7 @@ export class PortfolioService {
       controller,
       launch_input: launchInput,
       record,
-      prompt: `Apply the governed Patch task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}.`,
+      prompt: `Apply the governed Patch task in ${mission.mission.task_path} and write only the required result to ${mission.mission.result_contract.output_path}. ${WRITABLE_PERMISSION_REQUEST_GUIDANCE}`,
       start_session: (eventSink, callbacks) =>
         prepared.start(eventSink, callbacks),
       preference: {

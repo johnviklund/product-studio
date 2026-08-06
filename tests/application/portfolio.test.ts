@@ -4156,6 +4156,11 @@ describe("PortfolioService", () => {
     );
     expect(fake.prepare).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledOnce();
+    expect(session.run).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "When the task requires a command that is not listed in the capability envelope, invoke the available command tool with the exact command",
+      ),
+    );
     await expect(
       service.listShapingArtifacts(sourceId, created.goal.work_item_id),
     ).resolves.toMatchObject({
@@ -4923,6 +4928,11 @@ describe("PortfolioService", () => {
     expect(fake.prepare).toHaveBeenCalledOnce();
     expect(fake.start).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledOnce();
+    expect(session.run).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "When the task requires a command that is not listed in the capability envelope, invoke the available command tool with the exact command",
+      ),
+    );
     expect(launched.connected_run).toMatchObject({
       mission: { identity: { phase: "patch", patch_cycle: 1 } },
       authorization: { kind: "capability_envelope" },
