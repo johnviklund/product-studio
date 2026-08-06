@@ -5656,7 +5656,7 @@ describe("WorkItemController", () => {
     ).rejects.toMatchObject({ kind: "stale_expectation" });
   });
 
-  it("prepares and applies one exact command authorization in a fresh attempt", async () => {
+  it("renews exact command authorization after a terminal no-result attempt", async () => {
     const fixture = await createConnectedFixture();
     const changedFiles = [
       "src/application/work-item-controller.ts",
@@ -5772,15 +5772,96 @@ describe("WorkItemController", () => {
       input_revision: applied.work_item.state.input_revision!,
       attempt: applied.work_item.state.attempt!,
     };
-    await fixture.repository.writeMissionPackage(nextIdentity, (paths) =>
-      compileMission(applied.work_item, applied.manifest!, paths),
+    const retryMission = await fixture.repository.writeMissionPackage(
+      nextIdentity,
+      (paths) =>
+        compileMission(applied.work_item, applied.manifest!, paths),
     );
-    await expect(
-      controller.prepareCommandAuthorization(
-        fixture.workItem.goal.work_item_id,
-        "execute",
-      ),
-    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+    const retryEnvelope = retryMission.mission.capability_envelope;
+    const retryRun: ConnectedRunRecordV2 = {
+      ...fixture.record,
+      connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2",
+      mission: {
+        identity: nextIdentity,
+        path: retryMission.mission.task_path.replace(/TASK\.md$/, "mission.json"),
+        content_sha256: retryMission.mission.content_sha256,
+        source_commit: retryMission.mission.source_revision.git_base_commit,
+      },
+      governed_tuple: {
+        ...prepared.proposal.governed_tuple,
+        attempt: 1,
+      },
+      provenance: {
+        ...fixture.record.provenance,
+        authorization_sha256: {
+          value: hashResolvedCapabilityEnvelope(retryEnvelope),
+          assurance: "controller_observed",
+        },
+      },
+      authorization: {
+        kind: "capability_envelope",
+        envelope: retryEnvelope,
+        envelope_sha256: hashResolvedCapabilityEnvelope(retryEnvelope),
+      },
+      lifecycle: {
+        ...fixture.record.lifecycle,
+        started_at: "2026-07-26T18:01:00.000Z",
+        updated_at: "2026-07-26T18:01:00.000Z",
+      },
+    };
+    await fixture.repository.createConnectedRun(retryRun);
+    await fixture.repository.completeConnectedRun(
+      fixture.workItem.goal.work_item_id,
+      retryRun.connected_run_id,
+      { outcome: "completed", partial: false, reason: null },
+    );
+
+    const renewed = await controller.prepareCommandAuthorization(
+      fixture.workItem.goal.work_item_id,
+      "execute",
+    );
+    expect(renewed.proposal).toMatchObject({
+      governed_tuple: {
+        ...prepared.proposal.governed_tuple,
+        attempt: 1,
+      },
+      source_mission_content_sha256: retryMission.mission.content_sha256,
+      terminal_connected_run_id: retryRun.connected_run_id,
+      changed_files: changedFiles,
+      commands: prepared.proposal.commands,
+    });
+    expect(renewed.proposal.proposal_sha256).not.toBe(
+      prepared.proposal.proposal_sha256,
+    );
+
+    const renewedDecision = await controller.decideCommandAuthorization(
+      fixture.workItem.goal.work_item_id,
+      {
+        decision: "allow_once",
+        expected_phase: "execute",
+        governed_tuple: renewed.proposal.governed_tuple,
+        source_mission_content_sha256:
+          renewed.proposal.source_mission_content_sha256,
+        terminal_connected_run_id:
+          renewed.proposal.terminal_connected_run_id,
+        proposal_sha256: renewed.proposal.proposal_sha256,
+      },
+    );
+    expect(renewedDecision.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      attempt: 2,
+    });
+    expect(renewedDecision.manifest).toMatchObject({
+      phase: "execute",
+      attempt: 2,
+      outcome: "applied",
+      command_authorization: renewed.proposal,
+      capability_grant: {
+        source_mission_content_sha256:
+          renewed.proposal.source_mission_content_sha256,
+      },
+    });
   });
 
   it("keeps an exact command authorization denied without advancing state", async () => {
