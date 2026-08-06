@@ -237,7 +237,33 @@ function containsOnlyShellLiteralBracketTokens(command: string): boolean {
 
 const FORBIDDEN_SHELL_WORD_CHARACTERS =
   /[\u0000-\u001f\u007f|&;<>()`$\\"*?{}!~#]/u;
-const FORBIDDEN_DOUBLE_QUOTED_SHELL_WORD_CHARACTERS = /[`$\\]/u;
+const FORBIDDEN_DOUBLE_QUOTED_SHELL_WORD_CHARACTERS = /[`$]/u;
+const DOUBLE_QUOTED_BACKSLASH_ESCAPED_CHARACTERS = new Set([
+  "$",
+  "`",
+  '"',
+  "\\",
+]);
+
+function containsOnlyShellInertDoubleQuotedBackslashes(word: string): boolean {
+  for (let index = 0; index < word.length; index += 1) {
+    if (word[index] !== "\\") {
+      continue;
+    }
+
+    const nextCharacter = word[index + 1];
+    if (
+      nextCharacter === undefined ||
+      DOUBLE_QUOTED_BACKSLASH_ESCAPED_CHARACTERS.has(nextCharacter)
+    ) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
 
 function parseRestrictedShellWords(command: string): string[] | null {
   if (/[\u0000-\u001f\u007f]/u.test(command)) {
@@ -281,6 +307,7 @@ function parseRestrictedShellWords(command: string): string[] | null {
       const word = input.slice(index + 1, closingQuote);
       if (
         FORBIDDEN_DOUBLE_QUOTED_SHELL_WORD_CHARACTERS.test(word) ||
+        !containsOnlyShellInertDoubleQuotedBackslashes(word) ||
         (closingQuote + 1 < input.length && input[closingQuote + 1] !== " ")
       ) {
         return null;

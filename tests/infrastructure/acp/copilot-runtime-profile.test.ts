@@ -61,6 +61,8 @@ const quotedStageCommand = `git add -- ${quotedStagePaths
   .join(" ")}`;
 const quotedRegexCommand =
   'rg -n "trusted mutation|missing Origin|wrong Origin|oversized|malformed|unknown" tests/api/portfolio-routes.test.ts';
+const inertBackslashRegexCommand =
+  'rg -n "13 remaining|assertTrustedRequestOrigin|readCappedJsonRequest|request origin|route factory|ROADMAP 3\\.4|Slice 2" PRODUCT.md DESIGN.md ROADMAP.md .workflow/brainstorm.md .workflow/spec.md .workflow/plan.md';
 
 function input(
   overrides: Partial<CopilotRuntimeProfileInput> = {},
@@ -558,6 +560,54 @@ describe("Copilot ACP runtime profile", () => {
         resolveCapabilityEnvelope(["src"], defaults),
       ),
     ).toBe(false);
+    const normalizedInertBackslashCommand = normalizeCopilotPermission(
+      permission({
+        kind: "execute",
+        rawInput: {
+          command: inertBackslashRegexCommand,
+          commands: [inertBackslashRegexCommand],
+        },
+      }),
+      workspaceCwd,
+    );
+    expect(normalizedInertBackslashCommand).toEqual({
+      schema_version: 1,
+      kind: "command",
+      executable: "rg",
+      args: [
+        "-n",
+        "13 remaining|assertTrustedRequestOrigin|readCappedJsonRequest|request origin|route factory|ROADMAP 3\\.4|Slice 2",
+        "PRODUCT.md",
+        "DESIGN.md",
+        "ROADMAP.md",
+        ".workflow/brainstorm.md",
+        ".workflow/spec.md",
+        ".workflow/plan.md",
+      ],
+    });
+    expect(
+      capabilityRequestMatchesEnvelope(
+        canonicalizeCapabilityRequest(normalizedInertBackslashCommand!),
+        resolveCapabilityEnvelope(["src"], defaults),
+      ),
+    ).toBe(false);
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
+            command: 'echo "src\\file"',
+            commands: ['echo "src\\file"'],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toEqual({
+      schema_version: 1,
+      kind: "command",
+      executable: "echo",
+      args: ["src\\file"],
+    });
     expect(
       normalizeCopilotPermission(
         permission({
@@ -633,7 +683,10 @@ describe("Copilot ACP runtime profile", () => {
       'echo "$HOME"',
       'echo "$(id)"',
       'echo "`id`"',
-      'echo "src\\file"',
+      'echo "cash\\$HOME"',
+      'echo "tick\\`id"',
+      'echo "quote\\"next"',
+      'echo "slash\\\\next"',
       'echo "unterminated',
       'echo "safe"next',
     ]) {
