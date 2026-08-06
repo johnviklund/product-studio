@@ -2228,6 +2228,7 @@ export function compileMission(
     execution_defaults:
       executionDefaults ??
       executeManifest.capability_grant?.execution_defaults ??
+      executeManifest.capability_carry_forward?.execution_defaults ??
       FAIL_CLOSED_EXECUTION_DEFAULTS,
   });
   const content: Omit<ExecuteMissionPackage, "content_sha256"> = {
@@ -2467,6 +2468,7 @@ function renderCapabilityEnvelope(
     "",
     "Approved command forms:",
     renderList(commandForms.length === 0 ? ["None"] : commandForms),
+    "Approved command arrays are exact. Do not add arguments, message paragraphs, attribution trailers, or metadata.",
     "",
     "Approved URL operations:",
     renderList(urlOperations.length === 0 ? ["None"] : urlOperations),

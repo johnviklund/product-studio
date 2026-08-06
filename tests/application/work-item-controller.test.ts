@@ -1719,7 +1719,10 @@ async function createConnectedFixture(): Promise<{
     mcp: "forbidden",
     credentials: "forbidden",
   };
-  const envelope = resolveCapabilityEnvelope(["src", "tests"], defaults);
+  const envelope = resolveCapabilityEnvelope(
+    workItem.goal.goal_contract!.allowed_scope,
+    defaults,
+  );
   const envelopeSha256 = hashResolvedCapabilityEnvelope(envelope);
   const input = {
     expected_phase: "execute" as const,
@@ -2327,6 +2330,28 @@ describe("WorkItemController", () => {
         },
       ),
     ).resolves.toMatchObject({ manifest: null });
+    const patchRetry = await patch.controller.resolveConnectedPermission(
+      patch.workItem.goal.work_item_id,
+      {
+        decision: "retry_without_allowing",
+        expected_phase: "patch",
+        governed_tuple: patch.input.governed_tuple,
+        operation_sha256: operation.operation_sha256,
+        connected_run_id: operation.connected_run_id,
+        mission_content_sha256: patch.input.mission_content_sha256,
+      },
+    );
+    expect(patchRetry.work_item.state).toMatchObject({
+      phase: "patch",
+      status: "active",
+      attempt: patch.input.governed_tuple.attempt + 1,
+    });
+    expect(patchRetry.work_item.state.attention).toBeUndefined();
+    expect(patchRetry.manifest?.capability_grant).toBeUndefined();
+    expect(patchRetry.manifest?.capability_carry_forward).toMatchObject({
+      kind: "carry_forward",
+      source_mission_content_sha256: patch.input.mission_content_sha256,
+    });
 
     const review = await createPhaseConnectedFixture("review");
     await review.controller.launchConnectedRun(
@@ -2582,6 +2607,88 @@ describe("WorkItemController", () => {
       { executable: "git", args: ["status"] },
       { executable: "npm", args: ["run", "test"] },
     ]);
+  });
+
+  it("retries a denied operation without granting it and replays idempotently", async () => {
+    const fixture = await createConnectedFixture();
+    await fixture.controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    const request = {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "git",
+      args: ["commit", "-m", "Expected message", "-m", "Extra trailer"],
+    };
+    const operation = {
+      normalized_operation: request,
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest(request),
+      reason: "outside_capability_envelope",
+      resolved_envelope_sha256:
+        fixture.record.authorization.envelope_sha256,
+      connected_run_id: fixture.record.connected_run_id,
+    };
+    await fixture.controller.recordConnectedPermissionDenial(
+      fixture.workItem.goal.work_item_id,
+      { ...withoutRunOrdinal(fixture.input), operation },
+    );
+    const decision = {
+      decision: "retry_without_allowing" as const,
+      expected_phase: "execute" as const,
+      governed_tuple: fixture.input.governed_tuple,
+      operation_sha256: operation.operation_sha256,
+      connected_run_id: operation.connected_run_id,
+      mission_content_sha256: fixture.input.mission_content_sha256,
+    };
+
+    const retried = await fixture.controller.resolveConnectedPermission(
+      fixture.workItem.goal.work_item_id,
+      decision,
+    );
+    expect(retried.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      attempt: fixture.input.governed_tuple.attempt + 1,
+    });
+    expect(retried.work_item.state.attention).toBeUndefined();
+    expect(retried.manifest).not.toBeNull();
+    expect(retried.manifest?.capability_grant).toBeUndefined();
+    expect(retried.manifest?.capability_carry_forward).toMatchObject({
+      kind: "carry_forward",
+      source_mission_content_sha256: fixture.input.mission_content_sha256,
+      execution_defaults: {
+        approved_command_forms: [
+          { executable: "npm", args: ["run", "test"] },
+        ],
+      },
+    });
+    expect(
+      retried.manifest?.capability_carry_forward?.execution_defaults
+        .approved_command_forms,
+    ).not.toContainEqual({ executable: "git", args: request.args });
+    await expect(
+      fixture.controller.resolveConnectedPermission(
+        fixture.workItem.goal.work_item_id,
+        decision,
+      ),
+    ).resolves.toEqual(retried);
+
+    const retryMission = await fixture.repository.writeMissionPackage(
+      {
+        phase: "execute",
+        work_item_id: retried.work_item.goal.work_item_id,
+        goal_version: retried.work_item.state.goal_version!,
+        input_revision: retried.work_item.state.input_revision!,
+        attempt: retried.work_item.state.attempt!,
+      },
+      (paths) => compileMission(retried.work_item, retried.manifest!, paths),
+    );
+    expect(retryMission.mission.capability_envelope).toEqual(
+      fixture.record.authorization.envelope,
+    );
   });
 
   it("never turns forbidden capability kinds into fresh-attempt grants", async () => {

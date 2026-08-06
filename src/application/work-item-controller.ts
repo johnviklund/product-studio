@@ -88,6 +88,7 @@ import {
   acceptPatchPlanInputSchema,
   approvePlanResultInputSchema,
   applyScopeCorrectionInputSchema,
+  createControllerCapabilityCarryForward,
   createControllerCapabilityGrant,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
@@ -117,6 +118,7 @@ import {
   type ControllerLease,
   type ControllerCapabilityGrant,
   type CommandAuthorizationDecisionInput,
+  type ControllerCapabilityCarryForward,
   type CommandAuthorizationProposalV1,
   type ControllerMutationResult,
   type ControllerRunManifest,
@@ -451,6 +453,7 @@ function manifestMatches(
     input_revision: number;
     attempt: number;
     capability_grant?: ControllerCapabilityGrant;
+    capability_carry_forward?: ControllerCapabilityCarryForward;
   },
 ): boolean {
   return (
@@ -463,7 +466,12 @@ function manifestMatches(
     manifest.input_revision === input.input_revision &&
     manifest.attempt === input.attempt &&
     (input.capability_grant === undefined ||
-      isDeepStrictEqual(manifest.capability_grant, input.capability_grant))
+      isDeepStrictEqual(manifest.capability_grant, input.capability_grant)) &&
+    (input.capability_carry_forward === undefined ||
+      isDeepStrictEqual(
+        manifest.capability_carry_forward,
+        input.capability_carry_forward,
+      ))
   );
 }
 
@@ -2874,16 +2882,39 @@ export class WorkItemController {
         input_revision: validatedInput.governed_tuple.input_revision,
         attempt: nextAttempt,
       };
-      if (validatedInput.decision === "allow_once") {
+      if (validatedInput.decision !== "keep_denied") {
         const existing = await this.repository.readControllerRunManifest(
           validatedId,
           runId,
         );
         if (existing !== null) {
+          const replayRecord =
+            validatedInput.decision === "retry_without_allowing"
+              ? await this.requireConnectedRun(
+                  validatedId,
+                  validatedInput.connected_run_id,
+                )
+              : null;
+          const carryForwardMatches =
+            replayRecord?.authorization.kind === "capability_envelope" &&
+            existing.capability_carry_forward
+              ?.source_mission_content_sha256 ===
+              validatedInput.mission_content_sha256 &&
+            isDeepStrictEqual(
+              existing.capability_carry_forward.execution_defaults,
+              executionDefaultsFromCapabilityEnvelope(
+                replayRecord.authorization.envelope,
+              ),
+            );
+          const grantMatches =
+            validatedInput.decision === "allow_once"
+              ? existing.capability_grant?.source_mission_content_sha256 ===
+                validatedInput.mission_content_sha256
+              : existing.capability_grant === undefined &&
+                carryForwardMatches;
           if (
             manifestMatches(existing, manifestIdentity) &&
-            existing.capability_grant?.source_mission_content_sha256 ===
-              validatedInput.mission_content_sha256 &&
+            grantMatches &&
             this.matchesActiveConnectedState(
               lease.work_item,
               {
@@ -2918,19 +2949,26 @@ export class WorkItemController {
       if (validatedInput.decision === "keep_denied") {
         return { work_item: lease.work_item, manifest: null };
       }
-      const capabilityGrant = this.connectedCapabilityGrant(
-        lease.work_item,
-        record,
-      );
+      const retryManifestIdentity =
+        validatedInput.decision === "allow_once"
+          ? {
+              ...manifestIdentity,
+              capability_grant: this.connectedCapabilityGrant(
+                lease.work_item,
+                record,
+              ),
+            }
+          : {
+              ...manifestIdentity,
+              capability_carry_forward:
+                this.connectedCapabilityCarryForward(record),
+            };
       const mutation = await this.retryConnectedAttemptWithLease({
         work_item_id: validatedId,
         phase: validatedInput.expected_phase,
         lease,
         active_run: activeRun,
-        manifest_identity: {
-          ...manifestIdentity,
-          capability_grant: capabilityGrant,
-        },
+        manifest_identity: retryManifestIdentity,
         next_attempt: nextAttempt,
         clear_attention: true,
         validate_current: async () => {
@@ -3299,6 +3337,24 @@ export class WorkItemController {
     return createControllerCapabilityGrant({
       source_mission_content_sha256: record.mission.content_sha256,
       execution_defaults: executionDefaults,
+    });
+  }
+
+  private connectedCapabilityCarryForward(
+    record: ConnectedRunRecordV2,
+  ): ControllerCapabilityCarryForward {
+    if (record.authorization.kind !== "capability_envelope") {
+      throw this.conflict(
+        "stale_expectation",
+        record.mission.identity.work_item_id,
+        "Connected capability carry-forward requires capability-envelope authorization.",
+      );
+    }
+    return createControllerCapabilityCarryForward({
+      source_mission_content_sha256: record.mission.content_sha256,
+      execution_defaults: executionDefaultsFromCapabilityEnvelope(
+        record.authorization.envelope,
+      ),
     });
   }
 

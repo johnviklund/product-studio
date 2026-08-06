@@ -14,6 +14,7 @@ import {
   connectedPermissionResolutionInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
+  createControllerCapabilityCarryForward,
   createControllerCapabilityGrant,
   hashCommandAuthorizationProposal,
   hashScopeCorrectionProposal,
@@ -551,7 +552,7 @@ describe("durable work-item schemas", () => {
     ).toThrow();
   });
 
-  it.each(["allow_once", "keep_denied"] as const)(
+  it.each(["allow_once", "retry_without_allowing", "keep_denied"] as const)(
     "round-trips the %s connected permission resolution identity",
     (decision) => {
       const resolution = {
@@ -585,6 +586,24 @@ describe("durable work-item schemas", () => {
       ).toThrow();
     },
   );
+
+  it("keeps retry-without-grant out of command authorization decisions", () => {
+    expect(() =>
+      commandAuthorizationDecisionInputSchema.parse({
+        decision: "retry_without_allowing",
+        expected_phase: "execute",
+        governed_tuple: {
+          goal_version: 1,
+          input_revision: 1,
+          attempt: 0,
+          patch_cycle: 0,
+        },
+        source_mission_content_sha256: "b".repeat(64),
+        terminal_connected_run_id: runId,
+        proposal_sha256: "c".repeat(64),
+      }),
+    ).toThrow();
+  });
 
   it("requires an exact, hash-verified operation for connected permission denial", () => {
     const denial = {
@@ -960,6 +979,47 @@ describe("durable work-item schemas", () => {
         },
       }),
     ).toThrow("grant_sha256 must hash");
+  });
+
+  it("hash-binds unchanged capability carry-forward separately from grants", () => {
+    const carryForward = createControllerCapabilityCarryForward({
+      source_mission_content_sha256: "a".repeat(64),
+      execution_defaults: {
+        schema_version: 1,
+        approved_command_forms: [
+          { executable: "npm", args: ["run", "test"] },
+        ],
+        approved_url_operations: [],
+        mcp: "forbidden",
+        credentials: "forbidden",
+      },
+    });
+    const manifest = controllerRunManifestSchema.parse({
+      schema_version: 1,
+      run_id: runId,
+      work_item_id: workItemId,
+      idempotency_key: `${workItemId}:execute:1:1:1`,
+      phase: "execute",
+      goal_version: 1,
+      input_revision: 1,
+      attempt: 1,
+      started_at: "2026-07-21T20:00:00.000Z",
+      completed_at: "2026-07-21T20:00:01.000Z",
+      outcome: "applied",
+      capability_carry_forward: carryForward,
+    });
+
+    expect(manifest.capability_grant).toBeUndefined();
+    expect(manifest.capability_carry_forward).toEqual(carryForward);
+    expect(() =>
+      controllerRunManifestSchema.parse({
+        ...manifest,
+        capability_grant: createControllerCapabilityGrant({
+          source_mission_content_sha256: "a".repeat(64),
+          execution_defaults: carryForward.execution_defaults,
+        }),
+      }),
+    ).toThrow("cannot grant and carry forward");
   });
 });
 

@@ -242,7 +242,10 @@ export type WorkItemAttention =
       proposal: CommandAuthorizationProposalV1;
     });
 
-export type ConnectedPermissionDecision = "allow_once" | "keep_denied";
+export type ConnectedPermissionDecision =
+  | "allow_once"
+  | "retry_without_allowing"
+  | "keep_denied";
 
 export interface ConnectedPermissionResolutionInput {
   decision: ConnectedPermissionDecision;
@@ -254,7 +257,7 @@ export interface ConnectedPermissionResolutionInput {
 }
 
 export interface CommandAuthorizationDecisionInput {
-  decision: ConnectedPermissionDecision;
+  decision: "allow_once" | "keep_denied";
   expected_phase: "execute" | "patch";
   governed_tuple: GovernedTuple;
   source_mission_content_sha256: string;
@@ -468,6 +471,7 @@ export interface ControllerRunManifest {
   completed_at?: string;
   outcome: ControllerRunOutcome;
   capability_grant?: ControllerCapabilityGrant;
+  capability_carry_forward?: ControllerCapabilityCarryForward;
   scope_correction?: ScopeCorrectionProposalV1;
   command_authorization?: CommandAuthorizationProposalV1;
 }
@@ -493,6 +497,14 @@ export interface ControllerCapabilityGrant {
   source_mission_content_sha256: string;
   execution_defaults: ExecutionDefaultsV1;
   grant_sha256: string;
+}
+
+export interface ControllerCapabilityCarryForward {
+  schema_version: 1;
+  kind: "carry_forward";
+  source_mission_content_sha256: string;
+  execution_defaults: ExecutionDefaultsV1;
+  carry_forward_sha256: string;
 }
 
 export interface ControllerLease {
@@ -1161,9 +1173,16 @@ export const keepDeniedConnectedPermissionInputSchema = z.strictObject({
   ...connectedPermissionResolutionFields,
 });
 
+export const retryWithoutAllowingConnectedPermissionInputSchema =
+  z.strictObject({
+    decision: z.literal("retry_without_allowing"),
+    ...connectedPermissionResolutionFields,
+  });
+
 export const connectedPermissionResolutionInputSchema: z.ZodType<ConnectedPermissionResolutionInput> =
   z.discriminatedUnion("decision", [
     allowOnceConnectedPermissionInputSchema,
+    retryWithoutAllowingConnectedPermissionInputSchema,
     keepDeniedConnectedPermissionInputSchema,
   ]);
 
@@ -1601,6 +1620,28 @@ export const controllerCapabilityGrantSchema: z.ZodType<ControllerCapabilityGran
       }
     });
 
+export const controllerCapabilityCarryForwardSchema: z.ZodType<ControllerCapabilityCarryForward> =
+  z
+    .strictObject({
+      schema_version: z.literal(1),
+      kind: z.literal("carry_forward"),
+      source_mission_content_sha256: sha256Schema,
+      execution_defaults: executionDefaultsV1Schema,
+      carry_forward_sha256: sha256Schema,
+    })
+    .superRefine((carryForward, context) => {
+      const expected = hashControllerCapabilityCarryForward(carryForward);
+      if (carryForward.carry_forward_sha256 !== expected) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "carry_forward_sha256 must hash the capability carry-forward content",
+          path: ["carry_forward_sha256"],
+          input: carryForward.carry_forward_sha256,
+        });
+      }
+    });
+
 export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
   z.strictObject({
     schema_version: z.literal(1),
@@ -1615,10 +1656,25 @@ export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
     completed_at: z.iso.datetime().optional(),
     outcome: z.enum(CONTROLLER_RUN_OUTCOMES),
     capability_grant: controllerCapabilityGrantSchema.optional(),
+    capability_carry_forward:
+      controllerCapabilityCarryForwardSchema.optional(),
     scope_correction: z.lazy(() => scopeCorrectionProposalSchema).optional(),
     command_authorization: z
       .lazy(() => commandAuthorizationProposalSchema)
       .optional(),
+  }).superRefine((manifest, context) => {
+    if (
+      manifest.capability_grant !== undefined &&
+      manifest.capability_carry_forward !== undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "controller manifests cannot grant and carry forward capability authorization together",
+        path: ["capability_carry_forward"],
+        input: manifest.capability_carry_forward,
+      });
+    }
   });
 
 const scopeCorrectionProposalContentSchema = z.strictObject({
@@ -1697,6 +1753,41 @@ export function createControllerCapabilityGrant(input: {
   return controllerCapabilityGrantSchema.parse({
     ...content,
     grant_sha256: hashControllerCapabilityGrant(content),
+  });
+}
+
+export function hashControllerCapabilityCarryForward(input: {
+  source_mission_content_sha256: string;
+  execution_defaults: ExecutionDefaultsV1;
+}): string {
+  const content = {
+    schema_version: 1,
+    kind: "carry_forward",
+    source_mission_content_sha256: sha256Schema.parse(
+      input.source_mission_content_sha256,
+    ),
+    execution_defaults: executionDefaultsV1Schema.parse(
+      input.execution_defaults,
+    ),
+  } as const;
+  return createHash("sha256")
+    .update(`${JSON.stringify(content, null, 2)}\n`)
+    .digest("hex");
+}
+
+export function createControllerCapabilityCarryForward(input: {
+  source_mission_content_sha256: string;
+  execution_defaults: ExecutionDefaultsV1;
+}): ControllerCapabilityCarryForward {
+  const content = {
+    schema_version: 1 as const,
+    kind: "carry_forward" as const,
+    source_mission_content_sha256: input.source_mission_content_sha256,
+    execution_defaults: input.execution_defaults,
+  };
+  return controllerCapabilityCarryForwardSchema.parse({
+    ...content,
+    carry_forward_sha256: hashControllerCapabilityCarryForward(content),
   });
 }
 

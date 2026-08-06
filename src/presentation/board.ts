@@ -534,6 +534,7 @@ export type ConnectedProjectionActionKind =
   | "launch_phase"
   | "cancel_run"
   | "allow_once"
+  | "retry_without_allowing"
   | "keep_denied"
   | "wait_for_import"
   | "open_advanced_recovery";
@@ -2566,6 +2567,12 @@ export function connectedPhaseForItem(
             primary: true,
             connected_run_id: permissionRun.connected_run_id,
           },
+        ),
+        connectedProjectionAction(
+          phase,
+          "retry_without_allowing",
+          "Retry without allowing",
+          { connected_run_id: permissionRun.connected_run_id },
         ),
         connectedProjectionAction(
           phase,

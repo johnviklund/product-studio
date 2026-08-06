@@ -2602,6 +2602,7 @@ describe("board projection", () => {
       permission,
       actions: [
         { kind: "allow_once", primary: true },
+        { kind: "retry_without_allowing", primary: false },
         { kind: "keep_denied", primary: false },
       ],
     });

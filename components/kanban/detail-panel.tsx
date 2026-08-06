@@ -523,6 +523,7 @@ type ConnectedMutation =
   | "launching"
   | "cancelling"
   | "allowing_once"
+  | "retrying_without_allowing"
   | "keeping_denied"
   | "preparing_commands"
   | "authorizing_commands";
@@ -3959,6 +3960,7 @@ interface ConnectedExecuteSectionProps {
   onModelOverrideChange: (value: string) => void;
   onLaunch: () => void;
   onAllowOnce: () => void;
+  onRetryWithoutAllowing: () => void;
   onKeepDenied: () => void;
 }
 
@@ -4073,6 +4075,7 @@ export function ConnectedExecuteSection({
   onModelOverrideChange,
   onLaunch,
   onAllowOnce,
+  onRetryWithoutAllowing,
   onKeepDenied,
 }: ConnectedExecuteSectionProps) {
   const latest = latestConnectedRun(runs);
@@ -4159,6 +4162,16 @@ export function ConnectedExecuteSection({
               className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
             >
               {mutation === "allowing_once" ? "Allowing…" : "Allow once and retry"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onRetryWithoutAllowing}
+              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "retrying_without_allowing"
+                ? "Retrying…"
+                : "Retry without allowing"}
             </button>
             <button
               type="button"
@@ -4271,6 +4284,7 @@ interface ConnectedPhaseSectionProps {
   onLaunch: () => void;
   onCancel: () => void;
   onAllowOnce: () => void;
+  onRetryWithoutAllowing: () => void;
   onKeepDenied: () => void;
 }
 
@@ -4290,6 +4304,7 @@ export function ConnectedPhaseSection({
   onLaunch,
   onCancel,
   onAllowOnce,
+  onRetryWithoutAllowing,
   onKeepDenied,
 }: ConnectedPhaseSectionProps) {
   if (projection.mode === "hidden") {
@@ -4465,6 +4480,16 @@ export function ConnectedPhaseSection({
               {mutation === "allowing_once"
                 ? "Allowing…"
                 : "Allow once and retry"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onRetryWithoutAllowing}
+              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "retrying_without_allowing"
+                ? "Retrying…"
+                : "Retry without allowing"}
             </button>
             <button
               type="button"
@@ -7301,7 +7326,7 @@ export function DetailPanel({
   }
 
   async function handleConnectedPatchPermission(
-    decision: "allow_once" | "keep_denied",
+    decision: "allow_once" | "retry_without_allowing" | "keep_denied",
   ) {
     if (
       connectedMutationRef.current ||
@@ -7313,7 +7338,11 @@ export function DetailPanel({
     }
     connectedMutationRef.current = true;
     setConnectedMutation(
-      decision === "allow_once" ? "allowing_once" : "keeping_denied",
+      decision === "allow_once"
+        ? "allowing_once"
+        : decision === "retry_without_allowing"
+          ? "retrying_without_allowing"
+          : "keeping_denied",
     );
     const permission = connectedPhaseProjection.permission;
     try {
@@ -7351,6 +7380,8 @@ export function DetailPanel({
         updatedItem,
         decision === "allow_once"
           ? "Exact Patch permission allowed once; a fresh attempt is ready."
+          : decision === "retry_without_allowing"
+            ? "Fresh Patch attempt ready without allowing the denied operation."
           : "Exact Patch permission remains denied.",
       );
     } catch {
@@ -7368,7 +7399,7 @@ export function DetailPanel({
   }
 
   async function handleConnectedPermission(
-    decision: "allow_once" | "keep_denied",
+    decision: "allow_once" | "retry_without_allowing" | "keep_denied",
   ) {
     if (
       connectedMutationRef.current ||
@@ -7378,7 +7409,11 @@ export function DetailPanel({
     }
     connectedMutationRef.current = true;
     setConnectedMutation(
-      decision === "allow_once" ? "allowing_once" : "keeping_denied",
+      decision === "allow_once"
+        ? "allowing_once"
+        : decision === "retry_without_allowing"
+          ? "retrying_without_allowing"
+          : "keeping_denied",
     );
 
     try {
@@ -7418,6 +7453,8 @@ export function DetailPanel({
         body as PortfolioWorkItem,
         decision === "allow_once"
           ? "Exact permission allowed once; a fresh Execute attempt is ready."
+          : decision === "retry_without_allowing"
+            ? "Fresh Execute attempt ready without allowing the denied operation."
           : "Exact permission remains denied.",
       );
     } catch {
@@ -8035,6 +8072,11 @@ export function DetailPanel({
                       onAllowOnce={() =>
                         void handleConnectedPermission("allow_once")
                       }
+                      onRetryWithoutAllowing={() =>
+                        void handleConnectedPermission(
+                          "retry_without_allowing",
+                        )
+                      }
                       onKeepDenied={() =>
                         void handleConnectedPermission("keep_denied")
                       }
@@ -8229,6 +8271,11 @@ export function DetailPanel({
                       onCancel={() => void handleCancelConnectedPhase()}
                       onAllowOnce={() =>
                         void handleConnectedPatchPermission("allow_once")
+                      }
+                      onRetryWithoutAllowing={() =>
+                        void handleConnectedPatchPermission(
+                          "retry_without_allowing",
+                        )
                       }
                       onKeepDenied={() =>
                         void handleConnectedPatchPermission("keep_denied")

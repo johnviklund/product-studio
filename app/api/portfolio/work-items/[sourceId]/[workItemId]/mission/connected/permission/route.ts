@@ -8,7 +8,11 @@ export const runtime = "nodejs";
 const permissionRequestSchema = z.strictObject({
   connected_run_id: controllerRunIdSchema,
   operation_sha256: z.string().regex(/^[0-9a-f]{64}$/),
-  decision: z.enum(["allow_once", "keep_denied"]),
+  decision: z.enum([
+    "allow_once",
+    "retry_without_allowing",
+    "keep_denied",
+  ]),
 });
 
 export const POST = createConnectedPostRoute(

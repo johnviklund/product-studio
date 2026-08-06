@@ -853,6 +853,7 @@ function renderConnectedPhase(
       onLaunch={noop}
       onCancel={noop}
       onAllowOnce={noop}
+      onRetryWithoutAllowing={noop}
       onKeepDenied={noop}
       {...overrides}
     />,
@@ -3293,6 +3294,7 @@ describe("detail panel connected execution", () => {
         onModelOverrideChange={noop}
         onLaunch={noop}
         onAllowOnce={noop}
+        onRetryWithoutAllowing={noop}
         onKeepDenied={noop}
       />,
     );
@@ -3308,7 +3310,7 @@ describe("detail panel connected execution", () => {
     expect(html).not.toContain("token stream");
   });
 
-  it("renders both recovery actions against the exact permission hash", () => {
+  it("renders all recovery actions against the exact permission hash", () => {
     const operationSha256 = "f".repeat(64);
     const html = renderToStaticMarkup(
       <ConnectedExecuteSection
@@ -3350,12 +3352,14 @@ describe("detail panel connected execution", () => {
         onModelOverrideChange={noop}
         onLaunch={noop}
         onAllowOnce={noop}
+        onRetryWithoutAllowing={noop}
         onKeepDenied={noop}
       />,
     );
 
     expect(html).toContain(operationSha256);
     expect(html).toContain("Allow once and retry");
+    expect(html).toContain("Retry without allowing");
     expect(html).toContain("Keep denied");
     expect(html).not.toContain("Launch connected run");
   });
@@ -3540,6 +3544,14 @@ describe("detail panel connected Review and Patch", () => {
           enabled: true,
           connected_run_id: connectedPatchRun.connected_run_id,
         },
+        {
+          kind: "retry_without_allowing",
+          phase: "patch",
+          label: "Retry without allowing",
+          primary: false,
+          enabled: true,
+          connected_run_id: connectedPatchRun.connected_run_id,
+        },
       ],
     };
     const patch = renderConnectedPhase(patchPermission);
@@ -3554,9 +3566,11 @@ describe("detail panel connected Review and Patch", () => {
 
     expect(patch).toContain(missingPermissionAttention.operation.operation_sha256);
     expect(patch).toContain("Allow once and retry");
+    expect(patch).toContain("Retry without allowing");
     expect(patch).toContain("Keep denied");
     expect(primaryActionCount(patch)).toBe(1);
     expect(impossibleReview).not.toContain("Allow once and retry");
+    expect(impossibleReview).not.toContain("Retry without allowing");
     expect(impossibleReview).not.toContain("Keep denied");
   });
 });

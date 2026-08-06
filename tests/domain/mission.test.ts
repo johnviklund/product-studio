@@ -654,6 +654,9 @@ describe("mission domain", () => {
     expect(task).toContain("## Capability envelope");
     expect(task).toContain("not_independently_enforced");
     expect(task).toContain('["npm","run","test"]');
+    expect(task).toContain(
+      "Approved command arrays are exact. Do not add arguments, message paragraphs, attribution trailers, or metadata.",
+    );
     expect(task).toContain("GET https://registry.npmjs.org/package");
     expect(task.toLowerCase()).not.toMatch(
       /codex|claude|openai|anthropic|copilot|gemini/,

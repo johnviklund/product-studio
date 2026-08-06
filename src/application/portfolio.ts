@@ -945,7 +945,7 @@ const launchConnectedPatchRequestSchema: z.ZodType<LaunchConnectedPatchRequest> 
 export interface ConnectedPermissionDecisionRequest {
   connected_run_id: string;
   operation_sha256: string;
-  decision: "allow_once" | "keep_denied";
+  decision: "allow_once" | "retry_without_allowing" | "keep_denied";
 }
 
 export interface PortfolioConnectedPermissionResult extends PortfolioWorkItem {
@@ -956,7 +956,11 @@ const connectedPermissionDecisionRequestSchema: z.ZodType<ConnectedPermissionDec
   z.strictObject({
     connected_run_id: controllerRunIdSchema,
     operation_sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    decision: z.enum(["allow_once", "keep_denied"]),
+    decision: z.enum([
+      "allow_once",
+      "retry_without_allowing",
+      "keep_denied",
+    ]),
   });
 
 function errorMessage(error: unknown): string {
@@ -1433,12 +1437,14 @@ export class PortfolioService {
       );
     }
 
-    const capabilityGrant = executeManifest.capability_grant;
-    if (capabilityGrant !== undefined) {
+    const capabilityAuthorization =
+      executeManifest.capability_grant ??
+      executeManifest.capability_carry_forward;
+    if (capabilityAuthorization !== undefined) {
       if (identity.attempt < 1) {
         throw this.missionNotReady(
           workItemId,
-          "An initial Execute attempt cannot carry a permission-recovery grant.",
+          "An initial Execute attempt cannot carry permission-recovery authorization.",
         );
       }
       const prior = await source.workspace.readMissionPackage({
@@ -1448,11 +1454,11 @@ export class PortfolioService {
       if (
         prior.mission.identity.phase !== "execute" ||
         prior.mission.content_sha256 !==
-          capabilityGrant.source_mission_content_sha256
+          capabilityAuthorization.source_mission_content_sha256
       ) {
         throw this.missionNotReady(
           workItemId,
-          "The Execute capability grant does not bind the immediately prior mission.",
+          "The Execute capability authorization does not bind the immediately prior mission.",
         );
       }
     }
@@ -1462,7 +1468,7 @@ export class PortfolioService {
         workItem,
         executeManifest,
         paths,
-        capabilityGrant?.execution_defaults,
+        capabilityAuthorization?.execution_defaults,
       ),
     ) as Promise<MissionCompilation>;
   }
@@ -3014,12 +3020,14 @@ export class PortfolioService {
       completed_at: currentAttemptManifest.completed_at,
       outcome: "applied" as const,
     };
-    const capabilityGrant = currentAttemptManifest.capability_grant;
-    if (capabilityGrant !== undefined) {
+    const capabilityAuthorization =
+      currentAttemptManifest.capability_grant ??
+      currentAttemptManifest.capability_carry_forward;
+    if (capabilityAuthorization !== undefined) {
       if (identity.attempt < 1) {
         throw this.missionNotReady(
           workItemId,
-          "An initial Patch attempt cannot carry a permission-recovery grant.",
+          "An initial Patch attempt cannot carry permission-recovery authorization.",
         );
       }
       const prior = await source.workspace.readMissionPackage(
@@ -3029,16 +3037,16 @@ export class PortfolioService {
       if (
         prior.mission.identity.phase !== "patch" ||
         prior.mission.content_sha256 !==
-          capabilityGrant.source_mission_content_sha256
+          capabilityAuthorization.source_mission_content_sha256
       ) {
         throw this.missionNotReady(
           workItemId,
-          "The Patch capability grant does not bind the immediately prior mission.",
+          "The Patch capability authorization does not bind the immediately prior mission.",
         );
       }
     }
     const executionDefaults =
-      capabilityGrant?.execution_defaults ??
+      capabilityAuthorization?.execution_defaults ??
       (await source.workspace.readExecutionDefaults());
 
     return source.workspace.writePatchMissionPackage(
