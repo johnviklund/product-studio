@@ -237,6 +237,7 @@ function containsOnlyShellLiteralBracketTokens(command: string): boolean {
 
 const FORBIDDEN_SHELL_WORD_CHARACTERS =
   /[\u0000-\u001f\u007f|&;<>()`$\\"*?{}!~#]/u;
+const FORBIDDEN_DOUBLE_QUOTED_SHELL_WORD_CHARACTERS = /[`$\\]/u;
 
 function parseRestrictedShellWords(command: string): string[] | null {
   if (/[\u0000-\u001f\u007f]/u.test(command)) {
@@ -263,6 +264,23 @@ function parseRestrictedShellWords(command: string): string[] | null {
       const word = input.slice(index + 1, closingQuote);
       if (
         FORBIDDEN_SHELL_WORD_CHARACTERS.test(word) ||
+        (closingQuote + 1 < input.length && input[closingQuote + 1] !== " ")
+      ) {
+        return null;
+      }
+      words.push(word);
+      index = closingQuote + 1;
+      continue;
+    }
+
+    if (input[index] === '"') {
+      const closingQuote = input.indexOf('"', index + 1);
+      if (closingQuote === -1) {
+        return null;
+      }
+      const word = input.slice(index + 1, closingQuote);
+      if (
+        FORBIDDEN_DOUBLE_QUOTED_SHELL_WORD_CHARACTERS.test(word) ||
         (closingQuote + 1 < input.length && input[closingQuote + 1] !== " ")
       ) {
         return null;

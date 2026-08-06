@@ -59,6 +59,8 @@ const quotedStagePaths = [
 const quotedStageCommand = `git add -- ${quotedStagePaths
   .map((path) => `'${path}'`)
   .join(" ")}`;
+const quotedRegexCommand =
+  'rg -n "trusted mutation|missing Origin|wrong Origin|oversized|malformed|unknown" tests/api/portfolio-routes.test.ts';
 
 function input(
   overrides: Partial<CopilotRuntimeProfileInput> = {},
@@ -530,6 +532,49 @@ describe("Copilot ACP runtime profile", () => {
       executable: "git",
       args: ["commit", "-m", "Guard the remaining 13 mutating API routes"],
     });
+    const normalizedRegexCommand = normalizeCopilotPermission(
+      permission({
+        kind: "execute",
+        rawInput: {
+          command: quotedRegexCommand,
+          commands: [quotedRegexCommand],
+        },
+      }),
+      workspaceCwd,
+    );
+    expect(normalizedRegexCommand).toEqual({
+      schema_version: 1,
+      kind: "command",
+      executable: "rg",
+      args: [
+        "-n",
+        "trusted mutation|missing Origin|wrong Origin|oversized|malformed|unknown",
+        "tests/api/portfolio-routes.test.ts",
+      ],
+    });
+    expect(
+      capabilityRequestMatchesEnvelope(
+        canonicalizeCapabilityRequest(normalizedRegexCommand!),
+        resolveCapabilityEnvelope(["src"], defaults),
+      ),
+    ).toBe(false);
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
+            command: 'git commit -m "Guard the routes"',
+            commands: ['git commit -m "Guard the routes"'],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toEqual({
+      schema_version: 1,
+      kind: "command",
+      executable: "git",
+      args: ["commit", "-m", "Guard the routes"],
+    });
     expect(
       normalizeCopilotPermission(
         permission({
@@ -584,18 +629,24 @@ describe("Copilot ACP runtime profile", () => {
         workspaceCwd,
       ),
     ).toBeNull();
-    expect(
-      normalizeCopilotPermission(
-        permission({
-          kind: "execute",
-          rawInput: {
-            command: 'git commit -m "Guard the routes"',
-            commands: ['git commit -m "Guard the routes"'],
-          },
-        }),
-        workspaceCwd,
-      ),
-    ).toBeNull();
+    for (const command of [
+      'echo "$HOME"',
+      'echo "$(id)"',
+      'echo "`id`"',
+      'echo "src\\file"',
+      'echo "unterminated',
+      'echo "safe"next',
+    ]) {
+      expect(
+        normalizeCopilotPermission(
+          permission({
+            kind: "execute",
+            rawInput: { command, commands: [command] },
+          }),
+          workspaceCwd,
+        ),
+      ).toBeNull();
+    }
     expect(
       normalizeCopilotPermission(
         permission({
