@@ -2164,7 +2164,11 @@ export class PortfolioService {
       );
     }
 
-    const mission = await this.compileMission(sourceId, workItemId);
+    const mission = await this.connectedExecuteMission(
+      source,
+      identity,
+      connectedRuns,
+    );
     const capabilityEnvelope = this.resolveConnectedCapabilityEnvelope(
       workItemId,
       mission.mission.capability_envelope,
@@ -2218,6 +2222,57 @@ export class PortfolioService {
         await this.rebuild();
       },
     });
+  }
+
+  private async connectedExecuteMission(
+    source: ResolvedSource,
+    identity: MissionIdentity<"execute">,
+    connectedRuns: ConnectedRunRecordV2[],
+  ): Promise<MissionCompilation> {
+    const matchingRuns = connectedRuns.filter(
+      (record) =>
+        JSON.stringify(record.mission.identity) === JSON.stringify(identity),
+    );
+    if (matchingRuns.length === 0) {
+      return this.compileMission(source.source_id, identity.work_item_id);
+    }
+
+    const snapshot = await source.workspace.readMissionPackage(identity);
+    const mission = snapshot.mission;
+    if (
+      mission.mission_schema_version !== MISSION_SCHEMA_VERSION ||
+      mission.identity.phase !== "execute"
+    ) {
+      throw new ControllerConflictError(
+        "repair_required",
+        identity.work_item_id,
+        "Connected Execute retry requires the current immutable Execute mission package.",
+      );
+    }
+    const disagreesWithSnapshot = matchingRuns.some(
+      (record) =>
+        record.mission.path !== snapshot.mission_path ||
+        record.mission.content_sha256 !== mission.content_sha256 ||
+        record.mission.source_commit !==
+          mission.source_revision.git_base_commit,
+    );
+    if (disagreesWithSnapshot) {
+      throw new ControllerConflictError(
+        "repair_required",
+        identity.work_item_id,
+        "Connected Execute history disagrees with the immutable mission package.",
+      );
+    }
+
+    return {
+      mission,
+      workspace_path: source.workspace.workspaceRoot,
+      task_path: join(source.workspace.workspaceRoot, mission.task_path),
+      mission_path: join(
+        source.workspace.workspaceRoot,
+        snapshot.mission_path,
+      ),
+    };
   }
 
   async launchConnectedPatch(

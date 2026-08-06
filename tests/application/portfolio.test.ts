@@ -4220,6 +4220,102 @@ describe("PortfolioService", () => {
     rebuiltIndex.close();
   });
 
+  it("reuses the immutable Execute mission when repository HEAD advances before a retry", async () => {
+    const firstCommit = "a".repeat(40);
+    let headCommit = firstCommit;
+    const root = await createWorkspace("Connected Execute Retry Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: {
+        ...controllerGit,
+        async readHeadCommit() {
+          return headCommit;
+        },
+      },
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Retry one immutable Execute mission",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const retryResult = deferred<AcpRunResult>();
+    const run = vi
+      .fn<() => Promise<AcpRunResult>>()
+      .mockResolvedValueOnce({
+        outcome: "failed",
+        partial: true,
+        stop_reason: null,
+        permissions: [],
+      })
+      .mockImplementationOnce(() => retryResult.promise);
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7d1",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4201,
+        process_group_id: 4201,
+        started_at: "2026-08-06T05:00:00.000Z",
+      },
+      run,
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedRuntime(session);
+    const { index, service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const workItemId = created.goal.work_item_id;
+
+    const first = await service.launchConnectedExecute(sourceId, workItemId);
+    await expect.poll(async () => {
+      const [stored] = await repository.listConnectedRuns(workItemId);
+      return stored?.lifecycle.terminal?.outcome;
+    }).toBe("failed");
+    headCommit = "b".repeat(40);
+
+    const retry = await service.launchConnectedExecute(sourceId, workItemId);
+    expect(retry.connected_run).toMatchObject({
+      lifecycle: { status: "running" },
+      mission: {
+        content_sha256: first.connected_run.mission.content_sha256,
+        source_commit: firstCommit,
+      },
+    });
+    expect(retry.connected_run.connected_run_id).not.toBe(
+      first.connected_run.connected_run_id,
+    );
+    expect(fake.prepare).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(
+      (await repository.listConnectedRuns(workItemId)).find(
+        (record) =>
+          record.connected_run_id === retry.connected_run.connected_run_id,
+      )?.limits,
+    ).toMatchObject({ max_output_bytes: 1_000_000 });
+
+    retryResult.resolve({
+      outcome: "cancelled",
+      partial: true,
+      stop_reason: "cancelled",
+      permissions: [],
+    });
+    await expect.poll(async () => {
+      const stored = await repository.listConnectedRuns(workItemId);
+      return stored.find(
+        (record) =>
+          record.connected_run_id === retry.connected_run.connected_run_id,
+      )?.lifecycle.terminal?.outcome;
+    }).toBe("cancelled");
+    index.close();
+  });
+
   it("launches connected review read-only, terminals before import, and replays without duplicate spawn", async () => {
     const root = await createWorkspace("Connected Review Workspace");
     const repository = new ProductWorkspace(root, {
