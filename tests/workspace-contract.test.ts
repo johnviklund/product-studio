@@ -24,10 +24,12 @@ import {
   compilePatchMission,
   compileReviewMission,
   hashHistoricalMissionContentV3,
+  hashHistoricalMissionContentV6,
   renderReadableTaskMd,
   renderTaskMd,
   serializeReadableMissionPackage,
   serializeMissionPackage,
+  type HistoricalExecuteMissionPackageV6,
   type HistoricalExecuteMissionPackageV3,
   type HistoricalReviewMissionPackageV3,
   type MissionIdentity,
@@ -3662,6 +3664,52 @@ describe("ProductWorkspace", () => {
     await expect(
       workspace.readImportEvidence(missionIdentity(), importRunId),
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
+  });
+
+  it("reads a pre-guidance v6 TASK byte-for-byte and still rejects tampering", async () => {
+    const root = await createWorkspace();
+    const item = await writeMissionReadyWorkItem(root, firstId);
+    const workspace = missionWorkspace(root);
+    const identity = missionIdentity();
+    const artifact = await workspace.writeMissionPackage(
+      identity,
+      (paths) => compileMission(item, appliedExecuteManifest(), paths),
+    );
+    const historicalDraft: HistoricalExecuteMissionPackageV6 = {
+      ...artifact.mission,
+      mission_schema_version: 6 as const,
+      content_sha256: "0".repeat(64),
+    };
+    const historical = {
+      ...historicalDraft,
+      content_sha256: hashHistoricalMissionContentV6(historicalDraft),
+    };
+    const missionSource = serializeReadableMissionPackage(historical);
+    const exactArrayGuidance =
+      "Approved command arrays are exact. Do not add arguments, message paragraphs, attribution trailers, or metadata.\n";
+    const historicalTaskSource = renderReadableTaskMd(historical).replace(
+      exactArrayGuidance,
+      "",
+    );
+    expect(historicalTaskSource).not.toContain(exactArrayGuidance.trim());
+    await writeFile(artifact.mission_path, missionSource, "utf8");
+    await writeFile(artifact.task_path, historicalTaskSource, "utf8");
+
+    const snapshot = await workspace.readMissionPackage(identity);
+    expect(snapshot.mission.mission_schema_version).toBe(6);
+    expect(await readFile(artifact.mission_path, "utf8")).toBe(missionSource);
+    expect(await readFile(artifact.task_path, "utf8")).toBe(
+      historicalTaskSource,
+    );
+
+    await writeFile(
+      artifact.task_path,
+      `${historicalTaskSource}tampered\n`,
+      "utf8",
+    );
+    await expect(workspace.readMissionPackage(identity)).rejects.toMatchObject({
+      kind: "invalid_workspace",
+    });
   });
 
   it("reads historical v3 execute/review artifacts without rewriting their bytes", async () => {

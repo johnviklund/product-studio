@@ -4,9 +4,11 @@ import {
   compileMission,
   compilePatchMission,
   compileReviewMission,
+  hashHistoricalMissionContentV6,
   hashHistoricalMissionContentV5,
   hashHistoricalMissionContentV4,
   hashMissionContent,
+  historicalMissionPackageV6Schema,
   historicalMissionPackageV5Schema,
   historicalMissionPackageV4Schema,
   missionPackageSchema,
@@ -18,8 +20,10 @@ import {
   serializeReadableMissionPackage,
   serializeMissionPackage,
   type ExecuteReviewSubject,
+  type HistoricalExecuteMissionPackageV6,
   type HistoricalExecuteMissionPackageV5,
   type HistoricalExecuteMissionPackageV4,
+  type HistoricalPatchMissionPackageV6,
   type HistoricalPatchMissionPackageV5,
   type MissionPaths,
   type PatchMissionControllerRun,
@@ -269,7 +273,7 @@ describe("mission domain", () => {
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(renderTaskMd(second)).toBe(renderTaskMd(first));
     expect(first.content_sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(first.mission_schema_version).toBe(6);
+    expect(first.mission_schema_version).toBe(7);
     expect(first.identity.phase).toBe("execute");
     expect(first.source_revision.git_base_commit).toBe(paths.git_base_commit);
     expect(first.result_contract).toEqual({
@@ -549,6 +553,62 @@ describe("mission domain", () => {
     expect(() => missionPackageSchema.parse(historical)).toThrow();
   });
 
+  it("reads stored v6 Execute/Patch TASKs without current-only command guidance", () => {
+    const currentExecute = compileMission(
+      workItem,
+      executeManifest,
+      paths,
+      executionDefaults,
+    );
+    const historicalExecuteDraft: HistoricalExecuteMissionPackageV6 = {
+      ...currentExecute,
+      mission_schema_version: 6,
+      content_sha256: "0".repeat(64),
+    };
+    const historicalExecute = {
+      ...historicalExecuteDraft,
+      content_sha256: hashHistoricalMissionContentV6(
+        historicalExecuteDraft,
+      ),
+    };
+    const currentPatch = compilePatchMission(
+      {
+        work_item: patchWorkItem,
+        controller_run: patchControllerRun,
+        patch_subject: patchSubject,
+        paths: patchPaths,
+      },
+      executionDefaults,
+    );
+    const historicalPatchDraft: HistoricalPatchMissionPackageV6 = {
+      ...currentPatch,
+      mission_schema_version: 6,
+      content_sha256: "0".repeat(64),
+    };
+    const historicalPatch = {
+      ...historicalPatchDraft,
+      content_sha256: hashHistoricalMissionContentV6(historicalPatchDraft),
+    };
+
+    for (const mission of [historicalExecute, historicalPatch]) {
+      expect(historicalMissionPackageV6Schema.parse(mission)).toEqual(mission);
+      expect(readableMissionPackageSchema.parse(mission)).toEqual(mission);
+      expect(serializeReadableMissionPackage(mission)).toContain(
+        '"mission_schema_version": 6',
+      );
+      expect(renderReadableTaskMd(mission)).not.toContain(
+        "Approved command arrays are exact.",
+      );
+      expect(() => missionPackageSchema.parse(mission)).toThrow();
+    }
+    expect(renderTaskMd(currentExecute)).toContain(
+      "Approved command arrays are exact.",
+    );
+    expect(renderTaskMd(currentPatch)).toContain(
+      "Approved command arrays are exact.",
+    );
+  });
+
   it("reads stored v5 execute and patch missions without mutating their authority", () => {
     const currentExecute = compileMission(
       workItem,
@@ -629,6 +689,9 @@ describe("mission domain", () => {
     expect(renderReadableTaskMd(historicalExecute)).toContain(
       "## Capability envelope",
     );
+    expect(renderReadableTaskMd(historicalExecute)).not.toContain(
+      "Approved command arrays are exact.",
+    );
     expect(renderReadableTaskMd(historicalPatch)).not.toContain(
       "## Capability envelope",
     );
@@ -678,11 +741,11 @@ describe("mission domain", () => {
     expect(second).toEqual(first);
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(first.content_sha256).toBe(
-      "dabe5ab0b238768593f4dff7bd8e378b247abfca74a725a07410a4d5880ea80f",
+      "4654b69f72ce81544cf2584c13492fa1827b26a14c1119f958f69f3c7fdf3a29",
     );
     expect(first.content_sha256).not.toBe(execute.content_sha256);
     expect(first.identity.phase).toBe("review");
-    expect(first.mission_schema_version).toBe(6);
+    expect(first.mission_schema_version).toBe(7);
     expect(first.controller_run.phase).toBe("review");
     expect(first.independence_attested).toBe(true);
     expect(first.review_subject).toEqual(reviewSubject);
@@ -787,7 +850,7 @@ describe("mission domain", () => {
     };
 
     expect(second).toEqual(first);
-    expect(first.mission_schema_version).toBe(6);
+    expect(first.mission_schema_version).toBe(7);
     expect(first.identity).toMatchObject({ phase: "patch", patch_cycle: 1 });
     expect(first.capability_envelope).toEqual({
       schema_version: 1,

@@ -16,7 +16,7 @@ import type {
 } from "./work-item";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
-export const MISSION_SCHEMA_VERSION = 6 as const;
+export const MISSION_SCHEMA_VERSION = 7 as const;
 const RESULT_CONTRACT_SCHEMA_VERSION = 4 as const;
 const RESULT_SCHEMA_VERSION = 2 as const;
 const FAIL_CLOSED_EXECUTION_DEFAULTS: ExecutionDefaultsV1 = {
@@ -293,6 +293,24 @@ export type MissionPackage =
   | ReviewMissionPackage
   | PatchMissionPackage;
 
+type HistoricalMissionPackageVariantV6<TPackage> =
+  TPackage extends MissionPackage
+    ? Omit<TPackage, "mission_schema_version"> & {
+        mission_schema_version: 6;
+      }
+    : never;
+
+export type HistoricalExecuteMissionPackageV6 =
+  HistoricalMissionPackageVariantV6<ExecuteMissionPackage>;
+export type HistoricalReviewMissionPackageV6 =
+  HistoricalMissionPackageVariantV6<ReviewMissionPackage>;
+export type HistoricalPatchMissionPackageV6 =
+  HistoricalMissionPackageVariantV6<PatchMissionPackage>;
+export type HistoricalMissionPackageV6 =
+  | HistoricalExecuteMissionPackageV6
+  | HistoricalReviewMissionPackageV6
+  | HistoricalPatchMissionPackageV6;
+
 interface HistoricalMissionPackageBaseV5<TPhase extends MissionPhase>
   extends Omit<MissionPackageBase<TPhase>, "mission_schema_version"> {
   mission_schema_version: 5;
@@ -450,6 +468,7 @@ export type HistoricalMissionPackageV3 =
 
 export type ReadableMissionPackage =
   | MissionPackage
+  | HistoricalMissionPackageV6
   | HistoricalMissionPackageV5
   | HistoricalMissionPackageV4
   | HistoricalMissionPackageV3;
@@ -1062,6 +1081,72 @@ export const missionPackageSchema: z.ZodType<MissionPackage> = z
     }
   });
 
+function historicalMissionPackageV6VariantSchema<
+  TCurrent extends MissionPackage,
+  THistorical extends HistoricalMissionPackageV6,
+>(currentSchema: z.ZodType<TCurrent>): z.ZodType<THistorical> {
+  return z
+    .preprocess((input) => {
+      if (input === null || typeof input !== "object" || Array.isArray(input)) {
+        return input;
+      }
+      const candidate = input as Record<string, unknown>;
+      return {
+        ...candidate,
+        mission_schema_version:
+          candidate.mission_schema_version === 6
+            ? MISSION_SCHEMA_VERSION
+            : null,
+      };
+    }, currentSchema)
+    .transform(
+      (mission) =>
+        ({ ...mission, mission_schema_version: 6 }) as unknown as THistorical,
+    ) as z.ZodType<THistorical>;
+}
+
+const historicalExecuteMissionPackageV6Schema =
+  historicalMissionPackageV6VariantSchema<
+    ExecuteMissionPackage,
+    HistoricalExecuteMissionPackageV6
+  >(executeMissionPackageSchema);
+const historicalExecuteReviewMissionPackageV6Schema =
+  historicalMissionPackageV6VariantSchema<
+    ExecuteReviewMissionPackage,
+    HistoricalMissionPackageVariantV6<ExecuteReviewMissionPackage>
+  >(executeReviewMissionPackageSchema);
+const historicalPatchReviewMissionPackageV6Schema =
+  historicalMissionPackageV6VariantSchema<
+    PatchReviewMissionPackage,
+    HistoricalMissionPackageVariantV6<PatchReviewMissionPackage>
+  >(patchReviewMissionPackageSchema);
+const historicalPatchMissionPackageV6Schema =
+  historicalMissionPackageV6VariantSchema<
+    PatchMissionPackage,
+    HistoricalPatchMissionPackageV6
+  >(patchMissionPackageSchema);
+
+export const historicalMissionPackageV6Schema: z.ZodType<
+  HistoricalMissionPackageV6
+> = z
+  .union([
+    historicalExecuteMissionPackageV6Schema,
+    historicalExecuteReviewMissionPackageV6Schema,
+    historicalPatchReviewMissionPackageV6Schema,
+    historicalPatchMissionPackageV6Schema,
+  ])
+  .superRefine((mission, context) => {
+    if (mission.content_sha256 !== hashHistoricalMissionContentV6(mission)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "content_sha256 must match the canonical historical mission content",
+        path: ["content_sha256"],
+        input: mission.content_sha256,
+      });
+    }
+  });
+
 const historicalMissionPackageCommonShapeV5 = {
   mission_schema_version: z.literal(5),
   goal: missionGoalSchema,
@@ -1479,6 +1564,7 @@ export const historicalMissionPackageV3Schema: z.ZodType<
 export const readableMissionPackageSchema: z.ZodType<ReadableMissionPackage> =
   z.union([
     missionPackageSchema,
+    historicalMissionPackageV6Schema,
     historicalMissionPackageV5Schema,
     historicalMissionPackageV4Schema,
     historicalMissionPackageV3Schema,
@@ -1978,6 +2064,7 @@ function missionContentWithoutCapability(
   mission:
     | MissionPackageWithoutHash
     | MissionPackage
+    | HistoricalMissionPackageV6
     | HistoricalMissionPackageV5
     | HistoricalMissionPackageV4,
 ) {
@@ -2047,6 +2134,31 @@ function missionContentWithoutCapability(
   };
 }
 
+function historicalMissionContentV6(mission: HistoricalMissionPackageV6) {
+  return missionContentWithOptionalCapability(mission);
+}
+
+export function hashHistoricalMissionContentV6(
+  mission: HistoricalMissionPackageV6,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(historicalMissionContentV6(mission)))
+    .digest("hex");
+}
+
+function serializeHistoricalMissionPackageV6(
+  mission: HistoricalMissionPackageV6,
+): string {
+  return `${JSON.stringify(
+    {
+      ...historicalMissionContentV6(mission),
+      content_sha256: mission.content_sha256,
+    },
+    null,
+    2,
+  )}\n`;
+}
+
 function historicalMissionContentV5(mission: HistoricalMissionPackageV5) {
   return missionContentWithOptionalCapability(mission);
 }
@@ -2101,6 +2213,7 @@ function missionContentWithOptionalCapability(
   mission:
     | MissionPackageWithoutHash
     | MissionPackage
+    | HistoricalMissionPackageV6
     | HistoricalMissionPackageV5,
 ) {
   const content = missionContentWithoutCapability(mission);
@@ -2167,6 +2280,9 @@ export function serializeReadableMissionPackage(
   const validatedMission = readableMissionPackageSchema.parse(mission);
   if (validatedMission.mission_schema_version === MISSION_SCHEMA_VERSION) {
     return serializeMissionPackage(validatedMission);
+  }
+  if (validatedMission.mission_schema_version === 6) {
+    return serializeHistoricalMissionPackageV6(validatedMission);
   }
   if (validatedMission.mission_schema_version === 5) {
     return serializeHistoricalMissionPackageV5(validatedMission);
@@ -2429,12 +2545,14 @@ function renderMissionHeader(mission: ReadableMissionPackage): string[] {
 
 type ReadableExecuteMissionPackage =
   | ExecuteMissionPackage
+  | HistoricalExecuteMissionPackageV6
   | HistoricalExecuteMissionPackageV5
   | HistoricalExecuteMissionPackageV4
   | HistoricalExecuteMissionPackageV3;
 
 type ReadablePatchMissionPackage =
   | PatchMissionPackage
+  | HistoricalPatchMissionPackageV6
   | HistoricalPatchMissionPackageV5
   | HistoricalPatchMissionPackageV4;
 
@@ -2444,6 +2562,7 @@ type ReadableCapabilityMissionPackage =
 
 function renderCapabilityEnvelope(
   mission: ReadableCapabilityMissionPackage,
+  includeExactArrayGuidance = true,
 ): string[] {
   if (!("capability_envelope" in mission)) {
     return [];
@@ -2468,7 +2587,11 @@ function renderCapabilityEnvelope(
     "",
     "Approved command forms:",
     renderList(commandForms.length === 0 ? ["None"] : commandForms),
-    "Approved command arrays are exact. Do not add arguments, message paragraphs, attribution trailers, or metadata.",
+    ...(includeExactArrayGuidance
+      ? [
+          "Approved command arrays are exact. Do not add arguments, message paragraphs, attribution trailers, or metadata.",
+        ]
+      : []),
     "",
     "Approved URL operations:",
     renderList(urlOperations.length === 0 ? ["None"] : urlOperations),
@@ -2476,10 +2599,13 @@ function renderCapabilityEnvelope(
   ];
 }
 
-function renderExecuteTaskMd(mission: ReadableExecuteMissionPackage): string {
+function renderExecuteTaskMd(
+  mission: ReadableExecuteMissionPackage,
+  includeExactArrayGuidance = true,
+): string {
   return [
     ...renderMissionHeader(mission),
-    ...renderCapabilityEnvelope(mission),
+    ...renderCapabilityEnvelope(mission, includeExactArrayGuidance),
     "## Result contract",
     "",
     `Write the structured result to \`${mission.result_contract.output_path}\`.`,
@@ -2620,7 +2746,10 @@ function renderReviewTaskMd(mission: ReviewMissionPackage): string {
   ].join("\n");
 }
 
-function renderPatchTaskMd(mission: ReadablePatchMissionPackage): string {
+function renderPatchTaskMd(
+  mission: ReadablePatchMissionPackage,
+  includeExactArrayGuidance = true,
+): string {
   const subject = mission.patch_subject;
   const findings = subject.findings.flatMap((finding) => [
     `- ${finding.finding_id} (${finding.severity}): ${finding.title}`,
@@ -2629,7 +2758,7 @@ function renderPatchTaskMd(mission: ReadablePatchMissionPackage): string {
 
   return [
     ...renderMissionHeader(mission),
-    ...renderCapabilityEnvelope(mission),
+    ...renderCapabilityEnvelope(mission, includeExactArrayGuidance),
     "## Patch assignment",
     "",
     "Apply one bounded repair that addresses every finding listed below.",
@@ -2696,25 +2825,35 @@ export function renderReadableTaskMd(
   if (validatedMission.mission_schema_version === MISSION_SCHEMA_VERSION) {
     return renderTaskMd(validatedMission);
   }
-  if (validatedMission.mission_schema_version === 5) {
+  if (validatedMission.mission_schema_version === 6) {
     if ("patch_subject" in validatedMission) {
-      return renderPatchTaskMd(validatedMission);
+      return renderPatchTaskMd(validatedMission, false);
     }
     return "review_subject" in validatedMission
       ? renderReviewTaskMd(
           validatedMission as unknown as ReviewMissionPackage,
         )
-      : renderExecuteTaskMd(validatedMission);
+      : renderExecuteTaskMd(validatedMission, false);
+  }
+  if (validatedMission.mission_schema_version === 5) {
+    if ("patch_subject" in validatedMission) {
+      return renderPatchTaskMd(validatedMission, false);
+    }
+    return "review_subject" in validatedMission
+      ? renderReviewTaskMd(
+          validatedMission as unknown as ReviewMissionPackage,
+        )
+      : renderExecuteTaskMd(validatedMission, false);
   }
   if (validatedMission.mission_schema_version === 4) {
     if ("patch_subject" in validatedMission) {
-      return renderPatchTaskMd(validatedMission);
+      return renderPatchTaskMd(validatedMission, false);
     }
     return "review_subject" in validatedMission
       ? renderReviewTaskMd(
           validatedMission as unknown as ReviewMissionPackage,
         )
-      : renderExecuteTaskMd(validatedMission);
+      : renderExecuteTaskMd(validatedMission, false);
   }
   if ("review_subject" in validatedMission) {
     return renderReviewTaskMd({
@@ -2725,5 +2864,5 @@ export function renderReadableTaskMd(
       },
     } as unknown as ExecuteReviewMissionPackage);
   }
-  return renderExecuteTaskMd(validatedMission);
+  return renderExecuteTaskMd(validatedMission, false);
 }

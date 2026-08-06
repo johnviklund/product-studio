@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
 
 import {
@@ -22,7 +22,10 @@ import {
   compileMission,
   compilePatchMission,
   compileReviewMission,
+  hashHistoricalMissionContentV6,
+  type ExecuteMissionPackage,
   type ExecuteReviewSubject,
+  type HistoricalExecuteMissionPackageV6,
   type MissionIdentity,
   type MissionPhase,
   type PatchReviewSubject,
@@ -2689,6 +2692,109 @@ describe("WorkItemController", () => {
     expect(retryMission.mission.capability_envelope).toEqual(
       fixture.record.authorization.envelope,
     );
+  });
+
+  it("keeps v6 launch-ineligible while allowing its exact permission recovery", async () => {
+    const historicalFixture = async () => {
+      const fixture = await createConnectedFixture();
+      const snapshot = await fixture.repository.readMissionPackage(
+        fixture.record.mission.identity,
+      );
+      const currentMission = snapshot.mission as ExecuteMissionPackage;
+      const draft: HistoricalExecuteMissionPackageV6 = {
+        ...currentMission,
+        mission_schema_version: 6 as const,
+        content_sha256: "0".repeat(64),
+      };
+      const historicalMission = {
+        ...draft,
+        content_sha256: hashHistoricalMissionContentV6(draft),
+      };
+      const record = {
+        ...fixture.record,
+        mission: {
+          ...fixture.record.mission,
+          content_sha256: historicalMission.content_sha256,
+        },
+      };
+      const input = {
+        ...fixture.input,
+        mission_content_sha256: historicalMission.content_sha256,
+      };
+      return { fixture, snapshot, historicalMission, record, input };
+    };
+
+    const launch = await historicalFixture();
+    vi.spyOn(launch.fixture.repository, "readMissionPackage").mockResolvedValue({
+      ...launch.snapshot,
+      mission: launch.historicalMission,
+    });
+    await expect(
+      launch.fixture.controller.launchConnectedExecute(
+        launch.fixture.workItem.goal.work_item_id,
+        launch.input,
+        launch.record,
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+
+    const recovery = await historicalFixture();
+    const readMission = vi
+      .spyOn(recovery.fixture.repository, "readMissionPackage")
+      .mockResolvedValue({
+        ...recovery.snapshot,
+        mission: {
+          ...recovery.historicalMission,
+          mission_schema_version: MISSION_SCHEMA_VERSION,
+        } as ExecuteMissionPackage,
+      });
+    await recovery.fixture.controller.launchConnectedExecute(
+      recovery.fixture.workItem.goal.work_item_id,
+      recovery.input,
+      recovery.record,
+    );
+    const request = {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "git",
+      args: ["commit", "-m", "Expected message", "-m", "Extra trailer"],
+    };
+    const operation = {
+      normalized_operation: request,
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest(request),
+      reason: "outside_capability_envelope" as const,
+      resolved_envelope_sha256:
+        recovery.record.authorization.envelope_sha256,
+      connected_run_id: recovery.record.connected_run_id,
+    };
+    await recovery.fixture.controller.recordConnectedPermissionDenial(
+      recovery.fixture.workItem.goal.work_item_id,
+      { ...withoutRunOrdinal(recovery.input), operation },
+    );
+    readMission.mockResolvedValue({
+      ...recovery.snapshot,
+      mission: recovery.historicalMission,
+    });
+
+    const retried = await recovery.fixture.controller.resolveConnectedPermission(
+      recovery.fixture.workItem.goal.work_item_id,
+      {
+        decision: "retry_without_allowing",
+        expected_phase: "execute",
+        governed_tuple: recovery.input.governed_tuple,
+        operation_sha256: operation.operation_sha256,
+        connected_run_id: operation.connected_run_id,
+        mission_content_sha256: recovery.input.mission_content_sha256,
+      },
+    );
+    expect(retried.work_item.state.attempt).toBe(
+      recovery.input.governed_tuple.attempt + 1,
+    );
+    expect(retried.manifest?.capability_grant).toBeUndefined();
+    expect(retried.manifest?.capability_carry_forward).toMatchObject({
+      source_mission_content_sha256:
+        recovery.historicalMission.content_sha256,
+    });
   });
 
   it("never turns forbidden capability kinds into fresh-attempt grants", async () => {

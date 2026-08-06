@@ -3282,6 +3282,7 @@ export class WorkItemController {
       input.expected_phase,
       input.governed_tuple,
       input.mission_content_sha256,
+      { allowHistoricalV6PermissionRecovery: true },
     );
     if (record.authorization.kind !== "capability_envelope") {
       throw this.conflict(
@@ -3369,6 +3370,7 @@ export class WorkItemController {
       patch_cycle: number;
     },
     missionContentSha256: string,
+    options: { allowHistoricalV6PermissionRecovery?: boolean } = {},
   ): Promise<void> {
     if (
       record.mission.identity.work_item_id !== workItemId ||
@@ -3385,11 +3387,17 @@ export class WorkItemController {
     const snapshot = await this.repository.readMissionPackage(
       record.mission.identity,
     );
-    if (snapshot.mission.mission_schema_version !== MISSION_SCHEMA_VERSION) {
+    if (
+      snapshot.mission.mission_schema_version !== MISSION_SCHEMA_VERSION &&
+      !(
+        options.allowHistoricalV6PermissionRecovery === true &&
+        snapshot.mission.mission_schema_version === 6
+      )
+    ) {
       throw this.conflict(
         "mission_not_ready",
         workItemId,
-        "Historical mission packages cannot start or recover connected execution.",
+        "Historical mission packages cannot start connected execution.",
       );
     }
     if (

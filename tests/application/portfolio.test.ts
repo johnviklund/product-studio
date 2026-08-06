@@ -6128,7 +6128,7 @@ describe("PortfolioService", () => {
       created.goal.work_item_id,
     );
     expect(patchMission.mission).toMatchObject({
-      mission_schema_version: 6,
+      mission_schema_version: 7,
       identity: { phase: "patch", patch_cycle: 1 },
       capability_envelope: {
         runtime: {
