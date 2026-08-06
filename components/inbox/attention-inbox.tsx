@@ -44,6 +44,7 @@ const ATTENTION_LABELS: Record<WorkItemAttentionKind, string> = {
   ambiguous_goal: "Goal clarification",
   cycle_limit: "Cycle limit",
   missing_permission: "Permission required",
+  command_authorization: "Command approval",
   review_ready: "Review ready",
 };
 

@@ -9,10 +9,13 @@ import {
   WorkItemTransferFailedError,
   acceptPatchPlanInputSchema,
   approvePlanResultInputSchema,
+  commandAuthorizationDecisionInputSchema,
+  commandAuthorizationProposalSchema,
   connectedPermissionResolutionInputSchema,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   createControllerCapabilityGrant,
+  hashCommandAuthorizationProposal,
   hashScopeCorrectionProposal,
   createCaptureInputSchema,
   createWorkItemInputSchema,
@@ -32,6 +35,7 @@ import {
   workItemAttentionSchema,
   workItemSchema,
   workItemStateSchema,
+  type CommandAuthorizationProposalV1,
   type PlanApprovalIntentV1,
   type PlanApprovalManifestV1,
 } from "../../src/domain/work-item";
@@ -67,6 +71,42 @@ const scopeCorrectionContent = {
   },
   current_allowed_scope: ["Focused route tests"],
   proposed_allowed_scope: ["tests/api/portfolio-routes.test.ts"],
+};
+
+const commandAuthorizationContent: Omit<
+  CommandAuthorizationProposalV1,
+  "proposal_sha256"
+> = {
+  schema_version: 1 as const,
+  phase: "execute" as const,
+  work_item_id: workItemId,
+  governed_tuple: {
+    goal_version: 2,
+    input_revision: 2,
+    attempt: 0,
+    patch_cycle: 0,
+  },
+  source_mission_content_sha256: "b".repeat(64),
+  terminal_connected_run_id: runId,
+  changed_files: ["src/application/work-item-controller.ts"],
+  commands: [
+    {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "npm",
+      args: ["test"],
+    },
+    {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "git",
+      args: [
+        "add",
+        "--",
+        "src/application/work-item-controller.ts",
+      ],
+    },
+  ],
 };
 
 const goal = {
@@ -155,6 +195,55 @@ const planApprovalManifest: PlanApprovalManifestV1 = {
 };
 
 describe("durable work-item schemas", () => {
+  it("hash-binds exact command authorization proposals and decisions", () => {
+    const proposal = {
+      ...commandAuthorizationContent,
+      proposal_sha256: hashCommandAuthorizationProposal(
+        commandAuthorizationContent,
+      ),
+    };
+    expect(commandAuthorizationProposalSchema.parse(proposal)).toEqual(
+      proposal,
+    );
+    expect(() =>
+      commandAuthorizationProposalSchema.parse({
+        ...proposal,
+        commands: [
+          ...proposal.commands,
+          {
+            schema_version: 1,
+            kind: "command",
+            executable: "git",
+            args: ["push"],
+          },
+        ],
+      }),
+    ).toThrow(/proposal_sha256/u);
+
+    expect(
+      commandAuthorizationDecisionInputSchema.parse({
+        decision: "allow_once",
+        expected_phase: proposal.phase,
+        governed_tuple: proposal.governed_tuple,
+        source_mission_content_sha256:
+          proposal.source_mission_content_sha256,
+        terminal_connected_run_id: proposal.terminal_connected_run_id,
+        proposal_sha256: proposal.proposal_sha256,
+      }),
+    ).toMatchObject({ decision: "allow_once", expected_phase: "execute" });
+    expect(() =>
+      commandAuthorizationDecisionInputSchema.parse({
+        decision: "allow_once",
+        expected_phase: "review",
+        governed_tuple: proposal.governed_tuple,
+        source_mission_content_sha256:
+          proposal.source_mission_content_sha256,
+        terminal_connected_run_id: proposal.terminal_connected_run_id,
+        proposal_sha256: proposal.proposal_sha256,
+      }),
+    ).toThrow();
+  });
+
   it("hash-binds exact scope-correction proposals", () => {
     const proposal = {
       ...scopeCorrectionContent,
@@ -398,6 +487,15 @@ describe("durable work-item schemas", () => {
         },
         ...(kind === "missing_permission"
           ? { operation: missingPermissionOperation }
+          : kind === "command_authorization"
+            ? {
+                proposal: {
+                  ...commandAuthorizationContent,
+                  proposal_sha256: hashCommandAuthorizationProposal(
+                    commandAuthorizationContent,
+                  ),
+                },
+              }
           : {}),
       };
 

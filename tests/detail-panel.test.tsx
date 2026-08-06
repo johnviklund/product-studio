@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   canEditGoalContractFromFullWorkItem,
   clearShapingStateForExecuteHandoff,
+  CommandAuthorizationSection,
   ConnectedExecuteSection,
   ConnectedPhaseSection,
   dispatchShapingManualRecoveryAction,
@@ -40,7 +41,11 @@ import type {
 } from "../src/domain/shaping";
 import type { ShapingModelPickerOption } from "../src/domain/portfolio-preferences";
 import type { ShapingRunSummary } from "../src/domain/shaping-run";
-import type { GoalContract, WorkItemPhase } from "../src/domain/work-item";
+import type {
+  GoalContract,
+  WorkItemAttention,
+  WorkItemPhase,
+} from "../src/domain/work-item";
 import {
   shapingHandoffForItem,
   type ConnectedPhaseProjection,
@@ -3120,6 +3125,87 @@ describe("detail panel patch workflow", () => {
 });
 
 describe("detail panel connected execution", () => {
+  it("shows every exact preflight command at the visible founder gate", () => {
+    const commandAttention: Extract<
+      WorkItemAttention,
+      { kind: "command_authorization" }
+    > = {
+      kind: "command_authorization",
+      question: "Allow these exact commands once in a fresh writable attempt?",
+      recommendation: "Review every command.",
+      created_at: "2026-08-06T12:00:00.000Z",
+      governed_tuple: {
+        goal_version: 2,
+        input_revision: 2,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      pins: {
+        artifact_paths: [
+          `.founder/missions/${workItemId}/execute-2-2-0/mission.json`,
+        ],
+        evidence_paths: [],
+        mission_content_sha256: missionContentSha256,
+      },
+      proposal: {
+        schema_version: 1,
+        phase: "execute",
+        work_item_id: workItemId,
+        governed_tuple: {
+          goal_version: 2,
+          input_revision: 2,
+          attempt: 0,
+          patch_cycle: 0,
+        },
+        source_mission_content_sha256: missionContentSha256,
+        terminal_connected_run_id:
+          "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+        changed_files: ["src/domain/work-item.ts"],
+        commands: [
+          {
+            schema_version: 1,
+            kind: "command",
+            executable: "npm",
+            args: ["test"],
+          },
+          {
+            schema_version: 1,
+            kind: "command",
+            executable: "git",
+            args: ["add", "--", "src/domain/work-item.ts"],
+          },
+          {
+            schema_version: 1,
+            kind: "command",
+            executable: "git",
+            args: ["commit", "-m", "Add model configuration"],
+          },
+        ],
+        proposal_sha256: "f".repeat(64),
+      },
+    };
+    const html = renderToStaticMarkup(
+      <CommandAuthorizationSection
+        fieldId="detail"
+        attention={commandAttention}
+        canPrepare={false}
+        mutation={null}
+        onPrepare={noop}
+        onAllowOnce={noop}
+        onKeepDenied={noop}
+      />,
+    );
+
+    expect(html).toContain("Required command preflight");
+    expect(html).toContain("npm test");
+    expect(html).toContain("git add -- src/domain/work-item.ts");
+    expect(html).toContain("git commit -m Add model configuration");
+    expect(html).toContain(commandAttention.proposal.proposal_sha256);
+    expect(html).toContain("Allow once and retry");
+    expect(html).toContain("Keep denied");
+    expect(primaryActionCount(html)).toBe(1);
+  });
+
   it("keeps the connected surface compact and sanitized", () => {
     const html = renderToStaticMarkup(
       <ConnectedExecuteSection

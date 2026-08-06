@@ -2900,7 +2900,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         manifest.outcome === "applied" &&
         manifest.goal_version === validatedIdentity.goal_version &&
         manifest.input_revision === validatedIdentity.input_revision &&
-        manifest.attempt === validatedIdentity.attempt,
+        manifest.attempt === validatedIdentity.attempt &&
+        !(
+          manifest.command_authorization !== undefined &&
+          manifest.capability_grant === undefined
+        ),
     );
 
     const planApprovalMatches = (

@@ -81,11 +81,13 @@ import {
   workItemStateSchema,
   type ApprovePlanResultInput,
   type ApplyScopeCorrectionInput,
+  type CommandAuthorizationDecisionInput,
   type CreateCaptureInput,
   type ControllerRunManifest,
   type RetainedControllerLeaseRepairResult,
   type SaveWorkItemInput,
   type ScopeCorrectionProposalV1,
+  type CommandAuthorizationProposalV1,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
   type WorkItemAttention,
@@ -667,6 +669,11 @@ export interface PortfolioScopeCorrectionListing {
 export interface PortfolioScopeCorrectionResult extends PortfolioWorkItem {
   controller_run: ControllerRunManifest;
   proposal: ScopeCorrectionProposalV1;
+}
+
+export interface PortfolioCommandAuthorizationResult extends PortfolioWorkItem {
+  controller_run: ControllerRunManifest | null;
+  proposal: CommandAuthorizationProposalV1;
 }
 
 export interface LaunchConnectedExecuteRequest {
@@ -3413,6 +3420,56 @@ export class PortfolioService {
       work_item: corrected.work_item,
       controller_run: corrected.manifest,
       proposal: corrected.proposal,
+    };
+  }
+
+  async prepareCommandAuthorization(
+    sourceId: string,
+    workItemId: string,
+    phase: "execute" | "patch",
+  ): Promise<PortfolioCommandAuthorizationResult> {
+    const source = await this.resolveSource(sourceId);
+    const current = await source.workspace.read(workItemId);
+    if (current === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    if (phase === "execute") {
+      await this.compileMission(sourceId, workItemId);
+    } else {
+      await this.compilePatchMission(sourceId, workItemId);
+    }
+    const prepared = await this.workItemController(
+      source.workspace,
+    ).prepareCommandAuthorization(workItemId, phase);
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: prepared.work_item,
+      controller_run: prepared.manifest,
+      proposal: prepared.proposal,
+    };
+  }
+
+  async decideCommandAuthorization(
+    sourceId: string,
+    workItemId: string,
+    input: CommandAuthorizationDecisionInput,
+  ): Promise<PortfolioCommandAuthorizationResult> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const decided = await this.workItemController(
+      source.workspace,
+    ).decideCommandAuthorization(workItemId, input);
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: decided.work_item,
+      controller_run: decided.manifest,
+      proposal: decided.proposal,
     };
   }
 

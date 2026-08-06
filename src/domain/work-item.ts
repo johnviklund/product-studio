@@ -83,6 +83,7 @@ export const WORK_ITEM_ATTENTION_KINDS = [
   "ambiguous_goal",
   "cycle_limit",
   "missing_permission",
+  "command_authorization",
   "review_ready",
 ] as const;
 
@@ -193,6 +194,23 @@ interface WorkItemAttentionBase {
   pins: WorkItemAttentionPins;
 }
 
+export type CommandAuthorizationCommand = Extract<
+  CanonicalCapabilityRequest,
+  { kind: "command" }
+>;
+
+export interface CommandAuthorizationProposalV1 {
+  schema_version: 1;
+  phase: "execute" | "patch";
+  work_item_id: string;
+  governed_tuple: GovernedTuple;
+  source_mission_content_sha256: string;
+  terminal_connected_run_id: string;
+  changed_files: string[];
+  commands: [CommandAuthorizationCommand, ...CommandAuthorizationCommand[]];
+  proposal_sha256: string;
+}
+
 export interface MissingPermissionOperation {
   normalized_operation: CanonicalCapabilityRequest;
   canonical_args_sha256: string;
@@ -204,7 +222,7 @@ export interface MissingPermissionOperation {
 
 type StandardWorkItemAttentionKind = Exclude<
   WorkItemAttentionKind,
-  "missing_permission"
+  "missing_permission" | "command_authorization"
 >;
 
 type StandardWorkItemAttention = {
@@ -218,6 +236,10 @@ export type WorkItemAttention =
   | (WorkItemAttentionBase & {
       kind: "missing_permission";
       operation: MissingPermissionOperation;
+    })
+  | (WorkItemAttentionBase & {
+      kind: "command_authorization";
+      proposal: CommandAuthorizationProposalV1;
     });
 
 export type ConnectedPermissionDecision = "allow_once" | "keep_denied";
@@ -229,6 +251,15 @@ export interface ConnectedPermissionResolutionInput {
   operation_sha256: string;
   connected_run_id: string;
   mission_content_sha256: string;
+}
+
+export interface CommandAuthorizationDecisionInput {
+  decision: ConnectedPermissionDecision;
+  expected_phase: "execute" | "patch";
+  governed_tuple: GovernedTuple;
+  source_mission_content_sha256: string;
+  terminal_connected_run_id: string;
+  proposal_sha256: string;
 }
 
 export interface RecordConnectedPermissionDenialInput {
@@ -438,6 +469,7 @@ export interface ControllerRunManifest {
   outcome: ControllerRunOutcome;
   capability_grant?: ControllerCapabilityGrant;
   scope_correction?: ScopeCorrectionProposalV1;
+  command_authorization?: CommandAuthorizationProposalV1;
 }
 
 export interface ScopeCorrectionProposalV1 {
@@ -1007,6 +1039,68 @@ const attentionRecordFields = {
   pins: workItemAttentionPinsSchema,
 };
 
+const commandAuthorizationCommandSchema: z.ZodType<CommandAuthorizationCommand> =
+  canonicalCapabilityRequestSchema.refine(
+    (operation): operation is CommandAuthorizationCommand =>
+      operation.kind === "command",
+    "command authorization accepts only command operations",
+  );
+
+const commandAuthorizationProposalContentSchema = z.strictObject({
+  schema_version: z.literal(1),
+  phase: z.enum(["execute", "patch"]),
+  work_item_id: workItemIdSchema,
+  governed_tuple: governedTupleSchema,
+  source_mission_content_sha256: sha256Schema,
+  terminal_connected_run_id: controllerRunIdSchema,
+  changed_files: z
+    .array(workspaceRelativePosixPathSchema)
+    .min(1)
+    .refine(
+      (paths) => new Set(paths).size === paths.length,
+      "changed_files must not contain duplicates",
+    ),
+  commands: z.tuple(
+    [commandAuthorizationCommandSchema],
+    commandAuthorizationCommandSchema,
+  ),
+});
+
+export function hashCommandAuthorizationProposal(
+  input: Omit<CommandAuthorizationProposalV1, "proposal_sha256">,
+): string {
+  const parsed = commandAuthorizationProposalContentSchema.parse({
+    schema_version: input.schema_version,
+    phase: input.phase,
+    work_item_id: input.work_item_id,
+    governed_tuple: input.governed_tuple,
+    source_mission_content_sha256: input.source_mission_content_sha256,
+    terminal_connected_run_id: input.terminal_connected_run_id,
+    changed_files: input.changed_files,
+    commands: input.commands,
+  });
+  return createHash("sha256")
+    .update(`${JSON.stringify(parsed, null, 2)}\n`)
+    .digest("hex");
+}
+
+export const commandAuthorizationProposalSchema: z.ZodType<CommandAuthorizationProposalV1> =
+  commandAuthorizationProposalContentSchema
+    .extend({ proposal_sha256: sha256Schema })
+    .superRefine((proposal, context) => {
+      if (
+        proposal.proposal_sha256 !==
+        hashCommandAuthorizationProposal(proposal)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "proposal_sha256 must hash the command-authorization proposal",
+          path: ["proposal_sha256"],
+          input: proposal.proposal_sha256,
+        });
+      }
+    });
+
 export const workItemAttentionSchema: z.ZodType<WorkItemAttention> =
   z.discriminatedUnion("kind", [
     z.strictObject({
@@ -1039,6 +1133,11 @@ export const workItemAttentionSchema: z.ZodType<WorkItemAttention> =
       operation: missingPermissionOperationSchema,
     }),
     z.strictObject({
+      kind: z.literal("command_authorization"),
+      ...attentionRecordFields,
+      proposal: commandAuthorizationProposalSchema,
+    }),
+    z.strictObject({
       kind: z.literal("review_ready"),
       ...attentionRecordFields,
     }),
@@ -1066,6 +1165,26 @@ export const connectedPermissionResolutionInputSchema: z.ZodType<ConnectedPermis
   z.discriminatedUnion("decision", [
     allowOnceConnectedPermissionInputSchema,
     keepDeniedConnectedPermissionInputSchema,
+  ]);
+
+const commandAuthorizationDecisionFields = {
+  expected_phase: z.enum(["execute", "patch"]),
+  governed_tuple: governedTupleSchema,
+  source_mission_content_sha256: sha256Schema,
+  terminal_connected_run_id: controllerRunIdSchema,
+  proposal_sha256: sha256Schema,
+};
+
+export const commandAuthorizationDecisionInputSchema: z.ZodType<CommandAuthorizationDecisionInput> =
+  z.discriminatedUnion("decision", [
+    z.strictObject({
+      decision: z.literal("allow_once"),
+      ...commandAuthorizationDecisionFields,
+    }),
+    z.strictObject({
+      decision: z.literal("keep_denied"),
+      ...commandAuthorizationDecisionFields,
+    }),
   ]);
 
 export const recordConnectedPermissionDenialInputSchema: z.ZodType<RecordConnectedPermissionDenialInput> =
@@ -1497,6 +1616,9 @@ export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
     outcome: z.enum(CONTROLLER_RUN_OUTCOMES),
     capability_grant: controllerCapabilityGrantSchema.optional(),
     scope_correction: z.lazy(() => scopeCorrectionProposalSchema).optional(),
+    command_authorization: z
+      .lazy(() => commandAuthorizationProposalSchema)
+      .optional(),
   });
 
 const scopeCorrectionProposalContentSchema = z.strictObject({

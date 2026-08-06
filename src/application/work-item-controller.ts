@@ -9,6 +9,7 @@ import {
   reviewSubjectSchema,
   type MissionIdentity,
   type MissionPhase,
+  type ReadableMissionPackage,
   type ReviewSubject,
 } from "../domain/mission";
 import {
@@ -90,6 +91,8 @@ import {
   createControllerCapabilityGrant,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
+  commandAuthorizationDecisionInputSchema,
+  commandAuthorizationProposalSchema,
   connectedPermissionResolutionInputSchema,
   importExternalResultInputSchema,
   importPatchResultInputSchema,
@@ -98,6 +101,7 @@ import {
   recordConnectedPermissionDenialInputSchema,
   saveWorkItemInputSchema,
   hashScopeCorrectionProposal,
+  hashCommandAuthorizationProposal,
   scopeCorrectionProposalSchema,
   deriveControllerRunId,
   derivePlanApprovalId,
@@ -112,6 +116,8 @@ import {
   type ApplyScopeCorrectionInput,
   type ControllerLease,
   type ControllerCapabilityGrant,
+  type CommandAuthorizationDecisionInput,
+  type CommandAuthorizationProposalV1,
   type ControllerMutationResult,
   type ControllerRunManifest,
   type ControllerTransitionInput,
@@ -343,6 +349,12 @@ export interface ConnectedLaunchResult extends ControllerMutationResult {
 
 export interface ScopeCorrectionControllerResult extends ControllerMutationResult {
   proposal: ScopeCorrectionProposalV1;
+}
+
+export interface CommandAuthorizationControllerResult {
+  work_item: WorkItem;
+  manifest: ControllerRunManifest | null;
+  proposal: CommandAuthorizationProposalV1;
 }
 
 export interface ConnectedPermissionDecisionResult {
@@ -642,6 +654,317 @@ export class WorkItemController {
           activeRun.acquired_at,
         ),
         scope_correction: proposal,
+      };
+      const committed = await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest,
+      });
+      return { ...committed, proposal };
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
+  }
+
+  async prepareCommandAuthorization(
+    workItemId: string,
+    expectedPhase: "execute" | "patch",
+  ): Promise<CommandAuthorizationControllerResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const preLockItem = await this.repository.read(validatedId);
+    if (preLockItem === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+    const preLockSnapshot = await this.currentWritableMission(
+      preLockItem,
+      expectedPhase,
+    );
+    const preLockProposal = await this.buildCommandAuthorizationProposal(
+      preLockItem,
+      preLockSnapshot.mission,
+    );
+    const idempotencyKey = [
+      validatedId,
+      expectedPhase,
+      "command-authorization",
+      preLockProposal.proposal_sha256,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "prepare_command_authorization" }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (existing?.outcome === "applied") {
+        const attention = lease.work_item.state.attention;
+        if (
+          existing.command_authorization?.proposal_sha256 !==
+            preLockProposal.proposal_sha256 ||
+          attention?.kind !== "command_authorization" ||
+          attention.proposal.proposal_sha256 !==
+            preLockProposal.proposal_sha256
+        ) {
+          throw this.conflict(
+            "idempotency_conflict",
+            validatedId,
+            `Command authorization ${runId} does not match durable attention.`,
+          );
+        }
+        return {
+          work_item: lease.work_item,
+          manifest: existing,
+          proposal: attention.proposal,
+        };
+      }
+      if (existing !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Command authorization ${runId} has a non-applied controller manifest.`,
+        );
+      }
+      if (lease.work_item.state.attention !== undefined) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "Command authorization requires no unresolved attention.",
+        );
+      }
+      const snapshot = await this.currentWritableMission(
+        lease.work_item,
+        expectedPhase,
+      );
+      const proposal = await this.buildCommandAuthorizationProposal(
+        lease.work_item,
+        snapshot.mission,
+      );
+      if (proposal.proposal_sha256 !== preLockProposal.proposal_sha256) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "The command-authorization proposal changed while acquiring its lease.",
+        );
+      }
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...lease.work_item.state,
+          attention: {
+            kind: "command_authorization",
+            question: "Allow these exact commands once in a fresh writable attempt?",
+            recommendation:
+              "Review every command and keep denied unless each is required by the governed result contract.",
+            created_at: activeRun.acquired_at,
+            governed_tuple: proposal.governed_tuple,
+            pins: {
+              artifact_paths: [snapshot.mission_path],
+              evidence_paths: [],
+              mission_content_sha256:
+                proposal.source_mission_content_sha256,
+            },
+            proposal,
+          },
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const manifest = {
+        ...this.pendingManifest(
+          {
+            work_item_id: validatedId,
+            run_id: runId,
+            idempotency_key: idempotencyKey,
+            phase: expectedPhase,
+            goal_version: proposal.governed_tuple.goal_version,
+            input_revision: proposal.governed_tuple.input_revision,
+            attempt: proposal.governed_tuple.attempt,
+          },
+          activeRun.acquired_at,
+        ),
+        command_authorization: proposal,
+      };
+      const committed = await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest,
+      });
+      return { ...committed, proposal };
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
+  }
+
+  async decideCommandAuthorization(
+    workItemId: string,
+    input: CommandAuthorizationDecisionInput,
+  ): Promise<CommandAuthorizationControllerResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = commandAuthorizationDecisionInputSchema.parse(input);
+    const nextAttempt = this.incrementVersion(
+      validatedInput.governed_tuple.attempt,
+      validatedId,
+      "attempt",
+    );
+    const idempotencyKey = deriveControllerIdempotencyKey(
+      validatedId,
+      validatedInput.expected_phase,
+      validatedInput.governed_tuple.goal_version,
+      validatedInput.governed_tuple.input_revision,
+      nextAttempt,
+    );
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "decide_command_authorization", input: validatedInput }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+    try {
+      const attention = lease.work_item.state.attention;
+      const proposal =
+        attention?.kind === "command_authorization"
+          ? attention.proposal
+          : null;
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (existing?.outcome === "applied") {
+        const storedProposal = existing.command_authorization;
+        if (
+          validatedInput.decision !== "allow_once" ||
+          storedProposal?.proposal_sha256 !== validatedInput.proposal_sha256 ||
+          existing.capability_grant?.source_mission_content_sha256 !==
+            validatedInput.source_mission_content_sha256 ||
+          lease.work_item.state.attempt !== nextAttempt
+        ) {
+          throw this.conflict(
+            "idempotency_conflict",
+            validatedId,
+            `Command-authorization decision ${runId} does not match durable state.`,
+          );
+        }
+        return {
+          work_item: lease.work_item,
+          manifest: existing,
+          proposal: storedProposal,
+        };
+      }
+      if (existing !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Command-authorization decision ${runId} is not applied.`,
+        );
+      }
+      if (
+        proposal === null ||
+        proposal.phase !== validatedInput.expected_phase ||
+        proposal.proposal_sha256 !== validatedInput.proposal_sha256 ||
+        proposal.source_mission_content_sha256 !==
+          validatedInput.source_mission_content_sha256 ||
+        proposal.terminal_connected_run_id !==
+          validatedInput.terminal_connected_run_id ||
+        !isDeepStrictEqual(
+          proposal.governed_tuple,
+          validatedInput.governed_tuple,
+        )
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "The command decision does not match the exact unresolved attention.",
+        );
+      }
+      if (validatedInput.decision === "keep_denied") {
+        return { work_item: lease.work_item, manifest: null, proposal };
+      }
+      const snapshot = await this.currentWritableMission(
+        lease.work_item,
+        validatedInput.expected_phase,
+      );
+      if (
+        snapshot.mission.content_sha256 !==
+        proposal.source_mission_content_sha256 ||
+        !("capability_envelope" in snapshot.mission)
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "The command decision no longer binds the current writable mission.",
+        );
+      }
+      let executionDefaults = executionDefaultsFromCapabilityEnvelope(
+        snapshot.mission.capability_envelope,
+      );
+      for (const command of proposal.commands) {
+        executionDefaults = extendExecutionDefaultsWithRequest(
+          executionDefaults,
+          command,
+        );
+      }
+      const capabilityGrant = createControllerCapabilityGrant({
+        source_mission_content_sha256:
+          proposal.source_mission_content_sha256,
+        execution_defaults: executionDefaults,
+      });
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...withoutAttention(lease.work_item.state),
+          attempt: nextAttempt,
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const manifest = {
+        ...this.pendingManifest(
+          {
+            work_item_id: validatedId,
+            run_id: runId,
+            idempotency_key: idempotencyKey,
+            phase: validatedInput.expected_phase,
+            goal_version: proposal.governed_tuple.goal_version,
+            input_revision: proposal.governed_tuple.input_revision,
+            attempt: nextAttempt,
+          },
+          activeRun.acquired_at,
+        ),
+        capability_grant: capabilityGrant,
+        command_authorization: proposal,
       };
       const committed = await this.repository.commitControllerMutation(lease, {
         goal: nextItem.goal,
@@ -3671,6 +3994,203 @@ export class WorkItemController {
     return scopeCorrectionProposalSchema.parse({
       ...content,
       proposal_sha256: hashScopeCorrectionProposal(content),
+    });
+  }
+
+  private async currentWritableMission(
+    item: WorkItem,
+    expectedPhase: "execute" | "patch",
+  ): Promise<{
+    mission: ReadableMissionPackage;
+    mission_path: string;
+  }> {
+    const state = item.state;
+    if (
+      state.phase !== expectedPhase ||
+      state.status !== "active" ||
+      state.goal_version === undefined ||
+      state.input_revision === undefined ||
+      state.attempt === undefined ||
+      state.patch_cycle === undefined ||
+      item.goal.goal_contract?.goal_version !== state.goal_version
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        item.goal.work_item_id,
+        "Command authorization requires one current active writable tuple.",
+      );
+    }
+    const identity: MissionIdentity<"execute"> | MissionIdentity<"patch"> =
+      expectedPhase === "execute"
+        ? {
+            phase: "execute",
+            work_item_id: item.goal.work_item_id,
+            goal_version: state.goal_version,
+            input_revision: state.input_revision,
+            attempt: state.attempt,
+          }
+        : {
+            phase: "patch",
+            work_item_id: item.goal.work_item_id,
+            goal_version: state.goal_version,
+            input_revision: state.input_revision,
+            attempt: state.attempt,
+            patch_cycle: state.patch_cycle,
+          };
+    const snapshot = await this.repository.readMissionPackage(identity);
+    if (
+      snapshot.mission.identity.phase !== expectedPhase ||
+      !isDeepStrictEqual(snapshot.mission.identity, identity) ||
+      !("capability_envelope" in snapshot.mission)
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        item.goal.work_item_id,
+        "The current writable mission is absent or does not match its governed tuple.",
+      );
+    }
+    return snapshot;
+  }
+
+  private async buildCommandAuthorizationProposal(
+    item: WorkItem,
+    mission: ReadableMissionPackage,
+  ): Promise<CommandAuthorizationProposalV1> {
+    const phase = item.state.phase;
+    if (
+      (phase !== "execute" && phase !== "patch") ||
+      item.state.status !== "active" ||
+      item.state.goal_version === undefined ||
+      item.state.input_revision === undefined ||
+      item.state.attempt === undefined ||
+      item.state.patch_cycle === undefined ||
+      mission.identity.phase !== phase ||
+      !("capability_envelope" in mission)
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        item.goal.work_item_id,
+        "Command authorization requires an active writable mission.",
+      );
+    }
+    const governedTuple = {
+      goal_version: item.state.goal_version,
+      input_revision: item.state.input_revision,
+      attempt: item.state.attempt,
+      patch_cycle: item.state.patch_cycle,
+    };
+    const runs = (await this.repository.listConnectedRuns(
+      item.goal.work_item_id,
+    ))
+      .filter(
+        (run) =>
+          run.mission.identity.phase === phase &&
+          run.lifecycle.status === "terminal",
+      )
+      .sort(
+        (left, right) =>
+          right.lifecycle.updated_at.localeCompare(left.lifecycle.updated_at) ||
+          right.connected_run_id.localeCompare(left.connected_run_id),
+      );
+    const latest = runs[0];
+    if (
+      latest === undefined ||
+      latest.lifecycle.terminal?.outcome !== "completed" ||
+      latest.lifecycle.terminal.partial
+    ) {
+      throw this.conflict(
+        "mission_not_ready",
+        item.goal.work_item_id,
+        "Command authorization requires a latest complete writable run with no result.",
+      );
+    }
+    const evidence = await this.repository.listImportEvidence(
+      item.goal.work_item_id,
+    );
+    if (
+      evidence.some(
+        (stored) =>
+          stored.evidence.mission_content_sha256 ===
+          latest.mission.content_sha256,
+      )
+    ) {
+      throw this.conflict(
+        "mission_not_ready",
+        item.goal.work_item_id,
+        "The latest writable run already has immutable import evidence.",
+      );
+    }
+    if (this.git.listWorktreeChangedFilesExcludingFounder === undefined) {
+      throw this.conflict(
+        "mission_not_ready",
+        item.goal.work_item_id,
+        "The Git adapter cannot derive an exact worktree proposal.",
+      );
+    }
+    const changedFiles = [
+      ...new Set(await this.git.listWorktreeChangedFilesExcludingFounder()),
+    ].sort();
+    if (changedFiles.length === 0) {
+      throw this.conflict(
+        "mission_not_ready",
+        item.goal.work_item_id,
+        "The retained worktree is clean; no command authorization is needed.",
+      );
+    }
+    for (const path of changedFiles) {
+      if (
+        !workspaceRelativePosixPathSchema.safeParse(path).success ||
+        path === ".founder" ||
+        path.startsWith(".founder/") ||
+        !mission.goal.allowed_scope.some((scopeEntry) =>
+          scopeMatchesPath(scopeEntry, path),
+        )
+      ) {
+        throw this.conflict(
+          "mission_not_ready",
+          item.goal.work_item_id,
+          `The retained worktree path is outside the current mission scope: ${path}`,
+        );
+      }
+    }
+    const manifest = await this.repository.readManifest();
+    const [firstRequiredCommand, ...remainingRequiredCommands] =
+      manifest.verification.required_commands;
+    const commandOperation = (command: ProductManifest["verification"]["required_commands"][number]) => ({
+        schema_version: 1 as const,
+        kind: "command" as const,
+        executable: command.argv[0],
+        args: command.argv.slice(1),
+      });
+    const commands: CommandAuthorizationProposalV1["commands"] = [
+      commandOperation(firstRequiredCommand),
+      ...remainingRequiredCommands.map(commandOperation),
+      {
+        schema_version: 1 as const,
+        kind: "command" as const,
+        executable: "git",
+        args: ["add", "--", ...changedFiles],
+      },
+      {
+        schema_version: 1 as const,
+        kind: "command" as const,
+        executable: "git",
+        args: ["commit", "-m", item.goal.title],
+      },
+    ];
+    const content = {
+      schema_version: 1 as const,
+      phase,
+      work_item_id: item.goal.work_item_id,
+      governed_tuple: governedTuple,
+      source_mission_content_sha256: mission.content_sha256,
+      terminal_connected_run_id: latest.connected_run_id,
+      changed_files: changedFiles,
+      commands,
+    };
+    return commandAuthorizationProposalSchema.parse({
+      ...content,
+      proposal_sha256: hashCommandAuthorizationProposal(content),
     });
   }
 

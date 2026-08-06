@@ -5655,4 +5655,249 @@ describe("WorkItemController", () => {
       }),
     ).rejects.toMatchObject({ kind: "stale_expectation" });
   });
+
+  it("prepares and applies one exact command authorization in a fresh attempt", async () => {
+    const fixture = await createConnectedFixture();
+    const changedFiles = [
+      "src/application/work-item-controller.ts",
+      "src/domain/work-item.ts",
+    ];
+    const git: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return [...changedFiles].reverse();
+      },
+    };
+    const controller = createController(fixture.repository, git);
+    await fixture.repository.createConnectedRun(fixture.record);
+    await fixture.repository.completeConnectedRun(
+      fixture.workItem.goal.work_item_id,
+      fixture.record.connected_run_id,
+      { outcome: "completed", partial: false, reason: null },
+    );
+
+    const prepared = await controller.prepareCommandAuthorization(
+      fixture.workItem.goal.work_item_id,
+      "execute",
+    );
+    expect(prepared.proposal).toMatchObject({
+      schema_version: 1,
+      phase: "execute",
+      governed_tuple: fixture.input.governed_tuple,
+      source_mission_content_sha256: fixture.input.mission_content_sha256,
+      terminal_connected_run_id: fixture.record.connected_run_id,
+      changed_files: changedFiles,
+      commands: [
+        { executable: "npm", args: ["test"] },
+        { executable: "npm", args: ["run", "typecheck"] },
+        { executable: "git", args: ["add", "--", ...changedFiles] },
+        {
+          executable: "git",
+          args: ["commit", "-m", "Build the controller foundation"],
+        },
+      ],
+    });
+    expect(prepared.work_item.state.attention).toMatchObject({
+      kind: "command_authorization",
+      governed_tuple: fixture.input.governed_tuple,
+      pins: {
+        mission_content_sha256: fixture.input.mission_content_sha256,
+      },
+      proposal: {
+        proposal_sha256: prepared.proposal.proposal_sha256,
+      },
+    });
+    expect(prepared.manifest).toMatchObject({
+      phase: "execute",
+      attempt: 0,
+      outcome: "applied",
+      command_authorization: prepared.proposal,
+    });
+
+    const decision = {
+      decision: "allow_once" as const,
+      expected_phase: "execute" as const,
+      governed_tuple: prepared.proposal.governed_tuple,
+      source_mission_content_sha256:
+        prepared.proposal.source_mission_content_sha256,
+      terminal_connected_run_id:
+        prepared.proposal.terminal_connected_run_id,
+      proposal_sha256: prepared.proposal.proposal_sha256,
+    };
+    const applied = await controller.decideCommandAuthorization(
+      fixture.workItem.goal.work_item_id,
+      decision,
+    );
+    expect(applied.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      attempt: 1,
+    });
+    expect(applied.work_item.state.attention).toBeUndefined();
+    expect(applied.manifest).toMatchObject({
+      phase: "execute",
+      attempt: 1,
+      outcome: "applied",
+      command_authorization: prepared.proposal,
+      capability_grant: {
+        source_mission_content_sha256:
+          prepared.proposal.source_mission_content_sha256,
+      },
+    });
+    expect(
+      applied.manifest?.capability_grant?.execution_defaults
+        .approved_command_forms,
+    ).toEqual(
+      expect.arrayContaining(
+        prepared.proposal.commands.map((command) => ({
+          executable: command.executable,
+          args: command.args,
+        })),
+      ),
+    );
+    await expect(
+      controller.decideCommandAuthorization(
+        fixture.workItem.goal.work_item_id,
+        decision,
+      ),
+    ).resolves.toEqual(applied);
+  });
+
+  it("keeps an exact command authorization denied without advancing state", async () => {
+    const fixture = await createConnectedFixture();
+    const git: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return ["src/domain/work-item.ts"];
+      },
+    };
+    const controller = createController(fixture.repository, git);
+    await fixture.repository.createConnectedRun(fixture.record);
+    await fixture.repository.completeConnectedRun(
+      fixture.workItem.goal.work_item_id,
+      fixture.record.connected_run_id,
+      { outcome: "completed", partial: false, reason: null },
+    );
+    const prepared = await controller.prepareCommandAuthorization(
+      fixture.workItem.goal.work_item_id,
+      "execute",
+    );
+
+    const denied = await controller.decideCommandAuthorization(
+      fixture.workItem.goal.work_item_id,
+      {
+        decision: "keep_denied",
+        expected_phase: "execute",
+        governed_tuple: prepared.proposal.governed_tuple,
+        source_mission_content_sha256:
+          prepared.proposal.source_mission_content_sha256,
+        terminal_connected_run_id:
+          prepared.proposal.terminal_connected_run_id,
+        proposal_sha256: prepared.proposal.proposal_sha256,
+      },
+    );
+    expect(denied.manifest).toBeNull();
+    expect(denied.work_item.state).toEqual(prepared.work_item.state);
+    expect(denied.work_item.state.attempt).toBe(0);
+    expect(denied.work_item.state.attention).toMatchObject({
+      kind: "command_authorization",
+      proposal: { proposal_sha256: prepared.proposal.proposal_sha256 },
+    });
+  });
+
+  it("refuses command preparation without a complete no-result run or exact in-scope changes", async () => {
+    const noRun = await createConnectedFixture();
+    await expect(
+      noRun.controller.prepareCommandAuthorization(
+        noRun.workItem.goal.work_item_id,
+        "execute",
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+
+    const clean = await createConnectedFixture();
+    await clean.repository.createConnectedRun(clean.record);
+    await clean.repository.completeConnectedRun(
+      clean.workItem.goal.work_item_id,
+      clean.record.connected_run_id,
+      { outcome: "completed", partial: false, reason: null },
+    );
+    await expect(
+      createController(clean.repository, {
+        ...passingGit,
+        async listWorktreeChangedFilesExcludingFounder() {
+          return [];
+        },
+      }).prepareCommandAuthorization(
+        clean.workItem.goal.work_item_id,
+        "execute",
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+
+    const outOfScope = await createConnectedFixture();
+    await outOfScope.repository.createConnectedRun(outOfScope.record);
+    await outOfScope.repository.completeConnectedRun(
+      outOfScope.workItem.goal.work_item_id,
+      outOfScope.record.connected_run_id,
+      { outcome: "completed", partial: false, reason: null },
+    );
+    await expect(
+      createController(outOfScope.repository, {
+        ...passingGit,
+        async listWorktreeChangedFilesExcludingFounder() {
+          return ["app/outside-current-mission.ts"];
+        },
+      }).prepareCommandAuthorization(
+        outOfScope.workItem.goal.work_item_id,
+        "execute",
+      ),
+    ).rejects.toMatchObject({ kind: "mission_not_ready" });
+  });
+
+  it("rejects command decisions that drift from the source, phase, tuple, or proposal", async () => {
+    const fixture = await createConnectedFixture();
+    const controller = createController(fixture.repository, {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return ["src/domain/work-item.ts"];
+      },
+    });
+    await fixture.repository.createConnectedRun(fixture.record);
+    await fixture.repository.completeConnectedRun(
+      fixture.workItem.goal.work_item_id,
+      fixture.record.connected_run_id,
+      { outcome: "completed", partial: false, reason: null },
+    );
+    const prepared = await controller.prepareCommandAuthorization(
+      fixture.workItem.goal.work_item_id,
+      "execute",
+    );
+    const exact = {
+      decision: "allow_once" as const,
+      expected_phase: "execute" as const,
+      governed_tuple: prepared.proposal.governed_tuple,
+      source_mission_content_sha256:
+        prepared.proposal.source_mission_content_sha256,
+      terminal_connected_run_id:
+        prepared.proposal.terminal_connected_run_id,
+      proposal_sha256: prepared.proposal.proposal_sha256,
+    };
+    const staleInputs = [
+      { ...exact, expected_phase: "patch" as const },
+      {
+        ...exact,
+        governed_tuple: { ...exact.governed_tuple, attempt: 1 },
+      },
+      { ...exact, source_mission_content_sha256: "e".repeat(64) },
+      { ...exact, proposal_sha256: "f".repeat(64) },
+    ];
+
+    for (const input of staleInputs) {
+      await expect(
+        controller.decideCommandAuthorization(
+          fixture.workItem.goal.work_item_id,
+          input,
+        ),
+      ).rejects.toMatchObject({ kind: "stale_expectation" });
+    }
+  });
 });

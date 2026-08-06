@@ -32,6 +32,7 @@ import type {
   PortfolioRetryResult,
   PortfolioScopeCorrectionListing,
   PortfolioScopeCorrectionResult,
+  PortfolioCommandAuthorizationResult,
   PortfolioShapingDecisionResult,
   PortfolioShapingLaunchResult,
   ReviewMissionCompilation,
@@ -67,6 +68,7 @@ import {
   type ActiveRun,
   type GoalContract,
   type RetainedControllerLeaseRepairResult,
+  type WorkItemAttention,
   type WorkItemPhase,
   type WorkItemPriority,
   type WorkItemType,
@@ -520,7 +522,9 @@ type ConnectedMutation =
   | "launching"
   | "cancelling"
   | "allowing_once"
-  | "keeping_denied";
+  | "keeping_denied"
+  | "preparing_commands"
+  | "authorizing_commands";
 
 interface RunEvidenceSectionProps {
   fieldId: string;
@@ -3910,6 +3914,106 @@ interface ConnectedExecuteSectionProps {
   onKeepDenied: () => void;
 }
 
+interface CommandAuthorizationSectionProps {
+  fieldId: string;
+  attention: Extract<
+    WorkItemAttention,
+    { kind: "command_authorization" }
+  > | null;
+  canPrepare: boolean;
+  mutation: ConnectedMutation | null;
+  onPrepare: () => void;
+  onAllowOnce: () => void;
+  onKeepDenied: () => void;
+}
+
+export function CommandAuthorizationSection({
+  fieldId,
+  attention,
+  canPrepare,
+  mutation,
+  onPrepare,
+  onAllowOnce,
+  onKeepDenied,
+}: CommandAuthorizationSectionProps) {
+  if (!canPrepare && attention === null) {
+    return null;
+  }
+  const busy = mutation !== null;
+  return (
+    <section
+      aria-labelledby={`${fieldId}-command-authorization`}
+      className="border-l-2 border-warning bg-background px-3 py-3"
+    >
+      <h3
+        id={`${fieldId}-command-authorization`}
+        className="text-xs font-medium"
+      >
+        Required command preflight
+      </h3>
+      {attention === null ? (
+        <>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            The last connected writer completed without a result. Derive the exact verification, staging, and commit commands before launching another attempt.
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onPrepare}
+            className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {mutation === "preparing_commands"
+              ? "Preparing exact commands…"
+              : "Prepare exact command approval"}
+          </button>
+        </>
+      ) : (
+        <>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {attention.question}
+          </p>
+          <ol className="mt-3 space-y-2 text-[11px]">
+            {attention.proposal.commands.map((command, index) => (
+              <li
+                key={`${attention.proposal.proposal_sha256}:${index}`}
+                className="break-all border-l-2 border-border pl-2.5 font-mono leading-5"
+              >
+                {[command.executable, ...command.args].join(" ")}
+              </li>
+            ))}
+          </ol>
+          <p className="mt-3 break-all text-[11px] text-muted-foreground">
+            Proposal hash · {attention.proposal.proposal_sha256}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-primary-action="true"
+              disabled={busy}
+              onClick={onAllowOnce}
+              className="h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "authorizing_commands"
+                ? "Allowing exact commands…"
+                : "Allow once and retry"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onKeepDenied}
+              className="h-9 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mutation === "keeping_denied"
+                ? "Keeping denied…"
+                : "Keep denied"}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 export function ConnectedExecuteSection({
   fieldId,
   projection,
@@ -4892,6 +4996,24 @@ export function DetailPanel({
     connectedRunState?.itemKey === connectedRunItemKey
       ? connectedRunState.result
       : [];
+  const commandAuthorizationAttention =
+    state.attention?.kind === "command_authorization"
+      ? state.attention
+      : null;
+  const latestWritableRun = latestConnectedRun(
+    connectedRuns.filter(
+      (run) => run.mission.identity.phase === state.phase,
+    ),
+  );
+  const canPrepareCommandAuthorization =
+    (state.phase === "execute" || state.phase === "patch") &&
+    state.status === "active" &&
+    state.attention === undefined &&
+    latestWritableRun?.lifecycle.status === "terminal" &&
+    latestWritableRun.lifecycle.terminal_outcome === "completed" &&
+    !latestWritableRun.lifecycle.partial;
+  const commandPreflightActive =
+    canPrepareCommandAuthorization || commandAuthorizationAttention !== null;
   const connectedRunsLoading =
     mode === "governed" &&
     (connectedRunState?.itemKey !== connectedRunItemKey ||
@@ -6872,6 +6994,119 @@ export function DetailPanel({
     }
   }
 
+  async function handlePrepareCommandAuthorization() {
+    if (
+      connectedWorkflowPhase === null ||
+      connectedWorkflowPhase === "review" ||
+      connectedMutationRef.current
+    ) {
+      return;
+    }
+    connectedMutationRef.current = true;
+    setConnectedMutation("preparing_commands");
+    setError(null);
+    const prefix =
+      connectedWorkflowPhase === "execute"
+        ? "mission/connected"
+        : "mission/patch/connected";
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/${prefix}/command-authorization/prepare`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      const body = (await response.json()) as
+        | PortfolioCommandAuthorizationResult
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "Exact commands could not be prepared."
+            : "Exact commands could not be prepared.",
+        );
+        return;
+      }
+      onUpdated(
+        body as PortfolioCommandAuthorizationResult,
+        "Exact commands are ready for founder review.",
+      );
+    } catch {
+      setError(
+        "Exact commands could not be prepared. Check the local server and try again.",
+      );
+    } finally {
+      connectedMutationRef.current = false;
+      setConnectedMutation(null);
+    }
+  }
+
+  async function handleCommandAuthorizationDecision(
+    decision: "allow_once" | "keep_denied",
+  ) {
+    if (
+      commandAuthorizationAttention === null ||
+      connectedMutationRef.current
+    ) {
+      return;
+    }
+    connectedMutationRef.current = true;
+    setConnectedMutation(
+      decision === "allow_once" ? "authorizing_commands" : "keeping_denied",
+    );
+    setError(null);
+    const proposal = commandAuthorizationAttention.proposal;
+    const prefix =
+      proposal.phase === "execute"
+        ? "mission/connected"
+        : "mission/patch/connected";
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/${prefix}/command-authorization/decision`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            decision,
+            expected_phase: proposal.phase,
+            governed_tuple: proposal.governed_tuple,
+            source_mission_content_sha256:
+              proposal.source_mission_content_sha256,
+            terminal_connected_run_id:
+              proposal.terminal_connected_run_id,
+            proposal_sha256: proposal.proposal_sha256,
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | PortfolioCommandAuthorizationResult
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The command decision could not be recorded."
+            : "The command decision could not be recorded.",
+        );
+        return;
+      }
+      onUpdated(
+        body as PortfolioCommandAuthorizationResult,
+        decision === "allow_once"
+          ? "Exact commands allowed once; a fresh writable attempt is ready."
+          : "Exact commands remain denied.",
+      );
+    } catch {
+      setError(
+        "The command decision could not be recorded. Check the local server and try again.",
+      );
+    } finally {
+      connectedMutationRef.current = false;
+      setConnectedMutation(null);
+    }
+  }
+
   async function handleLaunchConnectedPhase() {
     if (
       connectedMutationRef.current ||
@@ -7731,7 +7966,24 @@ export function DetailPanel({
                     </p>
                   ) : null}
 
-                  {connectedWorkflowPhase === "execute" ? (
+                  <CommandAuthorizationSection
+                    fieldId={fieldId}
+                    attention={commandAuthorizationAttention}
+                    canPrepare={canPrepareCommandAuthorization}
+                    mutation={connectedMutation}
+                    onPrepare={() =>
+                      void handlePrepareCommandAuthorization()
+                    }
+                    onAllowOnce={() =>
+                      void handleCommandAuthorizationDecision("allow_once")
+                    }
+                    onKeepDenied={() =>
+                      void handleCommandAuthorizationDecision("keep_denied")
+                    }
+                  />
+
+                  {connectedWorkflowPhase === "execute" &&
+                  !commandPreflightActive ? (
                     <ConnectedExecuteSection
                       fieldId={fieldId}
                       projection={connectedExecute}
@@ -7906,7 +8158,8 @@ export function DetailPanel({
                     />
                   )}
 
-                  {connectedPhaseProjection === null ? null : (
+                  {connectedPhaseProjection === null ||
+                  commandPreflightActive ? null : (
                     <ConnectedPhaseSection
                       fieldId={fieldId}
                       projection={connectedPhaseProjection}
