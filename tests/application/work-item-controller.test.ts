@@ -5659,8 +5659,12 @@ describe("WorkItemController", () => {
   it("renews exact command authorization after a terminal no-result attempt", async () => {
     const fixture = await createConnectedFixture();
     const changedFiles = [
-      "src/application/work-item-controller.ts",
-      "src/domain/work-item.ts",
+      "src/application/[sourceId]/work-item-controller.ts",
+      "src/domain/[workItemId].ts",
+    ];
+    const stagePaths = [
+      "src/application/[[]sourceId[]]/work-item-controller.ts",
+      "src/domain/[[]workItemId[]].ts",
     ];
     const git: GitVerificationAdapter = {
       ...passingGit,
@@ -5690,7 +5694,7 @@ describe("WorkItemController", () => {
       commands: [
         { executable: "npm", args: ["test"] },
         { executable: "npm", args: ["run", "typecheck"] },
-        { executable: "git", args: ["add", "--", ...changedFiles] },
+        { executable: "git", args: ["add", "--", ...stagePaths] },
         {
           executable: "git",
           args: ["commit", "-m", "Build the controller foundation"],

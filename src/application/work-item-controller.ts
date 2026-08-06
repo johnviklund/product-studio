@@ -160,6 +160,18 @@ const nonEmptyTrimmedStringSchema = z
     "must not have leading or trailing whitespace",
   );
 
+function shellLiteralPathPattern(path: string): string {
+  return Array.from(path, (character) => {
+    if (character === "[") {
+      return "[[]";
+    }
+    if (character === "]") {
+      return "[]]";
+    }
+    return character;
+  }).join("");
+}
+
 const shapingLaunchInputShape = {
   launch_mode: z.enum(["connected", "manual"]),
   next_requested_model: nonEmptyTrimmedStringSchema.nullable(),
@@ -4169,7 +4181,11 @@ export class WorkItemController {
         schema_version: 1 as const,
         kind: "command" as const,
         executable: "git",
-        args: ["add", "--", ...changedFiles],
+        args: [
+          "add",
+          "--",
+          ...changedFiles.map(shellLiteralPathPattern),
+        ],
       },
       {
         schema_version: 1 as const,

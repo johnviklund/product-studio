@@ -453,6 +453,54 @@ describe("Copilot ACP runtime profile", () => {
         permission({
           kind: "execute",
           rawInput: {
+            command:
+              "git add -- src/[[]sourceId[]]/[[]workItemId[]]/route.ts",
+            commands: [
+              "git add -- src/[[]sourceId[]]/[[]workItemId[]]/route.ts",
+            ],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toEqual({
+      schema_version: 1,
+      kind: "command",
+      executable: "git",
+      args: [
+        "add",
+        "--",
+        "src/[[]sourceId[]]/[[]workItemId[]]/route.ts",
+      ],
+    });
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
+            command: "git add -- src/[sourceId]/route.ts",
+            commands: ["git add -- src/[sourceId]/route.ts"],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toBeNull();
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
+            command: "git add -- src/*",
+            commands: ["git add -- src/*"],
+          },
+        }),
+        workspaceCwd,
+      ),
+    ).toBeNull();
+    expect(
+      normalizeCopilotPermission(
+        permission({
+          kind: "execute",
+          rawInput: {
             command: "npm run test && git push",
             commands: ["npm run test && git push"],
           },

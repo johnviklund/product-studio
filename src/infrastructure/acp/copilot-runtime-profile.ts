@@ -219,6 +219,22 @@ function assertSafeArguments(args: readonly string[]): void {
   }
 }
 
+function containsOnlyShellLiteralBracketTokens(command: string): boolean {
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (character === "[") {
+      const token = command.slice(index, index + 3);
+      if (token !== "[[]" && token !== "[]]") {
+        return false;
+      }
+      index += 2;
+    } else if (character === "]") {
+      return false;
+    }
+  }
+  return true;
+}
+
 function commandFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | null {
   if (!isRecord(rawInput) || typeof rawInput.command !== "string") {
     return null;
@@ -232,7 +248,8 @@ function commandFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | nu
   }
   if (
     rawInput.command.trim() === "" ||
-    /[\u0000-\u001f\u007f|&;<>()`$\\'"*?{}[\]!~]/u.test(rawInput.command)
+    !containsOnlyShellLiteralBracketTokens(rawInput.command) ||
+    /[\u0000-\u001f\u007f|&;<>()`$\\'"*?{}!~]/u.test(rawInput.command)
   ) {
     return null;
   }
