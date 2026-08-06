@@ -321,6 +321,51 @@ describe("stdio ACP client adapter", () => {
     );
   });
 
+  it("completes while bounded evidence crosses the former 100 KB output ceiling", async () => {
+    const root = await createRoot();
+    const sink = new MemoryEventSink();
+    const requestCount = 300;
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            requests: Array.from({ length: requestCount }, (_entry, index) => ({
+              schema_version: 1,
+              kind: "workspace_write",
+              path: `src/generated-${index}.ts`,
+            })),
+            write_permission_sentinel: false,
+          },
+          join(root, "large-evidence-sentinel"),
+        ),
+        limits: {
+          ...limits,
+          wall_clock_timeout_ms: 10_000,
+          max_event_count: 1_000,
+          max_event_bytes: 1_000_000,
+          max_output_bytes: 1_000_000,
+        },
+      },
+      sink,
+    );
+
+    await expect(session.run("Retain the bounded high-volume evidence.")).resolves.toMatchObject({
+      outcome: "completed",
+      partial: false,
+    });
+    expect(sink.events.filter((event) => event.kind === "permission")).toHaveLength(
+      requestCount,
+    );
+    const retainedBytes = Buffer.byteLength(
+      sink.events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+      "utf8",
+    );
+    expect(retainedBytes).toBeGreaterThan(100_000);
+    expect(retainedBytes).toBeLessThanOrEqual(1_000_000);
+    expect(sink.events.at(-1)?.kind).toBe("run_finished");
+  });
+
   it("runs a profile initializer after newSession before making mission work available", async () => {
     const root = await createRoot();
     const sink = new MemoryEventSink();
