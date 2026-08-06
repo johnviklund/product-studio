@@ -4158,7 +4158,7 @@ describe("PortfolioService", () => {
     expect(session.run).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledWith(
       expect.stringContaining(
-        "You must invoke the `shell` tool with the exact first required command",
+        "You must invoke the `bash` tool with the exact first required command",
       ),
     );
     await expect(
@@ -4471,7 +4471,7 @@ describe("PortfolioService", () => {
     expect(fake.start).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledWith(
-      expect.not.stringContaining("You must invoke the `shell` tool"),
+      expect.not.stringContaining("You must invoke the `bash` tool"),
     );
     expect(launched.connected_run).toMatchObject({
       mission: { identity: { phase: "review" } },
@@ -4933,7 +4933,7 @@ describe("PortfolioService", () => {
     expect(session.run).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledWith(
       expect.stringContaining(
-        "You must invoke the `shell` tool with the exact first required command",
+        "You must invoke the `bash` tool with the exact first required command",
       ),
     );
     expect(launched.connected_run).toMatchObject({
@@ -5120,6 +5120,59 @@ describe("PortfolioService", () => {
     );
     expect(session.run).toHaveBeenCalledTimes(2);
     index.close();
+  });
+
+  it("fails writable preparation before spawn when Copilot does not expose bash", async () => {
+    const adapter: AcpClientAdapter = { start: vi.fn() };
+    const prepareInput = {
+      workspace_cwd: "/workspace/product-studio",
+      capability_envelope: resolveCapabilityEnvelope(["src"], {
+        schema_version: 1,
+        approved_command_forms: [],
+        approved_url_operations: [],
+        mcp: "forbidden" as const,
+        credentials: "forbidden" as const,
+      }),
+      limits: {
+        wall_clock_timeout_ms: 2_000,
+        max_event_count: 100,
+        max_event_bytes: 100_000,
+        max_output_bytes: 100_000,
+        termination_grace_ms: 100,
+        drain_grace_ms: 100,
+      },
+    };
+    const runtime = (availableTools: readonly string[]) =>
+      new CopilotConnectedWritableRuntime(adapter, {
+        profile: {
+          preflight: {
+            executable: "/tmp/copilot",
+            version: "1.0.78",
+            authentication: "noninteractive_authenticated",
+            available_model_ids: ["copilot-default"],
+          },
+          default_model: "copilot-default",
+          reasoning_effort: "high",
+          available_tools: availableTools,
+          excluded_tools: ["ask_user", "mcp"],
+          environment: { PATH: "/usr/bin" },
+        },
+      });
+
+    await expect(
+      runtime(["apply_patch", "shell", "view"]).prepare(prepareInput),
+    ).rejects.toThrow("Required Copilot tools are unavailable: bash.");
+
+    const prepared = await runtime(["apply_patch", "bash", "view"]).prepare(
+      prepareInput,
+    );
+    expect(prepared.sanitized_profile.available_tools).toEqual([
+      "apply_patch",
+      "bash",
+      "view",
+    ]);
+    expect(prepared.sanitized_profile.argv).toContain("apply_patch,bash,view");
+    expect(adapter.start).not.toHaveBeenCalled();
   });
 
   it("fails an unavailable model before ACP spawn and surfaces exact missing permission attention", async () => {

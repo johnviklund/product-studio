@@ -31,6 +31,7 @@ export const COPILOT_ADAPTER_ID = "copilot-acp";
 export const COPILOT_PROFILE_ID = "noninteractive-execute-v1";
 export const COPILOT_REVIEW_PROFILE_ID = "noninteractive-review-v1";
 export const COPILOT_REVIEW_READ_TOOL = "view";
+export const COPILOT_WRITABLE_COMMAND_TOOL = "bash";
 const COPILOT_REVIEW_READ_TOOLS = new Set([COPILOT_REVIEW_READ_TOOL, "read"]);
 const VERSION_OUTPUT = /^GitHub Copilot CLI (\d+\.\d+\.\d+)\.?\s*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;

@@ -171,6 +171,7 @@ import {
   COPILOT_ADAPTER_ID,
   COPILOT_PROFILE_ID,
   COPILOT_REVIEW_PROFILE_ID,
+  COPILOT_WRITABLE_COMMAND_TOOL,
   createCopilotReviewRuntimeProfile,
   createCopilotRuntimeProfile,
   type CopilotRuntimeProfileInput,
@@ -819,6 +820,7 @@ export class CopilotConnectedWritableRuntime
     }
     const profile = createCopilotRuntimeProfile({
       ...this.options.profile,
+      required_available_tools: [COPILOT_WRITABLE_COMMAND_TOOL],
       requested_model: requestedModel,
       workspace_cwd: input.workspace_cwd,
       evaluate_permission: (request) =>
@@ -920,7 +922,7 @@ const SHAPING_RUN_LIMITS: ShapingRunRecordV1["limits"] = {
 };
 
 const WRITABLE_PERMISSION_REQUEST_GUIDANCE =
-  "Pre-approved operations and permission requests are distinct. Do not return a not_run result merely because a task-required command is not listed in the capability envelope. You must invoke the `shell` tool with the exact first required command so the controller can deny it and mediate a founder decision. That invocation is a permission request, not authority to execute: do not bypass a denial or claim the command ran.";
+  `Pre-approved operations and permission requests are distinct. Do not return a not_run result merely because a task-required command is not listed in the capability envelope. You must invoke the \`${COPILOT_WRITABLE_COMMAND_TOOL}\` tool with the exact first required command so the controller can deny it and mediate a founder decision. That invocation is a permission request, not authority to execute: do not bypass a denial or claim the command ran.`;
 
 const launchConnectedExecuteRequestSchema: z.ZodType<LaunchConnectedExecuteRequest> =
   z.strictObject({
