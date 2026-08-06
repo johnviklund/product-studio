@@ -9,18 +9,31 @@ import { ProductWorkspace } from "../src/workspace/product-workspace";
 const repositoryRoot = process.cwd();
 const fixtureRoot = join(repositoryRoot, "fixtures", "sample-workspace");
 const createdRoots: string[] = [];
+const trustedOrigin = "http://127.0.0.1:3000";
 
 function registrationRequest(workspacePath: string): Request {
-  return new Request("http://localhost/api/workspaces", {
+  return new Request(`${trustedOrigin}/api/workspaces`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      host: "127.0.0.1:3000",
+      origin: trustedOrigin,
+    },
     body: JSON.stringify({ workspace_path: workspacePath }),
+  });
+}
+
+function rebuildRequest(): Request {
+  return new Request(`${trustedOrigin}/api/work-items/rebuild`, {
+    method: "POST",
+    headers: { host: "127.0.0.1:3000", origin: trustedOrigin },
   });
 }
 
 afterEach(async () => {
   process.chdir(repositoryRoot);
   vi.resetModules();
+  vi.unstubAllEnvs();
   await Promise.all(
     createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -34,6 +47,7 @@ describe("portfolio rebuild completion signal", () => {
     const secondWorkspace = join(root, "second-workspace");
     await cp(fixtureRoot, firstWorkspace, { recursive: true });
     await cp(fixtureRoot, secondWorkspace, { recursive: true });
+    vi.stubEnv("PRODUCT_STUDIO_APP_ORIGIN", trustedOrigin);
     process.chdir(root);
     vi.resetModules();
 
@@ -49,7 +63,7 @@ describe("portfolio rebuild completion signal", () => {
     const initialRebuildRoutes = await import(
       "../app/api/work-items/rebuild/route"
     );
-    await initialRebuildRoutes.POST();
+    await initialRebuildRoutes.POST(rebuildRequest());
     const before = await (await workItemRoutes.GET()).json();
 
     expect(before.items).toHaveLength(3);
@@ -76,7 +90,7 @@ describe("portfolio rebuild completion signal", () => {
 
     const rebuildRoutes = await import("../app/api/work-items/rebuild/route");
     const rebuiltWorkItemRoutes = await import("../app/api/work-items/route");
-    const rebuildResponse = await rebuildRoutes.POST();
+    const rebuildResponse = await rebuildRoutes.POST(rebuildRequest());
     const rebuild = await rebuildResponse.json();
     const after = await (await rebuiltWorkItemRoutes.GET()).json();
 
