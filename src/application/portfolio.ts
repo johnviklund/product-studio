@@ -900,7 +900,7 @@ const SHAPING_RUN_LIMITS: ShapingRunRecordV1["limits"] = {
 };
 
 const WRITABLE_PERMISSION_REQUEST_GUIDANCE =
-  "Pre-approved operations and permission requests are distinct. When the task requires a command that is not listed in the capability envelope, invoke the available command tool with the exact command so the controller can mediate a founder decision. The request does not authorize the command: do not bypass a denial or claim the command ran.";
+  "Pre-approved operations and permission requests are distinct. Do not return a not_run result merely because a task-required command is not listed in the capability envelope. You must invoke the `shell` tool with the exact first required command so the controller can deny it and mediate a founder decision. That invocation is a permission request, not authority to execute: do not bypass a denial or claim the command ran.";
 
 const launchConnectedExecuteRequestSchema: z.ZodType<LaunchConnectedExecuteRequest> =
   z.strictObject({

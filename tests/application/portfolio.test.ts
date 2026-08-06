@@ -4158,7 +4158,7 @@ describe("PortfolioService", () => {
     expect(session.run).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledWith(
       expect.stringContaining(
-        "When the task requires a command that is not listed in the capability envelope, invoke the available command tool with the exact command",
+        "You must invoke the `shell` tool with the exact first required command",
       ),
     );
     await expect(
@@ -4470,6 +4470,9 @@ describe("PortfolioService", () => {
     expect(fake.prepare).toHaveBeenCalledOnce();
     expect(fake.start).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledOnce();
+    expect(session.run).toHaveBeenCalledWith(
+      expect.not.stringContaining("You must invoke the `shell` tool"),
+    );
     expect(launched.connected_run).toMatchObject({
       mission: { identity: { phase: "review" } },
       authorization: { kind: "review_result_ingress" },
@@ -4930,7 +4933,7 @@ describe("PortfolioService", () => {
     expect(session.run).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledWith(
       expect.stringContaining(
-        "When the task requires a command that is not listed in the capability envelope, invoke the available command tool with the exact command",
+        "You must invoke the `shell` tool with the exact first required command",
       ),
     );
     expect(launched.connected_run).toMatchObject({
