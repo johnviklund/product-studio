@@ -633,6 +633,28 @@ export class NodeGitVerificationAdapter implements GitVerificationAdapter {
     return output.length === 0;
   }
 
+  async listWorktreeChangedFilesExcludingFounder(): Promise<string[]> {
+    const [tracked, staged, untracked] = await Promise.all([
+      this.run(["diff", "--no-renames", "--name-only", "-z", "HEAD", "--"]),
+      this.run([
+        "diff",
+        "--cached",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        "HEAD",
+        "--",
+      ]),
+      this.run(["ls-files", "--others", "--exclude-standard", "-z", "--"]),
+    ]);
+    return [...new Set(`${tracked}${staged}${untracked}`.split("\0"))]
+      .filter(
+        (path) =>
+          path.length > 0 && path !== ".founder" && !path.startsWith(".founder/"),
+      )
+      .sort();
+  }
+
   async listChangedFiles(
     baseCommit: string,
     resultCommit: string,
@@ -3049,10 +3071,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     )[0] ?? null;
   }
 
-  async writeMissionPackage(
+  async writeMissionPackage<TMission extends MissionPackage>(
     identity: MissionIdentity,
-    buildPackage: MissionPackageBuilder,
-  ): Promise<MissionArtifactWriteResult> {
+    buildPackage: MissionPackageBuilder<TMission>,
+  ): Promise<MissionArtifactWriteResult<TMission>> {
     const validatedIdentity = missionIdentitySchema.parse(identity);
     await this.readManifest();
     if (!(await this.hasSafeWorkItemsDirectory())) {
@@ -3089,7 +3111,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       validatedIdentity,
       await this.resolveGitBaseCommit(),
     );
-    const mission = missionPackageSchema.parse(buildPackage(paths));
+    const mission = missionPackageSchema.parse(buildPackage(paths)) as TMission;
     if (
       JSON.stringify(mission.identity) !== JSON.stringify(validatedIdentity) ||
       mission.task_path !== paths.task_path ||

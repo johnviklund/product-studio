@@ -80,10 +80,12 @@ import {
   workItemSchema,
   workItemStateSchema,
   type ApprovePlanResultInput,
+  type ApplyScopeCorrectionInput,
   type CreateCaptureInput,
   type ControllerRunManifest,
   type RetainedControllerLeaseRepairResult,
   type SaveWorkItemInput,
+  type ScopeCorrectionProposalV1,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
   type WorkItemAttention,
@@ -654,6 +656,17 @@ export type PortfolioNeedsYouEntry =
 
 export interface PortfolioRetryResult extends PortfolioWorkItem {
   controller_run: ControllerRunManifest;
+}
+
+export interface PortfolioScopeCorrectionListing {
+  source_id: string;
+  work_item_id: string;
+  proposal: ScopeCorrectionProposalV1 | null;
+}
+
+export interface PortfolioScopeCorrectionResult extends PortfolioWorkItem {
+  controller_run: ControllerRunManifest;
+  proposal: ScopeCorrectionProposalV1;
 }
 
 export interface LaunchConnectedExecuteRequest {
@@ -3361,6 +3374,45 @@ export class PortfolioService {
       project: source.project,
       work_item: retried.work_item,
       controller_run: retried.manifest,
+    };
+  }
+
+  async getScopeCorrectionProposal(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PortfolioScopeCorrectionListing> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    return {
+      source_id: source.source_id,
+      work_item_id: workItemId,
+      proposal: await this.workItemController(
+        source.workspace,
+      ).proposeScopeCorrection(workItemId),
+    };
+  }
+
+  async applyScopeCorrection(
+    sourceId: string,
+    workItemId: string,
+    input: ApplyScopeCorrectionInput,
+  ): Promise<PortfolioScopeCorrectionResult> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const corrected = await this.workItemController(
+      source.workspace,
+    ).applyScopeCorrection(workItemId, input);
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: corrected.work_item,
+      controller_run: corrected.manifest,
+      proposal: corrected.proposal,
     };
   }
 

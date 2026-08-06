@@ -5558,4 +5558,101 @@ describe("WorkItemController", () => {
       "wi_123e4567-e89b-12d3-a456-426614174000:review:3:5:2",
     );
   });
+
+  it("applies one hash-bound exact scope correction and replays it idempotently", async () => {
+    const { repository } = await createWorkspace();
+    const governed = await governToExecute(repository);
+    const changedFiles = [
+      "app/api/workspaces/route.ts",
+      "tests/api/portfolio-routes.test.ts",
+    ];
+    const git: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return [...changedFiles];
+      },
+    };
+    const controller = createController(repository, git);
+    const proposal = await controller.proposeScopeCorrection(
+      governed.workItem.goal.work_item_id,
+    );
+    expect(proposal).toMatchObject({
+      schema_version: 1,
+      current_allowed_scope: firstContract.allowed_scope,
+      proposed_allowed_scope: changedFiles,
+      governed_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+    });
+    if (proposal === null) {
+      throw new Error("Expected an exact scope-correction proposal.");
+    }
+    const input = {
+      source_goal_contract_sha256: proposal.source_goal_contract_sha256,
+      governed_tuple: proposal.governed_tuple,
+      proposal_sha256: proposal.proposal_sha256,
+    };
+    const corrected = await controller.applyScopeCorrection(
+      governed.workItem.goal.work_item_id,
+      input,
+    );
+    expect(corrected.work_item.goal.goal_contract).toEqual({
+      ...governed.workItem.goal.goal_contract,
+      goal_version: 2,
+      allowed_scope: changedFiles,
+    });
+    expect(corrected.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      goal_version: 2,
+      input_revision: 2,
+      attempt: 0,
+      patch_cycle: 0,
+    });
+    expect(corrected.manifest).toMatchObject({
+      phase: "execute",
+      goal_version: 2,
+      input_revision: 2,
+      attempt: 0,
+      outcome: "applied",
+      scope_correction: proposal,
+    });
+    const replay = await controller.applyScopeCorrection(
+      governed.workItem.goal.work_item_id,
+      input,
+    );
+    expect(replay.manifest).toEqual(corrected.manifest);
+    expect(replay.work_item).toEqual(corrected.work_item);
+  });
+
+  it("rejects a scope correction after the retained worktree changes", async () => {
+    const { repository } = await createWorkspace();
+    const governed = await governToExecute(repository);
+    let changedFiles = ["app/api/workspaces/route.ts"];
+    const git: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return [...changedFiles];
+      },
+    };
+    const controller = createController(repository, git);
+    const proposal = await controller.proposeScopeCorrection(
+      governed.workItem.goal.work_item_id,
+    );
+    if (proposal === null) {
+      throw new Error("Expected an exact scope-correction proposal.");
+    }
+    changedFiles = ["app/api/workspaces/route.ts", "src/unrelated.ts"];
+    await expect(
+      controller.applyScopeCorrection(governed.workItem.goal.work_item_id, {
+        source_goal_contract_sha256:
+          proposal.source_goal_contract_sha256,
+        governed_tuple: proposal.governed_tuple,
+        proposal_sha256: proposal.proposal_sha256,
+      }),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+  });
 });

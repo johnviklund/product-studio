@@ -13,6 +13,7 @@ import {
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
   createControllerCapabilityGrant,
+  hashScopeCorrectionProposal,
   createCaptureInputSchema,
   createWorkItemInputSchema,
   saveWorkItemInputSchema,
@@ -25,6 +26,7 @@ import {
   productManifestSchema,
   recordConnectedPermissionDenialInputSchema,
   retryExecuteAttemptInputSchema,
+  scopeCorrectionProposalSchema,
   updateWorkItemPhaseInputSchema,
   workItemGoalSchema,
   workItemAttentionSchema,
@@ -51,6 +53,20 @@ const missingPermissionOperation = {
   reason: "The command form is not present in the resolved envelope.",
   resolved_envelope_sha256: "e".repeat(64),
   connected_run_id: runId,
+};
+
+const scopeCorrectionContent = {
+  schema_version: 1 as const,
+  work_item_id: workItemId,
+  source_goal_contract_sha256: "a".repeat(64),
+  governed_tuple: {
+    goal_version: 1,
+    input_revision: 2,
+    attempt: 3,
+    patch_cycle: 0,
+  },
+  current_allowed_scope: ["Focused route tests"],
+  proposed_allowed_scope: ["tests/api/portfolio-routes.test.ts"],
 };
 
 const goal = {
@@ -139,6 +155,20 @@ const planApprovalManifest: PlanApprovalManifestV1 = {
 };
 
 describe("durable work-item schemas", () => {
+  it("hash-binds exact scope-correction proposals", () => {
+    const proposal = {
+      ...scopeCorrectionContent,
+      proposal_sha256: hashScopeCorrectionProposal(scopeCorrectionContent),
+    };
+    expect(scopeCorrectionProposalSchema.parse(proposal)).toEqual(proposal);
+    expect(() =>
+      scopeCorrectionProposalSchema.parse({
+        ...proposal,
+        proposed_allowed_scope: ["src/unrelated.ts"],
+      }),
+    ).toThrow(/proposal_sha256/u);
+  });
+
   it("accepts the work-item v2 and product-manifest v2 contracts", () => {
     expect(productManifestSchema.parse(productManifest)).toEqual(
       productManifest,

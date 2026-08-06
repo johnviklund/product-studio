@@ -9,6 +9,7 @@ export interface GitVerificationAdapter {
   ): Promise<boolean>;
   readHeadCommit(): Promise<string>;
   isWorktreeCleanExcludingFounder(): Promise<boolean>;
+  listWorktreeChangedFilesExcludingFounder?(): Promise<string[]>;
   listChangedFiles(
     baseCommit: string,
     resultCommit: string,

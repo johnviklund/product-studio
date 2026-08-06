@@ -437,6 +437,23 @@ export interface ControllerRunManifest {
   completed_at?: string;
   outcome: ControllerRunOutcome;
   capability_grant?: ControllerCapabilityGrant;
+  scope_correction?: ScopeCorrectionProposalV1;
+}
+
+export interface ScopeCorrectionProposalV1 {
+  schema_version: 1;
+  work_item_id: string;
+  source_goal_contract_sha256: string;
+  governed_tuple: GovernedTuple;
+  current_allowed_scope: string[];
+  proposed_allowed_scope: string[];
+  proposal_sha256: string;
+}
+
+export interface ApplyScopeCorrectionInput {
+  source_goal_contract_sha256: string;
+  governed_tuple: GovernedTuple;
+  proposal_sha256: string;
 }
 
 export interface ControllerCapabilityGrant {
@@ -593,10 +610,10 @@ export interface WorkItemRepository {
   findAppliedPatchAttemptManifest(
     identity: MissionIdentity<"patch">,
   ): Promise<ControllerRunManifest | null>;
-  writeMissionPackage(
+  writeMissionPackage<TMission extends import("./mission").MissionPackage>(
     identity: MissionIdentity,
-    buildPackage: MissionPackageBuilder,
-  ): Promise<MissionArtifactWriteResult>;
+    buildPackage: MissionPackageBuilder<TMission>,
+  ): Promise<MissionArtifactWriteResult<TMission>>;
   readMissionResult(
     identity: MissionIdentity,
     reviewPatchCycle?: number,
@@ -1479,6 +1496,53 @@ export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
     completed_at: z.iso.datetime().optional(),
     outcome: z.enum(CONTROLLER_RUN_OUTCOMES),
     capability_grant: controllerCapabilityGrantSchema.optional(),
+    scope_correction: z.lazy(() => scopeCorrectionProposalSchema).optional(),
+  });
+
+const scopeCorrectionProposalContentSchema = z.strictObject({
+  schema_version: z.literal(1),
+  work_item_id: workItemIdSchema,
+  source_goal_contract_sha256: sha256Schema,
+  governed_tuple: governedTupleSchema,
+  current_allowed_scope: allowedScopeSchema,
+  proposed_allowed_scope: allowedScopeSchema,
+});
+
+export function hashScopeCorrectionProposal(
+  input: Omit<ScopeCorrectionProposalV1, "proposal_sha256">,
+): string {
+  const parsed = scopeCorrectionProposalContentSchema.parse({
+    schema_version: input.schema_version,
+    work_item_id: input.work_item_id,
+    source_goal_contract_sha256: input.source_goal_contract_sha256,
+    governed_tuple: input.governed_tuple,
+    current_allowed_scope: input.current_allowed_scope,
+    proposed_allowed_scope: input.proposed_allowed_scope,
+  });
+  return createHash("sha256")
+    .update(`${JSON.stringify(parsed, null, 2)}\n`)
+    .digest("hex");
+}
+
+export const scopeCorrectionProposalSchema: z.ZodType<ScopeCorrectionProposalV1> =
+  scopeCorrectionProposalContentSchema
+    .extend({ proposal_sha256: sha256Schema })
+    .superRefine((proposal, context) => {
+      if (proposal.proposal_sha256 !== hashScopeCorrectionProposal(proposal)) {
+        context.addIssue({
+          code: "custom",
+          message: "proposal_sha256 must hash the scope-correction proposal",
+          path: ["proposal_sha256"],
+          input: proposal.proposal_sha256,
+        });
+      }
+    });
+
+export const applyScopeCorrectionInputSchema: z.ZodType<ApplyScopeCorrectionInput> =
+  z.strictObject({
+    source_goal_contract_sha256: sha256Schema,
+    governed_tuple: governedTupleSchema,
+    proposal_sha256: sha256Schema,
   });
 
 export function hashControllerCapabilityGrant(input: {

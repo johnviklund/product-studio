@@ -86,6 +86,7 @@ import {
   InvalidWorkspaceError,
   acceptPatchPlanInputSchema,
   approvePlanResultInputSchema,
+  applyScopeCorrectionInputSchema,
   createControllerCapabilityGrant,
   controllerRunManifestSchema,
   controllerTransitionInputSchema,
@@ -96,6 +97,8 @@ import {
   retryExecuteAttemptInputSchema,
   recordConnectedPermissionDenialInputSchema,
   saveWorkItemInputSchema,
+  hashScopeCorrectionProposal,
+  scopeCorrectionProposalSchema,
   deriveControllerRunId,
   derivePlanApprovalId,
   parseWorkItemStateForRead,
@@ -106,6 +109,7 @@ import {
   type ActiveRun,
   type AcceptPatchPlanInput,
   type ApprovePlanResultInput,
+  type ApplyScopeCorrectionInput,
   type ControllerLease,
   type ControllerCapabilityGrant,
   type ControllerMutationResult,
@@ -123,6 +127,7 @@ import {
   type RecordConnectedPermissionDenialInput,
   type RetryExecuteAttemptInput,
   type SaveWorkItemInput,
+  type ScopeCorrectionProposalV1,
   type WorkItem,
   type WorkItemAttention,
   type WorkItemPhase,
@@ -336,6 +341,10 @@ export interface ConnectedLaunchResult extends ControllerMutationResult {
   created: boolean;
 }
 
+export interface ScopeCorrectionControllerResult extends ControllerMutationResult {
+  proposal: ScopeCorrectionProposalV1;
+}
+
 export interface ConnectedPermissionDecisionResult {
   work_item: WorkItem;
   manifest: ControllerRunManifest | null;
@@ -477,6 +486,172 @@ export class WorkItemController {
       "start_brainstorm",
       startBrainstormDecisionInputSchema.parse(input),
     );
+  }
+
+  async proposeScopeCorrection(
+    workItemId: string,
+  ): Promise<ScopeCorrectionProposalV1 | null> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const item = await this.repository.read(validatedId);
+    if (item === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+    return this.buildScopeCorrectionProposal(item);
+  }
+
+  async applyScopeCorrection(
+    workItemId: string,
+    input: ApplyScopeCorrectionInput,
+  ): Promise<ScopeCorrectionControllerResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = applyScopeCorrectionInputSchema.parse(input);
+    const idempotencyKey = [
+      validatedId,
+      "scope-correction",
+      validatedInput.proposal_sha256,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "apply_scope_correction", input: validatedInput }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (existing?.outcome === "applied") {
+        const correction = existing.scope_correction;
+        if (
+          correction === undefined ||
+          correction.proposal_sha256 !== validatedInput.proposal_sha256 ||
+          correction.source_goal_contract_sha256 !==
+            validatedInput.source_goal_contract_sha256 ||
+          !isDeepStrictEqual(
+            correction.governed_tuple,
+            validatedInput.governed_tuple,
+          ) ||
+          lease.work_item.goal.goal_contract?.goal_version !==
+            existing.goal_version ||
+          !isDeepStrictEqual(
+            lease.work_item.goal.goal_contract.allowed_scope,
+            correction.proposed_allowed_scope,
+          ) ||
+          lease.work_item.state.input_revision !== existing.input_revision ||
+          lease.work_item.state.attempt !== 0
+        ) {
+          throw this.conflict(
+            "idempotency_conflict",
+            validatedId,
+            `Scope correction ${runId} does not match the durable work item.`,
+          );
+        }
+        return {
+          work_item: lease.work_item,
+          manifest: existing,
+          proposal: correction,
+        };
+      }
+      if (existing !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Scope correction ${runId} has a non-applied controller manifest.`,
+        );
+      }
+
+      const proposal = await this.buildScopeCorrectionProposal(lease.work_item);
+      if (
+        proposal === null ||
+        proposal.proposal_sha256 !== validatedInput.proposal_sha256 ||
+        proposal.source_goal_contract_sha256 !==
+          validatedInput.source_goal_contract_sha256 ||
+        !isDeepStrictEqual(
+          proposal.governed_tuple,
+          validatedInput.governed_tuple,
+        )
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "The scope-correction proposal no longer matches the governed goal and retained worktree.",
+        );
+      }
+
+      const nextGoalVersion = this.incrementVersion(
+        proposal.governed_tuple.goal_version,
+        validatedId,
+        "goal_version",
+      );
+      const nextInputRevision = this.incrementVersion(
+        proposal.governed_tuple.input_revision,
+        validatedId,
+        "input_revision",
+      );
+      const contract = lease.work_item.goal.goal_contract!;
+      const nextItem = workItemSchema.parse({
+        goal: {
+          ...lease.work_item.goal,
+          goal_contract: {
+            ...contract,
+            goal_version: nextGoalVersion,
+            allowed_scope: proposal.proposed_allowed_scope,
+          },
+        },
+        state: {
+          ...withoutAttention(lease.work_item.state),
+          phase: "execute",
+          status: "active",
+          goal_version: nextGoalVersion,
+          input_revision: nextInputRevision,
+          attempt: 0,
+          patch_cycle: 0,
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const manifest = {
+        ...this.pendingManifest(
+          {
+            work_item_id: validatedId,
+            run_id: runId,
+            idempotency_key: idempotencyKey,
+            phase: "execute" as const,
+            goal_version: nextGoalVersion,
+            input_revision: nextInputRevision,
+            attempt: 0,
+          },
+          activeRun.acquired_at,
+        ),
+        scope_correction: proposal,
+      };
+      const committed = await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest,
+      });
+      return { ...committed, proposal };
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
   }
 
   async requestShapingChanges(
@@ -3431,6 +3606,72 @@ export class WorkItemController {
       return ["Result changed_files do not exactly match the Git diff."];
     }
     return [];
+  }
+
+  private async buildScopeCorrectionProposal(
+    item: WorkItem,
+  ): Promise<ScopeCorrectionProposalV1 | null> {
+    const contract = item.goal.goal_contract;
+    const state = item.state;
+    if (
+      contract === undefined ||
+      state.phase !== "execute" ||
+      state.status !== "active" ||
+      state.goal_version === undefined ||
+      state.input_revision === undefined ||
+      state.attempt === undefined ||
+      state.patch_cycle === undefined ||
+      state.goal_version !== contract.goal_version ||
+      state.active_run !== undefined
+    ) {
+      return null;
+    }
+    if (this.git.listWorktreeChangedFilesExcludingFounder === undefined) {
+      return null;
+    }
+    const changedFiles =
+      await this.git.listWorktreeChangedFilesExcludingFounder();
+    if (changedFiles.length === 0) {
+      return null;
+    }
+    for (const path of changedFiles) {
+      if (
+        !workspaceRelativePosixPathSchema.safeParse(path).success ||
+        path === ".founder" ||
+        path.startsWith(".founder/")
+      ) {
+        throw this.conflict(
+          "repair_required",
+          item.goal.work_item_id,
+          `Git reported an unsafe scope-correction path: ${path}`,
+        );
+      }
+    }
+    const proposedAllowedScope = [...new Set(changedFiles)].sort();
+    if (
+      proposedAllowedScope.every((path) =>
+        contract.allowed_scope.some((entry) => scopeMatchesPath(entry, path)),
+      )
+    ) {
+      return null;
+    }
+    const content = {
+      schema_version: 1 as const,
+      work_item_id: item.goal.work_item_id,
+      source_goal_contract_sha256: hashGoalContract(contract),
+      governed_tuple: {
+        goal_version: state.goal_version,
+        input_revision: state.input_revision,
+        attempt: state.attempt,
+        patch_cycle: state.patch_cycle,
+      },
+      current_allowed_scope: [...contract.allowed_scope],
+      proposed_allowed_scope: proposedAllowedScope,
+    };
+    return scopeCorrectionProposalSchema.parse({
+      ...content,
+      proposal_sha256: hashScopeCorrectionProposal(content),
+    });
   }
 
   private reconcileStoredAcceptPatchPlan(

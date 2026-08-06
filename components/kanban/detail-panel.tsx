@@ -30,6 +30,8 @@ import type {
   PortfolioPlanApprovalResult,
   PortfolioReviewImportResult,
   PortfolioRetryResult,
+  PortfolioScopeCorrectionListing,
+  PortfolioScopeCorrectionResult,
   PortfolioShapingDecisionResult,
   PortfolioShapingLaunchResult,
   ReviewMissionCompilation,
@@ -192,6 +194,13 @@ interface ConnectedModelSelectionState {
   itemKey: string;
   phase: ConnectedWorkflowPhase;
   model: string;
+}
+
+interface ScopeCorrectionState {
+  itemKey: string;
+  listing: PortfolioScopeCorrectionListing | null;
+  loading: boolean;
+  error: string | null;
 }
 
 interface ShapingArtifactState {
@@ -735,6 +744,45 @@ async function requestConnectedModels(
     return {
       result: null,
       error: "Connected models could not be loaded. Check the local server and try again.",
+    };
+  }
+}
+
+async function requestScopeCorrection(
+  sourceId: string,
+  workItemId: string,
+  signal?: AbortSignal,
+): Promise<
+  { result: PortfolioScopeCorrectionListing | null; error: string | null } | null
+> {
+  try {
+    const response = await fetch(
+      `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/mission/scope-correction`,
+      { signal },
+    );
+    const body = (await response.json()) as
+      | PortfolioScopeCorrectionListing
+      | MutationErrorResponse;
+    if (signal?.aborted) {
+      return null;
+    }
+    if (!response.ok || !("proposal" in body)) {
+      return {
+        result: null,
+        error:
+          "error" in body
+            ? body.error?.message ?? "The scope correction could not be loaded."
+            : "The scope correction could not be loaded.",
+      };
+    }
+    return { result: body, error: null };
+  } catch {
+    if (signal?.aborted) {
+      return null;
+    }
+    return {
+      result: null,
+      error: "The scope correction could not be loaded. Check the local server and try again.",
     };
   }
 }
@@ -4430,6 +4478,9 @@ export function DetailPanel({
   const [connectedMutation, setConnectedMutation] =
     useState<ConnectedMutation | null>(null);
   const connectedMutationRef = useRef(false);
+  const [scopeCorrectionState, setScopeCorrectionState] =
+    useState<ScopeCorrectionState | null>(null);
+  const [applyingScopeCorrection, setApplyingScopeCorrection] = useState(false);
   const [shapingArtifactState, setShapingArtifactState] =
     useState<ShapingArtifactState | null>(null);
   const [shapingCompilationState, setShapingCompilationState] =
@@ -4817,6 +4868,21 @@ export function DetailPanel({
     state.input_revision,
     state.attempt,
   ].join(":");
+  const scopeCorrection =
+    mode === "governed" &&
+    scopeCorrectionState?.itemKey === connectedRunItemKey
+      ? scopeCorrectionState.listing?.proposal ?? null
+      : null;
+  const scopeCorrectionLoading =
+    mode === "governed" &&
+    state.phase === "execute" &&
+    (scopeCorrectionState?.itemKey !== connectedRunItemKey ||
+      scopeCorrectionState.loading);
+  const scopeCorrectionError =
+    mode === "governed" &&
+    scopeCorrectionState?.itemKey === connectedRunItemKey
+      ? scopeCorrectionState.error
+      : null;
   const runEvidence =
     mode === "governed" && runEvidenceState?.itemKey === runEvidenceItemKey
       ? runEvidenceState.result
@@ -5395,6 +5461,40 @@ export function DetailPanel({
     connectedWorkflowPhase,
     loadConnectedRuns,
     mode,
+  ]);
+
+  useEffect(() => {
+    if (
+      mode !== "governed" ||
+      state.phase !== "execute" ||
+      state.status !== "active"
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    void requestScopeCorrection(
+      item.source_id,
+      goal.work_item_id,
+      controller.signal,
+    ).then((loaded) => {
+      if (loaded === null) {
+        return;
+      }
+      setScopeCorrectionState({
+        itemKey: connectedRunItemKey,
+        listing: loaded.result,
+        loading: false,
+        error: loaded.error,
+      });
+    });
+    return () => controller.abort();
+  }, [
+    connectedRunItemKey,
+    goal.work_item_id,
+    item.source_id,
+    mode,
+    state.phase,
+    state.status,
   ]);
 
   useEffect(() => {
@@ -6724,6 +6824,54 @@ export function DetailPanel({
     }
   }
 
+  async function handleApplyScopeCorrection() {
+    if (scopeCorrection === null || applyingScopeCorrection) {
+      return;
+    }
+    setApplyingScopeCorrection(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/scope-correction`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            source_goal_contract_sha256:
+              scopeCorrection.source_goal_contract_sha256,
+            governed_tuple: scopeCorrection.governed_tuple,
+            proposal_sha256: scopeCorrection.proposal_sha256,
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | PortfolioScopeCorrectionResult
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The scope correction could not be applied."
+            : "The scope correction could not be applied.",
+        );
+        return;
+      }
+      const corrected = body as PortfolioScopeCorrectionResult;
+      setScopeCorrectionState(null);
+      setMissionCompilationState(null);
+      setMissionImportState(null);
+      onUpdated(
+        corrected,
+        "Exact scope approved; a fresh Execute attempt is ready.",
+      );
+    } catch {
+      setError(
+        "The scope correction could not be applied. Check the local server and try again.",
+      );
+    } finally {
+      setApplyingScopeCorrection(false);
+    }
+  }
+
   async function handleLaunchConnectedPhase() {
     if (
       connectedMutationRef.current ||
@@ -7531,6 +7679,57 @@ export function DetailPanel({
                   </section>
 
                   {shapingSection}
+
+                  {scopeCorrection !== null ? (
+                    <section
+                      aria-labelledby={`${fieldId}-scope-correction`}
+                      className="border-l-2 border-amber-500 bg-amber-500/10 px-3 py-3"
+                    >
+                      <h3
+                        id={`${fieldId}-scope-correction`}
+                        className="text-xs font-medium"
+                      >
+                        Exact scope correction required
+                      </h3>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        The current scope cannot authorize the retained worktree paths. Approval changes only allowed scope, versions the goal, and restarts Execute at attempt 0. Prior evidence remains immutable.
+                      </p>
+                      <div className="mt-3 grid gap-3 text-[11px] lg:grid-cols-2">
+                        <div>
+                          <p className="font-medium text-muted-foreground">Current governed scope</p>
+                          <ul className="mt-1 space-y-1 break-all font-mono">
+                            {scopeCorrection.current_allowed_scope.map((path) => (
+                              <li key={`current:${path}`}>{path}</li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div>
+                          <p className="font-medium text-muted-foreground">Proposed exact paths</p>
+                          <ul className="mt-1 space-y-1 break-all font-mono">
+                            {scopeCorrection.proposed_allowed_scope.map((path) => (
+                              <li key={`proposed:${path}`}>{path}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={applyingScopeCorrection}
+                        onClick={() => void handleApplyScopeCorrection()}
+                        className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {applyingScopeCorrection
+                          ? "Applying exact scope…"
+                          : "Approve exact scope & restart Execute"}
+                      </button>
+                    </section>
+                  ) : scopeCorrectionLoading ? (
+                    <p className="text-xs text-muted-foreground">Checking executable scope…</p>
+                  ) : scopeCorrectionError ? (
+                    <p className="text-xs text-destructive" role="alert">
+                      {scopeCorrectionError}
+                    </p>
+                  ) : null}
 
                   {connectedWorkflowPhase === "execute" ? (
                     <ConnectedExecuteSection
