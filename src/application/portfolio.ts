@@ -3435,11 +3435,6 @@ export class PortfolioService {
     if (current === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
-    if (phase === "execute") {
-      await this.compileMission(sourceId, workItemId);
-    } else {
-      await this.compilePatchMission(sourceId, workItemId);
-    }
     const prepared = await this.workItemController(
       source.workspace,
     ).prepareCommandAuthorization(workItemId, phase);

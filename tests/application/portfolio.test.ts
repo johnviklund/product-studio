@@ -4225,6 +4225,106 @@ describe("PortfolioService", () => {
     rebuiltIndex.close();
   });
 
+  it("reuses the immutable Execute mission when preparing commands after launch", async () => {
+    const root = await createWorkspace("Connected Command Preflight Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: {
+        ...controllerGit,
+        async listWorktreeChangedFilesExcludingFounder() {
+          return ["src/application/portfolio.ts"];
+        },
+      },
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Prepare exact connected commands",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const result = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b4",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4004,
+        process_group_id: 4004,
+        started_at: "2026-08-06T18:00:00.000Z",
+      },
+      run: vi.fn(() => result.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedRuntime(session);
+    const index = new SQLitePortfolioIndex(":memory:");
+    const { service } = await createService(
+      index,
+      () => repository,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const mission = await service.compileMission(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    const launched = await service.launchConnectedExecute(
+      sourceId,
+      created.goal.work_item_id,
+    );
+
+    result.resolve({
+      outcome: "completed",
+      partial: false,
+      stop_reason: "end_turn",
+      permissions: [],
+    });
+    await expect.poll(async () => {
+      const run = await repository.readConnectedRun(
+        created.goal.work_item_id,
+        launched.connected_run.connected_run_id,
+      );
+      return run?.lifecycle.terminal?.outcome;
+    }).toBe("completed");
+    await expect.poll(() => session.close).toHaveBeenCalledOnce();
+
+    const appliedManifestLookup = vi.spyOn(
+      repository,
+      "findAppliedExecuteManifest",
+    );
+    const prepared = await service.prepareCommandAuthorization(
+      sourceId,
+      created.goal.work_item_id,
+      "execute",
+    );
+
+    expect(appliedManifestLookup).not.toHaveBeenCalled();
+    expect(prepared.proposal).toMatchObject({
+      phase: "execute",
+      source_mission_content_sha256: mission.mission.content_sha256,
+      terminal_connected_run_id: launched.connected_run.connected_run_id,
+      changed_files: ["src/application/portfolio.ts"],
+      commands: [
+        { executable: "npm", args: ["test"] },
+        {
+          executable: "git",
+          args: ["add", "--", "src/application/portfolio.ts"],
+        },
+        {
+          executable: "git",
+          args: ["commit", "-m", "Prepare exact connected commands"],
+        },
+      ],
+    });
+    expect(prepared.work_item.state.attention).toMatchObject({
+      kind: "command_authorization",
+      proposal: { proposal_sha256: prepared.proposal.proposal_sha256 },
+    });
+    index.close();
+  });
+
   it("reuses the immutable Execute mission when repository HEAD advances before a retry", async () => {
     const firstCommit = "a".repeat(40);
     let headCommit = firstCommit;
