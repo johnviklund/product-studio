@@ -32,6 +32,7 @@ import {
   type PatchSubject,
 } from "../../src/domain/mission";
 import {
+  executionDefaultsFromCapabilityEnvelope,
   hashCanonicalCapabilityRequest,
   resolveCapabilityEnvelope,
   type ExecutionDefaultsV1,
@@ -377,6 +378,7 @@ async function governToExecute(
 
 async function createImportFixture(options?: {
   resultSource?: string;
+  executionDefaults?: ExecutionDefaultsV1;
   transformResult?: (
     result: ExecuteExternalResultSubmission,
   ) => ExecuteExternalResultSubmission;
@@ -403,12 +405,10 @@ async function createImportFixture(options?: {
     input_revision: workItem.state.input_revision!,
     attempt: workItem.state.attempt!,
   };
-  const paths = {
-    task_path: `.founder/missions/${identity.work_item_id}/execute-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/TASK.md`,
-    output_path: `.founder/missions/${identity.work_item_id}/execute-${identity.goal_version}-${identity.input_revision}-${identity.attempt}/result.json`,
-    git_base_commit: "0".repeat(40),
-  };
-  const mission = compileMission(workItem, manifest, paths);
+  const artifact = await workspace.writeMissionPackage(identity, (paths) =>
+    compileMission(workItem, manifest, paths, options?.executionDefaults),
+  );
+  const mission = artifact.mission;
   const defaultResult: ExecuteExternalResultSubmission = {
     result_schema_version: 2,
     mission_content_sha256: mission.content_sha256,
@@ -425,8 +425,8 @@ async function createImportFixture(options?: {
     );
   const snapshot: MissionResultSnapshot = {
     mission,
-    mission_path: paths.task_path.replace(/TASK\.md$/, "mission.json"),
-    result_path: paths.output_path,
+    mission_path: artifact.mission_path,
+    result_path: mission.result_contract.output_path,
     result_source: resultSource,
   };
   const evidence = new Map<string, StoredImportEvidence>();
@@ -453,6 +453,9 @@ async function createImportFixture(options?: {
         verification: input.verification,
       });
       return summary;
+    },
+    async listImportEvidence() {
+      return [...evidence.values()];
     },
   }) as ImportTestRepository;
 
@@ -1712,9 +1715,6 @@ async function createConnectedFixture(): Promise<{
     input_revision: workItem.state.input_revision!,
     attempt: workItem.state.attempt!,
   };
-  const artifact = await repository.writeMissionPackage(identity, (paths) =>
-    compileMission(workItem, manifest, paths),
-  );
   const defaults: ExecutionDefaultsV1 = {
     schema_version: 1,
     approved_command_forms: [{ executable: "npm", args: ["run", "test"] }],
@@ -1722,6 +1722,9 @@ async function createConnectedFixture(): Promise<{
     mcp: "forbidden",
     credentials: "forbidden",
   };
+  const artifact = await repository.writeMissionPackage(identity, (paths) =>
+    compileMission(workItem, manifest, paths, defaults),
+  );
   const envelope = resolveCapabilityEnvelope(
     workItem.goal.goal_contract!.allowed_scope,
     defaults,
@@ -2694,6 +2697,202 @@ describe("WorkItemController", () => {
     );
   });
 
+  it("recovers an already-created empty repair attempt from only its exact failed predecessor", async () => {
+    const fixture = await createConnectedFixture();
+    const prior = await fixture.repository.readMissionPackage(
+      fixture.record.mission.identity,
+    );
+    if (
+      prior.mission.identity.phase !== "execute" ||
+      !("capability_envelope" in prior.mission)
+    ) {
+      throw new Error("Expected a capability-bearing Execute predecessor.");
+    }
+    const result: ExecuteExternalResultSubmission = {
+      result_schema_version: 2,
+      mission_content_sha256: prior.mission.content_sha256,
+      identity: prior.mission.identity,
+      commit: testCommit,
+      summary: "Completed before deterministic verification failed",
+      changed_files: ["src/domain/result.ts"],
+      verification: [{ name: "Tests", status: "passed" }],
+    };
+    await writeFile(
+      join(
+        fixture.repository.workspaceRoot,
+        prior.mission.result_contract.output_path,
+      ),
+      serializeExternalResult(result),
+      "utf8",
+    );
+    const redRunner: VerificationRunner = {
+      async run(command) {
+        return {
+          ...(await passingRunner.run(command)),
+          status: "failed",
+          exit_code: 1,
+          stderr: "native verification environment mismatch",
+        };
+      },
+    };
+    const imported = await createController(
+      fixture.repository,
+      passingGit,
+      redRunner,
+    ).importExternalResult(fixture.workItem.goal.work_item_id, {
+      expected_phase: "execute",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: fixture.input.governed_tuple.goal_version,
+      expected_input_revision: fixture.input.governed_tuple.input_revision,
+      attempt: fixture.input.governed_tuple.attempt,
+    });
+    expect(imported.evidence.outcome).toBe("failed");
+
+    const repairRun = {
+      run_id: "83000000-0000-4000-8000-000000000001",
+      idempotency_key: "historical-empty-verification-repair",
+      acquired_at: "2026-07-26T18:01:00.000Z",
+    };
+    const lease = await fixture.repository.acquireControllerLease(
+      fixture.workItem.goal.work_item_id,
+      repairRun,
+    );
+    if (lease === null) {
+      throw new Error("Expected the blocked Execute item.");
+    }
+    let emptyRepair: { work_item: WorkItem; manifest: ControllerRunManifest };
+    try {
+      emptyRepair = await fixture.repository.commitControllerMutation(lease, {
+        goal: lease.work_item.goal,
+        state: {
+          ...lease.work_item.state,
+          status: "active",
+          attempt: lease.work_item.state.attempt! + 1,
+          updated_at: "2026-07-26T18:01:01.000Z",
+        },
+        manifest: {
+          schema_version: 1,
+          run_id: repairRun.run_id,
+          work_item_id: lease.work_item.goal.work_item_id,
+          idempotency_key: repairRun.idempotency_key,
+          phase: "execute",
+          goal_version: lease.work_item.state.goal_version!,
+          input_revision: lease.work_item.state.input_revision!,
+          attempt: lease.work_item.state.attempt! + 1,
+          started_at: repairRun.acquired_at,
+          outcome: "pending",
+        },
+      });
+    } finally {
+      await fixture.repository.releaseControllerLease(lease);
+    }
+    const currentIdentity = {
+      ...fixture.record.mission.identity,
+      attempt: fixture.record.mission.identity.attempt + 1,
+    };
+    const currentArtifact = await fixture.repository.writeMissionPackage(
+      currentIdentity,
+      (paths) =>
+        compileMission(emptyRepair.work_item, emptyRepair.manifest, paths),
+    );
+    const currentEnvelope = currentArtifact.mission.capability_envelope;
+    expect(currentEnvelope.runtime.approved_command_forms).toEqual([]);
+    const currentEnvelopeSha256 =
+      hashResolvedCapabilityEnvelope(currentEnvelope);
+    const currentInput = {
+      ...fixture.input,
+      governed_tuple: {
+        ...fixture.input.governed_tuple,
+        attempt: currentIdentity.attempt,
+      },
+      mission_content_sha256: currentArtifact.mission.content_sha256,
+    };
+    const currentRecord: typeof fixture.record = {
+      ...fixture.record,
+      connected_run_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b2",
+      mission: {
+        identity: currentIdentity,
+        path: currentArtifact.mission.task_path.replace(
+          /TASK\.md$/,
+          "mission.json",
+        ),
+        content_sha256: currentArtifact.mission.content_sha256,
+        source_commit: currentArtifact.mission.source_revision.git_base_commit,
+      },
+      governed_tuple: currentInput.governed_tuple,
+      authorization: {
+        kind: "capability_envelope",
+        envelope: currentEnvelope,
+        envelope_sha256: currentEnvelopeSha256,
+      },
+      acp: {
+        ...fixture.record.acp,
+        session_id: {
+          value: "empty-repair-session",
+          assurance: "adapter_attested",
+        },
+      },
+    };
+    const controller = createController(fixture.repository);
+    await controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      currentInput,
+      currentRecord,
+    );
+    const deniedRequest = {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "git",
+      args: ["status", "--short"],
+    };
+    const operation = {
+      normalized_operation: deniedRequest,
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest(deniedRequest),
+      reason: "outside_capability_envelope" as const,
+      resolved_envelope_sha256: currentEnvelopeSha256,
+      connected_run_id: currentRecord.connected_run_id,
+    };
+    await controller.recordConnectedPermissionDenial(
+      fixture.workItem.goal.work_item_id,
+      { ...withoutRunOrdinal(currentInput), operation },
+    );
+    const decision = {
+      decision: "retry_without_allowing" as const,
+      expected_phase: "execute" as const,
+      governed_tuple: currentInput.governed_tuple,
+      operation_sha256: operation.operation_sha256,
+      connected_run_id: currentRecord.connected_run_id,
+      mission_content_sha256: currentInput.mission_content_sha256,
+    };
+
+    const recovered = await controller.resolveConnectedPermission(
+      fixture.workItem.goal.work_item_id,
+      decision,
+    );
+    expect(recovered.manifest?.capability_grant).toBeUndefined();
+    expect(recovered.manifest?.capability_carry_forward).toMatchObject({
+      source_mission_content_sha256: currentInput.mission_content_sha256,
+      execution_defaults: executionDefaultsFromCapabilityEnvelope(
+        prior.mission.capability_envelope,
+      ),
+    });
+    expect(
+      recovered.manifest?.capability_carry_forward?.execution_defaults
+        .approved_command_forms,
+    ).not.toContainEqual({
+      executable: deniedRequest.executable,
+      args: deniedRequest.args,
+    });
+    await expect(
+      controller.resolveConnectedPermission(
+        fixture.workItem.goal.work_item_id,
+        decision,
+      ),
+    ).resolves.toEqual(recovered);
+  });
+
   it("keeps v6 launch-ineligible while allowing its exact permission recovery", async () => {
     const historicalFixture = async () => {
       const fixture = await createConnectedFixture();
@@ -3249,6 +3448,64 @@ describe("WorkItemController", () => {
     },
   );
 
+  it("carries only the failed mission's exact execution defaults into its repair attempt", async () => {
+    const executionDefaults: ExecutionDefaultsV1 = {
+      schema_version: 1,
+      approved_command_forms: [
+        { executable: "git", args: ["status", "--short"] },
+        { executable: "npm", args: ["run", "test"] },
+      ],
+      approved_url_operations: [],
+      mcp: "forbidden",
+      credentials: "forbidden",
+    };
+    const fixture = await createImportFixture({ executionDefaults });
+    const redRunner: VerificationRunner = {
+      async run(command) {
+        return {
+          ...(await passingRunner.run(command)),
+          status: "failed",
+          exit_code: 1,
+          stderr: "deterministic verification failed",
+        };
+      },
+    };
+    const controller = createController(
+      fixture.repository,
+      passingGit,
+      redRunner,
+    );
+    await controller.importExternalResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+
+    const retried = await controller.retryExecuteAttempt(
+      fixture.workItem.goal.work_item_id,
+      {
+        expected_phase: "execute",
+        expected_status: "blocked",
+        expected_schema_version: 2,
+        expected_goal_version: fixture.input.expected_goal_version,
+        expected_input_revision: fixture.input.expected_input_revision,
+        attempt: fixture.input.attempt,
+      },
+    );
+    const prior = await fixture.repository.readMissionPackage({
+      phase: "execute",
+      work_item_id: fixture.workItem.goal.work_item_id,
+      goal_version: fixture.input.expected_goal_version,
+      input_revision: fixture.input.expected_input_revision,
+      attempt: fixture.input.attempt,
+    });
+    expect(retried.manifest.capability_grant).toBeUndefined();
+    expect(retried.manifest.capability_carry_forward).toMatchObject({
+      kind: "carry_forward",
+      source_mission_content_sha256: prior.mission.content_sha256,
+      execution_defaults: executionDefaults,
+    });
+  });
+
   it("releases the controller lease after timed-out verification blocks an import", async () => {
     const { repository, workItem, input } = await createImportFixture();
     const timedOutRunner: VerificationRunner = {
@@ -3306,6 +3563,19 @@ describe("WorkItemController", () => {
     expect([...malformed.evidence.values()][0].evidence.reasons).toContain(
       "result.json is not valid JSON.",
     );
+    const malformedRetry = await malformedController.retryExecuteAttempt(
+      malformed.workItem.goal.work_item_id,
+      {
+        expected_phase: "execute",
+        expected_status: "blocked",
+        expected_schema_version: 2,
+        expected_goal_version: malformed.input.expected_goal_version,
+        expected_input_revision: malformed.input.expected_input_revision,
+        attempt: malformed.input.attempt,
+      },
+    );
+    expect(malformedRetry.manifest.capability_grant).toBeUndefined();
+    expect(malformedRetry.manifest.capability_carry_forward).toBeUndefined();
 
     const outside = await createImportFixture();
     const outsideGit: GitVerificationAdapter = {

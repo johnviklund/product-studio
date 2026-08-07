@@ -2550,6 +2550,14 @@ export class WorkItemController {
     }
 
     try {
+      const capabilityCarryForward =
+        await this.failedExecuteVerificationCapabilityCarryForward({
+          phase: "execute",
+          work_item_id: validatedId,
+          goal_version: validatedInput.expected_goal_version,
+          input_revision: validatedInput.expected_input_revision,
+          attempt: validatedInput.attempt,
+        });
       const manifestIdentity = {
         work_item_id: validatedId,
         run_id: runId,
@@ -2558,6 +2566,9 @@ export class WorkItemController {
         goal_version: validatedInput.expected_goal_version,
         input_revision: validatedInput.expected_input_revision,
         attempt: nextAttempt,
+        ...(capabilityCarryForward === undefined
+          ? {}
+          : { capability_carry_forward: capabilityCarryForward }),
       };
       return await this.retryConnectedAttemptWithLease({
         work_item_id: validatedId,
@@ -2895,16 +2906,17 @@ export class WorkItemController {
                   validatedInput.connected_run_id,
                 )
               : null;
+          const expectedCarryForward =
+            replayRecord === null
+              ? undefined
+              : await this.connectedRetryWithoutAllowingCarryForward(
+                  replayRecord,
+                );
           const carryForwardMatches =
-            replayRecord?.authorization.kind === "capability_envelope" &&
-            existing.capability_carry_forward
-              ?.source_mission_content_sha256 ===
-              validatedInput.mission_content_sha256 &&
+            expectedCarryForward !== undefined &&
             isDeepStrictEqual(
-              existing.capability_carry_forward.execution_defaults,
-              executionDefaultsFromCapabilityEnvelope(
-                replayRecord.authorization.envelope,
-              ),
+              existing.capability_carry_forward,
+              expectedCarryForward,
             );
           const grantMatches =
             validatedInput.decision === "allow_once"
@@ -2961,7 +2973,7 @@ export class WorkItemController {
           : {
               ...manifestIdentity,
               capability_carry_forward:
-                this.connectedCapabilityCarryForward(record),
+                await this.connectedRetryWithoutAllowingCarryForward(record),
             };
       const mutation = await this.retryConnectedAttemptWithLease({
         work_item_id: validatedId,
@@ -3356,6 +3368,195 @@ export class WorkItemController {
       execution_defaults: executionDefaultsFromCapabilityEnvelope(
         record.authorization.envelope,
       ),
+    });
+  }
+
+  private async failedExecuteVerificationAuthorization(
+    identity: MissionIdentity<"execute">,
+  ): Promise<
+    | {
+        source_mission_content_sha256: string;
+        git_base_commit: string;
+        allowed_scope_digest: string;
+        execution_defaults: ReturnType<
+          typeof executionDefaultsFromCapabilityEnvelope
+        >;
+      }
+    | undefined
+  > {
+    const matches = (
+      await this.repository.listImportEvidence(identity.work_item_id)
+    ).filter(
+      (stored) =>
+        stored.evidence.phase === "execute" &&
+        stored.evidence.outcome === "failed" &&
+        stored.evidence.result_commit !== null &&
+        isDeepStrictEqual(stored.evidence.identity, identity) &&
+        stored.verification.length > 0 &&
+        stored.verification.some((record) =>
+          ["failed", "timed_out", "spawn_error"].includes(record.status),
+        ),
+    );
+    if (matches.length === 0) {
+      return undefined;
+    }
+    if (matches.length !== 1) {
+      throw this.conflict(
+        "repair_required",
+        identity.work_item_id,
+        "Deterministic-verification repair requires exactly one matching immutable Execute failure.",
+      );
+    }
+
+    const stored = matches[0];
+    if (
+      stored.summary.phase !== stored.evidence.phase ||
+      stored.summary.import_run_id !== stored.evidence.import_run_id ||
+      stored.summary.outcome !== stored.evidence.outcome ||
+      !isDeepStrictEqual(stored.summary.reasons, stored.evidence.reasons)
+    ) {
+      throw this.conflict(
+        "repair_required",
+        identity.work_item_id,
+        "Deterministic-verification repair evidence has a mismatched immutable summary.",
+      );
+    }
+    const evidenceManifest =
+      await this.repository.readControllerRunManifest(
+        identity.work_item_id,
+        stored.evidence.controller_run_id,
+      );
+    if (
+      evidenceManifest === null ||
+      evidenceManifest.phase !== "execute" ||
+      evidenceManifest.goal_version !== identity.goal_version ||
+      evidenceManifest.input_revision !== identity.input_revision ||
+      evidenceManifest.attempt !== identity.attempt ||
+      evidenceManifest.outcome !== "applied"
+    ) {
+      throw this.conflict(
+        "repair_required",
+        identity.work_item_id,
+        "Deterministic-verification repair evidence does not bind its applied controller run.",
+      );
+    }
+    const snapshot = await this.repository.readMissionPackage(identity);
+    if (
+      snapshot.mission.identity.phase !== "execute" ||
+      !("capability_envelope" in snapshot.mission) ||
+      stored.evidence.mission_content_sha256 !==
+        snapshot.mission.content_sha256 ||
+      stored.evidence.git_base_commit !==
+        snapshot.mission.source_revision.git_base_commit
+    ) {
+      throw this.conflict(
+        "repair_required",
+        identity.work_item_id,
+        "Immutable Execute failure evidence does not bind its exact capability-bearing mission.",
+      );
+    }
+    return {
+      source_mission_content_sha256: snapshot.mission.content_sha256,
+      git_base_commit: snapshot.mission.source_revision.git_base_commit,
+      allowed_scope_digest:
+        snapshot.mission.capability_envelope.workspace.allowed_scope_digest,
+      execution_defaults: executionDefaultsFromCapabilityEnvelope(
+        snapshot.mission.capability_envelope,
+      ),
+    };
+  }
+
+  private async failedExecuteVerificationCapabilityCarryForward(
+    identity: MissionIdentity<"execute">,
+  ): Promise<ControllerCapabilityCarryForward | undefined> {
+    const authorization =
+      await this.failedExecuteVerificationAuthorization(identity);
+    return authorization === undefined
+      ? undefined
+      : createControllerCapabilityCarryForward({
+          source_mission_content_sha256:
+            authorization.source_mission_content_sha256,
+          execution_defaults: authorization.execution_defaults,
+        });
+  }
+
+  private async connectedRetryWithoutAllowingCarryForward(
+    record: ConnectedRunRecordV2,
+  ): Promise<ControllerCapabilityCarryForward> {
+    if (record.authorization.kind !== "capability_envelope") {
+      throw this.conflict(
+        "stale_expectation",
+        record.mission.identity.work_item_id,
+        "Connected capability carry-forward requires capability-envelope authorization.",
+      );
+    }
+    const current = this.connectedCapabilityCarryForward(record);
+    if (
+      record.mission.identity.phase !== "execute" ||
+      record.mission.identity.attempt < 1 ||
+      current.execution_defaults.approved_command_forms.length !== 0 ||
+      current.execution_defaults.approved_url_operations.length !== 0
+    ) {
+      return current;
+    }
+
+    const currentSnapshot = await this.repository.readMissionPackage(
+      record.mission.identity,
+    );
+    if (
+      currentSnapshot.mission.identity.phase !== "execute" ||
+      !("capability_envelope" in currentSnapshot.mission) ||
+      currentSnapshot.mission.content_sha256 !== record.mission.content_sha256 ||
+      !isDeepStrictEqual(
+        currentSnapshot.mission.capability_envelope,
+        record.authorization.envelope,
+      )
+    ) {
+      throw this.conflict(
+        "stale_expectation",
+        record.mission.identity.work_item_id,
+        "Permission recovery no longer binds the exact current Execute mission.",
+      );
+    }
+    const currentManifest = await this.repository.readControllerRunManifest(
+      record.mission.identity.work_item_id,
+      currentSnapshot.mission.controller_run.run_id,
+    );
+    if (
+      currentManifest === null ||
+      currentManifest.phase !== "execute" ||
+      currentManifest.goal_version !== record.mission.identity.goal_version ||
+      currentManifest.input_revision !==
+        record.mission.identity.input_revision ||
+      currentManifest.attempt !== record.mission.identity.attempt ||
+      currentManifest.outcome !== "applied" ||
+      currentManifest.capability_grant !== undefined ||
+      currentManifest.capability_carry_forward !== undefined
+    ) {
+      throw this.conflict(
+        "repair_required",
+        record.mission.identity.work_item_id,
+        "Empty-envelope recovery requires the exact authorization-free Execute manifest.",
+      );
+    }
+
+    const predecessor = await this.failedExecuteVerificationAuthorization({
+      ...record.mission.identity,
+      attempt: record.mission.identity.attempt - 1,
+    });
+    if (
+      predecessor === undefined ||
+      (predecessor.execution_defaults.approved_command_forms.length === 0 &&
+        predecessor.execution_defaults.approved_url_operations.length === 0) ||
+      predecessor.git_base_commit !== record.mission.source_commit ||
+      predecessor.allowed_scope_digest !==
+        record.authorization.envelope.workspace.allowed_scope_digest
+    ) {
+      return current;
+    }
+    return createControllerCapabilityCarryForward({
+      source_mission_content_sha256: record.mission.content_sha256,
+      execution_defaults: predecessor.execution_defaults,
     });
   }
 
