@@ -1,6 +1,7 @@
 import { compileReviewMissionInputSchema } from "../../../../../../../../src/application/portfolio";
 import { getPortfolioService } from "../../../../../../../../src/application/portfolio-service";
-import { errorResponse } from "../../../../../../responses";
+import { MUTATING_REQUEST_MAX_BYTES } from "../../../../../../request-body";
+import { createTrustedMutationRoute } from "../../route-factory";
 
 export const runtime = "nodejs";
 
@@ -11,13 +12,14 @@ interface RouteContext {
   }>;
 }
 
-export async function POST(
-  request: Request,
-  context: RouteContext,
-): Promise<Response> {
-  try {
-    const input: unknown = await request.json();
-    const validatedInput = compileReviewMissionInputSchema.parse(input);
+export const POST = createTrustedMutationRoute(
+  {
+    body: {
+      schema: compileReviewMissionInputSchema,
+      maxBytes: MUTATING_REQUEST_MAX_BYTES,
+    },
+  },
+  async (validatedInput, _request, context: RouteContext) => {
     const { sourceId, workItemId } = await context.params;
     const service = await getPortfolioService();
     const mission = await service.compileReviewMission(
@@ -27,7 +29,5 @@ export async function POST(
     );
 
     return Response.json(mission);
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
+  },
+);

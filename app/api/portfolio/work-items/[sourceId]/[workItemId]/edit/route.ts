@@ -1,6 +1,7 @@
 import { getPortfolioService } from "../../../../../../../src/application/portfolio-service";
 import { saveWorkItemInputSchema } from "../../../../../../../src/domain/work-item";
-import { errorResponse } from "../../../../../responses";
+import { MUTATING_REQUEST_MAX_BYTES } from "../../../../../request-body";
+import { createTrustedMutationRoute } from "../route-factory";
 
 export const runtime = "nodejs";
 
@@ -11,13 +12,14 @@ interface RouteContext {
   }>;
 }
 
-export async function PATCH(
-  request: Request,
-  context: RouteContext,
-): Promise<Response> {
-  try {
-    const input: unknown = await request.json();
-    const validatedInput = saveWorkItemInputSchema.parse(input);
+export const PATCH = createTrustedMutationRoute(
+  {
+    body: {
+      schema: saveWorkItemInputSchema,
+      maxBytes: MUTATING_REQUEST_MAX_BYTES,
+    },
+  },
+  async (validatedInput, _request, context: RouteContext) => {
     const { sourceId, workItemId } = await context.params;
     const service = await getPortfolioService();
     const updated = await service.saveWorkItem(
@@ -27,7 +29,5 @@ export async function PATCH(
     );
 
     return Response.json(updated);
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
+  },
+);

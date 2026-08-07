@@ -2,6 +2,7 @@ import type { z } from "zod";
 
 export const CONNECTED_REQUEST_MAX_BYTES = 4 * 1024;
 export const SHAPING_REQUEST_MAX_BYTES = 8 * 1024;
+export const MUTATING_REQUEST_MAX_BYTES = 64 * 1024;
 
 export async function readCappedJsonRequest<T>(
   request: Request,

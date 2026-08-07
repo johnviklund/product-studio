@@ -102,7 +102,10 @@ import * as startBrainstormRoute from "../../app/api/portfolio/work-items/[sourc
 import * as shapingModelsRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/shaping/models/route";
 import * as repairControllerLeaseRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/repair-controller-lease/route";
 import { GET as getPortfolioRunEvidence } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/run-evidence/route";
-import { SHAPING_REQUEST_MAX_BYTES } from "../../app/api/request-body";
+import {
+  MUTATING_REQUEST_MAX_BYTES,
+  SHAPING_REQUEST_MAX_BYTES,
+} from "../../app/api/request-body";
 import {
   PATCH as updatePortfolioWorkItem,
 } from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/route";
@@ -325,7 +328,7 @@ async function createService(): Promise<{
 function registrationRequest(workspacePath: string): Request {
   return new Request("http://localhost/api/workspaces", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: trustedMutationHeaders(),
     body: JSON.stringify({ workspace_path: workspacePath }),
   });
 }
@@ -333,15 +336,25 @@ function registrationRequest(workspacePath: string): Request {
 function registrationRequestBody(body: unknown): Request {
   return new Request("http://localhost/api/workspaces", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: trustedMutationHeaders(),
     body: JSON.stringify(body),
+  });
+}
+
+function trustedMutationHeaders(
+  additional: Record<string, string> = {},
+): Headers {
+  return new Headers({
+    origin: "http://127.0.0.1:3000",
+    host: "127.0.0.1:3000",
+    ...additional,
   });
 }
 
 function phaseUpdateRequest(body: unknown): Request {
   return new Request("http://localhost/api/portfolio/work-items/source/item", {
     method: "PATCH",
-    headers: { "content-type": "application/json" },
+    headers: trustedMutationHeaders(),
     body: JSON.stringify(body),
   });
 }
@@ -349,7 +362,7 @@ function phaseUpdateRequest(body: unknown): Request {
 function captureRequest(body: unknown): Request {
   return new Request("http://localhost/api/portfolio/work-items", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: trustedMutationHeaders(),
     body: JSON.stringify(body),
   });
 }
@@ -359,7 +372,7 @@ function saveWorkItemRequest(body: unknown): Request {
     "http://localhost/api/portfolio/work-items/source/item/edit",
     {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: trustedMutationHeaders(),
       body: JSON.stringify(body),
     },
   );
@@ -370,7 +383,7 @@ function missionRequest(): Request {
     "http://localhost/api/portfolio/work-items/source/item/mission",
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: trustedMutationHeaders(),
       body: "{ignored-no-body-contract",
     },
   );
@@ -417,7 +430,7 @@ function missionActionRequest(action: "import" | "retry"): Request {
     `http://localhost/api/portfolio/work-items/source/item/mission/${action}`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: trustedMutationHeaders(),
       body: "{ignored-no-body-contract",
     },
   );
@@ -428,7 +441,7 @@ function reviewMissionRequest(body: unknown): Request {
     "http://localhost/api/portfolio/work-items/source/item/mission/review",
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: trustedMutationHeaders(),
       body: JSON.stringify(body),
     },
   );
@@ -439,10 +452,17 @@ function reviewMissionImportRequest(): Request {
     "http://localhost/api/portfolio/work-items/source/item/mission/review/import",
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: trustedMutationHeaders(),
       body: "{ignored-no-body-contract",
     },
   );
+}
+
+function rebuildRequest(): Request {
+  return new Request("http://localhost/api/work-items/rebuild", {
+    method: "POST",
+    headers: trustedMutationHeaders(),
+  });
 }
 
 function runEvidenceRequest(): Request {
@@ -903,6 +923,169 @@ afterEach(async () => {
 });
 
 describe("portfolio API routes", () => {
+  it("rejects missing or wrong origins before all 13 guarded mutations", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const routes = [
+      {
+        name: "work item phase",
+        method: "PATCH",
+        body: JSON.stringify({ target_phase: "review" }),
+        invoke: (request: Request) => updatePortfolioWorkItem(request, context),
+      },
+      {
+        name: "work item edit",
+        method: "PATCH",
+        body: JSON.stringify({
+          target_source_id: "inbox",
+          title: "Guarded edit",
+          type: null,
+          priority: null,
+          tags: [],
+          notes: null,
+        }),
+        invoke: (request: Request) => savePortfolioWorkItem(request, context),
+      },
+      {
+        name: "mission",
+        method: "POST",
+        invoke: (request: Request) => compilePortfolioMission(request, context),
+      },
+      {
+        name: "mission retry",
+        method: "POST",
+        invoke: (request: Request) => retryPortfolioMission(request, context),
+      },
+      {
+        name: "mission import",
+        method: "POST",
+        invoke: (request: Request) => importPortfolioMission(request, context),
+      },
+      {
+        name: "patch mission",
+        method: "POST",
+        invoke: (request: Request) =>
+          compilePortfolioPatchMission(request, context),
+      },
+      {
+        name: "patch import",
+        method: "POST",
+        invoke: (request: Request) =>
+          importPortfolioPatchMission(request, context),
+      },
+      {
+        name: "review mission",
+        method: "POST",
+        body: JSON.stringify({ independence_attested: true }),
+        invoke: (request: Request) =>
+          compilePortfolioReviewMission(request, context),
+      },
+      {
+        name: "review import",
+        method: "POST",
+        invoke: (request: Request) =>
+          importPortfolioReviewMission(request, context),
+      },
+      {
+        name: "patch plan",
+        method: "POST",
+        invoke: (request: Request) => acceptPortfolioPatchPlan(request, context),
+      },
+      {
+        name: "portfolio capture",
+        method: "POST",
+        body: JSON.stringify({ title: "Guarded capture", capture_kind: "idea" }),
+        invoke: createPortfolioWorkItem,
+      },
+      {
+        name: "work item rebuild",
+        method: "POST",
+        invoke: rebuildWorkItems,
+      },
+      {
+        name: "workspace registration",
+        method: "POST",
+        body: JSON.stringify({ workspace_path: "/tmp/guarded-workspace" }),
+        invoke: registerWorkspace,
+      },
+    ];
+    expect(routes).toHaveLength(13);
+
+    for (const route of routes) {
+      for (const origin of [null, "https://attacker.example"]) {
+        getService.mockReset();
+        const headers = new Headers({ host: "127.0.0.1:3000" });
+        if (origin !== null) {
+          headers.set("origin", origin);
+        }
+        const response = await route.invoke(
+          new Request(`http://localhost/api/${route.name}`, {
+            method: route.method,
+            headers,
+            body: route.body,
+          }),
+        );
+
+        expect(response.status, `${route.name}: ${origin ?? "missing"}`).toBe(
+          403,
+        );
+        expect(getService).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  it("rejects unknown, malformed, and oversized JSON on every guarded JSON route", async () => {
+    const context = phaseUpdateContext("source", "item");
+    const routes = [
+      {
+        name: "work item phase",
+        method: "PATCH",
+        invoke: (request: Request) => updatePortfolioWorkItem(request, context),
+      },
+      {
+        name: "work item edit",
+        method: "PATCH",
+        invoke: (request: Request) => savePortfolioWorkItem(request, context),
+      },
+      {
+        name: "review mission",
+        method: "POST",
+        invoke: (request: Request) =>
+          compilePortfolioReviewMission(request, context),
+      },
+      {
+        name: "portfolio capture",
+        method: "POST",
+        invoke: createPortfolioWorkItem,
+      },
+      {
+        name: "workspace registration",
+        method: "POST",
+        invoke: registerWorkspace,
+      },
+    ];
+    const invalidBodies = [
+      JSON.stringify({ unexpected: true }),
+      "{malformed",
+      "x".repeat(MUTATING_REQUEST_MAX_BYTES + 1),
+    ];
+
+    for (const route of routes) {
+      for (const body of invalidBodies) {
+        getService.mockReset();
+        const response = await route.invoke(
+          new Request(`http://localhost/api/${route.name}`, {
+            method: route.method,
+            headers: trustedMutationHeaders(),
+            body,
+          }),
+        );
+
+        expect(response.status, route.name).toBe(400);
+        expect(getService).not.toHaveBeenCalled();
+      }
+    }
+  });
+
   it("registers and lists workspaces and their projected work items", async () => {
     await createService();
     const workspacePath = await createWorkspace();
@@ -939,7 +1122,7 @@ describe("portfolio API routes", () => {
     const workspacePath = await createWorkspace();
     await registerWorkspace(registrationRequest(workspacePath));
 
-    const response = await rebuildWorkItems();
+    const response = await rebuildWorkItems(rebuildRequest());
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -3018,7 +3201,7 @@ describe("portfolio API routes", () => {
     const registration = await registrationResponse.json();
     await rm(workspacePath, { recursive: true, force: true });
 
-    const rebuildResponse = await rebuildWorkItems();
+    const rebuildResponse = await rebuildWorkItems(rebuildRequest());
     const rebuild = await rebuildResponse.json();
     const workspacesResponse = await getWorkspaces();
 

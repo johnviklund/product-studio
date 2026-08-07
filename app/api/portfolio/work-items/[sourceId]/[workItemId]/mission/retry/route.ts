@@ -1,5 +1,5 @@
 import { getPortfolioService } from "../../../../../../../../src/application/portfolio-service";
-import { errorResponse } from "../../../../../../responses";
+import { createTrustedMutationRoute } from "../../route-factory";
 
 export const runtime = "nodejs";
 
@@ -10,17 +10,13 @@ interface RouteContext {
   }>;
 }
 
-export async function POST(
-  _request: Request,
-  context: RouteContext,
-): Promise<Response> {
-  try {
+export const POST = createTrustedMutationRoute(
+  { body: null },
+  async (_input, _request, context: RouteContext) => {
     const { sourceId, workItemId } = await context.params;
     const service = await getPortfolioService();
     const retried = await service.retryExecuteAttempt(sourceId, workItemId);
 
     return Response.json(retried);
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
+  },
+);

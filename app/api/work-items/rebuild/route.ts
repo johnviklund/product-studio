@@ -1,13 +1,22 @@
 import { getPortfolioService } from "../../../../src/application/portfolio-service";
-import { errorResponse } from "../../responses";
+import { createTrustedMutationRoute } from "../../portfolio/work-items/[sourceId]/[workItemId]/route-factory";
 
 export const runtime = "nodejs";
 
-export async function POST(): Promise<Response> {
-  try {
+const rebuildWorkItems = createTrustedMutationRoute(
+  { body: null },
+  async () => {
     const service = await getPortfolioService();
     return Response.json(await service.rebuild());
-  } catch (error) {
-    return errorResponse(error);
-  }
+  },
+);
+
+export function POST(request?: Request): Promise<Response> {
+  return rebuildWorkItems(
+    request ??
+      new Request("http://localhost/api/work-items/rebuild", {
+        method: "POST",
+      }),
+    undefined,
+  );
 }

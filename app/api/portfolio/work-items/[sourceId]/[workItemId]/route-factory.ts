@@ -20,6 +20,21 @@ export interface ShapingRouteContext {
   }>;
 }
 
+interface JsonMutationBody<Input> {
+  schema: z.ZodType<Input>;
+  maxBytes: number;
+}
+
+interface TrustedMutationRouteOptions<Input> {
+  body: JsonMutationBody<Input> | null;
+}
+
+type TrustedMutationRouteAction<Context, Input> = (
+  input: Input,
+  request: Request,
+  context: Context,
+) => Response | Promise<Response>;
+
 type ShapingRouteAction<Input> = (
   service: PortfolioService,
   sourceId: string,
@@ -33,26 +48,41 @@ type ShapingGetAction = (
   workItemId: string,
 ) => unknown | Promise<unknown>;
 
+export function createTrustedMutationRoute<Context, Input>(
+  options: TrustedMutationRouteOptions<Input>,
+  action: TrustedMutationRouteAction<Context, Input>,
+): (request: Request, context: Context) => Promise<Response> {
+  return async (request, context) => {
+    try {
+      assertTrustedRequestOrigin(request, getPortfolioTrustedOriginConfig());
+      const input =
+        options.body === null
+          ? (undefined as Input)
+          : await readCappedJsonRequest(
+              request,
+              options.body.schema,
+              options.body.maxBytes,
+            );
+      return await action(input, request, context);
+    } catch (error) {
+      return errorResponse(error);
+    }
+  };
+}
+
 function createPostRoute<Input>(
   schema: z.ZodType<Input>,
   maxBytes: number,
   action: ShapingRouteAction<Input>,
 ): (request: Request, context: ShapingRouteContext) => Promise<Response> {
-  return async (request, context) => {
-    try {
-      assertTrustedRequestOrigin(request, getPortfolioTrustedOriginConfig());
-      const input = await readCappedJsonRequest(
-        request,
-        schema,
-        maxBytes,
-      );
+  return createTrustedMutationRoute(
+    { body: { schema, maxBytes } },
+    async (input, _request, context) => {
       const { sourceId, workItemId } = await context.params;
       const service = await getPortfolioService();
       return Response.json(await action(service, sourceId, workItemId, input));
-    } catch (error) {
-      return errorResponse(error);
-    }
-  };
+    },
+  );
 }
 
 export function createShapingPostRoute<Input>(
