@@ -1287,6 +1287,48 @@ export function clearShapingStateForExecuteHandoff({
   setShowFullWorkItem(false);
 }
 
+interface ReviewImportDriftRecoverySuccessTransition<T> {
+  itemKey: string;
+  sourceId: string;
+  workItemId: string;
+  updatedItem: T;
+  setRecoveryState: (value: ReviewImportDriftRecoveryState) => void;
+  clearReviewMissionImportState: (value: null) => void;
+  markRunEvidenceLoading: () => void;
+  loadRunEvidence: () => Promise<void>;
+  onUpdated: (item: T, message: string) => void;
+}
+
+export async function completeReviewImportDriftRecoverySuccess<T>({
+  itemKey,
+  sourceId,
+  workItemId,
+  updatedItem,
+  setRecoveryState,
+  clearReviewMissionImportState,
+  markRunEvidenceLoading,
+  loadRunEvidence,
+  onUpdated,
+}: ReviewImportDriftRecoverySuccessTransition<T>): Promise<void> {
+  setRecoveryState({
+    itemKey,
+    listing: {
+      source_id: sourceId,
+      work_item_id: workItemId,
+      proposal: null,
+    },
+    loading: false,
+    error: null,
+  });
+  clearReviewMissionImportState(null);
+  markRunEvidenceLoading();
+  await loadRunEvidence();
+  onUpdated(
+    updatedItem,
+    "Exact drift accepted; the clean Review result is ready for approval.",
+  );
+}
+
 function formatDuration(durationMs: number): string {
   if (durationMs < 1_000) {
     return `${durationMs} ms`;
@@ -7311,23 +7353,17 @@ export function DetailPanel({
         );
         return;
       }
-      setReviewImportDriftRecoveryState({
+      await completeReviewImportDriftRecoverySuccess({
         itemKey: connectedRunItemKey,
-        listing: {
-          source_id: item.source_id,
-          work_item_id: goal.work_item_id,
-          proposal: null,
-        },
-        loading: false,
-        error: null,
+        sourceId: item.source_id,
+        workItemId: goal.work_item_id,
+        updatedItem: body as PortfolioReviewImportDriftRecoveryResult,
+        setRecoveryState: setReviewImportDriftRecoveryState,
+        clearReviewMissionImportState: setReviewMissionImportState,
+        markRunEvidenceLoading,
+        loadRunEvidence,
+        onUpdated,
       });
-      setReviewMissionImportState(null);
-      markRunEvidenceLoading();
-      await loadRunEvidence();
-      onUpdated(
-        body as PortfolioReviewImportDriftRecoveryResult,
-        "Exact drift accepted; the clean Review result is ready for approval.",
-      );
     } catch {
       setError(
         "The Review import drift decision could not be applied. Check the local server and try again.",

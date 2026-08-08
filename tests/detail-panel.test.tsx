@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   canEditGoalContractFromFullWorkItem,
   clearShapingStateForExecuteHandoff,
+  completeReviewImportDriftRecoverySuccess,
   CommandAuthorizationSection,
   commandAuthorizationPreflightEligible,
   ConnectedExecuteSection,
@@ -3358,6 +3359,67 @@ describe("detail panel connected execution", () => {
     expect(html).toContain("Touches the reviewed subject");
     expect(html).toContain("Accept exact drift &amp; reassess Review");
     expect(primaryActionCount(html)).toBe(1);
+  });
+
+  it("clears Review drift approval and refreshes applied evidence before updating the board", async () => {
+    const events: string[] = [];
+    let recoveryProjection: unknown = "approval-card";
+    let reviewImportProjection: unknown = "rejected-import";
+    let evidenceProjection = "stale";
+    const updatedItem = { state: "review-ready" };
+    const onUpdated = vi.fn((item: typeof updatedItem, message: string) => {
+      events.push("board-updated");
+      expect(item).toBe(updatedItem);
+      expect(message).toBe(
+        "Exact drift accepted; the clean Review result is ready for approval.",
+      );
+      expect(evidenceProjection).toBe("applied-review-evidence");
+    });
+
+    await completeReviewImportDriftRecoverySuccess({
+      itemKey: "source-1:work-item-1:review",
+      sourceId: "source-1",
+      workItemId,
+      updatedItem,
+      setRecoveryState(value) {
+        events.push("approval-cleared");
+        recoveryProjection = value;
+      },
+      clearReviewMissionImportState(value) {
+        events.push("review-import-cleared");
+        reviewImportProjection = value;
+      },
+      markRunEvidenceLoading() {
+        events.push("evidence-loading");
+        evidenceProjection = "loading";
+      },
+      async loadRunEvidence() {
+        events.push("evidence-loaded");
+        evidenceProjection = "applied-review-evidence";
+      },
+      onUpdated,
+    });
+
+    expect(recoveryProjection).toEqual({
+      itemKey: "source-1:work-item-1:review",
+      listing: {
+        source_id: "source-1",
+        work_item_id: workItemId,
+        proposal: null,
+      },
+      loading: false,
+      error: null,
+    });
+    expect(reviewImportProjection).toBeNull();
+    expect(evidenceProjection).toBe("applied-review-evidence");
+    expect(events).toEqual([
+      "approval-cleared",
+      "review-import-cleared",
+      "evidence-loading",
+      "evidence-loaded",
+      "board-updated",
+    ]);
+    expect(onUpdated).toHaveBeenCalledOnce();
   });
 
   it("renders all recovery actions against the exact permission hash", () => {
