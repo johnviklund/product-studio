@@ -59,6 +59,7 @@ import {
   hashResultContent,
   reviewExternalResultSubmissionForSubjectSchema,
   reviewFindingSchema,
+  type ConnectedReviewResultRecoveryReceiptV1,
   type ImportEvidenceSummary,
   type PatchExternalResultSubmission,
   type ReviewFinding,
@@ -254,6 +255,7 @@ type WorkspaceGateway = Pick<
   | "updateConnectedRunEffectiveModel"
   | "appendConnectedRunEvent"
   | "writeConnectedReviewResult"
+  | "recoverConnectedReviewResult"
   | "completeConnectedRun"
   | "reconcileConnectedRuns"
   | "readImportEvidence"
@@ -687,6 +689,12 @@ export interface LaunchConnectedReviewRequest {
   model_override?: string;
 }
 
+export interface RecoverConnectedReviewResultRequest {
+  review_mission_content_sha256: string;
+  result_content_sha256: string;
+  recovery_trigger_connected_run_id: string;
+}
+
 export interface LaunchConnectedPatchRequest {
   model_override?: string;
   narrowed_capability_envelope?: CapabilityEnvelopeV1;
@@ -937,6 +945,13 @@ const launchConnectedReviewRequestSchema: z.ZodType<LaunchConnectedReviewRequest
   z.strictObject({
     independence_attested: z.literal(true),
     model_override: z.string().trim().min(1).max(200).optional(),
+  });
+
+const recoverConnectedReviewResultRequestSchema: z.ZodType<RecoverConnectedReviewResultRequest> =
+  z.strictObject({
+    review_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    result_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    recovery_trigger_connected_run_id: controllerRunIdSchema,
   });
 
 const launchConnectedPatchRequestSchema: z.ZodType<LaunchConnectedPatchRequest> =
@@ -2644,6 +2659,57 @@ export class PortfolioService {
         await this.rebuild();
       },
     });
+  }
+
+  async recoverConnectedReviewResult(
+    sourceId: string,
+    workItemId: string,
+    input: RecoverConnectedReviewResultRequest,
+  ): Promise<ConnectedReviewResultRecoveryReceiptV1> {
+    const validatedInput = recoverConnectedReviewResultRequestSchema.parse(input);
+    const source = await this.resolveSource(sourceId);
+    const workItem = await source.workspace.read(workItemId);
+    if (workItem === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const identity = this.governedReviewIdentity(source, workItem);
+    if (
+      workItem.state.phase !== "review" ||
+      workItem.state.status !== "active"
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Stale Review result recovery requires an assigned, governed item in active review.",
+      );
+    }
+
+    const compiled = await this.compileReviewMission(sourceId, workItemId, {
+      independence_attested: true,
+    });
+    if (
+      compiled.mission.content_sha256 !==
+      validatedInput.review_mission_content_sha256
+    ) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItemId,
+        "The current Review mission does not match the founder-confirmed recovery hash.",
+      );
+    }
+    const recovered = await this.workItemController(
+      source.workspace,
+    ).recoverConnectedReviewResult(workItemId, {
+      identity,
+      patch_cycle: workItem.state.patch_cycle!,
+      review_mission_content_sha256:
+        validatedInput.review_mission_content_sha256,
+      result_path: compiled.mission.result_contract.output_path,
+      expected_result_content_sha256: validatedInput.result_content_sha256,
+      recovery_trigger_connected_run_id:
+        validatedInput.recovery_trigger_connected_run_id,
+    });
+    await this.rebuild();
+    return recovered.recovery;
   }
 
   async listConnectedRuns(

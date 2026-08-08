@@ -4652,7 +4652,7 @@ describe("PortfolioService", () => {
     index.close();
   });
 
-  it("fails a completed connected Review that did not publish its required result", async () => {
+  it("recovers a stale Review result only after the completed run fails its ingress guard", async () => {
     const root = await createWorkspace("Missing Connected Review Result Workspace");
     const repository = new ProductWorkspace(root, {
       git: controllerGit,
@@ -4698,17 +4698,22 @@ describe("PortfolioService", () => {
       sourceId,
       created,
     );
+    const staleSource = '{"verdict":"clean","summary":"stale"}\n';
+    const resultPath = join(dirname(reviewMission.task_path), "result.json");
+    await writeFile(resultPath, staleSource, "utf8");
 
     await service.launchConnectedReview(sourceId, created.goal.work_item_id, {
       independence_attested: true,
       model_override: "review-model",
     });
 
+    let failedRunId = "";
     await expect.poll(async () => {
       const runs = await service.listConnectedRuns(
         sourceId,
         created.goal.work_item_id,
       );
+      failedRunId = runs[0]?.connected_run_id ?? "";
       return runs[0]?.lifecycle.terminal_outcome;
     }).toBe("failed");
     const current = await repository.read(created.goal.work_item_id);
@@ -4716,9 +4721,48 @@ describe("PortfolioService", () => {
       state: { phase: "review", status: "active" },
     });
     expect(current?.state.attention).toBeUndefined();
+    await expect(readFile(resultPath, "utf8")).resolves.toBe(staleSource);
     await expect(
-      readFile(join(dirname(reviewMission.task_path), "result.json"), "utf8"),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+      service.recoverConnectedReviewResult(
+        sourceId,
+        created.goal.work_item_id,
+        {
+          review_mission_content_sha256: "0".repeat(64),
+          result_content_sha256: hashResultContent(staleSource),
+          recovery_trigger_connected_run_id: failedRunId,
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    const recovered = await service.recoverConnectedReviewResult(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        review_mission_content_sha256: reviewMission.mission.content_sha256,
+        result_content_sha256: hashResultContent(staleSource),
+        recovery_trigger_connected_run_id: failedRunId,
+      },
+    );
+    await expect(readFile(resultPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      readFile(join(root, ...recovered.archived_result_path.split("/")), "utf8"),
+    ).resolves.toBe(staleSource);
+    const stateAfterRecovery = await repository.read(created.goal.work_item_id);
+    await expect(
+      service.recoverConnectedReviewResult(
+        sourceId,
+        created.goal.work_item_id,
+        {
+          review_mission_content_sha256: reviewMission.mission.content_sha256,
+          result_content_sha256: hashResultContent(staleSource),
+          recovery_trigger_connected_run_id: failedRunId,
+        },
+      ),
+    ).resolves.toEqual(recovered);
+    expect(await repository.read(created.goal.work_item_id)).toEqual(
+      stateAfterRecovery,
+    );
     index.close();
   });
 

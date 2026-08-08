@@ -26,6 +26,7 @@ import {
 } from "../domain/connected-run";
 import {
   commandEvidenceRecordSchema,
+  connectedReviewResultRecoveryInputSchema,
   createImportRunId,
   executeExternalResultSubmissionSchema,
   hashResultContent,
@@ -33,6 +34,8 @@ import {
   patchExternalResultSubmissionSchema,
   reviewExternalResultSubmissionForSubjectSchema,
   type CommandEvidenceRecord,
+  type ConnectedReviewResultRecoveryInput,
+  type ConnectedReviewResultRecoveryReceiptV1,
   type ActiveMissionResultSnapshot,
   type ExecuteExternalResultSubmission,
   type ImportEvidenceOutcome,
@@ -359,6 +362,11 @@ export interface ImportPatchResultResult {
 export interface ConnectedLaunchResult extends ControllerMutationResult {
   connected_run: ConnectedRunRecordV2;
   created: boolean;
+}
+
+export interface ConnectedReviewResultRecoveryControllerResult
+  extends ControllerMutationResult {
+  recovery: ConnectedReviewResultRecoveryReceiptV1;
 }
 
 export interface ScopeCorrectionControllerResult extends ControllerMutationResult {
@@ -2596,6 +2604,117 @@ export class WorkItemController {
     record: ConnectedRunRecordV2,
   ): Promise<ConnectedLaunchResult> {
     return this.launchConnectedRun(workItemId, input, record);
+  }
+
+  async recoverConnectedReviewResult(
+    workItemId: string,
+    input: ConnectedReviewResultRecoveryInput,
+  ): Promise<ConnectedReviewResultRecoveryControllerResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = connectedReviewResultRecoveryInputSchema.parse(input);
+    if (validatedInput.identity.work_item_id !== validatedId) {
+      throw this.conflict(
+        "stale_expectation",
+        validatedId,
+        "Review result recovery identity does not match the target work item.",
+      );
+    }
+    const idempotencyKey = [
+      deriveControllerIdempotencyKey(
+        validatedId,
+        "review",
+        validatedInput.identity.goal_version,
+        validatedInput.identity.input_revision,
+        validatedInput.identity.attempt,
+      ),
+      "recover-stale-result",
+      validatedInput.review_mission_content_sha256,
+      validatedInput.expected_result_content_sha256,
+      validatedInput.recovery_trigger_connected_run_id,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({
+        operation: "recover_connected_review_result",
+        input: validatedInput,
+      }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const current = lease.work_item;
+      if (
+        current.state.phase !== "review" ||
+        current.state.status !== "active" ||
+        current.state.goal_version !== validatedInput.identity.goal_version ||
+        current.state.input_revision !==
+          validatedInput.identity.input_revision ||
+        current.state.attempt !== validatedInput.identity.attempt ||
+        current.state.patch_cycle !== validatedInput.patch_cycle
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "Review result recovery no longer matches the active Review tuple.",
+        );
+      }
+      const manifestIdentity = {
+        work_item_id: validatedId,
+        run_id: runId,
+        idempotency_key: idempotencyKey,
+        phase: "review" as const,
+        goal_version: validatedInput.identity.goal_version,
+        input_revision: validatedInput.identity.input_revision,
+        attempt: validatedInput.identity.attempt,
+      };
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (
+        existing !== null &&
+        (!manifestMatches(existing, manifestIdentity) ||
+          existing.outcome !== "applied")
+      ) {
+        throw this.conflict(
+          "idempotency_conflict",
+          validatedId,
+          `Review result recovery ${runId} has a non-matching controller manifest.`,
+        );
+      }
+
+      const recovery =
+        await this.repository.recoverConnectedReviewResult(validatedInput);
+      if (existing !== null) {
+        return { work_item: current, manifest: existing, recovery };
+      }
+      const nextItem = workItemSchema.parse({
+        goal: current.goal,
+        state: {
+          ...current.state,
+          updated_at: nextTimestamp(current.state.updated_at, this.clock),
+        },
+      });
+      const committed = await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
+      });
+      return { ...committed, recovery };
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
   }
 
   async launchConnectedRun(

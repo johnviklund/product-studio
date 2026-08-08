@@ -228,6 +228,28 @@ export interface StoredImportEvidence {
   submission?: ExternalResultSubmission;
 }
 
+export interface ConnectedReviewResultRecoveryInput {
+  identity: MissionIdentity<"review">;
+  patch_cycle: number;
+  review_mission_content_sha256: string;
+  result_path: string;
+  expected_result_content_sha256: string;
+  recovery_trigger_connected_run_id: string;
+}
+
+export interface ConnectedReviewResultRecoveryReceiptV1 {
+  schema_version: 1;
+  work_item_id: string;
+  identity: MissionIdentity<"review">;
+  patch_cycle: number;
+  review_mission_content_sha256: string;
+  result_content_sha256: string;
+  original_result_path: string;
+  archived_result_path: string;
+  recovery_path: string;
+  recovery_trigger_connected_run_id: string;
+}
+
 export interface AppliedExecuteReviewSubject {
   review_subject: ExecuteReviewSubject;
   submission_source: string;
@@ -287,6 +309,41 @@ const patchMissionIdentitySchema: z.ZodType<MissionIdentity<"patch">> =
     attempt: nonNegativeSafeIntegerSchema,
     patch_cycle: z.number().int().positive().safe(),
   });
+
+export const connectedReviewResultRecoveryInputSchema: z.ZodType<ConnectedReviewResultRecoveryInput> =
+  z.strictObject({
+    identity: reviewMissionIdentitySchema,
+    patch_cycle: nonNegativeSafeIntegerSchema,
+    review_mission_content_sha256: sha256Schema,
+    result_path: workspaceRelativePosixPathSchema,
+    expected_result_content_sha256: sha256Schema,
+    recovery_trigger_connected_run_id: z.uuid(),
+  });
+
+export const connectedReviewResultRecoveryReceiptV1Schema: z.ZodType<ConnectedReviewResultRecoveryReceiptV1> =
+  z
+    .strictObject({
+      schema_version: z.literal(1),
+      work_item_id: workItemIdSchema,
+      identity: reviewMissionIdentitySchema,
+      patch_cycle: nonNegativeSafeIntegerSchema,
+      review_mission_content_sha256: sha256Schema,
+      result_content_sha256: sha256Schema,
+      original_result_path: workspaceRelativePosixPathSchema,
+      archived_result_path: workspaceRelativePosixPathSchema,
+      recovery_path: workspaceRelativePosixPathSchema,
+      recovery_trigger_connected_run_id: z.uuid(),
+    })
+    .superRefine((receipt, context) => {
+      if (receipt.work_item_id !== receipt.identity.work_item_id) {
+        context.addIssue({
+          code: "custom",
+          message: "work_item_id must match the Review mission identity",
+          path: ["work_item_id"],
+          input: receipt.work_item_id,
+        });
+      }
+    });
 
 export const reportedVerificationSchema: z.ZodType<ReportedVerification> =
   z.strictObject({

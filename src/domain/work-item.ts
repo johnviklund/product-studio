@@ -30,6 +30,8 @@ import { portfolioSourceIdSchema } from "./portfolio-source";
 import type {
   AppliedExecuteReviewSubject,
   AppliedPatchReviewSubject,
+  ConnectedReviewResultRecoveryInput,
+  ConnectedReviewResultRecoveryReceiptV1,
   ImportEvidenceSummary,
   ImportEvidenceWriteInput,
   MissionResultSnapshot,
@@ -674,6 +676,9 @@ export interface WorkItemRepository {
     connectedRunId: string,
   ): Promise<ConnectedRunRecordV2 | null>;
   listConnectedRuns(workItemId: string): Promise<ConnectedRunRecordV2[]>;
+  recoverConnectedReviewResult(
+    input: ConnectedReviewResultRecoveryInput,
+  ): Promise<ConnectedReviewResultRecoveryReceiptV1>;
   readImportEvidence(
     identity: MissionIdentity,
     importRunId: string,

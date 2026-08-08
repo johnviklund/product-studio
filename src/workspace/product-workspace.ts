@@ -98,6 +98,8 @@ import {
 } from "../domain/mission";
 import {
   commandEvidenceRecordSchema,
+  connectedReviewResultRecoveryInputSchema,
+  connectedReviewResultRecoveryReceiptV1Schema,
   createImportRunId,
   executeExternalResultSubmissionSchema,
   externalResultSubmissionSchema,
@@ -108,6 +110,8 @@ import {
   type AppliedExecuteReviewSubject,
   type AppliedPatchReviewSubject,
   type CommandEvidenceRecord,
+  type ConnectedReviewResultRecoveryInput,
+  type ConnectedReviewResultRecoveryReceiptV1,
   type ExecuteImportEvidenceEnvelope,
   type ImportEvidenceSummary,
   type ImportEvidenceWriteInput,
@@ -210,6 +214,7 @@ const RUN_EVIDENCE_DIRECTORY = "run-evidence";
 const EXECUTION_DIRECTORY = "execution";
 const EXECUTION_DEFAULTS_FILE = "defaults.json";
 const CONNECTED_RUNS_DIRECTORY = "connected-runs";
+const REVIEW_RESULT_RECOVERIES_DIRECTORY = "review-result-recoveries";
 const CONNECTED_RUN_FILE = "run.json";
 const CONNECTED_RUN_EVENTS_FILE = "events.ndjson";
 const CONNECTED_RUN_PROCESS_FILE = "process.json";
@@ -1677,6 +1682,335 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
     return outcome;
+  }
+
+  async recoverConnectedReviewResult(
+    input: ConnectedReviewResultRecoveryInput,
+  ): Promise<ConnectedReviewResultRecoveryReceiptV1> {
+    const validated = connectedReviewResultRecoveryInputSchema.parse(input);
+    const workItemId = validated.identity.work_item_id;
+    await this.readManifest();
+    const current = await this.readValidated(workItemId);
+    if (
+      current === null ||
+      current.state.phase !== "review" ||
+      current.state.status !== "active" ||
+      current.goal.goal_contract?.goal_version !==
+        validated.identity.goal_version ||
+      current.state.goal_version !== validated.identity.goal_version ||
+      current.state.input_revision !== validated.identity.input_revision ||
+      current.state.attempt !== validated.identity.attempt ||
+      current.state.patch_cycle !== validated.patch_cycle
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Stale Review result recovery requires the exact active Review tuple.",
+      );
+    }
+
+    const expectedResultPath = posix.join(
+      FOUNDER_DIRECTORY,
+      MISSIONS_DIRECTORY,
+      workItemId,
+      this.missionDirectoryName(
+        validated.identity,
+        validated.patch_cycle === 0 ? undefined : validated.patch_cycle,
+      ),
+      RESULT_JSON_FILE,
+    );
+    if (validated.result_path !== expectedResultPath) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItemId,
+        "Stale Review recovery result path does not match the active mission tuple.",
+      );
+    }
+
+    const connectedRuns = await this.listConnectedRuns(workItemId);
+    if (connectedRuns.some((run) => run.lifecycle.status !== "terminal")) {
+      throw new ControllerConflictError(
+        "lease_held",
+        workItemId,
+        "Stale Review result recovery requires every connected run to be terminal.",
+      );
+    }
+    const trigger = connectedRuns.find(
+      (run) =>
+        run.connected_run_id ===
+        validated.recovery_trigger_connected_run_id,
+    );
+    if (
+      trigger === undefined ||
+      trigger.lifecycle.status !== "terminal" ||
+      trigger.lifecycle.terminal?.outcome !== "failed" ||
+      !trigger.lifecycle.terminal.partial ||
+      !isDeepStrictEqual(trigger.mission.identity, validated.identity) ||
+      trigger.mission.content_sha256 !==
+        validated.review_mission_content_sha256 ||
+      trigger.governed_tuple.patch_cycle !== validated.patch_cycle ||
+      trigger.authorization.kind !== "review_result_ingress" ||
+      trigger.authorization.result_path !== validated.result_path
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Stale Review result recovery requires the exact failed partial Review run that exposed the collision.",
+      );
+    }
+
+    const acceptedCurrentReview = (await this.listImportEvidence(workItemId)).some(
+      ({ evidence }) =>
+        evidence.phase === "review" &&
+        evidence.outcome === "applied" &&
+        evidence.mission_content_sha256 ===
+          validated.review_mission_content_sha256 &&
+        isDeepStrictEqual(evidence.identity, validated.identity),
+    );
+    if (acceptedCurrentReview) {
+      throw this.missionNotReady(
+        workItemId,
+        "An applied Review result cannot be recovered as stale output.",
+      );
+    }
+
+    await this.assertSafeWorkspaceDirectoryComponents(
+      posix.dirname(validated.result_path),
+    );
+    const resultPath = join(
+      this.workspaceRoot,
+      ...validated.result_path.split("/"),
+    );
+    const recoveryRelativeDirectory = posix.join(
+      FOUNDER_DIRECTORY,
+      REVIEW_RESULT_RECOVERIES_DIRECTORY,
+      workItemId,
+      validated.recovery_trigger_connected_run_id,
+    );
+    const archivedResultPath = posix.join(
+      recoveryRelativeDirectory,
+      RESULT_JSON_FILE,
+    );
+    const recoveryPath = posix.join(
+      recoveryRelativeDirectory,
+      "recovery.json",
+    );
+    const archivedResultAbsolutePath = join(
+      this.workspaceRoot,
+      ...archivedResultPath.split("/"),
+    );
+    const recoveryAbsolutePath = join(
+      this.workspaceRoot,
+      ...recoveryPath.split("/"),
+    );
+    const recoveryRoot = join(
+      this.founderDirectory,
+      REVIEW_RESULT_RECOVERIES_DIRECTORY,
+    );
+    const workItemRecoveryRoot = join(recoveryRoot, workItemId);
+    const recoveryDirectory = join(
+      workItemRecoveryRoot,
+      validated.recovery_trigger_connected_run_id,
+    );
+    if (
+      (await this.hasSafeDirectory(recoveryRoot)) &&
+      (await this.hasSafeDirectory(workItemRecoveryRoot))
+    ) {
+      await this.hasSafeDirectory(recoveryDirectory);
+    }
+    const receipt = connectedReviewResultRecoveryReceiptV1Schema.parse({
+      schema_version: 1,
+      work_item_id: workItemId,
+      identity: validated.identity,
+      patch_cycle: validated.patch_cycle,
+      review_mission_content_sha256:
+        validated.review_mission_content_sha256,
+      result_content_sha256: validated.expected_result_content_sha256,
+      original_result_path: validated.result_path,
+      archived_result_path: archivedResultPath,
+      recovery_path: recoveryPath,
+      recovery_trigger_connected_run_id:
+        validated.recovery_trigger_connected_run_id,
+    });
+    const receiptSource = `${JSON.stringify(receipt, null, 2)}\n`;
+
+    const readRecoveryFile = async (
+      filePath: string,
+      label: string,
+    ): Promise<Buffer | null> => {
+      let handle;
+      try {
+        handle = await open(
+          filePath,
+          fsConstants.O_RDONLY |
+            fsConstants.O_NOFOLLOW |
+            fsConstants.O_NONBLOCK,
+        );
+        const stats = await handle.stat();
+        if (
+          !stats.isFile() ||
+          stats.size === 0 ||
+          stats.size > trigger.limits.max_output_bytes
+        ) {
+          throw this.invalid(
+            filePath,
+            `${label} must be a bounded regular file`,
+          );
+        }
+        return await handle.readFile();
+      } catch (error) {
+        if (isNodeError(error) && error.code === "ENOENT") {
+          return null;
+        }
+        throw error;
+      } finally {
+        await handle?.close();
+      }
+    };
+
+    const [originalBytes, archivedBytes, existingReceiptSource] =
+      await Promise.all([
+        readRecoveryFile(resultPath, "Review result"),
+        readRecoveryFile(archivedResultAbsolutePath, "Archived Review result"),
+        this.readOptionalFile(recoveryAbsolutePath),
+      ]);
+    if (
+      originalBytes !== null &&
+      hashResultContent(originalBytes) !==
+        validated.expected_result_content_sha256
+    ) {
+      throw new ControllerConflictError(
+        "stale_expectation",
+        workItemId,
+        "Stale Review result bytes do not match the founder-confirmed content hash.",
+      );
+    }
+    if (
+      archivedBytes !== null &&
+      hashResultContent(archivedBytes) !==
+        validated.expected_result_content_sha256
+    ) {
+      throw this.invalid(
+        archivedResultAbsolutePath,
+        "archived Review result does not match its recovery content hash",
+      );
+    }
+    if (
+      originalBytes !== null &&
+      archivedBytes !== null &&
+      !originalBytes.equals(archivedBytes)
+    ) {
+      throw this.invalid(
+        archivedResultAbsolutePath,
+        "archived Review result differs from the stale mission output",
+      );
+    }
+    if (existingReceiptSource !== null) {
+      const existingReceipt = this.parseJson(
+        existingReceiptSource,
+        recoveryAbsolutePath,
+        connectedReviewResultRecoveryReceiptV1Schema,
+      );
+      if (!isDeepStrictEqual(existingReceipt, receipt)) {
+        throw this.invalid(
+          recoveryAbsolutePath,
+          "immutable Review result recovery receipt differs",
+        );
+      }
+    }
+    if (originalBytes === null) {
+      if (archivedBytes === null || existingReceiptSource === null) {
+        throw this.missionNotReady(
+          workItemId,
+          "The stale Review result is missing without complete recovery evidence.",
+        );
+      }
+      return receipt;
+    }
+
+    await this.ensureDirectory(recoveryRoot);
+    await this.ensureDirectory(workItemRecoveryRoot);
+    await this.ensureDirectory(recoveryDirectory);
+    if (archivedBytes === null) {
+      try {
+        linkSync(resultPath, archivedResultAbsolutePath);
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "EEXIST") {
+          throw error;
+        }
+      }
+    }
+    const publishedArchive = await readRecoveryFile(
+      archivedResultAbsolutePath,
+      "Archived Review result",
+    );
+    if (
+      publishedArchive === null ||
+      !publishedArchive.equals(originalBytes) ||
+      hashResultContent(publishedArchive) !==
+        validated.expected_result_content_sha256
+    ) {
+      throw this.invalid(
+        archivedResultAbsolutePath,
+        "archived Review result differs after publication",
+      );
+    }
+
+    if (existingReceiptSource === null) {
+      const stagingPath = `${recoveryAbsolutePath}.${randomUUID()}.tmp`;
+      try {
+        const descriptor = openSync(
+          stagingPath,
+          fsConstants.O_WRONLY |
+            fsConstants.O_CREAT |
+            fsConstants.O_EXCL |
+            fsConstants.O_NOFOLLOW,
+          0o600,
+        );
+        try {
+          writeFileSync(descriptor, receiptSource, "utf8");
+          fsyncSync(descriptor);
+        } finally {
+          closeSync(descriptor);
+        }
+        try {
+          linkSync(stagingPath, recoveryAbsolutePath);
+        } catch (error) {
+          if (!isNodeError(error) || error.code !== "EEXIST") {
+            throw error;
+          }
+        }
+      } finally {
+        await this.unlinkIfPresent(stagingPath);
+      }
+    }
+    const publishedReceiptSource = await this.readRequiredFile(
+      recoveryAbsolutePath,
+    );
+    if (publishedReceiptSource !== receiptSource) {
+      throw this.invalid(
+        recoveryAbsolutePath,
+        "immutable Review result recovery receipt differs after publication",
+      );
+    }
+
+    const [originalStats, archiveStats] = await Promise.all([
+      lstat(resultPath),
+      lstat(archivedResultAbsolutePath),
+    ]);
+    if (
+      !originalStats.isFile() ||
+      originalStats.isSymbolicLink() ||
+      !archiveStats.isFile() ||
+      archiveStats.isSymbolicLink() ||
+      originalStats.dev !== archiveStats.dev ||
+      originalStats.ino !== archiveStats.ino
+    ) {
+      throw this.invalid(
+        resultPath,
+        "stale Review result changed before recovery unlink",
+      );
+    }
+    await this.unlinkIfPresent(resultPath);
+    return receipt;
   }
 
   async reconcileConnectedRuns(): Promise<ConnectedRunRecordV2[]> {

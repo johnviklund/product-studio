@@ -22,6 +22,7 @@ import {
   type ConnectedRunProcessIdentity,
   type ConnectedRunRecordV2,
 } from "../../src/domain/connected-run";
+import { hashResultContent } from "../../src/domain/result";
 import { InvalidWorkspaceError } from "../../src/domain/work-item";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
 
@@ -105,6 +106,28 @@ async function createWorkspace(): Promise<string> {
     "utf8",
   );
   return root;
+}
+
+async function setActiveReviewState(root: string): Promise<void> {
+  await writeFile(
+    join(root, ".founder", "work-items", workItemId, "state.json"),
+    `${JSON.stringify(
+      {
+        schema_version: 2,
+        work_item_id: workItemId,
+        phase: "review",
+        status: "active",
+        updated_at: "2026-07-26T18:00:00.000Z",
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
 }
 
 function connectedRun(
@@ -422,7 +445,10 @@ describe("connected-run workspace storage", () => {
       phase: "review",
       maxOutputBytes: 64,
     });
-    if (review.authorization.kind !== "review_result_ingress") {
+    if (
+      review.authorization.kind !== "review_result_ingress" ||
+      review.mission.identity.phase !== "review"
+    ) {
       throw new Error("Expected a Review result-ingress fixture.");
     }
     const resultPath = join(
@@ -503,6 +529,119 @@ describe("connected-run workspace storage", () => {
       ),
     ).rejects.toMatchObject({ kind: "mission_not_ready" });
     await expect(readFile(resultPath, "utf8")).resolves.toBe(source);
+  });
+
+  it("archives an exact stale Review result before clearing it and replays idempotently", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const review = connectedRun(firstRunId, { phase: "review" });
+    if (
+      review.authorization.kind !== "review_result_ingress" ||
+      review.mission.identity.phase !== "review"
+    ) {
+      throw new Error("Expected a Review result-ingress fixture.");
+    }
+    await setActiveReviewState(root);
+    const resultPath = join(
+      root,
+      ...review.authorization.result_path.split("/"),
+    );
+    await mkdir(dirname(resultPath), { recursive: true });
+    const staleSource = '{"verdict":"clean","summary":"stale"}\n';
+    await writeFile(resultPath, staleSource, "utf8");
+    await workspace.createConnectedRun(review);
+    await workspace.startConnectedRun(
+      workItemId,
+      firstRunId,
+      {
+        protocol_version: { value: 1, assurance: "adapter_attested" },
+        session_id: { value: "review-recovery-session", assurance: "adapter_attested" },
+      },
+      {
+        pid: 6666,
+        process_group_id: 6666,
+        started_at: "2026-07-26T18:00:01.000Z",
+      },
+    );
+    await workspace.completeConnectedRun(workItemId, firstRunId, {
+      outcome: "failed",
+      partial: true,
+      reason: "Review result ingress was not observed.",
+    });
+    const resultContentSha256 = hashResultContent(staleSource);
+    const input = {
+      identity: review.mission.identity,
+      patch_cycle: 0,
+      review_mission_content_sha256: review.mission.content_sha256,
+      result_path: review.authorization.result_path,
+      expected_result_content_sha256: resultContentSha256,
+      recovery_trigger_connected_run_id: firstRunId,
+    };
+
+    await expect(
+      workspace.recoverConnectedReviewResult({
+        ...input,
+        expected_result_content_sha256: "0".repeat(64),
+      }),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    await expect(readFile(resultPath, "utf8")).resolves.toBe(staleSource);
+
+    const recovered = await workspace.recoverConnectedReviewResult(input);
+    expect(recovered).toMatchObject({
+      schema_version: 1,
+      work_item_id: workItemId,
+      identity: review.mission.identity,
+      patch_cycle: 0,
+      review_mission_content_sha256: review.mission.content_sha256,
+      result_content_sha256: resultContentSha256,
+      original_result_path: review.authorization.result_path,
+      recovery_trigger_connected_run_id: firstRunId,
+    });
+    await expect(readFile(resultPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      readFile(join(root, ...recovered.archived_result_path.split("/")), "utf8"),
+    ).resolves.toBe(staleSource);
+    await expect(
+      readFile(join(root, ...recovered.recovery_path.split("/")), "utf8"),
+    ).resolves.toBe(`${JSON.stringify(recovered, null, 2)}\n`);
+    await expect(
+      workspace.recoverConnectedReviewResult(input),
+    ).resolves.toEqual(recovered);
+  });
+
+  it("refuses stale Review recovery while a connected run is active", async () => {
+    const root = await createWorkspace();
+    const workspace = new ProductWorkspace(root);
+    const review = connectedRun(firstRunId, { phase: "review" });
+    if (
+      review.authorization.kind !== "review_result_ingress" ||
+      review.mission.identity.phase !== "review"
+    ) {
+      throw new Error("Expected a Review result-ingress fixture.");
+    }
+    await setActiveReviewState(root);
+    const resultPath = join(
+      root,
+      ...review.authorization.result_path.split("/"),
+    );
+    await mkdir(dirname(resultPath), { recursive: true });
+    const staleSource = '{"verdict":"clean","summary":"stale"}\n';
+    await writeFile(resultPath, staleSource, "utf8");
+    await workspace.createConnectedRun(review);
+
+    await expect(
+      workspace.recoverConnectedReviewResult({
+        identity: review.mission.identity,
+        patch_cycle: 0,
+        review_mission_content_sha256: review.mission.content_sha256,
+        result_path: review.authorization.result_path,
+        expected_result_content_sha256: hashResultContent(staleSource),
+        recovery_trigger_connected_run_id: firstRunId,
+      }),
+    ).rejects.toMatchObject({ kind: "lease_held" });
+    await expect(readFile(resultPath, "utf8")).resolves.toBe(staleSource);
   });
 
   it("rejects a symlinked Review result parent", async () => {

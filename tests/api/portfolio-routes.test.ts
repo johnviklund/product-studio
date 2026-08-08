@@ -65,6 +65,7 @@ import * as portfolioConnectedModelsRoute from "../../app/api/portfolio/work-ite
 import * as portfolioConnectedReviewLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/launch/route";
 import * as portfolioConnectedReviewRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/run/route";
 import * as portfolioConnectedReviewCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/cancel/route";
+import * as portfolioConnectedReviewRecoverResultRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/recover-result/route";
 import * as portfolioConnectedPatchLaunchRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/connected/launch/route";
 import * as portfolioConnectedPatchRunRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/connected/run/route";
 import * as portfolioConnectedPatchCancelRoute from "../../app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/connected/cancel/route";
@@ -132,6 +133,8 @@ const getPortfolioConnectedModels = portfolioConnectedModelsRoute.GET;
 const launchPortfolioConnectedReview = portfolioConnectedReviewLaunchRoute.POST;
 const getPortfolioConnectedReviewRuns = portfolioConnectedReviewRunRoute.GET;
 const cancelPortfolioConnectedReview = portfolioConnectedReviewCancelRoute.POST;
+const recoverPortfolioConnectedReviewResult =
+  portfolioConnectedReviewRecoverResultRoute.POST;
 const launchPortfolioConnectedPatch = portfolioConnectedPatchLaunchRoute.POST;
 const getPortfolioConnectedPatchRuns = portfolioConnectedPatchRunRoute.GET;
 const cancelPortfolioConnectedPatch = portfolioConnectedPatchCancelRoute.POST;
@@ -532,7 +535,7 @@ interface ShapingGetCase {
 
 interface ConnectedPostCase {
   name: string;
-  action: "launch" | "cancel" | "permission";
+  action: "launch" | "cancel" | "permission" | "recover";
   relativePath: string;
   handler: ApiRouteHandler;
   body: Record<string, unknown>;
@@ -615,6 +618,22 @@ const CONNECTED_POST_CASES: ConnectedPostCase[] = [
     body: { connected_run_id: SHAPING_RUN_ID },
     serviceMethod: "cancelConnectedReviewRun",
     serviceResult: { connected_run: { status: "cancelled" } },
+  },
+  {
+    name: "connected Review stale-result recovery",
+    action: "recover",
+    relativePath: "mission/review/connected/recover-result",
+    handler: recoverPortfolioConnectedReviewResult,
+    body: {
+      review_mission_content_sha256: SHA_A,
+      result_content_sha256: SHA_B,
+      recovery_trigger_connected_run_id: SHAPING_RUN_ID,
+    },
+    serviceMethod: "recoverConnectedReviewResult",
+    serviceResult: {
+      schema_version: 1,
+      archived_result_path: ".founder/review-result-recoveries/result.json",
+    },
   },
   {
     name: "connected Patch launch",
@@ -1707,6 +1726,13 @@ describe("portfolio API routes", () => {
       connected_run: reviewSummary,
       process: { pid: 9998 },
     });
+    const recoveryReceipt = {
+      schema_version: 1,
+      archived_result_path: ".founder/review-result-recoveries/result.json",
+    };
+    const recoverConnectedReviewResult = vi
+      .fn()
+      .mockResolvedValue(recoveryReceipt);
     const cancelConnectedPatchRun = vi.fn().mockResolvedValue({
       connected_run: patchSummary,
       process: { pid: 9999 },
@@ -1720,6 +1746,7 @@ describe("portfolio API routes", () => {
       launchConnectedPatch,
       listConnectedRunsForPhase,
       cancelConnectedReviewRun,
+      recoverConnectedReviewResult,
       cancelConnectedPatchRun,
       decideConnectedPermission,
       getConnectedModelOptions,
@@ -1776,6 +1803,18 @@ describe("portfolio API routes", () => {
       }),
       context,
     );
+    const recoveryBody = {
+      review_mission_content_sha256: SHA_A,
+      result_content_sha256: SHA_B,
+      recovery_trigger_connected_run_id: SHAPING_RUN_ID,
+    };
+    const reviewRecovery = await recoverPortfolioConnectedReviewResult(
+      guardedWorkItemPostRequest(
+        "mission/review/connected/recover-result",
+        recoveryBody,
+      ),
+      context,
+    );
     const patchCancel = await cancelPortfolioConnectedPatch(
       guardedWorkItemPostRequest("mission/patch/connected/cancel", {
         connected_run_id: patchSummary.connected_run_id,
@@ -1799,6 +1838,7 @@ describe("portfolio API routes", () => {
     await expect(patchRuns.json()).resolves.toEqual([patchSummary]);
     await expect(connectedModels.json()).resolves.toEqual(models);
     await expect(reviewCancel.json()).resolves.toEqual(reviewSummary);
+    await expect(reviewRecovery.json()).resolves.toEqual(recoveryReceipt);
     await expect(patchCancel.json()).resolves.toEqual(patchSummary);
     await expect(patchPermission.json()).resolves.toEqual({
       decision: "kept_denied",
@@ -1833,6 +1873,11 @@ describe("portfolio API routes", () => {
       sourceId,
       workItemId,
       reviewSummary.connected_run_id,
+    );
+    expect(recoverConnectedReviewResult).toHaveBeenCalledWith(
+      sourceId,
+      workItemId,
+      recoveryBody,
     );
     expect(cancelConnectedPatchRun).toHaveBeenCalledWith(
       sourceId,
