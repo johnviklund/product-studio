@@ -4569,22 +4569,38 @@ describe("ProductWorkspace", () => {
         submission_source: submissionSource,
         evidence: {
           ...recovery,
+          import_run_id: createRecoveryImportRunId(
+            missionHash,
+            resultHash,
+            "c".repeat(64),
+          ),
           recovery_proposal_sha256: undefined,
         } as unknown as ImportEvidenceEnvelope,
         verification: [],
       }),
-    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    ).rejects.toThrow(
+      "import evidence identity does not match the submitted result bytes",
+    );
 
     // A different proposal hash cannot claim this receipt id.
     await expect(
       workspace.writeImportEvidence({
         submission_source: submissionSource,
-        evidence: { ...recovery, recovery_proposal_sha256: "d".repeat(64) },
+        evidence: {
+          ...recovery,
+          import_run_id: createRecoveryImportRunId(
+            missionHash,
+            resultHash,
+            "b".repeat(64),
+          ),
+          recovery_proposal_sha256: "d".repeat(64),
+        },
         verification: [],
       }),
-    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+    ).rejects.toThrow(
+      "import evidence identity does not match the submitted result bytes",
+    );
   });
-
 
   it("lists immutable import evidence newest-first across governed identities", async () => {
     const root = await createWorkspace();
