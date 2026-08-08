@@ -11,6 +11,7 @@ import {
   ConnectedPhaseSection,
   dispatchShapingManualRecoveryAction,
   PatchWorkflowSection,
+  ReviewImportDriftRecoverySection,
   retainedControllerLeaseRepairForConflict,
   retainedControllerLeaseRepairRequest,
   RunEvidenceSection,
@@ -44,6 +45,7 @@ import type { ShapingModelPickerOption } from "../src/domain/portfolio-preferenc
 import type { ShapingRunSummary } from "../src/domain/shaping-run";
 import type {
   GoalContract,
+  ReviewImportDriftRecoveryProposalV1,
   WorkItemAttention,
   WorkItemPhase,
 } from "../src/domain/work-item";
@@ -3308,6 +3310,54 @@ describe("detail panel connected execution", () => {
     expect(html).not.toContain("stdout");
     expect(html).not.toContain("terminal output");
     expect(html).not.toContain("token stream");
+  });
+
+  it("presents the exact Review drift and preserves founder control", () => {
+    const proposal: ReviewImportDriftRecoveryProposalV1 = {
+      schema_version: 1,
+      work_item_id: workItemId,
+      identity: {
+        phase: "review",
+        work_item_id: workItemId,
+        goal_version: 2,
+        input_revision: 2,
+        attempt: 17,
+      },
+      patch_cycle: 0,
+      review_mission_content_sha256: missionContentSha256,
+      result_content_sha256: resultContentSha256,
+      rejected_import_run_id: "d".repeat(64),
+      rejected_import_controller_run_id:
+        "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b1",
+      rejected_import_evidence_path: evidencePath,
+      accepted_result_commit: "1".repeat(40),
+      current_head_commit: "2".repeat(40),
+      changed_files: [
+        "src/application/work-item-controller.ts",
+        "tests/api/portfolio-routes.test.ts",
+      ],
+      subject_changed_files: ["tests/api/portfolio-routes.test.ts"],
+      proposal_sha256: "f".repeat(64),
+    };
+    const html = renderToStaticMarkup(
+      <ReviewImportDriftRecoverySection
+        fieldId="detail"
+        proposal={proposal}
+        applying={false}
+        onApply={noop}
+      />,
+    );
+
+    expect(html).toContain("Review import drift requires approval");
+    expect(html).toContain(proposal.accepted_result_commit);
+    expect(html).toContain(proposal.current_head_commit);
+    expect(html).toContain(proposal.result_content_sha256);
+    expect(html).toContain(proposal.rejected_import_evidence_path);
+    expect(html).toContain("src/application/work-item-controller.ts");
+    expect(html).toContain("tests/api/portfolio-routes.test.ts");
+    expect(html).toContain("Touches the reviewed subject");
+    expect(html).toContain("Accept exact drift &amp; reassess Review");
+    expect(primaryActionCount(html)).toBe(1);
   });
 
   it("renders all recovery actions against the exact permission hash", () => {

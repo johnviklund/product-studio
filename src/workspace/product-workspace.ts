@@ -100,7 +100,7 @@ import {
   commandEvidenceRecordSchema,
   connectedReviewResultRecoveryInputSchema,
   connectedReviewResultRecoveryReceiptV1Schema,
-  createImportRunId,
+  expectedImportRunId,
   executeExternalResultSubmissionSchema,
   externalResultSubmissionSchema,
   hashResultContent,
@@ -4933,10 +4933,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     if (
       hashResultContent(input.submission_source) !==
         evidence.result_content_sha256 ||
-      createImportRunId(
-        evidence.mission_content_sha256,
-        evidence.result_content_sha256,
-      ) !== evidence.import_run_id
+      expectedImportRunId(evidence) !== evidence.import_run_id
     ) {
       throw this.invalid(
         this.founderDirectory,
@@ -6342,10 +6339,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       evidence.import_run_id !== importRunId ||
       JSON.stringify(evidence.identity) !== JSON.stringify(identity) ||
       hashResultContent(submissionSource) !== evidence.result_content_sha256 ||
-      createImportRunId(
-        evidence.mission_content_sha256,
-        evidence.result_content_sha256,
-      ) !== evidence.import_run_id
+      expectedImportRunId(evidence) !== evidence.import_run_id
     ) {
       throw this.invalid(
         evidenceDirectory,

@@ -475,6 +475,7 @@ export interface ControllerRunManifest {
   capability_grant?: ControllerCapabilityGrant;
   capability_carry_forward?: ControllerCapabilityCarryForward;
   scope_correction?: ScopeCorrectionProposalV1;
+  review_import_drift_recovery?: ReviewImportDriftRecoveryProposalV1;
   command_authorization?: CommandAuthorizationProposalV1;
 }
 
@@ -491,6 +492,34 @@ export interface ScopeCorrectionProposalV1 {
 export interface ApplyScopeCorrectionInput {
   source_goal_contract_sha256: string;
   governed_tuple: GovernedTuple;
+  proposal_sha256: string;
+}
+
+export interface ReviewImportDriftRecoveryProposalV1 {
+  schema_version: 1;
+  work_item_id: string;
+  identity: MissionIdentity<"review">;
+  patch_cycle: number;
+  review_mission_content_sha256: string;
+  result_content_sha256: string;
+  rejected_import_run_id: string;
+  rejected_import_controller_run_id: string;
+  rejected_import_evidence_path: string;
+  accepted_result_commit: string;
+  current_head_commit: string;
+  changed_files: [string, ...string[]];
+  subject_changed_files: string[];
+  proposal_sha256: string;
+}
+
+export interface ApplyReviewImportDriftRecoveryInput {
+  decision: "accept_exact_drift";
+  governed_tuple: GovernedTuple;
+  review_mission_content_sha256: string;
+  result_content_sha256: string;
+  rejected_import_run_id: string;
+  accepted_result_commit: string;
+  current_head_commit: string;
   proposal_sha256: string;
 }
 
@@ -1664,6 +1693,9 @@ export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
     capability_carry_forward:
       controllerCapabilityCarryForwardSchema.optional(),
     scope_correction: z.lazy(() => scopeCorrectionProposalSchema).optional(),
+    review_import_drift_recovery: z
+      .lazy(() => reviewImportDriftRecoveryProposalSchema)
+      .optional(),
     command_authorization: z
       .lazy(() => commandAuthorizationProposalSchema)
       .optional(),
@@ -1725,6 +1757,137 @@ export const applyScopeCorrectionInputSchema: z.ZodType<ApplyScopeCorrectionInpu
   z.strictObject({
     source_goal_contract_sha256: sha256Schema,
     governed_tuple: governedTupleSchema,
+    proposal_sha256: sha256Schema,
+  });
+
+const reviewImportDriftIdentitySchema: z.ZodType<MissionIdentity<"review">> =
+  z.strictObject({
+    phase: z.literal("review"),
+    work_item_id: workItemIdSchema,
+    goal_version: positiveSafeIntegerSchema,
+    input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+  });
+
+const sortedDriftPathListSchema = z
+  .array(workspaceRelativePosixPathSchema)
+  .refine(
+    (paths) => new Set(paths).size === paths.length,
+    "drift paths must not contain duplicates",
+  )
+  .refine(
+    (paths) => paths.every((path, index) => index === 0 || paths[index - 1] < path),
+    "drift paths must use canonical sorted order",
+  );
+
+const sortedNonEmptyDriftPathListSchema = z
+  .tuple(
+    [workspaceRelativePosixPathSchema],
+    workspaceRelativePosixPathSchema,
+  )
+  .refine(
+    (paths) => new Set(paths).size === paths.length,
+    "drift paths must not contain duplicates",
+  )
+  .refine(
+    (paths) =>
+      paths.every((path, index) => index === 0 || paths[index - 1] < path),
+    "drift paths must use canonical sorted order",
+  );
+
+const reviewImportDriftRecoveryProposalContentSchema = z.strictObject({
+  schema_version: z.literal(1),
+  work_item_id: workItemIdSchema,
+  identity: reviewImportDriftIdentitySchema,
+  patch_cycle: nonNegativeSafeIntegerSchema,
+  review_mission_content_sha256: sha256Schema,
+  result_content_sha256: sha256Schema,
+  rejected_import_run_id: sha256Schema,
+  rejected_import_controller_run_id: controllerRunIdSchema,
+  rejected_import_evidence_path: workspaceRelativePosixPathSchema,
+  accepted_result_commit: gitCommitSchema,
+  current_head_commit: gitCommitSchema,
+  changed_files: sortedNonEmptyDriftPathListSchema,
+  subject_changed_files: sortedDriftPathListSchema,
+});
+
+export function hashReviewImportDriftRecoveryProposal(
+  input: Omit<ReviewImportDriftRecoveryProposalV1, "proposal_sha256">,
+): string {
+  const parsed = reviewImportDriftRecoveryProposalContentSchema.parse({
+    schema_version: input.schema_version,
+    work_item_id: input.work_item_id,
+    identity: input.identity,
+    patch_cycle: input.patch_cycle,
+    review_mission_content_sha256: input.review_mission_content_sha256,
+    result_content_sha256: input.result_content_sha256,
+    rejected_import_run_id: input.rejected_import_run_id,
+    rejected_import_controller_run_id:
+      input.rejected_import_controller_run_id,
+    rejected_import_evidence_path: input.rejected_import_evidence_path,
+    accepted_result_commit: input.accepted_result_commit,
+    current_head_commit: input.current_head_commit,
+    changed_files: input.changed_files,
+    subject_changed_files: input.subject_changed_files,
+  });
+  return createHash("sha256")
+    .update(`${JSON.stringify(parsed, null, 2)}\n`)
+    .digest("hex");
+}
+
+export const reviewImportDriftRecoveryProposalSchema: z.ZodType<ReviewImportDriftRecoveryProposalV1> =
+  reviewImportDriftRecoveryProposalContentSchema
+    .extend({ proposal_sha256: sha256Schema })
+    .superRefine((proposal, context) => {
+      if (proposal.work_item_id !== proposal.identity.work_item_id) {
+        context.addIssue({
+          code: "custom",
+          message: "identity.work_item_id must match work_item_id",
+          path: ["identity", "work_item_id"],
+          input: proposal.identity.work_item_id,
+        });
+      }
+      const changedFiles = new Set(proposal.changed_files);
+      if (
+        proposal.subject_changed_files.some((path) => !changedFiles.has(path))
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "subject_changed_files must be a subset of changed_files",
+          path: ["subject_changed_files"],
+          input: proposal.subject_changed_files,
+        });
+      }
+      if (proposal.accepted_result_commit === proposal.current_head_commit) {
+        context.addIssue({
+          code: "custom",
+          message: "current_head_commit must differ from accepted_result_commit",
+          path: ["current_head_commit"],
+          input: proposal.current_head_commit,
+        });
+      }
+      if (
+        proposal.proposal_sha256 !==
+        hashReviewImportDriftRecoveryProposal(proposal)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "proposal_sha256 must hash the Review import drift proposal",
+          path: ["proposal_sha256"],
+          input: proposal.proposal_sha256,
+        });
+      }
+    });
+
+export const applyReviewImportDriftRecoveryInputSchema: z.ZodType<ApplyReviewImportDriftRecoveryInput> =
+  z.strictObject({
+    decision: z.literal("accept_exact_drift"),
+    governed_tuple: governedTupleSchema,
+    review_mission_content_sha256: sha256Schema,
+    result_content_sha256: sha256Schema,
+    rejected_import_run_id: sha256Schema,
+    accepted_result_commit: gitCommitSchema,
+    current_head_commit: gitCommitSchema,
     proposal_sha256: sha256Schema,
   });
 

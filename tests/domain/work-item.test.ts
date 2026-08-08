@@ -8,6 +8,7 @@ import {
   WorkItemTargetCollisionError,
   WorkItemTransferFailedError,
   acceptPatchPlanInputSchema,
+  applyReviewImportDriftRecoveryInputSchema,
   approvePlanResultInputSchema,
   commandAuthorizationDecisionInputSchema,
   commandAuthorizationProposalSchema,
@@ -17,6 +18,7 @@ import {
   createControllerCapabilityCarryForward,
   createControllerCapabilityGrant,
   hashCommandAuthorizationProposal,
+  hashReviewImportDriftRecoveryProposal,
   hashScopeCorrectionProposal,
   createCaptureInputSchema,
   createWorkItemInputSchema,
@@ -30,6 +32,7 @@ import {
   productManifestSchema,
   recordConnectedPermissionDenialInputSchema,
   retryExecuteAttemptInputSchema,
+  reviewImportDriftRecoveryProposalSchema,
   scopeCorrectionProposalSchema,
   updateWorkItemPhaseInputSchema,
   workItemGoalSchema,
@@ -39,6 +42,7 @@ import {
   type CommandAuthorizationProposalV1,
   type PlanApprovalIntentV1,
   type PlanApprovalManifestV1,
+  type ReviewImportDriftRecoveryProposalV1,
 } from "../../src/domain/work-item";
 
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
@@ -109,6 +113,32 @@ const commandAuthorizationContent: Omit<
     },
   ],
 };
+
+const reviewImportDriftRecoveryContent = {
+  schema_version: 1 as const,
+  work_item_id: workItemId,
+  identity: {
+    phase: "review" as const,
+    work_item_id: workItemId,
+    goal_version: 2,
+    input_revision: 3,
+    attempt: 4,
+  },
+  patch_cycle: 0,
+  review_mission_content_sha256: "1".repeat(64),
+  result_content_sha256: "2".repeat(64),
+  rejected_import_run_id: "3".repeat(64),
+  rejected_import_controller_run_id: runId,
+  rejected_import_evidence_path:
+    `.founder/run-evidence/${workItemId}/review-2-3-4/${"3".repeat(64)}`,
+  accepted_result_commit: "4".repeat(40),
+  current_head_commit: "5".repeat(40),
+  changed_files: [
+    "src/application/work-item-controller.ts",
+    "tests/api/portfolio-routes.test.ts",
+  ],
+  subject_changed_files: ["tests/api/portfolio-routes.test.ts"],
+} satisfies Omit<ReviewImportDriftRecoveryProposalV1, "proposal_sha256">;
 
 const goal = {
   schema_version: 2 as const,
@@ -257,6 +287,53 @@ describe("durable work-item schemas", () => {
         proposed_allowed_scope: ["src/unrelated.ts"],
       }),
     ).toThrow(/proposal_sha256/u);
+  });
+
+  it("hash-binds exact Review import drift proposals and founder decisions", () => {
+    const proposal = {
+      ...reviewImportDriftRecoveryContent,
+      proposal_sha256: hashReviewImportDriftRecoveryProposal(
+        reviewImportDriftRecoveryContent,
+      ),
+    };
+    expect(reviewImportDriftRecoveryProposalSchema.parse(proposal)).toEqual(
+      proposal,
+    );
+    expect(() =>
+      reviewImportDriftRecoveryProposalSchema.parse({
+        ...proposal,
+        current_head_commit: "6".repeat(40),
+      }),
+    ).toThrow(/proposal_sha256/u);
+    expect(() =>
+      reviewImportDriftRecoveryProposalSchema.parse({
+        ...proposal,
+        subject_changed_files: ["src/not-in-drift.ts"],
+        proposal_sha256: hashReviewImportDriftRecoveryProposal({
+          ...reviewImportDriftRecoveryContent,
+          subject_changed_files: ["src/not-in-drift.ts"],
+        }),
+      }),
+    ).toThrow(/subject_changed_files/u);
+
+    expect(
+      applyReviewImportDriftRecoveryInputSchema.parse({
+        decision: "accept_exact_drift",
+        governed_tuple: {
+          goal_version: proposal.identity.goal_version,
+          input_revision: proposal.identity.input_revision,
+          attempt: proposal.identity.attempt,
+          patch_cycle: proposal.patch_cycle,
+        },
+        review_mission_content_sha256:
+          proposal.review_mission_content_sha256,
+        result_content_sha256: proposal.result_content_sha256,
+        rejected_import_run_id: proposal.rejected_import_run_id,
+        accepted_result_commit: proposal.accepted_result_commit,
+        current_head_commit: proposal.current_head_commit,
+        proposal_sha256: proposal.proposal_sha256,
+      }),
+    ).toMatchObject({ decision: "accept_exact_drift" });
   });
 
   it("accepts the work-item v2 and product-manifest v2 contracts", () => {

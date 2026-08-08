@@ -179,6 +179,7 @@ export interface ReviewImportEvidenceEnvelope
   extends ImportEvidenceEnvelopeBase<"review"> {
   outcome: "rejected" | "applied";
   result_commit: string;
+  recovery_proposal_sha256?: string;
 }
 
 export interface PatchImportEvidenceEnvelope
@@ -723,6 +724,7 @@ const reviewImportEvidenceEnvelopeSchema = z.strictObject({
   identity: reviewMissionIdentitySchema,
   outcome: z.enum(["rejected", "applied"]),
   result_commit: gitCommitSchema,
+  recovery_proposal_sha256: sha256Schema.optional(),
 });
 
 const patchImportEvidenceEnvelopeSchema = z.strictObject({
@@ -767,6 +769,19 @@ export const importEvidenceEnvelopeSchema: z.ZodType<ImportEvidenceEnvelope> =
           message: "failed or applied execute evidence requires a result commit",
           path: ["result_commit"],
           input: evidence.result_commit,
+        });
+      }
+      if (
+        evidence.phase === "review" &&
+        evidence.recovery_proposal_sha256 !== undefined &&
+        evidence.outcome !== "applied"
+      ) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "only applied review evidence may carry a recovery proposal hash",
+          path: ["recovery_proposal_sha256"],
+          input: evidence.recovery_proposal_sha256,
         });
       }
     });
@@ -913,4 +928,29 @@ export function createImportRunId(
   const missionHash = sha256Schema.parse(missionContentSha256);
   const resultHash = sha256Schema.parse(resultContentSha256);
   return hashResultContent(`${missionHash}:${resultHash}`);
+}
+
+export function createRecoveryImportRunId(
+  missionContentSha256: string,
+  resultContentSha256: string,
+  recoveryProposalSha256: string,
+): string {
+  const missionHash = sha256Schema.parse(missionContentSha256);
+  const resultHash = sha256Schema.parse(resultContentSha256);
+  const proposalHash = sha256Schema.parse(recoveryProposalSha256);
+  return hashResultContent(`${missionHash}:${resultHash}:${proposalHash}`);
+}
+
+export function expectedImportRunId(evidence: ImportEvidenceEnvelope): string {
+  return evidence.phase === "review" &&
+    evidence.recovery_proposal_sha256 !== undefined
+    ? createRecoveryImportRunId(
+        evidence.mission_content_sha256,
+        evidence.result_content_sha256,
+        evidence.recovery_proposal_sha256,
+      )
+    : createImportRunId(
+        evidence.mission_content_sha256,
+        evidence.result_content_sha256,
+      );
 }

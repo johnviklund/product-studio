@@ -28,6 +28,8 @@ import type {
   PortfolioPatchImportResult,
   PortfolioPatchPlanResult,
   PortfolioPlanApprovalResult,
+  PortfolioReviewImportDriftRecoveryListing,
+  PortfolioReviewImportDriftRecoveryResult,
   PortfolioReviewImportResult,
   PortfolioRetryResult,
   PortfolioScopeCorrectionListing,
@@ -68,6 +70,7 @@ import {
   type ActiveRun,
   type GoalContract,
   type RetainedControllerLeaseRepairResult,
+  type ReviewImportDriftRecoveryProposalV1,
   type WorkItemAttention,
   type WorkItemPhase,
   type WorkItemPriority,
@@ -202,6 +205,13 @@ interface ConnectedModelSelectionState {
 interface ScopeCorrectionState {
   itemKey: string;
   listing: PortfolioScopeCorrectionListing | null;
+  loading: boolean;
+  error: string | null;
+}
+
+interface ReviewImportDriftRecoveryState {
+  itemKey: string;
+  listing: PortfolioReviewImportDriftRecoveryListing | null;
   loading: boolean;
   error: string | null;
 }
@@ -836,6 +846,50 @@ async function requestScopeCorrection(
     return {
       result: null,
       error: "The scope correction could not be loaded. Check the local server and try again.",
+    };
+  }
+}
+
+async function requestReviewImportDriftRecovery(
+  sourceId: string,
+  workItemId: string,
+  signal?: AbortSignal,
+): Promise<
+  {
+    result: PortfolioReviewImportDriftRecoveryListing | null;
+    error: string | null;
+  } | null
+> {
+  try {
+    const response = await fetch(
+      `/api/portfolio/work-items/${encodeURIComponent(sourceId)}/${encodeURIComponent(workItemId)}/mission/review/import-drift-recovery`,
+      { signal },
+    );
+    const body = (await response.json()) as
+      | PortfolioReviewImportDriftRecoveryListing
+      | MutationErrorResponse;
+    if (signal?.aborted) {
+      return null;
+    }
+    if (!response.ok || !("proposal" in body)) {
+      return {
+        result: null,
+        error:
+          "error" in body
+            ? body.error?.message ??
+              "The Review import drift proposal could not be loaded."
+            : "The Review import drift proposal could not be loaded.",
+      };
+    }
+    return { result: body, error: null };
+  } catch {
+    if (signal?.aborted) {
+      return null;
+    }
+    return {
+      result: null,
+      error:
+        "The Review import drift proposal could not be loaded. Check the local server and try again.",
     };
   }
 }
@@ -1902,6 +1956,103 @@ function SpecProposal({
         Fills the local editor only. Save remains the single durable action.
       </p>
     </article>
+  );
+}
+
+interface ReviewImportDriftRecoverySectionProps {
+  fieldId: string;
+  proposal: ReviewImportDriftRecoveryProposalV1;
+  applying: boolean;
+  onApply: () => void;
+}
+
+export function ReviewImportDriftRecoverySection({
+  fieldId,
+  proposal,
+  applying,
+  onApply,
+}: ReviewImportDriftRecoverySectionProps) {
+  const subjectFiles = new Set(proposal.subject_changed_files);
+
+  return (
+    <section
+      aria-labelledby={`${fieldId}-review-import-drift-recovery`}
+      className="border-l-2 border-amber-500 bg-amber-500/10 px-3 py-3"
+    >
+      <h3
+        id={`${fieldId}-review-import-drift-recovery`}
+        className="text-xs font-medium"
+      >
+        Review import drift requires approval
+      </h3>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+        The clean Review result was rejected because HEAD moved after its
+        accepted subject. Approval reassesses that retained result against this
+        exact clean descendant drift; the rejected import evidence remains
+        immutable.
+      </p>
+      <dl className="mt-3 space-y-3 text-[11px]">
+        <div>
+          <dt className="font-medium text-muted-foreground">Accepted subject</dt>
+          <dd className="mt-1 break-all font-mono">
+            {proposal.accepted_result_commit}
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-muted-foreground">Current HEAD</dt>
+          <dd className="mt-1 break-all font-mono">
+            {proposal.current_head_commit}
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-muted-foreground">
+            Retained clean result SHA
+          </dt>
+          <dd className="mt-1 break-all font-mono">
+            {proposal.result_content_sha256}
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium text-muted-foreground">
+            Prior rejected evidence
+          </dt>
+          <dd className="mt-1 break-all font-mono">
+            {proposal.rejected_import_evidence_path}
+          </dd>
+        </div>
+      </dl>
+      <div className="mt-3">
+        <p className="text-[11px] font-medium text-muted-foreground">
+          Exact post-subject changed files
+        </p>
+        <ul className="mt-1 space-y-1 text-[11px]">
+          {proposal.changed_files.map((path) => (
+            <li key={path} className="break-all font-mono">
+              {path}
+              {subjectFiles.has(path) ? (
+                <span className="ml-2 font-sans text-amber-700 dark:text-amber-300">
+                  Touches the reviewed subject
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <p className="mt-3 break-all text-[11px] text-muted-foreground">
+        Proposal SHA: <span className="font-mono">{proposal.proposal_sha256}</span>
+      </p>
+      <button
+        type="button"
+        data-primary-action="true"
+        disabled={applying}
+        onClick={onApply}
+        className="mt-3 h-9 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {applying
+          ? "Reassessing exact drift…"
+          : "Accept exact drift & reassess Review"}
+      </button>
+    </section>
   );
 }
 
@@ -4658,6 +4809,10 @@ export function DetailPanel({
   const [scopeCorrectionState, setScopeCorrectionState] =
     useState<ScopeCorrectionState | null>(null);
   const [applyingScopeCorrection, setApplyingScopeCorrection] = useState(false);
+  const [reviewImportDriftRecoveryState, setReviewImportDriftRecoveryState] =
+    useState<ReviewImportDriftRecoveryState | null>(null);
+  const [applyingReviewImportDriftRecovery, setApplyingReviewImportDriftRecovery] =
+    useState(false);
   const [shapingArtifactState, setShapingArtifactState] =
     useState<ShapingArtifactState | null>(null);
   const [shapingCompilationState, setShapingCompilationState] =
@@ -5059,6 +5214,22 @@ export function DetailPanel({
     mode === "governed" &&
     scopeCorrectionState?.itemKey === connectedRunItemKey
       ? scopeCorrectionState.error
+      : null;
+  const reviewImportDriftRecovery =
+    mode === "governed" &&
+    reviewImportDriftRecoveryState?.itemKey === connectedRunItemKey
+      ? reviewImportDriftRecoveryState.listing?.proposal ?? null
+      : null;
+  const reviewImportDriftRecoveryLoading =
+    mode === "governed" &&
+    state.phase === "review" &&
+    state.status === "active" &&
+    (reviewImportDriftRecoveryState?.itemKey !== connectedRunItemKey ||
+      reviewImportDriftRecoveryState.loading);
+  const reviewImportDriftRecoveryError =
+    mode === "governed" &&
+    reviewImportDriftRecoveryState?.itemKey === connectedRunItemKey
+      ? reviewImportDriftRecoveryState.error
       : null;
   const runEvidence =
     mode === "governed" && runEvidenceState?.itemKey === runEvidenceItemKey
@@ -5666,6 +5837,40 @@ export function DetailPanel({
         return;
       }
       setScopeCorrectionState({
+        itemKey: connectedRunItemKey,
+        listing: loaded.result,
+        loading: false,
+        error: loaded.error,
+      });
+    });
+    return () => controller.abort();
+  }, [
+    connectedRunItemKey,
+    goal.work_item_id,
+    item.source_id,
+    mode,
+    state.phase,
+    state.status,
+  ]);
+
+  useEffect(() => {
+    if (
+      mode !== "governed" ||
+      state.phase !== "review" ||
+      state.status !== "active"
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    void requestReviewImportDriftRecovery(
+      item.source_id,
+      goal.work_item_id,
+      controller.signal,
+    ).then((loaded) => {
+      if (loaded === null) {
+        return;
+      }
+      setReviewImportDriftRecoveryState({
         itemKey: connectedRunItemKey,
         listing: loaded.result,
         loading: false,
@@ -7057,6 +7262,81 @@ export function DetailPanel({
     }
   }
 
+  async function handleApplyReviewImportDriftRecovery() {
+    if (
+      reviewImportDriftRecovery === null ||
+      applyingReviewImportDriftRecovery
+    ) {
+      return;
+    }
+    setApplyingReviewImportDriftRecovery(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/portfolio/work-items/${encodeURIComponent(item.source_id)}/${encodeURIComponent(goal.work_item_id)}/mission/review/import-drift-recovery`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            decision: "accept_exact_drift",
+            governed_tuple: {
+              goal_version: reviewImportDriftRecovery.identity.goal_version,
+              input_revision: reviewImportDriftRecovery.identity.input_revision,
+              attempt: reviewImportDriftRecovery.identity.attempt,
+              patch_cycle: reviewImportDriftRecovery.patch_cycle,
+            },
+            review_mission_content_sha256:
+              reviewImportDriftRecovery.review_mission_content_sha256,
+            result_content_sha256:
+              reviewImportDriftRecovery.result_content_sha256,
+            rejected_import_run_id:
+              reviewImportDriftRecovery.rejected_import_run_id,
+            accepted_result_commit:
+              reviewImportDriftRecovery.accepted_result_commit,
+            current_head_commit:
+              reviewImportDriftRecovery.current_head_commit,
+            proposal_sha256: reviewImportDriftRecovery.proposal_sha256,
+          }),
+        },
+      );
+      const body = (await response.json()) as
+        | PortfolioReviewImportDriftRecoveryResult
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setError(
+          "error" in body
+            ? body.error?.message ??
+              "The Review import drift decision could not be applied."
+            : "The Review import drift decision could not be applied.",
+        );
+        return;
+      }
+      setReviewImportDriftRecoveryState({
+        itemKey: connectedRunItemKey,
+        listing: {
+          source_id: item.source_id,
+          work_item_id: goal.work_item_id,
+          proposal: null,
+        },
+        loading: false,
+        error: null,
+      });
+      setReviewMissionImportState(null);
+      markRunEvidenceLoading();
+      await loadRunEvidence();
+      onUpdated(
+        body as PortfolioReviewImportDriftRecoveryResult,
+        "Exact drift accepted; the clean Review result is ready for approval.",
+      );
+    } catch {
+      setError(
+        "The Review import drift decision could not be applied. Check the local server and try again.",
+      );
+    } finally {
+      setApplyingReviewImportDriftRecovery(false);
+    }
+  }
+
   async function handlePrepareCommandAuthorization() {
     if (
       connectedWorkflowPhase === null ||
@@ -7987,6 +8267,25 @@ export function DetailPanel({
                   >
                     {goalContractContent}
                   </section>
+
+                  {reviewImportDriftRecovery !== null ? (
+                    <ReviewImportDriftRecoverySection
+                      fieldId={fieldId}
+                      proposal={reviewImportDriftRecovery}
+                      applying={applyingReviewImportDriftRecovery}
+                      onApply={() =>
+                        void handleApplyReviewImportDriftRecovery()
+                      }
+                    />
+                  ) : reviewImportDriftRecoveryLoading ? (
+                    <p className="text-xs text-muted-foreground">
+                      Checking Review import drift…
+                    </p>
+                  ) : reviewImportDriftRecoveryError ? (
+                    <p className="text-xs text-destructive" role="alert">
+                      {reviewImportDriftRecoveryError}
+                    </p>
+                  ) : null}
 
                   {shapingSection}
 

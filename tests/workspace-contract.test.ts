@@ -38,6 +38,7 @@ import {
 } from "../src/domain/mission";
 import {
   createImportRunId,
+  createRecoveryImportRunId,
   hashResultContent,
   serializeExternalResult,
   type ImportEvidenceEnvelope,
@@ -4494,6 +4495,96 @@ describe("ProductWorkspace", () => {
       workspace.readImportEvidence(identity, evidence.import_run_id),
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
   });
+
+  it("keeps the rejected receipt and a decision-bound recovery receipt side by side", async () => {
+    const root = await createWorkspace();
+    const workspace = missionWorkspace(root);
+    const identity = { ...missionIdentity(), phase: "review" as const };
+    const submissionSource = '{"verdict":"clean"}\n';
+    const resultHash = hashResultContent(submissionSource);
+    const missionHash = "f".repeat(64);
+    const proposalHash = "e".repeat(64);
+
+    const rejected = {
+      schema_version: 2 as const,
+      phase: "review" as const,
+      import_run_id: createImportRunId(missionHash, resultHash),
+      result_content_sha256: resultHash,
+      mission_content_sha256: missionHash,
+      identity,
+      git_base_commit: "a".repeat(40),
+      result_commit: "a".repeat(40),
+      controller_run_id: thirdRunId,
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:01.000Z",
+      outcome: "rejected" as const,
+      reasons: ["Workspace HEAD no longer equals the accepted subject commit."],
+    };
+    const rejectedSummary = await workspace.writeImportEvidence({
+      submission_source: submissionSource,
+      evidence: rejected,
+      verification: [],
+    });
+
+    const recovery = {
+      ...rejected,
+      import_run_id: createRecoveryImportRunId(
+        missionHash,
+        resultHash,
+        proposalHash,
+      ),
+      outcome: "applied" as const,
+      reasons: [],
+      recovery_proposal_sha256: proposalHash,
+    };
+    const recoveryInput = {
+      submission_source: submissionSource,
+      evidence: recovery,
+      verification: [],
+    };
+    const recoverySummary = await workspace.writeImportEvidence(recoveryInput);
+
+    expect(recoverySummary.import_run_id).not.toBe(
+      rejectedSummary.import_run_id,
+    );
+    // Exact replay is idempotent and creates no third receipt.
+    expect(await workspace.writeImportEvidence(recoveryInput)).toEqual(
+      recoverySummary,
+    );
+    // Both receipts survive a fresh read and a listing.
+    expect(
+      await workspace.readImportEvidence(identity, rejected.import_run_id),
+    ).toMatchObject({ evidence: rejected });
+    expect(
+      await workspace.readImportEvidence(identity, recovery.import_run_id),
+    ).toMatchObject({ evidence: recovery });
+    const listed = await workspace.listImportEvidence(identity.work_item_id);
+    expect(
+      listed.map((stored) => stored.evidence.import_run_id).sort(),
+    ).toEqual([rejected.import_run_id, recovery.import_run_id].sort());
+
+    // A recovery-shaped id without its binding hash fails closed.
+    await expect(
+      workspace.writeImportEvidence({
+        submission_source: submissionSource,
+        evidence: {
+          ...recovery,
+          recovery_proposal_sha256: undefined,
+        } as unknown as ImportEvidenceEnvelope,
+        verification: [],
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+
+    // A different proposal hash cannot claim this receipt id.
+    await expect(
+      workspace.writeImportEvidence({
+        submission_source: submissionSource,
+        evidence: { ...recovery, recovery_proposal_sha256: "d".repeat(64) },
+        verification: [],
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_workspace" });
+  });
+
 
   it("lists immutable import evidence newest-first across governed identities", async () => {
     const root = await createWorkspace();

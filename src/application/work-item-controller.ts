@@ -28,6 +28,7 @@ import {
   commandEvidenceRecordSchema,
   connectedReviewResultRecoveryInputSchema,
   createImportRunId,
+  createRecoveryImportRunId,
   executeExternalResultSubmissionSchema,
   hashResultContent,
   importEvidenceEnvelopeSchema,
@@ -91,6 +92,7 @@ import {
   acceptPatchPlanInputSchema,
   approvePlanResultInputSchema,
   applyScopeCorrectionInputSchema,
+  applyReviewImportDriftRecoveryInputSchema,
   createControllerCapabilityCarryForward,
   createControllerCapabilityGrant,
   controllerRunManifestSchema,
@@ -105,8 +107,10 @@ import {
   recordConnectedPermissionDenialInputSchema,
   saveWorkItemInputSchema,
   hashScopeCorrectionProposal,
+  hashReviewImportDriftRecoveryProposal,
   hashCommandAuthorizationProposal,
   scopeCorrectionProposalSchema,
+  reviewImportDriftRecoveryProposalSchema,
   deriveControllerRunId,
   derivePlanApprovalId,
   parseWorkItemStateForRead,
@@ -118,6 +122,7 @@ import {
   type AcceptPatchPlanInput,
   type ApprovePlanResultInput,
   type ApplyScopeCorrectionInput,
+  type ApplyReviewImportDriftRecoveryInput,
   type ControllerLease,
   type ControllerCapabilityGrant,
   type CommandAuthorizationDecisionInput,
@@ -139,6 +144,7 @@ import {
   type RetryExecuteAttemptInput,
   type SaveWorkItemInput,
   type ScopeCorrectionProposalV1,
+  type ReviewImportDriftRecoveryProposalV1,
   type WorkItem,
   type WorkItemAttention,
   type WorkItemPhase,
@@ -157,6 +163,8 @@ import {
 type Clock = () => Date;
 
 const SHA256_SCHEMA = z.string().regex(/^[0-9a-f]{64}$/u);
+const REVIEW_HEAD_DRIFT_REASON =
+  "Workspace HEAD no longer equals the accepted subject commit.";
 const nonEmptyTrimmedStringSchema = z
   .string()
   .refine((value) => value.trim().length > 0, "must not be empty")
@@ -373,6 +381,13 @@ export interface ScopeCorrectionControllerResult extends ControllerMutationResul
   proposal: ScopeCorrectionProposalV1;
 }
 
+export interface ReviewImportDriftRecoveryControllerResult
+  extends ImportReviewResultResult {
+  manifest: ControllerRunManifest;
+  result: ReviewExternalResultSubmission;
+  proposal: ReviewImportDriftRecoveryProposalV1;
+}
+
 export interface CommandAuthorizationControllerResult {
   work_item: WorkItem;
   manifest: ControllerRunManifest | null;
@@ -541,6 +556,21 @@ export class WorkItemController {
       );
     }
     return this.buildScopeCorrectionProposal(item);
+  }
+
+  async proposeReviewImportDriftRecovery(
+    workItemId: string,
+  ): Promise<ReviewImportDriftRecoveryProposalV1 | null> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const item = await this.repository.read(validatedId);
+    if (item === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+    return this.buildReviewImportDriftRecoveryProposal(item, false);
   }
 
   async applyScopeCorrection(
@@ -2121,6 +2151,261 @@ export class WorkItemController {
       };
     } finally {
       await repository.releaseControllerLease(lease);
+    }
+  }
+
+  async applyReviewImportDriftRecovery(
+    workItemId: string,
+    input: ApplyReviewImportDriftRecoveryInput,
+  ): Promise<ReviewImportDriftRecoveryControllerResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = applyReviewImportDriftRecoveryInputSchema.parse(input);
+    const idempotencyKey = [
+      validatedId,
+      "review-import-drift-recovery",
+      validatedInput.proposal_sha256,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({
+        operation: "apply_review_import_drift_recovery",
+        input: validatedInput,
+      }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      let proposal: ReviewImportDriftRecoveryProposalV1 | null = null;
+      if (existing?.outcome === "applied") {
+        proposal = existing.review_import_drift_recovery ?? null;
+        if (
+          proposal === null ||
+          !this.reviewImportDriftInputMatchesProposal(
+            validatedInput,
+            proposal,
+          )
+        ) {
+          throw this.conflict(
+            "idempotency_conflict",
+            validatedId,
+            `Review import drift recovery ${runId} does not match its durable proposal.`,
+          );
+        }
+      } else if (existing !== null) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          `Review import drift recovery ${runId} has a non-applied controller manifest.`,
+        );
+      } else {
+        proposal = await this.buildReviewImportDriftRecoveryProposal(
+          lease.work_item,
+          true,
+        );
+        if (
+          proposal === null ||
+          !this.reviewImportDriftInputMatchesProposal(
+            validatedInput,
+            proposal,
+          )
+        ) {
+          throw this.conflict(
+            "stale_expectation",
+            validatedId,
+            "The Review import drift proposal no longer matches the immutable result, rejected receipt, or workspace drift.",
+          );
+        }
+      }
+
+      this.validateReviewExpectation(validatedId, lease.work_item, {
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: proposal.identity.goal_version,
+        expected_input_revision: proposal.identity.input_revision,
+        attempt: proposal.identity.attempt,
+        expected_patch_cycle: proposal.patch_cycle,
+      });
+      const snapshot = await this.repository.readMissionResult(
+        proposal.identity,
+        proposal.patch_cycle === 0 ? undefined : proposal.patch_cycle,
+      );
+      this.requireActiveMissionSnapshot(snapshot, validatedId);
+      if (!("review_subject" in snapshot.mission)) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          "Review import drift recovery requires an immutable Review mission.",
+        );
+      }
+      const currentSubject = await this.currentReviewSubject(
+        this.repository,
+        proposal.identity,
+        snapshot.mission.review_subject,
+        proposal.patch_cycle,
+      );
+      const assessment = await this.assessReviewResult(
+        snapshot,
+        proposal.identity,
+        currentSubject,
+        false,
+      );
+      if (assessment.outcome !== "applied" || assessment.result === undefined) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          "The retained Review result no longer validates independently of workspace HEAD.",
+        );
+      }
+
+      const recoveryImportRunId = createRecoveryImportRunId(
+        proposal.review_mission_content_sha256,
+        proposal.result_content_sha256,
+        proposal.proposal_sha256,
+      );
+      const stored = await this.repository.readImportEvidence(
+        proposal.identity,
+        recoveryImportRunId,
+      );
+      let evidenceSummary: ImportEvidenceSummary;
+      let completedAt: string;
+      if (stored === null) {
+        if (existing !== null) {
+          throw this.conflict(
+            "repair_required",
+            validatedId,
+            `Applied Review import drift recovery ${runId} has no immutable import evidence.`,
+          );
+        }
+        completedAt = nextTimestamp(activeRun.acquired_at, this.clock);
+        const evidence = importEvidenceEnvelopeSchema.parse({
+          schema_version: 2,
+          phase: "review",
+          import_run_id: recoveryImportRunId,
+          result_content_sha256: proposal.result_content_sha256,
+          mission_content_sha256: proposal.review_mission_content_sha256,
+          identity: proposal.identity,
+          git_base_commit: snapshot.mission.review_subject.git_base_commit,
+          result_commit: proposal.accepted_result_commit,
+          controller_run_id: runId,
+          started_at: activeRun.acquired_at,
+          completed_at: completedAt,
+          outcome: "applied",
+          reasons: [],
+          recovery_proposal_sha256: proposal.proposal_sha256,
+        });
+        evidenceSummary = await this.repository.writeImportEvidence({
+          submission_source: snapshot.result_source,
+          evidence,
+          verification: [],
+        });
+      } else {
+        if (
+          stored.evidence.phase !== "review" ||
+          stored.evidence.outcome !== "applied" ||
+          stored.evidence.import_run_id !== recoveryImportRunId ||
+          stored.evidence.controller_run_id !== runId ||
+          stored.evidence.mission_content_sha256 !==
+            proposal.review_mission_content_sha256 ||
+          stored.evidence.result_content_sha256 !==
+            proposal.result_content_sha256 ||
+          stored.evidence.result_commit !== proposal.accepted_result_commit ||
+          !isDeepStrictEqual(stored.evidence.identity, proposal.identity) ||
+          stored.summary.import_run_id !== recoveryImportRunId ||
+          stored.summary.phase !== "review" ||
+          stored.summary.outcome !== "applied" ||
+          stored.summary.reasons.length !== 0 ||
+          stored.verification.length !== 0
+        ) {
+          throw this.conflict(
+            "repair_required",
+            validatedId,
+            "Stored Review import drift evidence does not match the exact proposal and controller run.",
+          );
+        }
+        evidenceSummary = stored.summary;
+        completedAt = stored.evidence.completed_at;
+      }
+
+      const attention = this.reviewAttention(
+        lease.work_item,
+        snapshot,
+        evidenceSummary,
+        proposal.result_content_sha256,
+        assessment.result,
+        completedAt,
+      );
+      if (existing?.outcome === "applied") {
+        if (!isDeepStrictEqual(lease.work_item.state.attention, attention)) {
+          throw this.conflict(
+            "idempotency_conflict",
+            validatedId,
+            `Review import drift recovery ${runId} does not match the durable work-item attention.`,
+          );
+        }
+        return {
+          work_item: lease.work_item,
+          manifest: existing,
+          evidence: evidenceSummary,
+          result: assessment.result,
+          proposal,
+        };
+      }
+
+      const pendingManifest = {
+        ...this.pendingManifest(
+          {
+            work_item_id: validatedId,
+            run_id: runId,
+            idempotency_key: idempotencyKey,
+            phase: "review" as const,
+            goal_version: proposal.identity.goal_version,
+            input_revision: proposal.identity.input_revision,
+            attempt: proposal.identity.attempt,
+          },
+          activeRun.acquired_at,
+        ),
+        review_import_drift_recovery: proposal,
+      };
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...lease.work_item.state,
+          attention,
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      const mutation = await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest: pendingManifest,
+      });
+      return {
+        ...mutation,
+        evidence: evidenceSummary,
+        result: assessment.result,
+        proposal,
+      };
+    } finally {
+      await this.repository.releaseControllerLease(lease);
     }
   }
 
@@ -4054,7 +4339,7 @@ export class WorkItemController {
         (await this.git.readHeadCommit()) !==
         currentSubject.accepted_result_commit
       ) {
-        reasons.push("Workspace HEAD no longer equals the accepted subject commit.");
+        reasons.push(REVIEW_HEAD_DRIFT_REASON);
       }
       if (!(await this.git.isWorktreeCleanExcludingFounder())) {
         reasons.push("Workspace has uncommitted changes outside .founder/.");
@@ -4391,6 +4676,227 @@ export class WorkItemController {
       ...content,
       proposal_sha256: hashScopeCorrectionProposal(content),
     });
+  }
+
+  private reviewImportDriftInputMatchesProposal(
+    input: ApplyReviewImportDriftRecoveryInput,
+    proposal: ReviewImportDriftRecoveryProposalV1,
+  ): boolean {
+    return (
+      input.decision === "accept_exact_drift" &&
+      input.proposal_sha256 === proposal.proposal_sha256 &&
+      input.review_mission_content_sha256 ===
+        proposal.review_mission_content_sha256 &&
+      input.result_content_sha256 === proposal.result_content_sha256 &&
+      input.rejected_import_run_id === proposal.rejected_import_run_id &&
+      input.accepted_result_commit === proposal.accepted_result_commit &&
+      input.current_head_commit === proposal.current_head_commit &&
+      isDeepStrictEqual(input.governed_tuple, {
+        goal_version: proposal.identity.goal_version,
+        input_revision: proposal.identity.input_revision,
+        attempt: proposal.identity.attempt,
+        patch_cycle: proposal.patch_cycle,
+      })
+    );
+  }
+
+  private async buildReviewImportDriftRecoveryProposal(
+    item: WorkItem,
+    includeApplied: boolean,
+  ): Promise<ReviewImportDriftRecoveryProposalV1 | null> {
+    const state = item.state;
+    if (
+      item.goal.goal_contract === undefined ||
+      state.phase !== "review" ||
+      state.status !== "active" ||
+      state.goal_version === undefined ||
+      state.input_revision === undefined ||
+      state.attempt === undefined ||
+      state.patch_cycle === undefined ||
+      state.active_run !== undefined ||
+      state.attention !== undefined
+    ) {
+      return null;
+    }
+    const identity: MissionIdentity<"review"> = {
+      phase: "review",
+      work_item_id: item.goal.work_item_id,
+      goal_version: state.goal_version,
+      input_revision: state.input_revision,
+      attempt: state.attempt,
+    };
+    const candidateRejections = (
+      await this.repository.listImportEvidence(item.goal.work_item_id)
+    ).filter(
+      (stored) =>
+        stored.evidence.phase === "review" &&
+        stored.evidence.outcome === "rejected" &&
+        isDeepStrictEqual(stored.evidence.identity, identity) &&
+        isDeepStrictEqual(stored.evidence.reasons, [
+          REVIEW_HEAD_DRIFT_REASON,
+        ]),
+    );
+    if (candidateRejections.length === 0) {
+      return null;
+    }
+    const connectedRuns = await this.repository.listConnectedRuns(
+      item.goal.work_item_id,
+    );
+    if (connectedRuns.some((run) => run.lifecycle.status !== "terminal")) {
+      return null;
+    }
+
+    const snapshot = await this.repository.readMissionResult(
+      identity,
+      state.patch_cycle === 0 ? undefined : state.patch_cycle,
+    );
+    this.requireActiveMissionSnapshot(snapshot, item.goal.work_item_id);
+    if (!("review_subject" in snapshot.mission)) {
+      return null;
+    }
+    const resultContentSha256 = hashResultContent(snapshot.result_source);
+    const rejectedImportRunId = createImportRunId(
+      snapshot.mission.content_sha256,
+      resultContentSha256,
+    );
+    const rejected = await this.repository.readImportEvidence(
+      identity,
+      rejectedImportRunId,
+    );
+    if (
+      rejected === null ||
+      rejected.evidence.phase !== "review" ||
+      rejected.evidence.outcome !== "rejected" ||
+      rejected.evidence.mission_content_sha256 !==
+        snapshot.mission.content_sha256 ||
+      rejected.evidence.result_content_sha256 !== resultContentSha256 ||
+      rejected.evidence.result_commit !==
+        snapshot.mission.review_subject.accepted_result_commit ||
+      !isDeepStrictEqual(rejected.evidence.identity, identity) ||
+      !isDeepStrictEqual(rejected.evidence.reasons, [
+        REVIEW_HEAD_DRIFT_REASON,
+      ]) ||
+      rejected.summary.import_run_id !== rejectedImportRunId ||
+      rejected.summary.phase !== "review" ||
+      rejected.summary.outcome !== "rejected" ||
+      !isDeepStrictEqual(rejected.summary.reasons, [
+        REVIEW_HEAD_DRIFT_REASON,
+      ]) ||
+      rejected.verification.length !== 0
+    ) {
+      return null;
+    }
+    const currentSubject = await this.currentReviewSubject(
+      this.repository,
+      identity,
+      snapshot.mission.review_subject,
+      state.patch_cycle,
+    );
+    const assessment = await this.assessReviewResult(
+      snapshot,
+      identity,
+      currentSubject,
+      false,
+    );
+    if (assessment.outcome !== "applied") {
+      return null;
+    }
+    const currentHead = await this.git.readHeadCommit();
+    if (
+      currentHead === currentSubject.accepted_result_commit ||
+      !(await this.git.isAncestor(
+        currentSubject.accepted_result_commit,
+        currentHead,
+      )) ||
+      !(await this.git.isWorktreeCleanExcludingFounder())
+    ) {
+      return null;
+    }
+    const changedFiles = [
+      ...new Set(
+        await this.git.listChangedFiles(
+          currentSubject.accepted_result_commit,
+          currentHead,
+        ),
+      ),
+    ].sort();
+    if (changedFiles.length === 0) {
+      return null;
+    }
+    for (const path of changedFiles) {
+      if (
+        !workspaceRelativePosixPathSchema.safeParse(path).success ||
+        path === ".founder" ||
+        path.startsWith(".founder/")
+      ) {
+        throw this.conflict(
+          "repair_required",
+          item.goal.work_item_id,
+          `Git reported an unsafe Review import drift path: ${path}`,
+        );
+      }
+    }
+    const subjectChangedFiles = changedFiles.filter((path) =>
+      currentSubject.changed_files.includes(path),
+    );
+    const content = {
+      schema_version: 1 as const,
+      work_item_id: item.goal.work_item_id,
+      identity,
+      patch_cycle: state.patch_cycle,
+      review_mission_content_sha256: snapshot.mission.content_sha256,
+      result_content_sha256: resultContentSha256,
+      rejected_import_run_id: rejectedImportRunId,
+      rejected_import_controller_run_id:
+        rejected.evidence.controller_run_id,
+      rejected_import_evidence_path: rejected.summary.evidence_path,
+      accepted_result_commit: currentSubject.accepted_result_commit,
+      current_head_commit: currentHead,
+      changed_files: changedFiles as [string, ...string[]],
+      subject_changed_files: subjectChangedFiles,
+    };
+    const proposal = reviewImportDriftRecoveryProposalSchema.parse({
+      ...content,
+      proposal_sha256: hashReviewImportDriftRecoveryProposal(content),
+    });
+    if (!includeApplied) {
+      const decisionInput: ApplyReviewImportDriftRecoveryInput = {
+        decision: "accept_exact_drift",
+        governed_tuple: {
+          goal_version: identity.goal_version,
+          input_revision: identity.input_revision,
+          attempt: identity.attempt,
+          patch_cycle: state.patch_cycle,
+        },
+        review_mission_content_sha256:
+          proposal.review_mission_content_sha256,
+        result_content_sha256: proposal.result_content_sha256,
+        rejected_import_run_id: proposal.rejected_import_run_id,
+        accepted_result_commit: proposal.accepted_result_commit,
+        current_head_commit: proposal.current_head_commit,
+        proposal_sha256: proposal.proposal_sha256,
+      };
+      const idempotencyKey = [
+        item.goal.work_item_id,
+        "review-import-drift-recovery",
+        proposal.proposal_sha256,
+      ].join(":");
+      const runId = deriveControllerRunId(
+        idempotencyKey,
+        JSON.stringify({
+          operation: "apply_review_import_drift_recovery",
+          input: decisionInput,
+        }),
+      );
+      const existing = await this.repository.readControllerRunManifest(
+        item.goal.work_item_id,
+        runId,
+      );
+      if (existing?.outcome === "applied") {
+        return null;
+      }
+    }
+    return proposal;
   }
 
   private async currentWritableMission(

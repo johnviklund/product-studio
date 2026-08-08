@@ -82,6 +82,7 @@ import {
   workItemSchema,
   workItemStateSchema,
   type ApprovePlanResultInput,
+  type ApplyReviewImportDriftRecoveryInput,
   type ApplyScopeCorrectionInput,
   type CommandAuthorizationDecisionInput,
   type CreateCaptureInput,
@@ -89,6 +90,7 @@ import {
   type RetainedControllerLeaseRepairResult,
   type SaveWorkItemInput,
   type ScopeCorrectionProposalV1,
+  type ReviewImportDriftRecoveryProposalV1,
   type CommandAuthorizationProposalV1,
   type UpdateWorkItemPhaseInput,
   type WorkItem,
@@ -673,6 +675,20 @@ export interface PortfolioScopeCorrectionListing {
 export interface PortfolioScopeCorrectionResult extends PortfolioWorkItem {
   controller_run: ControllerRunManifest;
   proposal: ScopeCorrectionProposalV1;
+}
+
+export interface PortfolioReviewImportDriftRecoveryListing {
+  source_id: string;
+  work_item_id: string;
+  proposal: ReviewImportDriftRecoveryProposalV1 | null;
+}
+
+export interface PortfolioReviewImportDriftRecoveryResult
+  extends PortfolioWorkItem {
+  controller_run: ControllerRunManifest;
+  proposal: ReviewImportDriftRecoveryProposalV1;
+  evidence: ImportEvidenceSummary;
+  result: ReviewExternalResultSubmission;
 }
 
 export interface PortfolioCommandAuthorizationResult extends PortfolioWorkItem {
@@ -3500,6 +3516,47 @@ export class PortfolioService {
       work_item: corrected.work_item,
       controller_run: corrected.manifest,
       proposal: corrected.proposal,
+    };
+  }
+
+  async getReviewImportDriftRecoveryProposal(
+    sourceId: string,
+    workItemId: string,
+  ): Promise<PortfolioReviewImportDriftRecoveryListing> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    return {
+      source_id: source.source_id,
+      work_item_id: workItemId,
+      proposal: await this.workItemController(
+        source.workspace,
+      ).proposeReviewImportDriftRecovery(workItemId),
+    };
+  }
+
+  async applyReviewImportDriftRecovery(
+    sourceId: string,
+    workItemId: string,
+    input: ApplyReviewImportDriftRecoveryInput,
+  ): Promise<PortfolioReviewImportDriftRecoveryResult> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const recovered = await this.workItemController(
+      source.workspace,
+    ).applyReviewImportDriftRecovery(workItemId, input);
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: recovered.work_item,
+      controller_run: recovered.manifest,
+      proposal: recovered.proposal,
+      evidence: recovered.evidence,
+      result: recovered.result,
     };
   }
 

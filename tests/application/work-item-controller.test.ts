@@ -48,7 +48,9 @@ import {
   type ReviewRunPolicy,
 } from "../../src/domain/review-run-policy";
 import {
+  expectedImportRunId,
   hashResultContent,
+  importEvidenceEnvelopeSchema,
   importEvidenceSummarySchema,
   serializeExternalResult,
   type AppliedExecuteReviewSubject,
@@ -103,6 +105,24 @@ import {
 const createdRoots: string[] = [];
 const fixedClock = () => new Date("2026-07-21T21:00:00.000Z");
 const testCommit = "a".repeat(40);
+
+// Mirrors the ProductWorkspace.writeImportEvidence identity guard so these fakes
+// cannot accept evidence that production rejects.
+function assertProductionImportEvidenceContract(
+  input: ImportEvidenceWriteInput,
+): void {
+  const evidence = importEvidenceEnvelopeSchema.parse(input.evidence);
+  if (
+    hashResultContent(input.submission_source) !==
+      evidence.result_content_sha256 ||
+    expectedImportRunId(evidence) !== evidence.import_run_id
+  ) {
+    throw new Error(
+      "import evidence identity does not match the submitted result bytes",
+    );
+  }
+}
+
 const passingGit: GitVerificationAdapter = {
   async resolveCommit() {
     return testCommit;
@@ -439,6 +459,7 @@ async function createImportFixture(options?: {
       return evidence.get(importRunId) ?? null;
     },
     async writeImportEvidence(input: ImportEvidenceWriteInput) {
+      assertProductionImportEvidenceContract(input);
       evidenceWrites.count += 1;
       const summary = importEvidenceSummarySchema.parse({
         phase: input.evidence.phase,
@@ -687,6 +708,7 @@ async function createReviewImportFixture(options?: {
       return evidence.get(importRunId) ?? null;
     },
     async writeImportEvidence(input: ImportEvidenceWriteInput) {
+      assertProductionImportEvidenceContract(input);
       evidenceWrites.count += 1;
       const evidenceIdentity = input.evidence.identity;
       const patchCycleSuffix =
@@ -706,6 +728,9 @@ async function createReviewImportFixture(options?: {
         verification: input.verification,
       });
       return summary;
+    },
+    async listImportEvidence() {
+      return [...evidence.values()];
     },
   }) as ImportTestRepository;
 
@@ -4271,6 +4296,256 @@ describe("WorkItemController", () => {
         ),
       ),
     ).not.toContain(".controller.lock");
+  });
+
+  it("hash-binds exact descendant drift before a founder-approved Review reassessment", async () => {
+    const fixture = await createReviewImportFixture();
+    const currentHead = "b".repeat(40);
+    const driftGit: GitVerificationAdapter = {
+      ...passingGit,
+      readHeadCommit: async () => currentHead,
+      listChangedFiles: async () => [
+        "src/application/work-item-controller.ts",
+        "src/domain/result.ts",
+      ],
+    };
+    const controller = createController(fixture.repository, driftGit);
+    const rejected = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(rejected).toMatchObject({
+      manifest: null,
+      evidence: {
+        outcome: "rejected",
+        reasons: ["Workspace HEAD no longer equals the accepted subject commit."],
+      },
+    });
+
+    const proposal = await controller.proposeReviewImportDriftRecovery(
+      fixture.workItem.goal.work_item_id,
+    );
+    expect(proposal).toMatchObject({
+      schema_version: 1,
+      accepted_result_commit: testCommit,
+      current_head_commit: currentHead,
+      changed_files: [
+        "src/application/work-item-controller.ts",
+        "src/domain/result.ts",
+      ],
+      subject_changed_files: ["src/domain/result.ts"],
+      rejected_import_run_id: rejected.evidence.import_run_id,
+      rejected_import_evidence_path: rejected.evidence.evidence_path,
+    });
+    if (proposal === null) {
+      throw new Error("Expected an exact Review import drift proposal.");
+    }
+
+    const input = {
+      decision: "accept_exact_drift" as const,
+      governed_tuple: {
+        goal_version: proposal.identity.goal_version,
+        input_revision: proposal.identity.input_revision,
+        attempt: proposal.identity.attempt,
+        patch_cycle: proposal.patch_cycle,
+      },
+      review_mission_content_sha256:
+        proposal.review_mission_content_sha256,
+      result_content_sha256: proposal.result_content_sha256,
+      rejected_import_run_id: proposal.rejected_import_run_id,
+      accepted_result_commit: proposal.accepted_result_commit,
+      current_head_commit: proposal.current_head_commit,
+      proposal_sha256: proposal.proposal_sha256,
+    };
+    const applied = await controller.applyReviewImportDriftRecovery(
+      fixture.workItem.goal.work_item_id,
+      input,
+    );
+    expect(applied).toMatchObject({
+      manifest: {
+        outcome: "applied",
+        review_import_drift_recovery: {
+          proposal_sha256: proposal.proposal_sha256,
+        },
+      },
+      evidence: { phase: "review", outcome: "applied", reasons: [] },
+      result: { verdict: "clean", findings: [] },
+      work_item: {
+        state: {
+          phase: "review",
+          status: "active",
+          attention: { kind: "review_ready" },
+        },
+      },
+    });
+    expect(applied.evidence.import_run_id).not.toBe(
+      rejected.evidence.import_run_id,
+    );
+    expect(fixture.evidence.get(rejected.evidence.import_run_id)).toMatchObject({
+      evidence: { outcome: "rejected" },
+    });
+    expect(fixture.evidenceWrites.count).toBe(2);
+
+    const replay = await controller.applyReviewImportDriftRecovery(
+      fixture.workItem.goal.work_item_id,
+      input,
+    );
+    expect(replay).toEqual(applied);
+    expect(fixture.evidenceWrites.count).toBe(2);
+  });
+
+  it("rejects stale Review drift approval without writing recovery evidence", async () => {
+    const fixture = await createReviewImportFixture();
+    const currentHead = "b".repeat(40);
+    const controller = createController(fixture.repository, {
+      ...passingGit,
+      readHeadCommit: async () => currentHead,
+      listChangedFiles: async () => ["src/domain/result.ts"],
+    });
+    await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    const proposal = await controller.proposeReviewImportDriftRecovery(
+      fixture.workItem.goal.work_item_id,
+    );
+    if (proposal === null) {
+      throw new Error("Expected an exact Review import drift proposal.");
+    }
+
+    await expect(
+      controller.applyReviewImportDriftRecovery(
+        fixture.workItem.goal.work_item_id,
+        {
+          decision: "accept_exact_drift",
+          governed_tuple: {
+            goal_version: proposal.identity.goal_version,
+            input_revision: proposal.identity.input_revision,
+            attempt: proposal.identity.attempt,
+            patch_cycle: proposal.patch_cycle,
+          },
+          review_mission_content_sha256:
+            proposal.review_mission_content_sha256,
+          result_content_sha256: proposal.result_content_sha256,
+          rejected_import_run_id: proposal.rejected_import_run_id,
+          accepted_result_commit: proposal.accepted_result_commit,
+          current_head_commit: "c".repeat(40),
+          proposal_sha256: proposal.proposal_sha256,
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "stale_expectation" });
+    expect(fixture.evidenceWrites.count).toBe(1);
+  });
+
+  it("recovers Review drift reassessment from evidence written before a failed commit", async () => {
+    const fixture = await createReviewImportFixture();
+    const currentHead = "b".repeat(40);
+    const driftGit: GitVerificationAdapter = {
+      ...passingGit,
+      readHeadCommit: async () => currentHead,
+      listChangedFiles: async () => ["src/domain/result.ts"],
+    };
+    const controller = createController(fixture.repository, driftGit);
+    await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    const proposal = await controller.proposeReviewImportDriftRecovery(
+      fixture.workItem.goal.work_item_id,
+    );
+    if (proposal === null) {
+      throw new Error("Expected an exact Review import drift proposal.");
+    }
+    const input = {
+      decision: "accept_exact_drift" as const,
+      governed_tuple: {
+        goal_version: proposal.identity.goal_version,
+        input_revision: proposal.identity.input_revision,
+        attempt: proposal.identity.attempt,
+        patch_cycle: proposal.patch_cycle,
+      },
+      review_mission_content_sha256:
+        proposal.review_mission_content_sha256,
+      result_content_sha256: proposal.result_content_sha256,
+      rejected_import_run_id: proposal.rejected_import_run_id,
+      accepted_result_commit: proposal.accepted_result_commit,
+      current_head_commit: proposal.current_head_commit,
+      proposal_sha256: proposal.proposal_sha256,
+    };
+    const commit = fixture.repository.commitControllerMutation.bind(
+      fixture.repository,
+    );
+    Object.assign(fixture.repository, {
+      async commitControllerMutation() {
+        throw new Error("simulated Review drift commit failure");
+      },
+    });
+
+    await expect(
+      controller.applyReviewImportDriftRecovery(
+        fixture.workItem.goal.work_item_id,
+        input,
+      ),
+    ).rejects.toThrow("simulated Review drift commit failure");
+    expect(fixture.evidenceWrites.count).toBe(2);
+
+    Object.assign(fixture.repository, { commitControllerMutation: commit });
+    const recovered = await createController(
+      fixture.repository,
+      driftGit,
+    ).applyReviewImportDriftRecovery(
+      fixture.workItem.goal.work_item_id,
+      input,
+    );
+    expect(recovered).toMatchObject({
+      manifest: {
+        outcome: "applied",
+        review_import_drift_recovery: {
+          proposal_sha256: proposal.proposal_sha256,
+        },
+      },
+      evidence: { outcome: "applied" },
+      work_item: { state: { attention: { kind: "review_ready" } } },
+    });
+    expect(fixture.evidenceWrites.count).toBe(2);
+  });
+
+  it("withholds Review drift recovery unless the only rejection is exact HEAD drift on a clean descendant", async () => {
+    const fixture = await createReviewImportFixture();
+    const currentHead = "b".repeat(40);
+    const dirtyGit: GitVerificationAdapter = {
+      ...passingGit,
+      readHeadCommit: async () => currentHead,
+      isWorktreeCleanExcludingFounder: async () => false,
+      listChangedFiles: async () => ["src/domain/result.ts"],
+    };
+    const dirtyController = createController(fixture.repository, dirtyGit);
+    await dirtyController.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(
+      await dirtyController.proposeReviewImportDriftRecovery(
+        fixture.workItem.goal.work_item_id,
+      ),
+    ).toBeNull();
+
+    const cleanFixture = await createReviewImportFixture();
+    const nonDescendantController = createController(cleanFixture.repository, {
+      ...passingGit,
+      readHeadCommit: async () => currentHead,
+      isAncestor: async () => false,
+      listChangedFiles: async () => ["src/domain/result.ts"],
+    });
+    await nonDescendantController.importReviewResult(
+      cleanFixture.workItem.goal.work_item_id,
+      cleanFixture.input,
+    );
+    expect(
+      await nonDescendantController.proposeReviewImportDriftRecovery(
+        cleanFixture.workItem.goal.work_item_id,
+      ),
+    ).toBeNull();
   });
 
   it.each([
