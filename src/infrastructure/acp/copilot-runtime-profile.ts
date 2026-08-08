@@ -15,9 +15,11 @@ import {
   reviewRunPolicySchema,
   type ReviewRunPolicy,
 } from "../../domain/review-run-policy";
+import { readAcpWorkspaceTextFile } from "./acp-client";
 import type {
   AcpClientAdapter,
   AcpEventSink,
+  AcpReadTextFileHandler,
   AcpRuntimeProfile,
   AcpSession,
   AcpSessionCallbacks,
@@ -99,6 +101,7 @@ export interface CopilotRuntimeProfileInput {
   readonly environment: Readonly<Record<string, string>>;
   readonly workspace_cwd: string;
   readonly evaluate_permission: NormalizedPermissionEvaluator;
+  readonly read_text_file?: AcpReadTextFileHandler;
   readonly write_text_file?: AcpWriteTextFileHandler;
   readonly limits: ConnectedRunLimits;
 }
@@ -120,6 +123,7 @@ export interface CopilotSanitizedProfileEvidence {
   readonly containment_assurance: "not_independently_enforced";
   readonly machine_authority: "launching_user";
   readonly requested_mcp_server_count: 0;
+  readonly client_fs_read_text_file: boolean;
   readonly client_fs_write_text_file: boolean;
   readonly credential_environment: "explicit_allowlist_without_credential_values";
 }
@@ -589,6 +593,7 @@ export function createCopilotRuntimeProfile(
     containment_assurance: "not_independently_enforced",
     machine_authority: "launching_user",
     requested_mcp_server_count: 0,
+    client_fs_read_text_file: input.read_text_file !== undefined,
     client_fs_write_text_file: input.write_text_file !== undefined,
     credential_environment: "explicit_allowlist_without_credential_values",
   };
@@ -601,6 +606,7 @@ export function createCopilotRuntimeProfile(
       environment: resolveEnvironment(input.environment),
       workspace_cwd: workspaceCwd,
       evaluate_permission: input.evaluate_permission,
+      read_text_file: input.read_text_file,
       write_text_file: input.write_text_file,
       limits: input.limits,
       normalize_permission: (request) =>
@@ -663,6 +669,7 @@ export function createCopilotReviewRuntimeProfile(
   ];
   const prepared = createCopilotRuntimeProfile({
     ...profileInput,
+    read_text_file: readAcpWorkspaceTextFile,
     available_tools: availableTools,
     required_available_tools: [
       COPILOT_REVIEW_READ_TOOL,

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 
@@ -24,6 +25,22 @@ export type AcpWriteTextFileHandler = (
   signal: AbortSignal,
 ) => Promise<void>;
 
+export type AcpReadTextFileHandler = (
+  request: acp.ReadTextFileRequest,
+  signal: AbortSignal,
+) => Promise<acp.ReadTextFileResponse>;
+
+export const readAcpWorkspaceTextFile: AcpReadTextFileHandler = async (
+  request,
+  signal,
+) => {
+  const content = await readFile(request.path, { encoding: "utf8", signal });
+  const lines = content.match(/.*(?:\n|$)/gu)?.filter((line) => line !== "") ?? [];
+  const start = Math.max(0, (request.line ?? 1) - 1);
+  const limit = request.limit ?? lines.length;
+  return { content: lines.slice(start, start + limit).join("") };
+};
+
 export interface AcpRuntimeProfile {
   readonly adapter_id: string;
   readonly executable: string;
@@ -38,6 +55,7 @@ export interface AcpRuntimeProfile {
   readonly allow_unrestricted_read?: (
     request: acp.RequestPermissionRequest,
   ) => boolean;
+  readonly read_text_file?: AcpReadTextFileHandler;
   readonly write_text_file?: AcpWriteTextFileHandler;
   readonly initialize_session?: (
     session: AcpSessionInitializer,
@@ -301,6 +319,41 @@ function normalizeWriteTextFileRequest(
     kind: "workspace_write",
     path: workspaceRelativePath.split(sep).join("/"),
   };
+}
+
+function isWorkspaceDescendant(workspaceCwd: string, candidate: string): boolean {
+  const workspaceRelativePath = relative(workspaceCwd, candidate);
+  return (
+    workspaceRelativePath !== "" &&
+    workspaceRelativePath !== ".." &&
+    !workspaceRelativePath.startsWith(`..${sep}`) &&
+    !isAbsolute(workspaceRelativePath)
+  );
+}
+
+async function normalizeReadTextFileRequest(
+  request: acp.ReadTextFileRequest,
+  workspaceCwd: string,
+): Promise<acp.ReadTextFileRequest | null> {
+  if (!isAbsolute(request.path)) {
+    return null;
+  }
+  const absolutePath = resolve(request.path);
+  if (!isWorkspaceDescendant(workspaceCwd, absolutePath)) {
+    return null;
+  }
+  try {
+    const [canonicalWorkspace, canonicalPath] = await Promise.all([
+      realpath(workspaceCwd),
+      realpath(absolutePath),
+    ]);
+    if (!isWorkspaceDescendant(canonicalWorkspace, canonicalPath)) {
+      return null;
+    }
+    return { ...request, path: canonicalPath };
+  } catch {
+    return null;
+  }
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -680,6 +733,28 @@ class StdioAcpSession implements AcpSession {
     });
   }
 
+  async handleReadTextFile(
+    request: acp.ReadTextFileRequest,
+    reader: AcpReadTextFileHandler,
+  ): Promise<acp.ReadTextFileResponse> {
+    if (request.sessionId !== this.session_id) {
+      throw new AcpClientError("ACP client filesystem session does not match.");
+    }
+    return this.enqueueCallback(async () => {
+      if (this.writeAbortController.signal.aborted) {
+        throw new AcpClientError("ACP client filesystem read was interrupted.");
+      }
+      const normalized = await normalizeReadTextFileRequest(
+        request,
+        this.profile.workspace_cwd,
+      );
+      if (normalized === null) {
+        throw new AcpClientError("ACP client filesystem read was denied.");
+      }
+      return reader(normalized, this.writeAbortController.signal);
+    });
+  }
+
   private async recordPermissionEvaluation(
     normalized: CanonicalCapabilityRequest | null,
   ): Promise<"allow" | "reject" | "invalid"> {
@@ -907,6 +982,15 @@ export class StdioAcpClientAdapter implements AcpClientAdapter {
           await session.handleSessionUpdate(context.params);
         }
       })
+      .onRequest(acp.methods.client.fs.readTextFile, async (context) => {
+        if (session === null || profile.read_text_file === undefined) {
+          throw new AcpClientError("ACP client filesystem reads are unavailable.");
+        }
+        return session.handleReadTextFile(
+          context.params,
+          profile.read_text_file,
+        );
+      })
       .onRequest(acp.methods.client.fs.writeTextFile, async (context) => {
         if (session === null || profile.write_text_file === undefined) {
           throw new AcpClientError("ACP client filesystem writes are unavailable.");
@@ -927,10 +1011,12 @@ export class StdioAcpClientAdapter implements AcpClientAdapter {
       const initialized = await withinTimeout(
         connection.agent.request(acp.methods.agent.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities:
-            profile.write_text_file === undefined
-              ? {}
-              : { fs: { writeTextFile: true } },
+          clientCapabilities: {
+            fs: {
+              readTextFile: profile.read_text_file !== undefined,
+              writeTextFile: profile.write_text_file !== undefined,
+            },
+          },
         }),
         ACP_HANDSHAKE_TIMEOUT_MS,
       );

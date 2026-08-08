@@ -326,8 +326,14 @@ describe("Copilot ACP runtime profile", () => {
     expect(enabled.sanitized_profile_evidence.client_fs_write_text_file).toBe(
       true,
     );
+    expect(enabled.sanitized_profile_evidence.client_fs_read_text_file).toBe(
+      false,
+    );
     expect(disabled.runtime_profile.write_text_file).toBeUndefined();
     expect(disabled.sanitized_profile_evidence.client_fs_write_text_file).toBe(
+      false,
+    );
+    expect(disabled.sanitized_profile_evidence.client_fs_read_text_file).toBe(
       false,
     );
   });
@@ -348,8 +354,10 @@ describe("Copilot ACP runtime profile", () => {
         "mcp",
       ],
       client_fs_write_text_file: true,
+      client_fs_read_text_file: true,
     });
     expect(profile.runtime_profile.write_text_file).toBe(writeTextFile);
+    expect(profile.runtime_profile.read_text_file).toEqual(expect.any(Function));
     expect(
       profile.runtime_profile.evaluate_permission({
         schema_version: 1,

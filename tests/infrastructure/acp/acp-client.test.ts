@@ -1,4 +1,13 @@
-import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +23,7 @@ import {
 import type { ConnectedRunLimits } from "../../../src/domain/connected-run";
 import {
   hashAcpSessionConfigOptions,
+  readAcpWorkspaceTextFile,
   StdioAcpClientAdapter,
   type AcpEvidenceEvent,
   type AcpEventSink,
@@ -426,22 +436,30 @@ describe("stdio ACP client adapter", () => {
     });
   });
 
-  it("advertises and mediates write-only client filesystem capability only when a writer is supplied", async () => {
+  it("advertises and mediates the complete client filesystem capability pair", async () => {
     const root = await createRoot();
     const sentinel = join(root, "client-fs-sentinel");
+    const readTextFile = vi.fn(readAcpWorkspaceTextFile);
     const writeTextFile = vi.fn(async () => undefined);
+    const source = join(root, "src", "subject.txt");
     const target = join(root, "src", "result.json");
+    await mkdir(dirname(source), { recursive: true });
+    await writeFile(source, "first\nsecond\nthird\nfourth\n", "utf8");
     const session = await new StdioAcpClientAdapter().start(
       {
         ...profile(
           root,
           {
             record_client_capabilities: true,
+            client_read_path: source,
+            client_read_line: 2,
+            client_read_limit: 2,
             client_write_path: target,
             client_write_content: '{"ok":true}\n',
           },
           sentinel,
         ),
+        read_text_file: readTextFile,
         write_text_file: writeTextFile,
       },
       new MemoryEventSink(),
@@ -451,6 +469,15 @@ describe("stdio ACP client adapter", () => {
       outcome: "completed",
       permissions: [expect.objectContaining({ kind: "in_envelope" })],
     });
+    expect(readTextFile).toHaveBeenCalledWith({
+      sessionId: session.session_id,
+      path: await realpath(source),
+      line: 2,
+      limit: 2,
+    }, expect.any(AbortSignal));
+    await expect(readFile(`${sentinel}.client-read`, "utf8")).resolves.toBe(
+      "second\nthird\n",
+    );
     expect(writeTextFile).toHaveBeenCalledWith({
       sessionId: session.session_id,
       path: target,
@@ -459,7 +486,7 @@ describe("stdio ACP client adapter", () => {
     await expect(
       readFile(`${sentinel}.client-capabilities`, "utf8").then(JSON.parse),
     ).resolves.toMatchObject({
-      fs: { readTextFile: false, writeTextFile: true },
+      fs: { readTextFile: true, writeTextFile: true },
       terminal: false,
     });
 
@@ -479,6 +506,59 @@ describe("stdio ACP client adapter", () => {
       fs: { readTextFile: false, writeTextFile: false },
       terminal: false,
     });
+  });
+
+  it("rejects client filesystem reads outside the governed workspace", async () => {
+    const root = await createRoot();
+    const readTextFile = vi.fn(async () => ({ content: "blocked\n" }));
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            client_read_path: join(dirname(root), "outside-client-fs.txt"),
+            ignore_client_read_error: true,
+          },
+          join(root, "denied-client-read-sentinel"),
+        ),
+        read_text_file: readTextFile,
+      },
+      new MemoryEventSink(),
+    );
+
+    await expect(session.run("Try a denied client filesystem read.")).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(readTextFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects client filesystem reads through a workspace symlink escape", async () => {
+    const root = await createRoot();
+    const outsideRoot = await createRoot();
+    const outside = join(outsideRoot, "secret.txt");
+    const linked = join(root, "linked-secret.txt");
+    await writeFile(outside, "secret\n", "utf8");
+    await symlink(outside, linked);
+    const readTextFile = vi.fn(readAcpWorkspaceTextFile);
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...profile(
+          root,
+          {
+            client_read_path: linked,
+            ignore_client_read_error: true,
+          },
+          join(root, "symlink-client-read-sentinel"),
+        ),
+        read_text_file: readTextFile,
+      },
+      new MemoryEventSink(),
+    );
+
+    await expect(session.run("Try a symlinked client filesystem read.")).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(readTextFile).not.toHaveBeenCalled();
   });
 
   it("rejects a direct client filesystem write outside the runtime evaluator", async () => {

@@ -193,6 +193,37 @@ const application = acp
         },
       });
     }
+    if (typeof scenario.client_read_path === "string") {
+      try {
+        const response = await context.client.request(
+          acp.methods.client.fs.readTextFile,
+          {
+            sessionId:
+              typeof scenario.client_read_session_id === "string"
+                ? scenario.client_read_session_id
+                : sessionId,
+            path: scenario.client_read_path,
+            ...(Number.isSafeInteger(scenario.client_read_line)
+              ? { line: scenario.client_read_line }
+              : {}),
+            ...(Number.isSafeInteger(scenario.client_read_limit)
+              ? { limit: scenario.client_read_limit }
+              : {}),
+          },
+        );
+        if (sentinelPath !== null) {
+          await writeFile(
+            `${sentinelPath}.client-read`,
+            response.content,
+            "utf8",
+          );
+        }
+      } catch (error) {
+        if (scenario.ignore_client_read_error !== true) {
+          throw error;
+        }
+      }
+    }
     if (
       typeof scenario.client_write_path === "string" &&
       typeof scenario.client_write_content === "string"

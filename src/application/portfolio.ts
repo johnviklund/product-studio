@@ -787,6 +787,7 @@ export interface CopilotConnectedWritableRuntimeOptions {
     | "requested_model"
     | "workspace_cwd"
     | "evaluate_permission"
+    | "read_text_file"
     | "write_text_file"
     | "limits"
   > & {
@@ -850,6 +851,7 @@ export interface CopilotConnectedReviewRuntimeOptions {
     | "required_available_tools"
     | "workspace_cwd"
     | "evaluate_permission"
+    | "read_text_file"
     | "write_text_file"
     | "limits"
   > & {
