@@ -340,9 +340,8 @@ describe("Copilot ACP runtime profile", () => {
 
     expect(profile.sanitized_profile_evidence).toMatchObject({
       profile_id: COPILOT_REVIEW_PROFILE_ID,
-      available_tools: ["view"],
+      available_tools: ["apply_patch", "view"],
       excluded_tools: [
-        "apply_patch",
         "ask_user",
         "execute",
         "fetch",
@@ -410,6 +409,13 @@ describe("Copilot ACP runtime profile", () => {
         sink,
       ),
     ).rejects.toThrow("Required Copilot tools are unavailable: view.");
+    await expect(
+      startCopilotReviewRuntime(
+        adapter,
+        reviewInput({ available_tools: ["view", "execute", "fetch"] }),
+        sink,
+      ),
+    ).rejects.toThrow("Required Copilot tools are unavailable: apply_patch.");
     expect(adapter.start).not.toHaveBeenCalled();
   });
 

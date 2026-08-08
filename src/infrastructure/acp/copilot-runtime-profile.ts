@@ -31,8 +31,13 @@ export const COPILOT_ADAPTER_ID = "copilot-acp";
 export const COPILOT_PROFILE_ID = "noninteractive-execute-v1";
 export const COPILOT_REVIEW_PROFILE_ID = "noninteractive-review-v1";
 export const COPILOT_REVIEW_READ_TOOL = "view";
+export const COPILOT_REVIEW_RESULT_WRITE_TOOL = "apply_patch";
 export const COPILOT_WRITABLE_COMMAND_TOOL = "bash";
-const COPILOT_REVIEW_READ_TOOLS = new Set([COPILOT_REVIEW_READ_TOOL, "read"]);
+const COPILOT_REVIEW_TOOLS = new Set([
+  COPILOT_REVIEW_READ_TOOL,
+  COPILOT_REVIEW_RESULT_WRITE_TOOL,
+  "read",
+]);
 const VERSION_OUTPUT = /^GitHub Copilot CLI (\d+\.\d+\.\d+)\.?\s*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u;
@@ -648,10 +653,10 @@ export function createCopilotReviewRuntimeProfile(
   const { review_policy: reviewPolicyInput, ...profileInput } = input;
   const reviewPolicy = reviewRunPolicySchema.parse(reviewPolicyInput);
   const removedTools = profileInput.available_tools.filter((tool) =>
-    !COPILOT_REVIEW_READ_TOOLS.has(tool),
+    !COPILOT_REVIEW_TOOLS.has(tool),
   );
   const availableTools = profileInput.available_tools.filter(
-    (tool) => COPILOT_REVIEW_READ_TOOLS.has(tool),
+    (tool) => COPILOT_REVIEW_TOOLS.has(tool),
   );
   const excludedTools = [
     ...new Set([...profileInput.excluded_tools, ...removedTools]),
@@ -659,7 +664,10 @@ export function createCopilotReviewRuntimeProfile(
   const prepared = createCopilotRuntimeProfile({
     ...profileInput,
     available_tools: availableTools,
-    required_available_tools: [COPILOT_REVIEW_READ_TOOL],
+    required_available_tools: [
+      COPILOT_REVIEW_READ_TOOL,
+      COPILOT_REVIEW_RESULT_WRITE_TOOL,
+    ],
     excluded_tools: excludedTools,
     evaluate_permission: (request) =>
       evaluateReviewPermissionRequest(reviewPolicy, request),

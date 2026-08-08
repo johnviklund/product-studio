@@ -247,8 +247,8 @@ function preparedReviewRuntime(
       argv: ["--acp", "--stdio"],
       requested_model: requestedModel,
       reasoning_effort: "high",
-      available_tools: ["view"],
-      excluded_tools: ["apply_patch", "execute"],
+      available_tools: ["apply_patch", "view"],
+      excluded_tools: ["execute"],
       authentication: "noninteractive_authenticated",
       execution_mode: "permission_mediated_local",
       containment_assurance: "not_independently_enforced",
@@ -4645,6 +4645,76 @@ describe("PortfolioService", () => {
     await expect(
       preferences.getPreference("copilot-acp", "review"),
     ).resolves.toBe("review-model");
+    index.close();
+  });
+
+  it("fails a completed connected Review that did not publish its required result", async () => {
+    const root = await createWorkspace("Missing Connected Review Result Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Reject a Review completion without result ingress",
+      type: "Feature",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7cf",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4199,
+        process_group_id: 4199,
+        started_at: "2026-08-05T18:00:00.000Z",
+      },
+      run: vi.fn(async () => ({
+        outcome: "completed" as const,
+        partial: false,
+        stop_reason: "end_turn" as const,
+        permissions: [],
+      })),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedReviewRuntime(session);
+    const { index, service } = await createService(
+      new SQLitePortfolioIndex(":memory:"),
+      () => repository,
+      undefined,
+      undefined,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    const reviewMission = await prepareConnectedReviewItem(
+      service,
+      sourceId,
+      created,
+    );
+
+    await service.launchConnectedReview(sourceId, created.goal.work_item_id, {
+      independence_attested: true,
+      model_override: "review-model",
+    });
+
+    await expect.poll(async () => {
+      const runs = await service.listConnectedRuns(
+        sourceId,
+        created.goal.work_item_id,
+      );
+      return runs[0]?.lifecycle.terminal_outcome;
+    }).toBe("failed");
+    const current = await repository.read(created.goal.work_item_id);
+    expect(current).toMatchObject({
+      state: { phase: "review", status: "active" },
+    });
+    expect(current?.state.attention).toBeUndefined();
+    await expect(
+      readFile(join(dirname(reviewMission.task_path), "result.json"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
     index.close();
   });
 

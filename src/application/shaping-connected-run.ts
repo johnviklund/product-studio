@@ -78,6 +78,7 @@ export interface ConnectedAcpRunHooks<RunningRecord, TerminalRecord> {
     signal: AbortSignal,
   ) => Promise<void>;
   readonly prompt: string;
+  readonly before_complete?: (result: AcpRunResult) => Promise<void>;
   readonly complete: (result: AcpRunResult) => Promise<TerminalRecord>;
   readonly fail: (error: unknown) => Promise<void>;
   readonly started?: (
@@ -207,6 +208,7 @@ export async function startConnectedAcpRun<RunningRecord, TerminalRecord>(
         if (!signalWasAborted(runtimeSignal)) {
           await observationQueue;
         }
+        await hooks.before_complete?.(result);
         const terminal = await hooks.complete(result);
         await hooks.after_complete?.(result, terminal);
       } catch (error) {

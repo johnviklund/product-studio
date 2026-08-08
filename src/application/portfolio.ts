@@ -705,6 +705,7 @@ interface PreparedConnectedLaunch {
   launch_input: LaunchConnectedInput;
   record: ConnectedRunRecordV2;
   prompt: string;
+  before_complete?: (result: AcpRunResult) => Promise<void>;
   start_session: (
     event_sink: AcpEventSink,
     callbacks: AcpSessionCallbacks,
@@ -2595,6 +2596,7 @@ export class PortfolioService {
       policy,
       prepared,
     );
+    let resultIngressObserved = false;
     return this.launchPreparedConnectedRun({
       source,
       work_item_id: workItemId,
@@ -2605,18 +2607,26 @@ export class PortfolioService {
       start_session: (eventSink, callbacks, connectedRunId) =>
         prepared.start(
           eventSink,
-          (request, signal) =>
-            source.workspace
-              .writeConnectedReviewResult(
-                workItemId,
-                connectedRunId,
-                request.path,
-                request.content,
-                signal,
-              )
-              .then(() => undefined),
+          async (request, signal) => {
+            await source.workspace.writeConnectedReviewResult(
+              workItemId,
+              connectedRunId,
+              request.path,
+              request.content,
+              signal,
+            );
+            resultIngressObserved = true;
+          },
           callbacks,
         ),
+      before_complete: async (result) => {
+        if (result.outcome === "completed" && !resultIngressObserved) {
+          throw this.missionNotReady(
+            workItemId,
+            "Connected Review completed without publishing its required result ingress.",
+          );
+        }
+      },
       preference: {
         adapter_id: configuration.adapter_id,
         seat: "review",
@@ -6104,6 +6114,7 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
           )
           .then(() => undefined),
       prompt: input.prompt,
+      before_complete: input.before_complete,
       complete: (result) =>
         this.completeObservedConnectedRun(
           input.source,
