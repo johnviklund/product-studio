@@ -508,6 +508,7 @@ export interface ReviewImportDriftRecoveryProposalV1 {
   accepted_result_commit: string;
   current_head_commit: string;
   changed_files: [string, ...string[]];
+  /** Advisory overlap disclosed to the founder; non-empty overlap does not block recovery. */
   subject_changed_files: string[];
   proposal_sha256: string;
 }

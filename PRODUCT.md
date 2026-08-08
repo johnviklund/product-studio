@@ -104,6 +104,12 @@ Spec requires a real Brainstorm selection, backward movement uses phase-local `R
 and `Approve & run Execute` validates the exact Plan result and current governed contract before
 creating the governed Execute handoff.
 
+Review import drift recovery deliberately uses disclosure-only subject integrity. Recovery still
+requires a clean descendant HEAD and shows the founder both the complete drift path list and the
+`subject_changed_files` overlap, but a non-empty overlap is advisory and does not block the exact
+founder decision; the controller reassesses the retained result and preserves both the original
+rejected receipt and the decision-bound applied receipt.
+
 ## 7. Durable-state rule
 
 Markdown holds semantic artifacts such as product direction, briefs, specifications,
