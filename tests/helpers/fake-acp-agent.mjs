@@ -127,7 +127,10 @@ const application = acp
         sessionUpdate: "agent_message_chunk",
         content: {
           type: "text",
-          text: "This terminal-shaped message must not become durable evidence.",
+          text:
+            typeof scenario.agent_message_text === "string"
+              ? scenario.agent_message_text
+              : "This terminal-shaped message must not become durable evidence.",
         },
       },
     });
@@ -144,6 +147,21 @@ const application = acp
 
     const requests = Array.isArray(scenario.requests) ? scenario.requests : [];
     for (let index = 0; index < requests.length; index += 1) {
+      await context.client.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: `tool-${index + 1}`,
+          kind:
+            Array.isArray(scenario.request_tool_kinds) &&
+            typeof scenario.request_tool_kinds[index] === "string"
+              ? scenario.request_tool_kinds[index]
+              : "execute",
+          status: "pending",
+          title: "Controlled capability request",
+          rawInput: requests[index],
+        },
+      });
       const decision = await context.client.request(
         acp.methods.client.session.requestPermission,
         {
@@ -251,6 +269,18 @@ const application = acp
           throw error;
         }
       }
+    }
+    if (typeof scenario.final_agent_message_text === "string") {
+      await context.client.notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: {
+            type: "text",
+            text: scenario.final_agent_message_text,
+          },
+        },
+      });
     }
     return { stopReason: "end_turn" };
   })

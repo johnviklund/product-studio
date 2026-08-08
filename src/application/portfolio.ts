@@ -59,6 +59,7 @@ import {
   hashResultContent,
   reviewExternalResultSubmissionForSubjectSchema,
   reviewFindingSchema,
+  serializeExternalResult,
   type ConnectedReviewResultRecoveryReceiptV1,
   type ImportEvidenceSummary,
   type PatchExternalResultSubmission,
@@ -713,7 +714,10 @@ interface PreparedConnectedLaunch {
   launch_input: LaunchConnectedInput;
   record: ConnectedRunRecordV2;
   prompt: string;
-  before_complete?: (result: AcpRunResult) => Promise<void>;
+  before_complete?: (
+    result: AcpRunResult,
+    connected_run_id: string,
+  ) => Promise<void>;
   start_session: (
     event_sink: AcpEventSink,
     callbacks: AcpSessionCallbacks,
@@ -772,7 +776,6 @@ export interface PreparedConnectedReviewRuntime
   extends Omit<PreparedConnectedRuntime, "start"> {
   start(
     event_sink: AcpEventSink,
-    write_text_file: AcpWriteTextFileHandler,
     callbacks?: AcpSessionCallbacks,
   ): Promise<AcpSession>;
 }
@@ -893,21 +896,13 @@ export class CopilotConnectedReviewRuntime implements ConnectedReviewRuntime {
       review_policy: input.result_ingress_policy,
       limits: input.limits,
     };
-    const prepared = createCopilotReviewRuntimeProfile({
-      ...base,
-      write_text_file: async () => {
-        throw new Error("Prepared Review runtime cannot write before launch.");
-      },
-    });
+    const prepared = createCopilotReviewRuntimeProfile(base);
     return {
       requested_model: input.requested_model,
       reasoning_effort: this.options.profile.reasoning_effort,
       sanitized_profile: prepared.sanitized_profile_evidence,
-      start: (eventSink, writeTextFile, callbacks) => {
-        const profile = createCopilotReviewRuntimeProfile({
-          ...base,
-          write_text_file: writeTextFile,
-        });
+      start: (eventSink, callbacks) => {
+        const profile = createCopilotReviewRuntimeProfile(base);
         return this.adapter.start(
           profile.runtime_profile,
           eventSink,
@@ -2613,36 +2608,33 @@ export class PortfolioService {
       policy,
       prepared,
     );
-    let resultIngressObserved = false;
     return this.launchPreparedConnectedRun({
       source,
       work_item_id: workItemId,
       controller,
       launch_input: launchInput,
       record,
-      prompt: `Review the exact immutable subject in ${mission.mission.task_path}. Write only the strict JSON review result to ${mission.mission.result_contract.output_path}. Do not modify any other path, run commands, use URLs, or make approval decisions.`,
-      start_session: (eventSink, callbacks, connectedRunId) =>
-        prepared.start(
-          eventSink,
-          async (request, signal) => {
-            await source.workspace.writeConnectedReviewResult(
-              workItemId,
-              connectedRunId,
-              request.path,
-              request.content,
-              signal,
-            );
-            resultIngressObserved = true;
-          },
-          callbacks,
-        ),
-      before_complete: async (result) => {
-        if (result.outcome === "completed" && !resultIngressObserved) {
-          throw this.missionNotReady(
-            workItemId,
-            "Connected Review completed without publishing its required result ingress.",
-          );
+      prompt: `Review the exact immutable subject in ${mission.mission.task_path}. Return only the strict JSON Review result as your final response, with no Markdown fence or surrounding prose. Do not write or modify any workspace path, run commands, use URLs, or make approval decisions. Product Studio will validate and publish the response to ${mission.mission.result_contract.output_path}.`,
+      start_session: (eventSink, callbacks) =>
+        prepared.start(eventSink, callbacks),
+      before_complete: async (result, connectedRunId) => {
+        if (result.outcome !== "completed") {
+          return;
         }
+        const content = this.canonicalConnectedReviewOutput(
+          workItemId,
+          mission.mission,
+          result.output_text,
+        );
+        await source.workspace.writeConnectedReviewResult(
+          workItemId,
+          connectedRunId,
+          join(
+            source.workspace.workspaceRoot,
+            ...mission.mission.result_contract.output_path.split("/"),
+          ),
+          content,
+        );
       },
       preference: {
         adapter_id: configuration.adapter_id,
@@ -6032,6 +6024,46 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     };
   }
 
+  private canonicalConnectedReviewOutput(
+    workItemId: string,
+    mission: ReviewMissionPackage,
+    output: string,
+  ): string {
+    const outputBytes = Buffer.byteLength(output, "utf8");
+    if (
+      outputBytes === 0 ||
+      outputBytes > CONNECTED_RUN_LIMITS.max_output_bytes
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        `Connected Review response must contain 1-${CONNECTED_RUN_LIMITS.max_output_bytes} bytes.`,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(output);
+    } catch {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected Review response must be strict JSON without surrounding prose.",
+      );
+    }
+    const result = reviewExternalResultSubmissionForSubjectSchema(
+      mission.review_subject,
+    ).safeParse(parsed);
+    if (
+      !result.success ||
+      result.data.review_mission_content_sha256 !== mission.content_sha256 ||
+      JSON.stringify(result.data.identity) !== JSON.stringify(mission.identity)
+    ) {
+      throw this.missionNotReady(
+        workItemId,
+        "Connected Review response does not match its immutable mission contract.",
+      );
+    }
+    return serializeExternalResult(result.data);
+  }
+
   private connectedReviewRunRecord(
     mission: ReviewMissionCompilation,
     governedTuple: ConnectedRunRecordV2["governed_tuple"],
@@ -6182,7 +6214,9 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
           )
           .then(() => undefined),
       prompt: input.prompt,
-      before_complete: input.before_complete,
+      before_complete: async (result) => {
+        await input.before_complete?.(result, connectedRunId);
+      },
       complete: (result) =>
         this.completeObservedConnectedRun(
           input.source,

@@ -108,7 +108,6 @@ function reviewInput(
   void _evaluatePermission;
   return {
     ...base,
-    write_text_file: vi.fn(async () => undefined),
     review_policy: {
       kind: "single_result_file",
       result_path: ".founder/review/result.json",
@@ -338,25 +337,23 @@ describe("Copilot ACP runtime profile", () => {
     );
   });
 
-  it("builds a distinct read-only Review profile with one mediated result writer", () => {
-    const writeTextFile = vi.fn(async () => undefined);
-    const profile = createCopilotReviewRuntimeProfile(
-      reviewInput({ write_text_file: writeTextFile }),
-    );
+  it("builds a distinct read-only Review profile with no provider write tool", () => {
+    const profile = createCopilotReviewRuntimeProfile(reviewInput());
 
     expect(profile.sanitized_profile_evidence).toMatchObject({
       profile_id: COPILOT_REVIEW_PROFILE_ID,
-      available_tools: ["apply_patch", "view"],
+      available_tools: ["view"],
       excluded_tools: [
+        "apply_patch",
         "ask_user",
         "execute",
         "fetch",
         "mcp",
       ],
-      client_fs_write_text_file: true,
+      client_fs_write_text_file: false,
       client_fs_read_text_file: true,
     });
-    expect(profile.runtime_profile.write_text_file).toBe(writeTextFile);
+    expect(profile.runtime_profile.write_text_file).toBeUndefined();
     expect(profile.runtime_profile.read_text_file).toEqual(expect.any(Function));
     expect(
       profile.runtime_profile.evaluate_permission({
@@ -364,7 +361,10 @@ describe("Copilot ACP runtime profile", () => {
         kind: "workspace_write",
         path: ".founder/review/result.json",
       }),
-    ).toEqual({ decision: "allow_once", reason: null });
+    ).toEqual({
+      decision: "reject_once",
+      reason: "review_runtime_has_no_write_authority",
+    });
     expect(
       profile.runtime_profile.evaluate_permission({
         schema_version: 1,
@@ -373,7 +373,7 @@ describe("Copilot ACP runtime profile", () => {
       }),
     ).toEqual({
       decision: "reject_once",
-      reason: "review_run_read_only",
+      reason: "review_runtime_has_no_write_authority",
     });
     expect(
       profile.runtime_profile.evaluate_permission({
@@ -384,7 +384,7 @@ describe("Copilot ACP runtime profile", () => {
       }),
     ).toEqual({
       decision: "reject_once",
-      reason: "review_run_read_only",
+      reason: "review_runtime_has_no_write_authority",
     });
     expect(profile.runtime_profile).not.toHaveProperty(
       "capability_envelope",
@@ -423,8 +423,8 @@ describe("Copilot ACP runtime profile", () => {
         reviewInput({ available_tools: ["view", "execute", "fetch"] }),
         sink,
       ),
-    ).rejects.toThrow("Required Copilot tools are unavailable: apply_patch.");
-    expect(adapter.start).not.toHaveBeenCalled();
+    ).resolves.toBeUndefined();
+    expect(adapter.start).toHaveBeenCalledOnce();
   });
 
   it("normalizes only exact, non-shell Copilot permission requests", () => {

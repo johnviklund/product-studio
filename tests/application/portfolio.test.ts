@@ -82,7 +82,6 @@ import type {
   AcpRuntimeProfile,
   AcpRunResult,
   AcpSession,
-  AcpWriteTextFileHandler,
 } from "../../src/infrastructure/acp/acp-client";
 import { StdioAcpClientAdapter } from "../../src/infrastructure/acp/acp-client";
 
@@ -220,23 +219,15 @@ function preparedReviewRuntime(
   runtime: ConnectedReviewRuntime;
   prepare: ReturnType<typeof vi.fn>;
   start: ReturnType<typeof vi.fn>;
-  write(path: string, content: string): Promise<void>;
 } {
-  let writer: AcpWriteTextFileHandler | null = null;
   let startCount = 0;
-  const start = vi.fn(
-    async (
-      _eventSink: AcpEventSink,
-      writeTextFile: AcpWriteTextFileHandler,
-    ) => {
-      startCount += 1;
-      if (startCount <= failStartCount) {
-        throw new Error("Review adapter unavailable after durable launch");
-      }
-      writer = writeTextFile;
-      return session;
-    },
-  );
+  const start = vi.fn(async () => {
+    startCount += 1;
+    if (startCount <= failStartCount) {
+      throw new Error("Review adapter unavailable after durable launch");
+    }
+    return session;
+  });
   const prepared: PreparedConnectedReviewRuntime = {
     requested_model: requestedModel,
     reasoning_effort: "high",
@@ -248,15 +239,15 @@ function preparedReviewRuntime(
       argv: ["--acp", "--stdio"],
       requested_model: requestedModel,
       reasoning_effort: "high",
-      available_tools: ["apply_patch", "view"],
-      excluded_tools: ["execute"],
+      available_tools: ["view"],
+      excluded_tools: ["apply_patch", "execute"],
       authentication: "noninteractive_authenticated",
       execution_mode: "permission_mediated_local",
       containment_assurance: "not_independently_enforced",
       machine_authority: "launching_user",
       requested_mcp_server_count: 0,
       client_fs_read_text_file: true,
-      client_fs_write_text_file: true,
+      client_fs_write_text_file: false,
       credential_environment: "explicit_allowlist_without_credential_values",
     },
     start,
@@ -275,19 +266,6 @@ function preparedReviewRuntime(
     },
     prepare,
     start,
-    async write(path, content) {
-      if (writer === null) {
-        throw new Error("Review runtime writer is not active.");
-      }
-      await writer(
-        {
-          sessionId: session.session_id,
-          path,
-          content,
-        } as never,
-        new AbortController().signal,
-      );
-    },
   };
 }
 
@@ -4193,6 +4171,7 @@ describe("PortfolioService", () => {
       partial: false,
       stop_reason: "end_turn",
       permissions: [],
+      output_text: "",
     });
     await expect.poll(async () => {
       const item = (await service.list()).find(
@@ -4284,6 +4263,7 @@ describe("PortfolioService", () => {
       partial: false,
       stop_reason: "end_turn",
       permissions: [],
+      output_text: "",
     });
     await expect.poll(async () => {
       const run = await repository.readConnectedRun(
@@ -4355,6 +4335,7 @@ describe("PortfolioService", () => {
         partial: true,
         stop_reason: null,
         permissions: [],
+        output_text: "",
       })
       .mockImplementationOnce(() => retryResult.promise);
     const session: AcpSession = {
@@ -4414,6 +4395,7 @@ describe("PortfolioService", () => {
       partial: true,
       stop_reason: "cancelled",
       permissions: [],
+      output_text: "",
     });
     await expect.poll(async () => {
       const stored = await repository.listConnectedRuns(workItemId);
@@ -4575,7 +4557,10 @@ describe("PortfolioService", () => {
     expect(fake.start).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledOnce();
     expect(session.run).toHaveBeenCalledWith(
-      expect.not.stringContaining("You must invoke the `bash` tool"),
+      expect.stringContaining("Return only the strict JSON Review result"),
+    );
+    expect(session.run).toHaveBeenCalledWith(
+      expect.stringContaining("Do not write or modify any workspace path"),
     );
     expect(launched.connected_run).toMatchObject({
       mission: { identity: { phase: "review" } },
@@ -4598,33 +4583,27 @@ describe("PortfolioService", () => {
     if (reviewMission.mission.review_subject.source !== "execute") {
       throw new Error("Initial connected Review must bind Execute evidence.");
     }
-    await fake.write(
-      join(root, reviewMission.mission.result_contract.output_path),
-      serializeExternalResult({
-        result_schema_version: 2,
-        review_mission_content_sha256:
-          reviewMission.mission.content_sha256,
-        identity: reviewMission.mission.identity,
-        execute_mission_content_sha256:
-          reviewMission.mission.review_subject
-            .execute_mission_content_sha256,
-        execute_result_content_sha256:
-          reviewMission.mission.review_subject
-            .execute_result_content_sha256,
-        git_base_commit:
-          reviewMission.mission.review_subject.git_base_commit,
-        accepted_result_commit:
-          reviewMission.mission.review_subject.accepted_result_commit,
-        summary: "Independent review found no blocking issue.",
-        verdict: "clean",
-        findings: [],
-      }),
-    );
+    const reviewResultSource = serializeExternalResult({
+      result_schema_version: 2,
+      review_mission_content_sha256: reviewMission.mission.content_sha256,
+      identity: reviewMission.mission.identity,
+      execute_mission_content_sha256:
+        reviewMission.mission.review_subject.execute_mission_content_sha256,
+      execute_result_content_sha256:
+        reviewMission.mission.review_subject.execute_result_content_sha256,
+      git_base_commit: reviewMission.mission.review_subject.git_base_commit,
+      accepted_result_commit:
+        reviewMission.mission.review_subject.accepted_result_commit,
+      summary: "Independent review found no blocking issue.",
+      verdict: "clean",
+      findings: [],
+    });
     result.resolve({
       outcome: "completed",
       partial: false,
       stop_reason: "end_turn",
       permissions: [],
+      output_text: JSON.stringify(JSON.parse(reviewResultSource)),
     });
     await expect.poll(async () => {
       const item = (await service.list()).find(
@@ -4642,6 +4621,12 @@ describe("PortfolioService", () => {
       );
       return runs[0]?.lifecycle.terminal_outcome;
     }).toBe("completed");
+    await expect(
+      readFile(
+        join(root, reviewMission.mission.result_contract.output_path),
+        "utf8",
+      ),
+    ).resolves.toBe(reviewResultSource);
     expect(order).toEqual(["terminal", "import"]);
     const preferences = new PortfolioPreferencesStore(
       dirname(dirname(inboxRoot)),
@@ -4679,6 +4664,7 @@ describe("PortfolioService", () => {
         partial: false,
         stop_reason: "end_turn" as const,
         permissions: [],
+        output_text: "```json\n{\"verdict\":\"clean\"}\n```",
       })),
       cancel: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined),
@@ -5178,6 +5164,7 @@ describe("PortfolioService", () => {
       partial: false,
       stop_reason: "end_turn",
       permissions: [],
+      output_text: "",
     });
     await expect.poll(async () => {
       const item = await repository.read(created.goal.work_item_id);
@@ -5261,6 +5248,7 @@ describe("PortfolioService", () => {
       outcome: "missing_permission",
       partial: true,
       stop_reason: "end_turn",
+      output_text: "",
       permissions: [
         {
           kind: "missing_permission",
@@ -5498,6 +5486,7 @@ describe("PortfolioService", () => {
       outcome: "missing_permission",
       partial: true,
       stop_reason: "end_turn",
+      output_text: "",
       permissions: [
         {
           kind: "missing_permission",
@@ -5622,7 +5611,7 @@ describe("PortfolioService", () => {
         machine_authority: "launching_user",
         requested_mcp_server_count: 0,
         client_fs_read_text_file: true,
-        client_fs_write_text_file: true,
+        client_fs_write_text_file: false,
         credential_environment: "explicit_allowlist_without_credential_values",
       },
       start: vi.fn(async () => {

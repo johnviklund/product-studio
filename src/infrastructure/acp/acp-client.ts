@@ -121,6 +121,7 @@ export interface AcpRunResult {
   readonly partial: boolean;
   readonly stop_reason: acp.StopReason | null;
   readonly permissions: readonly AcpPermissionOutcome[];
+  readonly output_text: string;
 }
 
 export type AcpPermissionOutcome =
@@ -468,6 +469,9 @@ class StdioAcpSession implements AcpSession {
   private callbackQueue: Promise<void> = Promise.resolve();
   private lastConfigOptionsSha256: string | null = null;
   private readonly writeAbortController = new AbortController();
+  private outputText = "";
+  private observedOutputBytes = 0;
+  private outputLimitExceeded = false;
 
   get wall_clock_timeout_ms(): number {
     return this.profile.limits.wall_clock_timeout_ms;
@@ -506,6 +510,9 @@ class StdioAcpSession implements AcpSession {
       throw new AcpClientError("ACP session cannot start this prompt.");
     }
     this.runInFlight = true;
+    this.outputText = "";
+    this.observedOutputBytes = 0;
+    this.outputLimitExceeded = false;
     let timeout: NodeJS.Timeout | undefined;
     try {
       const timedOut = new Promise<never>((_resolve, reject) => {
@@ -519,6 +526,9 @@ class StdioAcpSession implements AcpSession {
         timedOut,
       ]);
       await Promise.race([this.callbackQueue, timedOut]);
+      if (this.outputLimitExceeded) {
+        throw new AcpEventLimitError("ACP agent output exceeded its byte limit.");
+      }
       const result = this.resultFromStopReason(response.stopReason);
       await Promise.race([
         this.recorder.record(
@@ -605,6 +615,7 @@ class StdioAcpSession implements AcpSession {
   ): Promise<void> {
     return this.enqueueCallback(async () => {
       const signal = this.writeAbortController.signal;
+      this.captureOutputText(notification);
       const event = summarizeSessionUpdate(notification);
       const configOptionsSha256 =
         event.config_options === null
@@ -635,6 +646,29 @@ class StdioAcpSession implements AcpSession {
         this.lastConfigOptionsSha256 = configOptionsSha256;
       }
     });
+  }
+
+  private captureOutputText(notification: acp.SessionNotification): void {
+    if (!this.runInFlight) {
+      return;
+    }
+    const update = notification.update;
+    if (update.sessionUpdate === "tool_call") {
+      this.outputText = "";
+      return;
+    }
+    if (
+      update.sessionUpdate !== "agent_message_chunk" ||
+      update.content.type !== "text"
+    ) {
+      return;
+    }
+    this.observedOutputBytes += Buffer.byteLength(update.content.text, "utf8");
+    if (this.observedOutputBytes > this.profile.limits.max_output_bytes) {
+      this.outputLimitExceeded = true;
+      throw new AcpEventLimitError("ACP agent output exceeded its byte limit.");
+    }
+    this.outputText += update.content.text;
   }
 
   async handleConfigOptionResponse(
@@ -858,6 +892,7 @@ class StdioAcpSession implements AcpSession {
         partial: true,
         stop_reason: stopReason,
         permissions: [...this.permissionOutcomes],
+        output_text: this.outputText,
       };
     }
     if (stopReason === "end_turn") {
@@ -866,6 +901,7 @@ class StdioAcpSession implements AcpSession {
         partial: false,
         stop_reason: stopReason,
         permissions: [...this.permissionOutcomes],
+        output_text: this.outputText,
       };
     }
     return {
@@ -873,6 +909,7 @@ class StdioAcpSession implements AcpSession {
       partial: true,
       stop_reason: stopReason,
       permissions: [...this.permissionOutcomes],
+      output_text: this.outputText,
     };
   }
 
@@ -889,6 +926,7 @@ class StdioAcpSession implements AcpSession {
       partial: true,
       stop_reason: null,
       permissions: [...this.permissionOutcomes],
+      output_text: this.outputText,
     };
   }
 

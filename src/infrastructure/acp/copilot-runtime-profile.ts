@@ -11,7 +11,6 @@ import {
 } from "../../domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../domain/connected-run";
 import {
-  evaluateReviewPermissionRequest,
   reviewRunPolicySchema,
   type ReviewRunPolicy,
 } from "../../domain/review-run-policy";
@@ -33,11 +32,9 @@ export const COPILOT_ADAPTER_ID = "copilot-acp";
 export const COPILOT_PROFILE_ID = "noninteractive-execute-v1";
 export const COPILOT_REVIEW_PROFILE_ID = "noninteractive-review-v1";
 export const COPILOT_REVIEW_READ_TOOL = "view";
-export const COPILOT_REVIEW_RESULT_WRITE_TOOL = "apply_patch";
 export const COPILOT_WRITABLE_COMMAND_TOOL = "bash";
 const COPILOT_REVIEW_TOOLS = new Set([
   COPILOT_REVIEW_READ_TOOL,
-  COPILOT_REVIEW_RESULT_WRITE_TOOL,
   "read",
 ]);
 const VERSION_OUTPUT = /^GitHub Copilot CLI (\d+\.\d+\.\d+)\.?\s*$/u;
@@ -136,7 +133,10 @@ export interface CopilotRuntimeProfile {
 export interface CopilotReviewRuntimeProfileInput
   extends Omit<
     CopilotRuntimeProfileInput,
-    "required_available_tools" | "evaluate_permission"
+    | "required_available_tools"
+    | "evaluate_permission"
+    | "read_text_file"
+    | "write_text_file"
   > {
   readonly review_policy: ReviewRunPolicy;
 }
@@ -657,7 +657,7 @@ export function createCopilotReviewRuntimeProfile(
   input: CopilotReviewRuntimeProfileInput,
 ): CopilotRuntimeProfile {
   const { review_policy: reviewPolicyInput, ...profileInput } = input;
-  const reviewPolicy = reviewRunPolicySchema.parse(reviewPolicyInput);
+  reviewRunPolicySchema.parse(reviewPolicyInput);
   const removedTools = profileInput.available_tools.filter((tool) =>
     !COPILOT_REVIEW_TOOLS.has(tool),
   );
@@ -671,13 +671,12 @@ export function createCopilotReviewRuntimeProfile(
     ...profileInput,
     read_text_file: readAcpWorkspaceTextFile,
     available_tools: availableTools,
-    required_available_tools: [
-      COPILOT_REVIEW_READ_TOOL,
-      COPILOT_REVIEW_RESULT_WRITE_TOOL,
-    ],
+    required_available_tools: [COPILOT_REVIEW_READ_TOOL],
     excluded_tools: excludedTools,
-    evaluate_permission: (request) =>
-      evaluateReviewPermissionRequest(reviewPolicy, request),
+    evaluate_permission: () => ({
+      decision: "reject_once",
+      reason: "review_runtime_has_no_write_authority",
+    }),
   });
   return {
     ...prepared,

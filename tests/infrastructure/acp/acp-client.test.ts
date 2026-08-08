@@ -290,6 +290,7 @@ describe("stdio ACP client adapter", () => {
               path: "/status",
             },
           ],
+          final_agent_message_text: "{\"result\":true}",
         },
         sentinel,
       ),
@@ -306,6 +307,7 @@ describe("stdio ACP client adapter", () => {
     const result = await session.run("Apply the bounded changes.");
 
     expect(result).toMatchObject({ outcome: "completed", partial: false });
+    expect(result.output_text).toBe('{"result":true}');
     expect(result.permissions).toHaveLength(3);
     expect(result.permissions.every((entry) => entry.kind === "in_envelope")).toBe(true);
     const observedCwd = (await readFile(`${sentinel}.cwd`, "utf8")).trim();
@@ -374,6 +376,30 @@ describe("stdio ACP client adapter", () => {
     expect(retainedBytes).toBeGreaterThan(100_000);
     expect(retainedBytes).toBeLessThanOrEqual(1_000_000);
     expect(sink.events.at(-1)?.kind).toBe("run_finished");
+  });
+
+  it("fails closed when private agent response text exceeds the output limit", async () => {
+    const root = await createRoot();
+    const sink = new MemoryEventSink();
+    const runtime = profile(
+      root,
+      { agent_message_text: "x".repeat(10_001) },
+      join(root, "output-limit-sentinel"),
+    );
+    const session = await new StdioAcpClientAdapter().start(
+      {
+        ...runtime,
+        limits: { ...runtime.limits, max_output_bytes: 10_000 },
+      },
+      sink,
+    );
+
+    await expect(session.run("Return a bounded response.")).resolves.toMatchObject({
+      outcome: "failed",
+      partial: true,
+      output_text: "",
+    });
+    expect(JSON.stringify(sink.events)).not.toContain("x".repeat(100));
   });
 
   it("runs a profile initializer after newSession before making mission work available", async () => {

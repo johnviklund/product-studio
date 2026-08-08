@@ -171,6 +171,7 @@ describe("connected ACP run orchestration", () => {
         partial: false,
         stop_reason: "end_turn" as const,
         permissions: [],
+        output_text: "",
       })),
       cancel: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined),
@@ -206,6 +207,7 @@ describe("connected ACP run orchestration", () => {
       partial: true,
       stop_reason: null,
       permissions: [],
+      output_text: "",
     };
     const session: AcpSession = {
       session_id: "timeout-session",
