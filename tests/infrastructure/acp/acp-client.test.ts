@@ -356,7 +356,7 @@ describe("stdio ACP client adapter", () => {
           wall_clock_timeout_ms: 10_000,
           max_event_count: 1_000,
           max_event_bytes: 1_000_000,
-          max_output_bytes: 1_000_000,
+          max_output_bytes: 100_000,
         },
       },
       sink,

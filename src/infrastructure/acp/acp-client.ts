@@ -398,7 +398,7 @@ class AcpEvidenceRecorder {
 
   constructor(
     private readonly sink: AcpEventSink,
-    private readonly maxOutputBytes: number,
+    private readonly maxEventBytes: number,
     private readonly now: () => Date,
   ) {}
 
@@ -438,7 +438,7 @@ class AcpEvidenceRecorder {
       event_sha256: hashEvent(eventWithoutHash),
     };
     const eventBytes = Buffer.byteLength(`${canonicalJson(event)}\n`, "utf8");
-    if (this.retainedBytes + eventBytes > this.maxOutputBytes) {
+    if (this.retainedBytes + eventBytes > this.maxEventBytes) {
       throw new AcpEventLimitError("ACP event output limit reached.");
     }
     const result = await this.sink.append(event, signal);
@@ -1014,7 +1014,7 @@ export class StdioAcpClientAdapter implements AcpClientAdapter {
     });
     const recorder = new AcpEvidenceRecorder(
       eventSink,
-      profile.limits.max_output_bytes,
+      profile.limits.max_event_bytes,
       this.now,
     );
 

@@ -6,6 +6,37 @@ delivery phases.
 
 ## Active Initiatives
 
+### Report why a shaping run failed instead of a generic sentence
+
+- **Status:** Proposed — defect, hides the cause of every shaping failure. Found 2026-08-09 on
+  `wi_f2d97c58` ("View full work item page lacks a to navigate back").
+- **Idea:** The plan run was killed by a containment limit after it had already written a complete,
+  valid `result.json`. The founder saw only "The agent or result validation failed." and `run.json`
+  recorded only `shaping_failed`. Nothing anywhere named the real cause; diagnosing it took reading
+  the raw event log and measuring its byte size against the profile limits. `resultFromError`
+  discards the error it caught, so `AcpRunResult` cannot distinguish a limit breach, a refusal, or
+  an adapter crash — they all arrive as bare `failed`.
+- **Purpose:** A failure the founder cannot act on is worse than no failure at all; it costs an
+  expensive run and teaches nothing.
+- **Definition of done:** A terminal failure carries a machine-readable cause from the adapter
+  through to the board copy, so the founder is told which limit or condition ended the run.
+- **Boundary:** Do not leak private agent output into the reason; the cause is a classification,
+  not a transcript.
+
+### Accept a shaping result that the agent already wrote before the run was killed
+
+- **Status:** Proposed — defect, discards correct work. Found 2026-08-09 on `wi_f2d97c58`.
+- **Idea:** The plan agent wrote a complete, schema-valid result into its single ingress file, and
+  the run was then killed by a containment limit. The controller judged the run purely by the ACP
+  outcome and threw the artifact away, so the founder had to pay for the whole run again. The
+  ingress file is the mission's only deliverable and it was already sound.
+- **Purpose:** Containment should bound what a run may do, not destroy what it correctly produced.
+- **Definition of done:** When a shaping run ends non-clean but its ingress artifact validates
+  against the mission identity and content hash, the founder is offered that result rather than
+  only a retry.
+- **Boundary:** Never accept an artifact that fails identity or schema validation, and keep the
+  run's terminal outcome honest — offering the artifact is not the same as reporting success.
+
 ### Compile the mission package that a tuple-advancing transition points at
 
 - **Status:** Proposed — defect, found 2026-08-09 running a live connected cycle.
