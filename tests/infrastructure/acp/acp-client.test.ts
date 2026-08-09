@@ -18,6 +18,7 @@ import {
   capabilityRequestMatchesEnvelope,
   resolveCapabilityEnvelope,
   type CanonicalCapabilityRequest,
+  type PermissionRejection,
   type ExecutionDefaultsV1,
 } from "../../../src/domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../../src/domain/connected-run";
@@ -190,16 +191,18 @@ async function createRoot(): Promise<string> {
   return root;
 }
 
-function capabilityRequest(raw: unknown): CanonicalCapabilityRequest | null {
+function capabilityRequest(
+  raw: unknown,
+): CanonicalCapabilityRequest | PermissionRejection {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return null;
+    return { rejected: "tool_kind_unsupported" };
   }
   const candidate = raw as Partial<CanonicalCapabilityRequest>;
   if (
     candidate.schema_version !== 1 ||
     typeof candidate.kind !== "string"
   ) {
-    return null;
+    return { rejected: "tool_kind_unsupported" };
   }
   return candidate as CanonicalCapabilityRequest;
 }
@@ -1029,8 +1032,17 @@ describe("stdio ACP client adapter", () => {
       {
         kind: "invalid_request",
         reason: "missing_or_unnormalizable_permission_detail",
+        detail: "tool_kind_unsupported",
       },
     ]);
+    expect(
+      invalidSink.events.some(
+        (event) =>
+          event.kind === "permission" &&
+          event.payload.decision === "invalid_request" &&
+          event.payload.detail === "tool_kind_unsupported",
+      ),
+    ).toBe(true);
     expect(
       invalidSink.events.some(
         (event) =>

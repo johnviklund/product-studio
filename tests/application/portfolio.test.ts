@@ -57,6 +57,7 @@ import {
 import {
   resolveCapabilityEnvelope,
   type CanonicalCapabilityRequest,
+  type PermissionRejection,
 } from "../../src/domain/capability-envelope";
 import {
   WorkItemTargetCollisionError,
@@ -350,14 +351,16 @@ function preparedShapingRuntime(
   };
 }
 
-function canonicalFakeRequest(raw: unknown): CanonicalCapabilityRequest | null {
+function canonicalFakeRequest(
+  raw: unknown,
+): CanonicalCapabilityRequest | PermissionRejection {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return null;
+    return { rejected: "tool_kind_unsupported" };
   }
   const request = raw as Partial<CanonicalCapabilityRequest>;
   return request.schema_version === 1 && typeof request.kind === "string"
     ? (request as CanonicalCapabilityRequest)
-    : null;
+    : { rejected: "tool_kind_unsupported" };
 }
 
 function modelConfigOption(

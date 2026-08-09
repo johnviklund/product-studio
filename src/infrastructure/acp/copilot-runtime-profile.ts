@@ -8,6 +8,7 @@ import {
   normalizeApprovedCommandForm,
   normalizeApprovedUrlOperation,
   type CanonicalCapabilityRequest,
+  type PermissionRejection,
 } from "../../domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../domain/connected-run";
 import {
@@ -353,20 +354,22 @@ function parseRestrictedShellWords(command: string): string[] | null {
   return words;
 }
 
-function commandFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | null {
+function commandFromRawInput(
+  rawInput: unknown,
+): CanonicalCapabilityRequest | PermissionRejection {
   if (!isRecord(rawInput) || typeof rawInput.command !== "string") {
-    return null;
+    return { rejected: "command_detail_missing" };
   }
   if (
     !Array.isArray(rawInput.commands) ||
     rawInput.commands.length !== 1 ||
     rawInput.commands[0] !== rawInput.command
   ) {
-    return null;
+    return { rejected: "command_batch_unsupported" };
   }
   const words = parseRestrictedShellWords(rawInput.command);
   if (words === null) {
-    return null;
+    return { rejected: "command_shell_syntax_unsupported" };
   }
   const [executable, ...args] = words;
   try {
@@ -376,14 +379,14 @@ function commandFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | nu
       ...normalizeApprovedCommandForm(executable, args),
     };
   } catch {
-    return null;
+    return { rejected: "command_form_not_approvable" };
   }
 }
 
 function pathFromRawInput(
   toolCall: acp.RequestPermissionRequest["toolCall"],
   workspaceCwd: string,
-): CanonicalCapabilityRequest | null {
+): CanonicalCapabilityRequest | PermissionRejection {
   const rawInput = isRecord(toolCall.rawInput) ? toolCall.rawInput : null;
   const candidates = [
     rawInput?.fileName,
@@ -392,7 +395,7 @@ function pathFromRawInput(
   ].filter((value): value is string => typeof value === "string");
   const unique = [...new Set(candidates)];
   if (unique.length !== 1 || unique[0]!.includes("\u0000")) {
-    return null;
+    return { rejected: "path_not_uniquely_identified" };
   }
   const path = resolve(workspaceCwd, unique[0]!);
   const pathRelativeToWorkspace = relative(workspaceCwd, path);
@@ -403,7 +406,7 @@ function pathFromRawInput(
       !pathRelativeToWorkspace.startsWith(`..${sep}`));
   if (isWithinWorkspace) {
     if (pathRelativeToWorkspace === "") {
-      return null;
+      return { rejected: "path_is_workspace_root" };
     }
     return {
       schema_version: 1,
@@ -440,9 +443,11 @@ function isCopilotUnrestrictedReadPermission(
   );
 }
 
-function urlFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | null {
+function urlFromRawInput(
+  rawInput: unknown,
+): CanonicalCapabilityRequest | PermissionRejection {
   if (!isRecord(rawInput) || typeof rawInput.url !== "string") {
-    return null;
+    return { rejected: "url_detail_missing" };
   }
   try {
     return {
@@ -454,7 +459,7 @@ function urlFromRawInput(rawInput: unknown): CanonicalCapabilityRequest | null {
       ),
     };
   } catch {
-    return null;
+    return { rejected: "url_not_approvable" };
   }
 }
 
@@ -721,7 +726,7 @@ export function narrowCopilotShapingTools(input: {
 export function normalizeCopilotPermission(
   request: acp.RequestPermissionRequest,
   workspaceCwd: string,
-): CanonicalCapabilityRequest | null {
+): CanonicalCapabilityRequest | PermissionRejection {
   const normalizedWorkspace = requireAbsoluteWorkspace(workspaceCwd);
   const toolCall = request.toolCall;
   switch (toolCall.kind) {
@@ -733,7 +738,7 @@ export function normalizeCopilotPermission(
     case "fetch":
       return urlFromRawInput(toolCall.rawInput);
     default:
-      return null;
+      return { rejected: "tool_kind_unsupported" };
   }
 }
 

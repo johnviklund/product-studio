@@ -4,7 +4,10 @@ import {
   resolveCapabilityEnvelope,
   canonicalizeCapabilityRequest,
   capabilityRequestMatchesEnvelope,
+  isPermissionRejection,
+  type CanonicalCapabilityRequest,
   type ExecutionDefaultsV1,
+  type PermissionRejection,
 } from "../../../src/domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../../src/domain/connected-run";
 import type { AcpEventSink } from "../../../src/infrastructure/acp/acp-client";
@@ -125,6 +128,15 @@ function reviewInput(
     },
     ...overrides,
   };
+}
+
+function accepted(
+  value: CanonicalCapabilityRequest | PermissionRejection,
+): CanonicalCapabilityRequest {
+  if (isPermissionRejection(value)) {
+    throw new Error(`expected a normalized request but was rejected: ${value.rejected}`);
+  }
+  return value;
 }
 
 function permission(toolCall: unknown) {
@@ -570,7 +582,7 @@ describe("Copilot ACP runtime profile", () => {
     });
     expect(
       capabilityRequestMatchesEnvelope(
-        canonicalizeCapabilityRequest(normalizedRegexCommand!),
+        canonicalizeCapabilityRequest(accepted(normalizedRegexCommand)),
         resolveCapabilityEnvelope(["src"], defaults),
       ),
     ).toBe(false);
@@ -601,7 +613,7 @@ describe("Copilot ACP runtime profile", () => {
     });
     expect(
       capabilityRequestMatchesEnvelope(
-        canonicalizeCapabilityRequest(normalizedInertBackslashCommand!),
+        canonicalizeCapabilityRequest(accepted(normalizedInertBackslashCommand)),
         resolveCapabilityEnvelope(["src"], defaults),
       ),
     ).toBe(false);
@@ -650,7 +662,7 @@ describe("Copilot ACP runtime profile", () => {
         }),
         workspaceCwd,
       ),
-    ).toBeNull();
+    ).toEqual({ rejected: "command_shell_syntax_unsupported" });
     for (const command of [
       "git add -- 'src/*'",
       "echo '$(id)'",
@@ -667,7 +679,7 @@ describe("Copilot ACP runtime profile", () => {
           }),
           workspaceCwd,
         ),
-      ).toBeNull();
+      ).toEqual({ rejected: "command_shell_syntax_unsupported" });
     }
     expect(
       normalizeCopilotPermission(
@@ -680,7 +692,7 @@ describe("Copilot ACP runtime profile", () => {
         }),
         workspaceCwd,
       ),
-    ).toBeNull();
+    ).toEqual({ rejected: "command_shell_syntax_unsupported" });
     expect(
       normalizeCopilotPermission(
         permission({
@@ -692,7 +704,7 @@ describe("Copilot ACP runtime profile", () => {
         }),
         workspaceCwd,
       ),
-    ).toBeNull();
+    ).toEqual({ rejected: "command_shell_syntax_unsupported" });
     for (const command of [
       'echo "$HOME"',
       'echo "$(id)"',
@@ -712,7 +724,7 @@ describe("Copilot ACP runtime profile", () => {
           }),
           workspaceCwd,
         ),
-      ).toBeNull();
+      ).toEqual({ rejected: "command_shell_syntax_unsupported" });
     }
     expect(
       normalizeCopilotPermission(
@@ -725,7 +737,7 @@ describe("Copilot ACP runtime profile", () => {
         }),
         workspaceCwd,
       ),
-    ).toBeNull();
+    ).toEqual({ rejected: "command_shell_syntax_unsupported" });
     expect(
       normalizeCopilotPermission(
         permission({
@@ -737,7 +749,7 @@ describe("Copilot ACP runtime profile", () => {
         }),
         workspaceCwd,
       ),
-    ).toBeNull();
+    ).toEqual({ rejected: "command_shell_syntax_unsupported" });
     expect(
       normalizeCopilotPermission(
         permission({
@@ -800,8 +812,7 @@ describe("Copilot ACP runtime profile", () => {
       }),
       workspaceCwd,
     );
-    expect(inside).not.toBeNull();
-    const canonicalInside = canonicalizeCapabilityRequest(inside!);
+        const canonicalInside = canonicalizeCapabilityRequest(accepted(inside));
     expect(canonicalInside).toEqual({
       schema_version: 1,
       kind: "workspace_write",
@@ -817,8 +828,7 @@ describe("Copilot ACP runtime profile", () => {
       }),
       workspaceCwd,
     );
-    expect(escape).not.toBeNull();
-    const canonicalEscape = canonicalizeCapabilityRequest(escape!);
+        const canonicalEscape = canonicalizeCapabilityRequest(accepted(escape));
     expect(canonicalEscape).toEqual({
       schema_version: 1,
       kind: "outside_workspace_write",

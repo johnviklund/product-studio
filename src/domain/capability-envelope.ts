@@ -96,6 +96,31 @@ export type CanonicalCapabilityRequest =
       source: string;
     };
 
+export const PERMISSION_REJECTION_REASONS = [
+  "command_detail_missing",
+  "command_batch_unsupported",
+  "command_shell_syntax_unsupported",
+  "command_form_not_approvable",
+  "path_not_uniquely_identified",
+  "path_is_workspace_root",
+  "url_detail_missing",
+  "url_not_approvable",
+  "tool_kind_unsupported",
+] as const;
+
+export type PermissionRejectionReason =
+  (typeof PERMISSION_REJECTION_REASONS)[number];
+
+export interface PermissionRejection {
+  readonly rejected: PermissionRejectionReason;
+}
+
+export function isPermissionRejection(
+  value: CanonicalCapabilityRequest | PermissionRejection,
+): value is PermissionRejection {
+  return "rejected" in value;
+}
+
 export const approvedCommandFormSchema: z.ZodType<ApprovedCommandForm> =
   z.strictObject({
     executable: exactNonEmptyStringSchema,

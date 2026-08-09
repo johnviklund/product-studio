@@ -9,7 +9,10 @@ import * as acp from "@agentclientprotocol/sdk";
 import {
   canonicalizeCapabilityRequest,
   hashCanonicalCapabilityRequest,
+  isPermissionRejection,
   type CanonicalCapabilityRequest,
+  type PermissionRejection,
+  type PermissionRejectionReason,
 } from "../../domain/capability-envelope";
 import type { ConnectedRunLimits } from "../../domain/connected-run";
 
@@ -51,7 +54,7 @@ export interface AcpRuntimeProfile {
   readonly limits: ConnectedRunLimits;
   readonly normalize_permission: (
     request: acp.RequestPermissionRequest,
-  ) => CanonicalCapabilityRequest | null;
+  ) => CanonicalCapabilityRequest | PermissionRejection;
   readonly allow_unrestricted_read?: (
     request: acp.RequestPermissionRequest,
   ) => boolean;
@@ -139,6 +142,7 @@ export type AcpPermissionOutcome =
   | {
       readonly kind: "invalid_request";
       readonly reason: "missing_or_unnormalizable_permission_detail";
+      readonly detail: PermissionRejectionReason;
     };
 
 export type AcpEvidenceEvent = {
@@ -723,13 +727,14 @@ class StdioAcpSession implements AcpSession {
       return allowed;
     }
 
-    let normalized: CanonicalCapabilityRequest | null;
+    let normalized: CanonicalCapabilityRequest | PermissionRejection;
     try {
-      normalized = this.profile.normalize_permission(request);
-      normalized =
-        normalized === null ? null : canonicalizeCapabilityRequest(normalized);
+      const candidate = this.profile.normalize_permission(request);
+      normalized = isPermissionRejection(candidate)
+        ? candidate
+        : canonicalizeCapabilityRequest(candidate);
     } catch {
-      normalized = null;
+      normalized = { rejected: "command_form_not_approvable" };
     }
 
     const decision = await this.recordPermissionEvaluation(normalized);
@@ -757,8 +762,12 @@ class StdioAcpSession implements AcpSession {
       if (this.writeAbortController.signal.aborted) {
         throw new AcpClientError("ACP client filesystem write was interrupted.");
       }
+      const normalized = normalizeWriteTextFileRequest(
+        request,
+        this.profile.workspace_cwd,
+      );
       const decision = await this.recordPermissionEvaluation(
-        normalizeWriteTextFileRequest(request, this.profile.workspace_cwd),
+        normalized ?? { rejected: "path_not_uniquely_identified" },
       );
       if (decision !== "allow") {
         throw new AcpClientError("ACP client filesystem write was denied.");
@@ -790,12 +799,13 @@ class StdioAcpSession implements AcpSession {
   }
 
   private async recordPermissionEvaluation(
-    normalized: CanonicalCapabilityRequest | null,
+    normalized: CanonicalCapabilityRequest | PermissionRejection,
   ): Promise<"allow" | "reject" | "invalid"> {
-    if (normalized === null) {
+    if (isPermissionRejection(normalized)) {
       this.permissionOutcomes.push({
         kind: "invalid_request",
         reason: "missing_or_unnormalizable_permission_detail",
+        detail: normalized.rejected,
       });
       await this.recorder.record(
         "permission",
@@ -803,6 +813,7 @@ class StdioAcpSession implements AcpSession {
           decision: "invalid_request",
           operation_sha256: null,
           reason: "missing_or_unnormalizable_permission_detail",
+          detail: normalized.rejected,
         },
         this.writeAbortController.signal,
       );

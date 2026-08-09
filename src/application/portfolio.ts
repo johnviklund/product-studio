@@ -115,6 +115,7 @@ import {
   capabilityEnvelopeV1Schema,
   isCapabilityEnvelopeNarrowing,
   type CapabilityEnvelopeV1,
+  type PermissionRejectionReason,
 } from "../domain/capability-envelope";
 import {
   deriveReviewMissionResultBindingSha256,
@@ -941,6 +942,28 @@ const CONNECTED_RUN_LIMITS: ConnectedRunRecordV2["limits"] = {
 const SHAPING_RUN_LIMITS: ShapingRunRecordV1["limits"] = {
   ...CONNECTED_RUN_LIMITS,
   max_output_bytes: 100_000,
+};
+
+const PERMISSION_REJECTION_EXPLANATIONS: Record<
+  PermissionRejectionReason,
+  string
+> = {
+  command_detail_missing:
+    "the command request carried no command text the runtime could read.",
+  command_batch_unsupported:
+    "the request bundled more than one command; each command must be requested on its own.",
+  command_shell_syntax_unsupported:
+    "the command used shell syntax the runtime will not interpret, such as an operator like && or |, a redirect, a glob, a variable or command substitution, or a line break. Request one plain command with literal arguments instead.",
+  command_form_not_approvable:
+    "the command could not be reduced to an approvable executable and argument list.",
+  path_not_uniquely_identified:
+    "the file request did not name exactly one path.",
+  path_is_workspace_root:
+    "the file request targeted the workspace root rather than a file.",
+  url_detail_missing: "the fetch request carried no URL the runtime could read.",
+  url_not_approvable: "the requested URL could not be normalized for approval.",
+  tool_kind_unsupported:
+    "the tool kind is not one this runtime mediates permission for.",
 };
 
 const WRITABLE_PERMISSION_REQUEST_GUIDANCE =
@@ -6403,8 +6426,19 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       reason:
         result.outcome === "missing_permission"
           ? "The ACP adapter denied an operation outside the approved capability envelope."
-          : "The ACP adapter did not complete the governed mission.",
+          : (this.unnormalizableRequestReason(result) ??
+            "The ACP adapter did not complete the governed mission."),
     };
+  }
+
+  private unnormalizableRequestReason(result: AcpRunResult): string | null {
+    const rejection = result.permissions.find(
+      (outcome) => outcome.kind === "invalid_request",
+    );
+    if (rejection === undefined || rejection.kind !== "invalid_request") {
+      return null;
+    }
+    return `The agent requested an operation the runtime could not interpret: ${PERMISSION_REJECTION_EXPLANATIONS[rejection.detail]}`;
   }
 
   private failedConnectedTerminal() {
@@ -6441,7 +6475,9 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     return {
       outcome: result.outcome,
       partial: result.partial,
-      reason: "The ACP adapter did not complete the artifact-only shaping mission.",
+      reason:
+        this.unnormalizableRequestReason(result) ??
+        "The ACP adapter did not complete the artifact-only shaping mission.",
     };
   }
 

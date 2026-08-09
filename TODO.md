@@ -6,10 +6,45 @@ delivery phases.
 
 ## Active Initiatives
 
+### Give Execute and Review the same simplified card view as Idea through Plan
+
+- **Status:** Proposed — the founder cannot tell what an execute item is doing. Found 2026-08-09 on
+  `wi_f2d97c58`.
+- **Idea:** `shapingEligible` gates the simplified decision card on `isShapingPhase`, so Idea,
+  Brainstorm, Spec, and Plan get a card that states the situation and offers one obvious next
+  action, while Execute, Review, and Patch drop straight to the dense full work item panel. Landing
+  in Execute, the founder could not tell whether a run was in flight, had stopped, or had failed —
+  in fact the run had already failed 19 seconds in, and nothing on the surface said so.
+- **Purpose:** These are the phases where runs actually execute commands and change the repository,
+  so they are exactly where an unreadable surface is most expensive.
+- **Definition of done:** Execute and Review present the same shape as the shaping phases — current
+  status in one sentence, whether a run is live, and the single next action — with the full panel
+  available behind an explicit affordance rather than as the default.
+- **Boundary:** Do not fork a second projection; extend the existing decision-view contract so the
+  phases stay consistent. Keep review read-only.
+
+### Let the agent recover from a request the runtime cannot interpret
+
+- **Status:** Proposed — defect, ends runs the agent could have salvaged. Found 2026-08-09 on
+  `wi_f2d97c58`, which died 19 seconds in on its first command.
+- **Idea:** An unnormalizable request is rejected with a bare `reject_once`; the agent is never told
+  what was wrong with it. The mission guidance already forbids shell operators and multi-line
+  commands, and the agent violated it anyway, then gave up immediately rather than reformulating.
+  The controller now records a precise reason, but that reason is only shown to the founder after
+  the run is already dead.
+- **Purpose:** A run that dies on a malformed request wastes a full launch cycle over a mistake the
+  agent could have fixed in one turn.
+- **Definition of done:** The rejection reason travels back to the agent in the permission response,
+  and a run only fails on an unnormalizable request after the agent has had a bounded chance to
+  reformulate it.
+- **Boundary:** Do not widen `parseRestrictedShellWords` — it is the containment boundary. Explain
+  the rejection; never accept the request.
+
 ### Report why a shaping run failed instead of a generic sentence
 
-- **Status:** Proposed — defect, hides the cause of every shaping failure. Found 2026-08-09 on
-  `wi_f2d97c58` ("View full work item page lacks a to navigate back").
+- **Status:** Partly delivered — an unnormalizable permission request now names its precise cause
+  in the run's terminal reason (commit below); a limit breach or adapter crash is still generic.
+  Found 2026-08-09 on `wi_f2d97c58` ("View full work item page lacks a to navigate back").
 - **Idea:** The plan run was killed by a containment limit after it had already written a complete,
   valid `result.json`. The founder saw only "The agent or result validation failed." and `run.json`
   recorded only `shaping_failed`. Nothing anywhere named the real cause; diagnosing it took reading
