@@ -79,6 +79,28 @@ delivery phases.
   decision. The fix is *which paths get proposed* and *when a transition may fire*, not who
   authorizes it.
 
+### Freeze the mission Git base so a committed-then-failed attempt can still validate
+
+- **Status:** Proposed — defect, deadlocks execute. Found 2026-08-09 on `wi_b9b852f6`.
+- **Idea:** `compileMission` captures `source_revision.git_base_commit` from current `HEAD` every
+  time it compiles, and a fresh attempt recompiles. So when an attempt commits its work and *then*
+  dies for an unrelated reason (here: attempt 5 committed `718b7ff`, then terminated on a denied
+  `git log --oneline -10`), the next attempt's mission is compiled with that commit as its base.
+  Attempt 6 correctly reported `commit: 718b7ff`, but `validateGitProof` diffs
+  `git_base_commit..result_commit` — identical commits — and rejects with "Git reports no changed
+  files for the result commit." The item lands in `execute` / `blocked`, and the only recovery
+  (`retryExecuteAttempt`) recompiles the same base, so **every** subsequent attempt rejects
+  identically. The work is committed and correct; the controller simply cannot prove it.
+- **Purpose:** This is a permanent deadlock reachable from ordinary behavior — any attempt that
+  commits before failing poisons the base for all successors. It also silently discards a correct
+  result, which is worse than failing loudly.
+- **Definition of done:** The Git base is captured once for the governed tuple (or derived from the
+  work item's pre-execute revision) and reused across attempts rather than re-read from `HEAD` at
+  each compile. A result whose commit already contains the change validates instead of rejecting,
+  and a blocked item carries a recovery that can actually succeed.
+- **Boundary:** Do not weaken `validateGitProof`'s scope, ancestry, HEAD-equality, or clean-worktree
+  checks — the fix is *which base is compared*, not relaxing the proof.
+
 ### Connected model configuration settings page
 
 - **Status:** Proposed.

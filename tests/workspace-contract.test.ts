@@ -2508,6 +2508,66 @@ describe("ProductWorkspace", () => {
     ).toEqual(["TASK.md", "mission.json"]);
   });
 
+  it("freezes the mission Git base across attempts in one governed tuple", async () => {
+    const root = await createWorkspace();
+    const item = await writeMissionReadyWorkItem(root, firstId);
+    const manifest = appliedExecuteManifest();
+    const buildPackage = (paths: Parameters<typeof compileMission>[2]) =>
+      compileMission(item, manifest, paths);
+
+    const baseCommit = "a".repeat(40);
+    const attemptCommit = "b".repeat(40);
+    let head = baseCommit;
+    const workspace = new ProductWorkspace(root, {
+      git: {
+        ...testGit,
+        async readHeadCommit() {
+          return head;
+        },
+      },
+    });
+
+    const first = await workspace.writeMissionPackage(
+      missionIdentity(firstId, { attempt: 0 }),
+      buildPackage,
+    );
+    expect(first.mission.source_revision.git_base_commit).toBe(baseCommit);
+
+    // The attempt commits its work and then fails for an unrelated reason.
+    head = attemptCommit;
+    const statePath = join(
+      root,
+      ".founder",
+      "work-items",
+      firstId,
+      "state.json",
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      attempt: number;
+    };
+    await writeFile(
+      statePath,
+      `${JSON.stringify({ ...state, attempt: 1 }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const retryItem = {
+      ...item,
+      state: { ...item.state, attempt: 1 },
+    };
+    const retryManifest = appliedExecuteManifest(firstRunId, { attempt: 1 });
+    const retry = await workspace.writeMissionPackage(
+      missionIdentity(firstId, { attempt: 1 }),
+      (paths: Parameters<typeof compileMission>[2]) =>
+        compileMission(retryItem, retryManifest, paths),
+    );
+
+    expect(retry.mission.source_revision.git_base_commit).toBe(baseCommit);
+    expect(retry.mission.source_revision.git_base_commit).not.toBe(
+      attemptCommit,
+    );
+  });
+
   it("publishes byte-identical v2 Brainstorm, Spec, and Plan missions without Git", async () => {
     const root = await createWorkspace();
     const item = await writeShapingReadyWorkItem(root, firstId);

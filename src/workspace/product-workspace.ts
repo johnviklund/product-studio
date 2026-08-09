@@ -3447,7 +3447,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
     const paths = this.missionPaths(
       validatedIdentity,
-      await this.resolveGitBaseCommit(),
+      await this.governedTupleGitBaseCommit(validatedIdentity),
     );
     const mission = missionPackageSchema.parse(buildPackage(paths)) as TMission;
     if (
@@ -7720,6 +7720,46 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         `cannot resolve the mission Git base commit: ${errorMessage(error)}`,
       );
     }
+  }
+
+  private async governedTupleGitBaseCommit(
+    identity: MissionIdentity,
+  ): Promise<string> {
+    if (identity.attempt < 1) {
+      return this.resolveGitBaseCommit();
+    }
+    const priorBase = await this.priorAttemptGitBaseCommit({
+      ...identity,
+      attempt: identity.attempt - 1,
+    });
+    return priorBase ?? this.resolveGitBaseCommit();
+  }
+
+  private async priorAttemptGitBaseCommit(
+    identity: MissionIdentity,
+  ): Promise<string | null> {
+    const missionPath = join(
+      this.founderDirectory,
+      MISSIONS_DIRECTORY,
+      identity.work_item_id,
+      this.missionDirectoryName(identity),
+      MISSION_JSON_FILE,
+    );
+    let source: string;
+    try {
+      source = await readFile(missionPath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+    const mission = this.parseJson(
+      source,
+      missionPath,
+      readableMissionPackageSchema,
+    );
+    return mission.source_revision.git_base_commit;
   }
 
   private missionDirectoryName(
