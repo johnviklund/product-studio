@@ -1028,13 +1028,13 @@ describe("stdio ACP client adapter", () => {
     const invalidResult = await invalidSession.run("Try an unnormalizable request.");
 
     expect(invalidResult).toMatchObject({ outcome: "failed", partial: true });
-    expect(invalidResult.permissions).toEqual([
-      {
+    expect(invalidResult.permissions).toEqual(
+      Array.from({ length: 3 }, () => ({
         kind: "invalid_request",
         reason: "missing_or_unnormalizable_permission_detail",
         detail: "tool_kind_unsupported",
-      },
-    ]);
+      })),
+    );
     expect(
       invalidSink.events.some(
         (event) =>
@@ -1062,6 +1062,39 @@ describe("stdio ACP client adapter", () => {
     expect(refusalResult).toMatchObject({ outcome: "failed", partial: true });
     expect(refusalResult.permissions).toEqual([]);
     expect(refusalSink.events.some((event) => event.kind === "permission")).toBe(false);
+  });
+
+  it("explains an uninterpretable request in a new turn so one malformed command cannot end the mission", async () => {
+    const root = await createRoot();
+    const sentinel = join(root, "recovered-sentinel");
+    const sink = new MemoryEventSink();
+    const session = await new StdioAcpClientAdapter().start(
+      profile(
+        root,
+        { requests: [{ kind: "unknown" }], requests_first_turn_only: true },
+        sentinel,
+      ),
+      sink,
+    );
+
+    const result = await session.run("Try an unnormalizable request.");
+
+    expect(result).toMatchObject({ outcome: "completed", partial: false });
+    expect(result.permissions).toEqual([
+      {
+        kind: "invalid_request",
+        reason: "missing_or_unnormalizable_permission_detail",
+        detail: "tool_kind_unsupported",
+      },
+    ]);
+    expect(
+      sink.events.some(
+        (event) =>
+          event.kind === "permission" &&
+          event.payload.decision === "missing_permission",
+      ),
+    ).toBe(false);
+    expect(await exists(`${sentinel}.1`)).toBe(false);
   });
 
   it("bounds timeout and cancellation by terminating the detached stdio process group", async () => {

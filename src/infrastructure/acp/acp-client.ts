@@ -10,6 +10,7 @@ import {
   canonicalizeCapabilityRequest,
   hashCanonicalCapabilityRequest,
   isPermissionRejection,
+  PERMISSION_REJECTION_EXPLANATIONS,
   type CanonicalCapabilityRequest,
   type PermissionRejection,
   type PermissionRejectionReason,
@@ -458,6 +459,21 @@ class AcpEvidenceRecorder {
   }
 }
 
+const MAX_UNINTERPRETABLE_CONTINUATIONS = 2;
+
+function buildUninterpretableRequestGuidance(
+  reasons: readonly PermissionRejectionReason[],
+): string {
+  const explanations = [...new Set(reasons)].map(
+    (reason) => PERMISSION_REJECTION_EXPLANATIONS[reason],
+  );
+  return [
+    "Your previous request was refused before it reached the founder, because the runtime could not interpret it:",
+    ...explanations.map((explanation) => `- ${explanation}`),
+    "This was not a denial of the work itself, and nothing about the task has changed. Reissue the request in a form the runtime can read, or continue without it, and then finish the mission and write the required result file.",
+  ].join("\n");
+}
+
 class StdioAcpSession implements AcpSession {
   readonly session_id: string;
   readonly protocol_version: number;
@@ -466,6 +482,7 @@ class StdioAcpSession implements AcpSession {
   readonly process: { pid: number; process_group_id: number; started_at: string };
 
   private readonly permissionOutcomes: AcpPermissionOutcome[] = [];
+  private finalTurnStart = 0;
   private runInFlight = false;
   private closed = false;
   private cancellationRequested = false;
@@ -530,10 +547,14 @@ class StdioAcpSession implements AcpSession {
         timedOut,
       ]);
       await Promise.race([this.callbackQueue, timedOut]);
+      const finalResponse = await this.continuePastUninterpretableRequests(
+        response,
+        timedOut,
+      );
       if (this.outputLimitExceeded) {
         throw new AcpEventLimitError("ACP agent output exceeded its byte limit.");
       }
-      const result = this.resultFromStopReason(response.stopReason);
+      const result = this.resultFromStopReason(finalResponse.stopReason);
       await Promise.race([
         this.recorder.record(
           "run_finished",
@@ -893,6 +914,47 @@ class StdioAcpSession implements AcpSession {
     }
   }
 
+  /**
+   * An agent that is refused an uninterpretable request typically ends its turn
+   * immediately, abandoning the mission over a single malformed command. The
+   * permission response itself carries no room to say why, so the explanation is
+   * delivered the only way the protocol allows: another turn in the same
+   * session. This is bounded, and it never grants anything — the agent still has
+   * to make a request the runtime can interpret.
+   */
+  private async continuePastUninterpretableRequests(
+    response: { readonly stopReason: acp.StopReason },
+    timedOut: Promise<never>,
+  ): Promise<{ readonly stopReason: acp.StopReason }> {
+    let current = response;
+    for (
+      let continuation = 0;
+      continuation < MAX_UNINTERPRETABLE_CONTINUATIONS;
+      continuation += 1
+    ) {
+      if (current.stopReason !== "end_turn") {
+        return current;
+      }
+      const unexplained = this.permissionOutcomes
+        .slice(this.finalTurnStart)
+        .flatMap((outcome) =>
+          outcome.kind === "invalid_request" ? [outcome.detail] : [],
+        );
+      if (unexplained.length === 0) {
+        return current;
+      }
+      this.finalTurnStart = this.permissionOutcomes.length;
+      current = await Promise.race([
+        this.activeSession.prompt(
+          buildUninterpretableRequestGuidance(unexplained),
+        ),
+        timedOut,
+      ]);
+      await Promise.race([this.callbackQueue, timedOut]);
+    }
+    return current;
+  }
+
   private resultFromStopReason(stopReason: acp.StopReason): AcpRunResult {
     const hasMissingPermission = this.permissionOutcomes.some(
       (outcome) => outcome.kind === "missing_permission",
@@ -906,9 +968,9 @@ class StdioAcpSession implements AcpSession {
         output_text: this.outputText,
       };
     }
-    const hasInvalidRequest = this.permissionOutcomes.some(
-      (outcome) => outcome.kind === "invalid_request",
-    );
+    const hasInvalidRequest = this.permissionOutcomes
+      .slice(this.finalTurnStart)
+      .some((outcome) => outcome.kind === "invalid_request");
     if (hasInvalidRequest) {
       return {
         outcome: "failed",

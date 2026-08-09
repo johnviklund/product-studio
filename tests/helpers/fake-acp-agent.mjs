@@ -5,6 +5,7 @@ import * as acp from "@agentclientprotocol/sdk";
 
 const scenario = JSON.parse(process.env.PRODUCT_STUDIO_FAKE_ACP_SCENARIO ?? "{}");
 const sentinelPath = process.env.PRODUCT_STUDIO_FAKE_ACP_SENTINEL ?? null;
+let promptTurn = 0;
 const sessionId = "product-studio-fake-session";
 let currentConfigOptions = Array.isArray(scenario.session_config_options)
   ? scenario.session_config_options
@@ -145,7 +146,12 @@ const application = acp
       });
     }
 
-    const requests = Array.isArray(scenario.requests) ? scenario.requests : [];
+    promptTurn += 1;
+    const requests =
+      Array.isArray(scenario.requests) &&
+      !(scenario.requests_first_turn_only === true && promptTurn > 1)
+        ? scenario.requests
+        : [];
     for (let index = 0; index < requests.length; index += 1) {
       await context.client.notify(acp.methods.client.session.update, {
         sessionId,

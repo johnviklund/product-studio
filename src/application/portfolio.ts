@@ -114,6 +114,7 @@ import {
   capabilityRequestMatchesEnvelope,
   capabilityEnvelopeV1Schema,
   isCapabilityEnvelopeNarrowing,
+  PERMISSION_REJECTION_EXPLANATIONS,
   type CapabilityEnvelopeV1,
   type PermissionRejectionReason,
 } from "../domain/capability-envelope";
@@ -944,27 +945,6 @@ const SHAPING_RUN_LIMITS: ShapingRunRecordV1["limits"] = {
   max_output_bytes: 100_000,
 };
 
-const PERMISSION_REJECTION_EXPLANATIONS: Record<
-  PermissionRejectionReason,
-  string
-> = {
-  command_detail_missing:
-    "the command request carried no command text the runtime could read.",
-  command_batch_unsupported:
-    "the request bundled more than one command; each command must be requested on its own.",
-  command_shell_syntax_unsupported:
-    "the command used shell syntax the runtime will not interpret, such as an operator like && or |, a redirect, a glob, a variable or command substitution, or a line break. Request one plain command with literal arguments instead.",
-  command_form_not_approvable:
-    "the command could not be reduced to an approvable executable and argument list.",
-  path_not_uniquely_identified:
-    "the file request did not name exactly one path.",
-  path_is_workspace_root:
-    "the file request targeted the workspace root rather than a file.",
-  url_detail_missing: "the fetch request carried no URL the runtime could read.",
-  url_not_approvable: "the requested URL could not be normalized for approval.",
-  tool_kind_unsupported:
-    "the tool kind is not one this runtime mediates permission for.",
-};
 
 const WRITABLE_PERMISSION_REQUEST_GUIDANCE =
   `Pre-approved operations and permission requests are distinct. Do not return a not_run result merely because a task-required command is not listed in the capability envelope. You must invoke the \`${COPILOT_WRITABLE_COMMAND_TOOL}\` tool with the exact first required command so the controller can deny it and mediate a founder decision. That invocation is a permission request, not authority to execute: do not bypass a denial or claim the command ran.`;

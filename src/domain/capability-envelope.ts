@@ -111,6 +111,32 @@ export const PERMISSION_REJECTION_REASONS = [
 export type PermissionRejectionReason =
   (typeof PERMISSION_REJECTION_REASONS)[number];
 
+/**
+ * Why a request could not be interpreted, phrased so it reads correctly both to
+ * a founder reviewing evidence and to the agent that made the request.
+ */
+export const PERMISSION_REJECTION_EXPLANATIONS: Record<
+  PermissionRejectionReason,
+  string
+> = {
+  command_detail_missing:
+    "the command request carried no command text the runtime could read.",
+  command_batch_unsupported:
+    "the request bundled more than one command; each command must be requested on its own.",
+  command_shell_syntax_unsupported:
+    "the command used shell syntax the runtime will not interpret, such as an operator like && or |, a redirect, a glob, a variable or command substitution, or a line break. Request one plain command with literal arguments instead.",
+  command_form_not_approvable:
+    "the command could not be reduced to an approvable executable and argument list.",
+  path_not_uniquely_identified:
+    "the file request did not name exactly one path.",
+  path_is_workspace_root:
+    "the file request targeted the workspace root rather than a file.",
+  url_detail_missing: "the fetch request carried no URL the runtime could read.",
+  url_not_approvable: "the requested URL could not be normalized for approval.",
+  tool_kind_unsupported:
+    "the tool kind is not one this runtime mediates permission for.",
+};
+
 export interface PermissionRejection {
   readonly rejected: PermissionRejectionReason;
 }
