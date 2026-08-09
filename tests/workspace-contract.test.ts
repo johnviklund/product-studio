@@ -2566,6 +2566,24 @@ describe("ProductWorkspace", () => {
     expect(retry.mission.source_revision.git_base_commit).not.toBe(
       attemptCommit,
     );
+
+    // A later attempt still resolves the base the tuple started from.
+    head = "c".repeat(40);
+    await writeFile(
+      statePath,
+      `${JSON.stringify({ ...state, attempt: 2 }, null, 2)}\n`,
+      "utf8",
+    );
+    const second = await workspace.writeMissionPackage(
+      missionIdentity(firstId, { attempt: 2 }),
+      (paths: Parameters<typeof compileMission>[2]) =>
+        compileMission(
+          { ...item, state: { ...item.state, attempt: 2 } },
+          appliedExecuteManifest(firstRunId, { attempt: 2 }),
+          paths,
+        ),
+    );
+    expect(second.mission.source_revision.git_base_commit).toBe(baseCommit);
   });
 
   it("publishes byte-identical v2 Brainstorm, Spec, and Plan missions without Git", async () => {

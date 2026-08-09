@@ -7728,14 +7728,14 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     if (identity.attempt < 1) {
       return this.resolveGitBaseCommit();
     }
-    const priorBase = await this.priorAttemptGitBaseCommit({
+    const tupleBase = await this.compiledGitBaseCommit({
       ...identity,
-      attempt: identity.attempt - 1,
+      attempt: 0,
     });
-    return priorBase ?? this.resolveGitBaseCommit();
+    return tupleBase ?? this.resolveGitBaseCommit();
   }
 
-  private async priorAttemptGitBaseCommit(
+  private async compiledGitBaseCommit(
     identity: MissionIdentity,
   ): Promise<string | null> {
     const missionPath = join(
