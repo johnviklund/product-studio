@@ -106,6 +106,25 @@ delivery phases.
 - **Boundary:** Do not weaken `validateGitProof`'s scope, ancestry, HEAD-equality, or clean-worktree
   checks — the fix is *which base is compared*, not relaxing the proof.
 
+### Give a blocked item a route back to active from any phase
+
+- **Status:** Partly delivered — the bricking path is closed (commit below); the recovery gap is
+  still open. Found 2026-08-09 on `wi_b9b852f6`.
+- **Idea:** `validateStatusTransition` already states the rule — "Phase movement requires active
+  status to remain active" — but `updateWorkItemPhase` only called `validatePhaseTransition`, so it
+  never enforced it. A blocked item could therefore be dragged out of execute, and once it landed in
+  `plan` / `blocked` it was inert: every shaping operation refuses a non-active item, and
+  `retryExecuteAttempt` — the only `blocked` → `active` route in the system — requires
+  `execute` phase. The item could not move, run, or recover. `updateWorkItemPhase` now validates
+  status alongside phase, so the illegal move is refused instead of bricking the item.
+- **Purpose:** Closing the trap is necessary but not sufficient. `blocked` is still a one-way door
+  outside execute, and the founder's instinct on a stuck card — move it back a column — is exactly
+  the move that used to destroy it.
+- **Definition of done:** A blocked item exposes an explicit, surfaced recovery to `active` that does
+  not depend on the phase it is in, and the board explains why a blocked card cannot be dragged.
+- **Boundary:** Do not let a phase move silently reset status; recovery should be a deliberate,
+  evidenced act, not a side effect of dragging a card.
+
 ### Stop requiring a work item to be the sole author of history since its Git base
 
 - **Status:** Proposed — defect, blocks recovery. Found 2026-08-09 on `wi_b9b852f6`.

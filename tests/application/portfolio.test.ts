@@ -5925,6 +5925,20 @@ describe("PortfolioService", () => {
       evidence: { outcome: "rejected" },
     });
 
+    await expect(
+      service.updateWorkItemPhase(sourceId, rejectedItem.goal.work_item_id, {
+        target_phase: "plan",
+      }),
+    ).rejects.toMatchObject({
+      kind: "invalid_transition",
+      message: expect.stringContaining(
+        "Phase movement requires active status to remain active.",
+      ),
+    });
+    expect(
+      (await repository.read(rejectedItem.goal.work_item_id))?.state,
+    ).toMatchObject({ phase: "execute", status: "blocked" });
+
     const retried = await service.retryExecuteAttempt(
       sourceId,
       rejectedItem.goal.work_item_id,

@@ -100,7 +100,7 @@ import {
 import {
   canUpdateGoalContract,
   dedicatedTransitionPolicy,
-  validatePhaseTransition,
+  validateWorkItemTransition,
 } from "../domain/workflow-policy";
 import { workspaceRelativePosixPathSchema } from "../domain/workspace-path";
 import {
@@ -1397,9 +1397,11 @@ export class PortfolioService {
       );
     }
 
-    const transition = validatePhaseTransition(
+    const transition = validateWorkItemTransition(
       current.state.phase,
       validatedInput.target_phase,
+      current.state.status,
+      current.state.status,
     );
     if (!transition.ok) {
       throw new InvalidWorkItemTransitionError(
