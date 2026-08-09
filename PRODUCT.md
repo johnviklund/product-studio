@@ -77,10 +77,12 @@ TypeScript, Tailwind CSS, shadcn/ui, and better-sqlite3 for its rebuildable loca
 
 ## 5. Post-MVP boundaries
 
-Semantic Activity and live Updates, additional execution adapters, deployment and operational
-adapters, governed learning proposals, model evaluation/routing expansion, multi-user
-collaboration, and a hosted control plane are post-MVP. They require dogfooding evidence rather
-than speculative architecture. Product Studio does not add them merely to remove every manual
+Semantic Activity, live Updates, the web-first Run Console, a headless local service boundary,
+additional execution adapters, deployment and operational adapters, governed learning proposals,
+model evaluation/routing expansion, multi-user collaboration, and a hosted control plane are
+post-MVP. A native macOS client is a long-term presentation objective after the web interaction
+and local service contracts are proven. These capabilities require dogfooding evidence and the
+adoption gates in `ARCHITECTURE.md`; Product Studio does not add them merely to remove every manual
 action.
 
 ## 6. Lifecycle and gates
@@ -169,6 +171,7 @@ durable files alone.
 
 ## 8. Core documents
 
+- [Target architecture](ARCHITECTURE.md)
 - [Design system](DESIGN.md)
 - [Delivery roadmap](ROADMAP.md)
 - [Repository working rules](AGENTS.md)
@@ -226,10 +229,17 @@ The following remain unresolved and must be decided with implementation evidence
   model, launch arguments, or configured model list; an unobserved model is recorded and rendered
   as the literal `unknown`. Per-seat model independence is proven from observed effective identities,
   not requests.
-- Whether a future managed runner needs subprocess-only execution or PTY support.
+- Whether a real terminal-only adapter justifies adding the optional Herdr PTY execution host.
+  Direct ACP remains the default and recovery path; a PTY host cannot own workflow state,
+  authorization, evidence, or completion.
 - GitHub synchronization depth: repositories and pull requests only, or optional issue
   mirroring.
-- Local-runner lifecycle: foreground process, background daemon, or tray utility.
+- Local-service packaging and lifecycle: companion process, background daemon, or tray utility.
+  - **Decided (2026-08-09):** the web UI is the first client and proves the versioned local
+    command/query/event contracts. Before a native client is built, controller ownership and
+    connected execution move behind a headless local service so closing a UI does not stop work.
+    A future native macOS client consumes the same contracts and does not reimplement the
+    controller, policy, orchestration, or evidence rules.
 - A method for estimating subscription and local-model effective cost.
 - Evaluation grading format and critical-case thresholds.
 - Initial monitoring sources for prototypes.

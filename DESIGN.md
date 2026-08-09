@@ -194,13 +194,19 @@ The interface must help the founder step away for hours, return, understand what
 
 ### Canonical screen states
 
-The application has three canonical desktop states. They share the same shell and board position.
+The application has four canonical desktop states. They share the same shell, and switching views
+preserves the board's filters, scroll position, and selection.
 
 1. **Focused Kanban:** The left navigation is collapsed to an icon rail and the right panel is closed. The board receives maximum width.
 2. **New idea or todo:** The left rail remains collapsed and a 390px right panel opens with a progressive capture form.
 3. **Work-item detail:** The left rail remains collapsed and a 410px right panel opens for reading, editing, replying, reviewing evidence, or approving a card.
+4. **Updates and Run Console (post-v1):** An inbox-style Updates sequence occupies the left side of
+   the work surface and the selected semantic run/update opens in a flexible Console on the right.
+   The Kanban remains the default view and returns exactly where the founder left it.
 
-Side panels change state; they do not navigate to separate page designs. Opening or closing a panel must preserve board filters, horizontal position, vertical position, and selected card.
+The capture and detail panels change state; they do not navigate to separate page designs. The
+Updates view changes the main work surface, but opening, closing, or switching any state must
+preserve board filters, horizontal position, vertical position, and selected card.
 
 ### Product principles expressed visually
 
@@ -265,6 +271,9 @@ The canonical design target is a 1440 × 1024 desktop viewport. The shell fills 
 - **Return-summary strip:** 48px tall when present.
 - **Create panel:** 390px wide.
 - **Detail/review panel:** 410px wide.
+- **Updates sequence (post-v1):** 340–400px wide.
+- **Run Console (post-v1):** Flexible remainder with a 560px useful minimum at the canonical
+  viewport.
 - **Board:** Uses all remaining width and height.
 
 The left rail, board, and right panel are siblings in one layout. A right panel should reduce the board viewport rather than float over cards. The board retains its own horizontal scrolling when available width cannot show every column.
@@ -316,7 +325,9 @@ Rules:
 - Hide the strip when there are no meaningful updates.
 - Count completed agent attempts, new review findings, newly blocked work, and human decisions requested.
 - Do not count background indexing, autosaves, or duplicate status events.
-- `Review updates` opens the relevant Updates sequence and advances through cards in chronological or priority order using the existing right panel.
+- `Review updates` opens the relevant Updates sequence with its Run Console and advances through
+  entries in chronological or priority order. Evidence-bound actions reuse the existing detail
+  controls rather than inventing a second mutation path.
 - Dismissal records the last acknowledged event, not merely the current time.
 - A critical blocked item may add a warning dot, but the strip stays visually calm.
 
@@ -341,6 +352,17 @@ filtered-out, superseded, already-resolved, and caught-up states must be explici
 Updates should support efficient sequential review and preserve project scope while moving to the
 next entry. An actionable row opens the existing detail panel at the exact evidence-bound approval
 or reply control, then continues the sequence without creating a second mutation path.
+
+The canonical Updates view uses an inbox-style split layout rather than opening every row as a
+small board side panel. The left sequence is compact and scannable; the right Run Console has room
+for current state, step relationships, evidence, and interaction. On a narrow viewport the two
+regions become a list followed by a full-screen detail route, while seen state, cursor, selection,
+and acknowledgment remain unchanged.
+
+The left sequence row shows title/outcome, project, logical actor, truthful bounded status, relative
+time, unseen state, and a quiet action-required marker. It does not show raw provider events or a
+miniature transcript. Selecting a row marks it viewed, not acknowledged or resolved. Keyboard
+navigation supports next/previous row, open, acknowledge, and jump to the exact action.
 
 Persist concise typed outcomes and immutable evidence references, not raw reasoning, token streams,
 unbounded terminal output, autosaves, indexing activity, or duplicate controller events. Show the
@@ -553,16 +575,66 @@ Summarize an agent attempt in one contained block:
 
 Do not show a live token stream by default. Use `Working · 8 min` or an indeterminate state instead of fabricated percentage progress unless the underlying workflow provides a defensible measurement.
 
-A connected (locally launched) agent run follows the same rule: project only the latest sanitized
-run summary and its provenance (runtime/model/effort, bounded status, one recovery action set) —
-never raw terminal output, protocol/token streams, or diagnostic internals. Launch controls use a
-synchronous in-flight guard for rapid-click feedback, but the durable per-item launch guard
-remains the sole authority that prevents a duplicate run.
+A connected (locally launched) agent run follows the same default rule: project only the latest
+sanitized run summary and its provenance (runtime/model/effort, bounded status, one recovery action
+set). Raw terminal output, protocol/token streams, and diagnostic internals never enter this
+summary or the semantic Activity history. A future PTY-backed Run Console may expose a bounded
+technical terminal under an explicit disclosure, but it remains untrusted runtime data and cannot
+drive status, approval, or completion. Launch controls use a synchronous in-flight guard for
+rapid-click feedback, but the durable per-item launch guard remains the sole authority that
+prevents a duplicate run.
 
 An imported shaping result (a compiled mission's proposal, brought in via `Use proposal as draft`)
 is neither live nor connected — it is a proposal, not current card state. Label it visibly as a
 proposal and never render it as an agent-update block; adopting it into a draft field fires no
 network request.
+
+### Run Console (post-v1, web first)
+
+The Run Console is the detailed live surface for one selected attempt or semantic update. It is a
+Product Studio console, not a vendor chat window or terminal multiplexer. Its default reading order
+is:
+
+1. Header with item, phase, bounded state, logical role, elapsed time, and close/open-in-item.
+2. Current meaningful outcome and, when applicable, the pending human question or decision.
+3. A compact step graph or ordered step list showing queued, working, waiting, failed, ready, and
+   accepted nodes. Parallel branches align visually and converge at their join.
+4. Evidence, verification, changed files, findings, and exact governed next action.
+5. Interaction composer when the selected run exposes a supported input capability.
+6. Collapsed provenance and technical diagnostics; an optional terminal appears here only for a
+   PTY-backed run.
+
+Do not animate synthetic model activity or stream hidden reasoning. A live state changes only from
+an owned runtime or controller event. Reconnection shows `Reconnecting…`, refreshes the
+authoritative snapshot, then resumes from the last event cursor; it never fabricates continuity.
+Closing the Console does not cancel the run.
+
+Interaction is explicit and typed:
+
+- **Answer agent:** Respond to one pending, evidence-bound question in the same attempt.
+- **Ask for explanation:** Add a run interaction that grants no new scope or authority.
+- **Change direction:** Cancel or genuinely pause where supported, then create a new revision or
+  attempt. Never edit the active mission silently.
+- **Approve / request changes:** Open the existing exact-result-bound decision control; do not add
+  a console-specific approval route.
+
+Show `paused` only when the selected runtime supports and has acknowledged real suspend/resume.
+Otherwise use `waiting for input`, `detached`, `cancellation requested`, or `cancelled`. Disable or
+omit unsupported controls based on the runtime capability query rather than letting the user type
+into a dead composer.
+
+For parallel agents, group branches by role and show isolated workspace/worktree provenance. The
+join remains locked until every required branch has a controller-accepted result. Concurrent
+writers may never appear to share one working tree; read-only researchers, reviewers, and
+verification branches are the preferred first parallel experience.
+
+### Cross-client continuity (post-v1)
+
+The web UI is the reference client for Updates and the Run Console. A future native macOS client
+may use native notifications, menu-bar state, windows, and keyboard integration, but its visible
+states and actions must come from the same command, query, semantic-event, acknowledgment, and
+capability contracts. Neither client may keep its own workflow state machine or infer completion
+from local process state.
 
 ### Reviewer finding
 

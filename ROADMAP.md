@@ -2,7 +2,8 @@
 
 This is a scoped delivery map, not an execution backlog. Each MVP phase is one
 `workflow brainstorm → spec → plan → execute → review` cycle; intake belongs in
-`TODO.md`, not here.
+`TODO.md`, not here. `ARCHITECTURE.md` defines the target component boundaries and the proof gates
+behind the post-MVP backbone choices referenced below.
 
 ## Milestone 1 — Focused control panel and Kanban
 
@@ -242,7 +243,7 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
   milestones.
 - **Dependencies:** 2.1–2.5 and 3.1–3.3.
 - **Slice 2 selected experience direction (2026-07-31):** Use the guided handoff defined in
-  [`DESIGN.md`](DESIGN.md#connected-guided-handoff-through-execute-approval-roadmap-34-slice-2): connected
+  [`DESIGN.md`](DESIGN.md#connected-guided-handoff-through-review-and-patch-roadmap-34-slices-23): connected
   Brainstorm, Spec, and Plan are the normal path, a ready Spec becomes one concise founder decision
   with `Approve & run Plan`, and manual artifact handoff remains collapsed recovery. The
   [directional mockup](docs/design/roadmap-3.4-slice-2-guided-handoff.png) supports the written
@@ -275,33 +276,53 @@ verification, independent review, bounded patch loop, and human authority preser
 
 ### Milestone 4 — Live workflow experience and governed learning
 
-#### 4.1 Semantic activity, live updates, and update review
+#### 4.1 Semantic activity, live Updates, and Run Console
 
 - **Goal:** Build on the working connected cycle so the founder can see meaningful live progress,
-  return after time away, and approve the next phase without reconstructing agent sessions.
+  interact when a run supports it, return after time away, and approve the next phase without
+  reconstructing agent sessions.
 - **Primary scope:** A provider-neutral semantic-event contract backed by durable controller changes
   and published evidence; stable event identity; an item-scoped Activity chronology; a
   cross-project, email-like Updates sequence; the existing Needs You decision queue as the
-  actionable subset; and the Since-you-were-away entry point. Current work-item state, missions,
-  results, and evidence remain authoritative; event records preserve meaningful history but never
-  authorize or determine workflow state, and every read model remains rebuildable.
+  actionable subset; the Since-you-were-away entry point; and a web-first inbox-style split view
+  with the Updates sequence on the left and a semantic Run Console on the right. Current work-item
+  state, missions, results, and evidence remain authoritative; event records preserve meaningful
+  history but never authorize or determine workflow state, and every read model remains
+  rebuildable.
 - **Live semantics:** Show bounded states and meaningful outcomes for connected runs, phase changes,
   verification, findings, decisions, approvals, and result replacement. Exclude raw reasoning,
   token streams, unbounded terminal output, indexing, autosaves, and duplicate controller churn.
   Entries carry a concise outcome, time, logical actor role, run identity, and immutable evidence
-  handles.
+  handles. Add a resumable cursor-based live transport: reconnect from an authoritative snapshot,
+  deduplicate stable event IDs, and never infer workflow state from a missed connection.
 - **View and action boundaries:** The Board remains the primary spatial workflow view; Activity is
   the complete semantic history for one governed item; Updates is the cross-project seen/unseen
-  review sequence; Needs You contains unresolved human decisions only. Actionable entries open the
-  existing exact-result-bound DetailPanel control rather than creating a second approval contract.
+  review sequence; Needs You contains unresolved human decisions only. The Run Console shows the
+  selected attempt's current outcome, step graph/list, evidence, files, verification, findings, and
+  supported interactions. Actionable entries open the existing exact-result-bound DetailPanel
+  control rather than creating a second approval contract.
+- **Interaction contract:** Add typed commands to answer one pending agent question, ask for an
+  explanation without granting new authority, cancel, and genuinely pause/resume only when the
+  runtime advertises that capability. A direction or scope change creates a new revision/attempt;
+  it never silently changes an active mission. Every accepted interaction is persisted before
+  delivery and appears in semantic history.
+- **Provenance and independence:** Bind semantic events to the logical role and controller/adapter-
+  observed run identity. Enforce writer/reviewer separation only when identity assurance supports
+  a fail-closed comparison; otherwise preserve the existing explicit human attestation.
+- **Operational observability:** Instrument the local service boundary, controller, policy checks,
+  and connected runtime with OpenTelemetry traces, metrics, and redacted structured logs. Sampling
+  or exporter failure must not affect workflow state, and Activity/Updates must never be rebuilt
+  from telemetry.
 - **Acknowledgment:** Viewing, acknowledging, and resolving are distinct. Dismissal advances a
   stable last-acknowledged event position rather than recording wall-clock time; resolved and
   superseded entries leave active queues according to explicit rules but remain in item Activity.
 - **Dependencies:** 3.3–3.4.
 - **Completion signal:** The founder can watch truthful bounded progress, enter from Since you were
-  away or Updates, inspect exact evidence, approve or answer through the existing governed control,
-  and reach an honest caught-up state while every surface agrees about event identity and
-  acknowledgment.
+  away or Updates, inspect exact evidence, interact through supported typed controls, approve or
+  answer through the existing governed control, and reach an honest caught-up state while every
+  surface agrees about event identity and acknowledgment. A disconnect/reconnect loses neither
+  durable state nor the user's place, and correlated diagnostics explain one real cycle without
+  exposing sensitive run content.
 
 #### 4.2 Learning, skill, and evaluation proposals
 
@@ -328,12 +349,42 @@ verification, independent review, bounded patch loop, and human authority preser
   and skill changes, every captured candidate has an explicit disposition, and none can silently
   change the active skills or agent behavior.
 
-#### 4.3 Workflow expansion and integrations
+#### 4.3 Local runtime backbone, durable orchestration, and integrations
 
-Post-MVP: add broader feedback routing, autonomy configuration, GitHub links/sync, remaining
-Ship/Learn integrations, and additional adapters only when version-one evidence justifies them.
-**Exit:** the proven connected cycle can expand without changing its controller, authorization,
-evidence, or non-MCP boundaries.
+- **Goal:** Let long-running local work survive UI lifecycles and add graph/parallel execution or
+  new process hosts without moving authority out of Product Studio.
+- **Local service boundary:** Extract the controller, durable repository, semantic event publisher,
+  orchestration port, policy-decision port, and execution broker behind one versioned local
+  command/query/event service. The Next.js web UI remains the first client. Closing or reloading it
+  does not stop owned work, and reconnect begins from an authoritative snapshot plus event cursor.
+- **Graph orchestration:** Introduce a versioned, provider-neutral `ExecutionGraph` only for a real
+  workflow that benefits from dependencies, fan-out/fan-in, or long-lived waits. Start with the
+  current in-process orchestrator. Adopt Temporal when restart-surviving retries, timers, waits, or
+  parallel nodes justify the operational dependency. Product Studio owns the graph and durable
+  results; Temporal Workflows coordinate it through idempotent Activities/commands and retain only
+  correlation provenance. Child Workflows are reserved for branches that need an independent
+  durable lifecycle or worker boundary.
+- **Parallel-agent safety:** Start with independent read-only research/review/evaluation or
+  verification nodes. Parallel writers never share a working tree; any later write fan-out uses
+  isolated worktrees and an explicit merge/review node. A join unlocks only from controller-
+  accepted, evidence-complete branch results.
+- **Policy boundary:** Keep the existing pure TypeScript evaluators behind a
+  `PolicyDecisionPoint`. Adopt OPA only when policy must be shared across processes, clients,
+  remote workers, or user roles. Pin and hash the selected policy bundle, persist each decision
+  receipt before mutation, keep enforcement in the controller/broker, and never run TypeScript and
+  OPA as competing authorities.
+- **Execution-host boundary:** Direct ACP remains the reference and recovery path. Adopt Herdr only
+  as an optional PTY execution host for a proven terminal-only or human-reattach need. Its pane and
+  agent states are untrusted liveness/diagnostic hints, raw history is sensitive and off by
+  default, and Herdr never owns phase, authorization, evidence, or completion.
+- **Other integrations:** Add broader feedback routing, autonomy configuration, GitHub links/sync,
+  remaining Ship/Learn integrations, and additional adapters only when version-one evidence
+  justifies them. MCP remains unsupported.
+- **Dependencies:** 3.4 and 4.1.
+- **Completion signal:** The web UI can close and reconnect to a still-running governed attempt;
+  one selected graph use case can survive service/worker recovery and safely fan out/fan in when
+  needed; every external backbone can be removed or replaced behind its port without changing the
+  controller, authorization, evidence, semantic-event, or non-MCP contracts.
 
 ### Milestone 5 — Deployment and operations
 
@@ -440,3 +491,28 @@ provider-neutral contracts informed by evidence from that manual workflow.
 **Milestone exit:** Repeated workflow cycles produce governed skill improvements and evaluation
 cases, qualified models can be swapped by task shape, and every change remains reproducible,
 reviewable, and reversible.
+
+### Milestone 7 — Native macOS client
+
+- **Goal:** Give the founder a durable native work surface for monitoring and interacting with the
+  same local Product Studio workflows proven in the web UI.
+- **Primary scope:** A native macOS presentation client for Kanban, Updates, Needs You, Activity,
+  and the Run Console; native notifications, windows, menu-bar status, and keyboard integration
+  where they add real value; and secure connection to the local service. The native client uses
+  the same versioned command, query, semantic-event, acknowledgment, capability, and evidence
+  contracts as the web client.
+- **Boundary:** Do not port the controller, transition rules, policy enforcement, orchestration,
+  durable workspace readers/writers, or completion logic into the client. SwiftUI versus a native
+  shell around the proven web surface remains an implementation decision until web dogfooding
+  establishes the interaction and packaging requirements.
+- **Continuity:** Closing any UI leaves the headless local service and its owned attempts running.
+  Web and native clients can reconnect from the authoritative snapshot and cursor without
+  disagreeing about selected work, seen/acknowledged updates, pending input, or terminal state.
+- **Dependencies:** 4.1 and the local service boundary from 4.3. Temporal, OPA, and Herdr are not
+  prerequisites unless their individual proof gates have already been met by a real use case.
+- **Completion signal:** The same live governed attempt can be inspected and acted on from web and
+  macOS without duplicate commands, divergent state, lost event position, or client-owned workflow
+  logic; a client restart does not interrupt the attempt.
+
+**Milestone exit:** Product Studio has a native macOS work surface while retaining one local
+controller, one durable truth, and one provider-neutral client contract.
