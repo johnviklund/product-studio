@@ -185,10 +185,7 @@ export function KanbanBoard() {
   const [transitionMessage, setTransitionMessage] =
     useState<TransitionMessage | null>(null);
   const [panel, setPanel] = useState<PanelState>(null);
-  const [projectsMenuOpen, setProjectsMenuOpen] = useState(false);
   const boardViewportRef = useRef<HTMLDivElement>(null);
-  const projectsMenuRef = useRef<HTMLDetailsElement>(null);
-  const projectsSummaryRef = useRef<HTMLElement>(null);
   const restoredScrollRef = useRef(false);
   const linkedItemHandledRef = useRef(false);
   const scrollPositionRef = useRef(view.scroll);
@@ -314,55 +311,6 @@ export function KanbanBoard() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [openCapturePanel]);
-
-  // Close Projects menu on click outside, Escape key, or board scroll
-  useEffect(() => {
-    if (!projectsMenuOpen) {
-      return;
-    }
-
-    function closeMenu() {
-      if (projectsMenuRef.current) {
-        projectsMenuRef.current.open = false;
-      }
-      setProjectsMenuOpen(false);
-    }
-
-    function handleClickOutside(event: MouseEvent) {
-      const menu = projectsMenuRef.current;
-      if (!menu || !(event.target instanceof Node)) {
-        return;
-      }
-      if (!menu.contains(event.target)) {
-        closeMenu();
-      }
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !event.defaultPrevented) {
-        event.preventDefault();
-        closeMenu();
-        projectsSummaryRef.current?.focus();
-      }
-    }
-
-    function handleScroll() {
-      closeMenu();
-    }
-
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleKeyDown);
-    boardViewportRef.current?.addEventListener("scroll", handleScroll, {
-      passive: true,
-    });
-
-    const viewport = boardViewportRef.current;
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleKeyDown);
-      viewport?.removeEventListener("scroll", handleScroll);
-    };
-  }, [projectsMenuOpen]);
 
   useEffect(() => {
     if (!viewReady) {
@@ -639,17 +587,8 @@ export function KanbanBoard() {
           </button>
 
           <div className="flex items-center gap-2">
-            <details
-              ref={projectsMenuRef}
-              className="group relative"
-              onToggle={(event) =>
-                setProjectsMenuOpen(event.currentTarget.open)
-              }
-            >
-              <summary
-                ref={projectsSummaryRef}
-                className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
-              >
+            <details className="group relative">
+              <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
                 <SlidersHorizontal className="size-4" strokeWidth={1.75} />
                 Projects
               </summary>
