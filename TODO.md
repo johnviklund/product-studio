@@ -106,6 +106,41 @@ delivery phases.
 - **Boundary:** Do not weaken `validateGitProof`'s scope, ancestry, HEAD-equality, or clean-worktree
   checks — the fix is *which base is compared*, not relaxing the proof.
 
+### Make a failed import recoverable when its controller run never applied
+
+- **Status:** Proposed — defect, wedges the item permanently. Found 2026-08-09 on `wi_b9b852f6`.
+- **Idea:** An import that publishes failure evidence and then loses its controller run leaves the
+  item unrecoverable. Here the import ran the authoritative checks, published immutable evidence with
+  `outcome: failed`, but retained its lease before applying the state transition. Repairing the lease
+  clears the lock and records no manifest, so the evidence now names a controller run with no applied
+  manifest. `retryExecuteAttempt` refuses with "Deterministic-verification repair evidence does not
+  bind its applied controller run", and re-importing refuses with "immutable import evidence differs
+  from the published snapshot" because the evidence is already published. There is no third option:
+  the item sits in `execute` / `blocked` with no legal move.
+- **Purpose:** Every guard here is individually correct — immutable evidence, bound manifests,
+  fail-closed repair. Together they leave no exit, which turns a transient infrastructure hiccup
+  (two `next build` processes colliding) into a permanently dead work item.
+- **Definition of done:** Lease repair either completes or explicitly voids the controller run it
+  releases, so published evidence never dangles; and a blocked item whose evidence cannot bind an
+  applied manifest still exposes one legal, evidenced recovery.
+- **Boundary:** Do not make evidence mutable and do not let repair invent an applied manifest. The
+  fix is to close the gap between publishing evidence and applying the transition.
+
+### Run authoritative verification without colliding with the founder's dev server
+
+- **Status:** Proposed — defect, fails a correct result. Found 2026-08-09 on `wi_b9b852f6`.
+- **Idea:** The import's required `Build` command failed with "Another next build process is already
+  running" while Lint, Typecheck, and Test all passed. The same build succeeded standalone moments
+  later. Verification runs `next build` against the shared build directory, so it collides with the
+  founder's running dev server or with a concurrent import, and a correct result is recorded as an
+  immutable failure that cannot be retried away.
+- **Purpose:** Authoritative verification decides whether work is accepted. It must not be able to
+  fail for a reason that has nothing to do with the work.
+- **Definition of done:** Verification runs builds in an isolated build directory or serializes them
+  behind a lease, and a spawn-level collision is distinguishable from a genuine build failure.
+- **Boundary:** Do not drop `Build` from required verification, and do not treat a failed build as
+  advisory; isolate the run instead.
+
 ### Report an unnormalizable permission request as a failure the founder can act on
 
 - **Status:** Partly delivered — the phantom success is closed (commit below); the recovery path is
