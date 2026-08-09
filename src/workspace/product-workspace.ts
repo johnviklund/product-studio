@@ -7229,14 +7229,19 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     );
     if (
       JSON.stringify(existingMission) !== JSON.stringify(mission) ||
-      existingMissionSource !== missionSource ||
-      existingTaskSource !== taskSource
+      existingMissionSource !== missionSource
     ) {
       throw this.invalid(
         missionDirectory,
         "immutable shaping snapshot differs from the compiled package",
       );
     }
+    await this.rederiveTaskMd(
+      missionDirectory,
+      taskPath,
+      existingTaskSource,
+      taskSource,
+    );
   }
 
   private async readShapingPackageSnapshot(
@@ -7925,13 +7930,60 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     );
     if (
       JSON.stringify(existingMission) !== JSON.stringify(mission) ||
-      existingMissionSource !== missionSource ||
-      existingTaskSource !== taskSource
+      existingMissionSource !== missionSource
     ) {
       throw this.invalid(
         missionDirectory,
         "immutable mission snapshot differs from the compiled package",
       );
+    }
+    await this.rederiveTaskMd(
+      missionDirectory,
+      taskPath,
+      existingTaskSource,
+      taskSource,
+    );
+  }
+
+  /**
+   * TASK.md is a pure rendering of mission.json, so a difference there is
+   * staleness after a guidance-text change, never tampering: the governed
+   * contract is mission.json, which is compared byte-for-byte above. Re-deriving
+   * the stale file restores the invariant that the agent reads exactly what the
+   * verified mission says. Failing instead would permanently strand every
+   * mission compiled before the renderer changed.
+   */
+  private async rederiveTaskMd(
+    missionDirectory: string,
+    taskPath: string,
+    existingTaskSource: string,
+    taskSource: string,
+  ): Promise<void> {
+    if (existingTaskSource === taskSource) {
+      return;
+    }
+    const temporaryTaskPath = join(
+      missionDirectory,
+      `.${TASK_MD_FILE}.${randomUUID()}.tmp`,
+    );
+    try {
+      await writeFile(temporaryTaskPath, taskSource, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await rename(temporaryTaskPath, taskPath);
+    } catch (error) {
+      try {
+        await unlink(temporaryTaskPath);
+      } catch (cleanupError) {
+        if (!isNodeError(cleanupError) || cleanupError.code !== "ENOENT") {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Stale TASK.md re-derivation failed and cleanup was incomplete",
+          );
+        }
+      }
+      throw error;
     }
   }
 

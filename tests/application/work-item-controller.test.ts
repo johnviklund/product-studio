@@ -6304,9 +6304,16 @@ describe("WorkItemController", () => {
     if (predicted === undefined) {
       throw new Error("Expected the predicted Spec mission.");
     }
+    const predictedMissionPath = join(
+      repository.workspaceRoot,
+      dirname(predicted.task_path),
+      "mission.json",
+    );
     await writeFile(
-      join(repository.workspaceRoot, predicted.task_path),
-      "corrupted predicted mission\n",
+      predictedMissionPath,
+      JSON.stringify(
+        JSON.parse(await readFile(predictedMissionPath, "utf8")),
+      ),
       "utf8",
     );
 

@@ -3797,7 +3797,7 @@ describe("ProductWorkspace", () => {
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
   });
 
-  it("reads a pre-guidance v6 TASK byte-for-byte and still rejects tampering", async () => {
+  it("reads a pre-guidance v6 TASK byte-for-byte and repairs tampering to its own version", async () => {
     const root = await createWorkspace();
     const item = await writeMissionReadyWorkItem(root, firstId);
     const workspace = missionWorkspace(root);
@@ -3838,9 +3838,12 @@ describe("ProductWorkspace", () => {
       `${historicalTaskSource}tampered\n`,
       "utf8",
     );
-    await expect(workspace.readMissionPackage(identity)).rejects.toMatchObject({
-      kind: "invalid_workspace",
-    });
+    const repaired = await workspace.readMissionPackage(identity);
+    expect(repaired.mission.mission_schema_version).toBe(6);
+    expect(await readFile(artifact.task_path, "utf8")).toBe(
+      historicalTaskSource,
+    );
+    expect(await readFile(artifact.mission_path, "utf8")).toBe(missionSource);
   });
 
   it("reads historical v3 execute/review artifacts without rewriting their bytes", async () => {
@@ -4922,13 +4925,52 @@ describe("ProductWorkspace", () => {
       (paths) =>
         compileMission(divergentItem, appliedExecuteManifest(), paths),
     );
-    await writeFile(first.task_path, "Divergent task\n", "utf8");
+    const publishedMissionSource = await readFile(first.mission_path, "utf8");
+    await writeFile(
+      first.mission_path,
+      JSON.stringify(JSON.parse(publishedMissionSource)),
+      "utf8",
+    );
     await expect(
       divergentWorkspace.writeMissionPackage(missionIdentity(), (paths) =>
         compileMission(divergentItem, appliedExecuteManifest(), paths),
       ),
     ).rejects.toMatchObject({ kind: "invalid_workspace" });
-    expect(await readFile(first.task_path, "utf8")).toBe("Divergent task\n");
+  });
+
+  it("re-derives a stale TASK.md instead of stranding the governed mission", async () => {
+    const root = await createWorkspace();
+    const item = await writeMissionReadyWorkItem(root, firstId);
+    const workspace = missionWorkspace(root);
+    const published = await workspace.writeMissionPackage(
+      missionIdentity(),
+      (paths) => compileMission(item, appliedExecuteManifest(), paths),
+    );
+    const renderedTask = await readFile(published.task_path, "utf8");
+    const publishedMissionSource = await readFile(
+      published.mission_path,
+      "utf8",
+    );
+    await writeFile(published.task_path, "Stale guidance\n", "utf8");
+
+    const republished = await workspace.writeMissionPackage(
+      missionIdentity(),
+      (paths) => compileMission(item, appliedExecuteManifest(), paths),
+    );
+
+    expect(republished.task_path).toBe(published.task_path);
+    expect(await readFile(published.task_path, "utf8")).toBe(renderedTask);
+    expect(await readFile(published.mission_path, "utf8")).toBe(
+      publishedMissionSource,
+    );
+    expect(await readdir(dirname(published.task_path))).toEqual(
+      expect.arrayContaining(["TASK.md", "mission.json"]),
+    );
+    expect(
+      (await readdir(dirname(published.task_path))).filter((entry) =>
+        entry.includes(".tmp"),
+      ),
+    ).toEqual([]);
   });
 
   it("rejects a symlinked missions directory without writing outside", async () => {
