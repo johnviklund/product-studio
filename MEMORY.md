@@ -15,6 +15,30 @@ idea backlog.
 
 ## Learnings
 
+### 2026-08-09 — Test-vacuity risk: extracted helpers and shared-`kind` error guards mask what a regression test actually proves
+
+- **Scope:** Any regression test written for `src/workspace/product-workspace.ts` (which has
+  multiple internal guards that can raise the same `WorkspaceError` `kind`, e.g. two separate
+  identity checks both raising `invalid_workspace`) or for a fix that ships as an extracted
+  helper called from `detail-panel.tsx` or similar UI orchestration.
+- **Evidence:** ROADMAP 3.4 Slice 3, Cycle 4 close-out review (`2d5b816..2c5dd19`) found two
+  independent instances in the same delta. First, `tests/workspace-contract.test.ts`'s coarse
+  `rejects.toMatchObject({ kind: "invalid_workspace" })` assertions passed even with the guard
+  under test fully removed, because a *different* guard at the read-back path
+  (`product-workspace.ts:6342`) raises the same `kind` — only pinning the guard's own exact
+  message (`rejects.toThrow("import evidence identity does not match...")`) closed the gap.
+  Second, extracting the Review-import evidence-refresh fix into a helper and testing the helper
+  in isolation left the actual `detail-panel.tsx` call site unguarded: reverting just that one
+  call site reintroduced the original stale-UI defect with the full suite green (804/804).
+  Golden cases for the reviewer seat: `evals/reviewer/2026-08-09-bidirectional-mutation-proves-regression-test-non-vacuous.md`
+  and `evals/reviewer/2026-08-09-isolating-load-bearing-half-of-a-two-part-fix.md`.
+- **Guidance:** When writing a regression test against a guard in `product-workspace.ts`, assert
+  the guard's own specific error message, not just its `kind` — check first whether another guard
+  in the file can raise the same `kind`. When a fix lands as "extract into a helper + test the
+  helper," add or update a test that exercises the actual call site too (mutate the call site
+  itself when reviewing to confirm this), not only the extracted unit.
+- **Supersession:** active.
+
 ### 2026-07-26 — ACP's `requestPermission` callback does not gate every workspace mutation; normalize and evaluate per canonical operation
 
 - **Scope:** Any local/CLI agent adapter reached over ACP (verified against Copilot CLI 1.0.75,
