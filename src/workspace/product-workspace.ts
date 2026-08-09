@@ -22,7 +22,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual, promisify, TextDecoder } from "node:util";
 
 import { parse, stringify } from "yaml";
@@ -232,6 +232,7 @@ const DECISION_JSON_FILE = "decision.json";
 const INSTRUCTION_JSON_FILE = "instruction.json";
 const VERIFICATION_JSON_FILE = "verification.json";
 const CONTROLLER_LOCK_FILE = ".controller.lock";
+const VERIFICATION_LOCK_FILE = ".verification.lock";
 const execFileAsync = promisify(execFile);
 const COMMAND_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const UUID_PATTERN =
@@ -691,6 +692,8 @@ interface NodeVerificationRunnerOptions {
   killGraceMs?: number;
   drainGraceMs?: number;
   now?: () => Date;
+  exclusiveWaitMs?: number;
+  exclusivePollMs?: number;
 }
 
 export class NodeVerificationRunner implements VerificationRunner {
@@ -698,6 +701,8 @@ export class NodeVerificationRunner implements VerificationRunner {
   private readonly killGraceMs: number;
   private readonly drainGraceMs: number;
   private readonly now: () => Date;
+  private readonly exclusiveWaitMs: number;
+  private readonly exclusivePollMs: number;
 
   constructor(
     private readonly workspaceRoot: string,
@@ -707,6 +712,8 @@ export class NodeVerificationRunner implements VerificationRunner {
     this.killGraceMs = options.killGraceMs ?? 5_000;
     this.drainGraceMs = options.drainGraceMs ?? 1_000;
     this.now = options.now ?? (() => new Date());
+    this.exclusiveWaitMs = options.exclusiveWaitMs ?? 900_000;
+    this.exclusivePollMs = options.exclusivePollMs ?? 250;
   }
 
   private killGroup(
@@ -735,6 +742,79 @@ export class NodeVerificationRunner implements VerificationRunner {
 
   async run(command: VerificationCommand): Promise<CommandEvidenceRecord> {
     const validated = verificationCommandSchema.parse(command);
+    const release = await this.acquireExclusiveVerification(validated);
+    if (release === null) {
+      const startedAt = this.now().toISOString();
+      return commandEvidenceRecordSchema.parse({
+        name: validated.name,
+        argv: validated.argv,
+        started_at: startedAt,
+        completed_at: this.now().toISOString(),
+        duration_ms: 0,
+        status: "spawn_error",
+        exit_code: null,
+        signal: null,
+        stdout: "",
+        stderr:
+          "Another authoritative verification is running in this workspace; verification was not started.",
+        output_truncated: false,
+      });
+    }
+    try {
+      return await this.spawnVerification(validated);
+    } finally {
+      await release();
+    }
+  }
+
+  private async acquireExclusiveVerification(
+    command: VerificationCommand,
+  ): Promise<(() => Promise<void>) | null> {
+    const lockPath = join(
+      this.workspaceRoot,
+      FOUNDER_DIRECTORY,
+      VERIFICATION_LOCK_FILE,
+    );
+    const deadline = Date.now() + this.exclusiveWaitMs;
+    for (;;) {
+      try {
+        await mkdir(dirname(lockPath), { recursive: true });
+        const handle = await open(lockPath, "wx");
+        try {
+          await handle.writeFile(
+            `${JSON.stringify({
+              name: command.name,
+              acquired_at: this.now().toISOString(),
+            })}\n`,
+            "utf8",
+          );
+        } finally {
+          await handle.close();
+        }
+        return async () => {
+          try {
+            await rm(lockPath, { force: true });
+          } catch {
+            // A lost lock file must not mask the verification record.
+          }
+        };
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "EEXIST") {
+          throw error;
+        }
+      }
+      if (Date.now() >= deadline) {
+        return null;
+      }
+      await new Promise((resolveWait) =>
+        setTimeout(resolveWait, this.exclusivePollMs),
+      );
+    }
+  }
+
+  private async spawnVerification(
+    validated: VerificationCommand,
+  ): Promise<CommandEvidenceRecord> {
     const startedAt = this.now().toISOString();
     const startedMs = Date.now();
     const stdoutChunks: Buffer[] = [];

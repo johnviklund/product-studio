@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -158,5 +158,49 @@ describe("Node verification runner", () => {
       expect(result.status).toBe("timed_out");
       expect(Date.now() - startedMs).toBeLessThan(maximumDurationMs);
     }
+  });
+
+  it("serialises concurrent authoritative verification in one workspace and refuses when the wait expires", async () => {
+    const root = await createRoot("product-studio-command-exclusive-");
+    const tracePath = join(root, "trace.log");
+    const runner = new NodeVerificationRunner(root, { exclusivePollMs: 5 });
+    const command = (name: string): VerificationCommand => ({
+      name,
+      argv: [
+        process.execPath,
+        "-e",
+        [
+          'const { appendFileSync } = require("node:fs")',
+          `appendFileSync(${JSON.stringify(tracePath)}, "${name}-start\\n")`,
+          `setTimeout(() => appendFileSync(${JSON.stringify(tracePath)}, "${name}-end\\n"), 150)`,
+        ].join(";"),
+      ],
+      timeout_seconds: 5,
+    });
+
+    const [first, second] = await Promise.all([
+      runner.run(command("A")),
+      runner.run(command("B")),
+    ]);
+
+    expect(first.status).toBe("passed");
+    expect(second.status).toBe("passed");
+    const trace = (await readFile(tracePath, "utf8")).trim().split("\n");
+    expect(trace).toHaveLength(4);
+    expect(trace[0].slice(0, 1)).toBe(trace[1].slice(0, 1));
+    expect(trace[2].slice(0, 1)).toBe(trace[3].slice(0, 1));
+    expect(trace[0].slice(0, 1)).not.toBe(trace[2].slice(0, 1));
+
+    await mkdir(join(root, ".founder"), { recursive: true });
+    await writeFile(join(root, ".founder", ".verification.lock"), "{}\n", "utf8");
+    const blocked = new NodeVerificationRunner(root, { exclusiveWaitMs: 0 });
+    const refused = await blocked.run({
+      name: "Blocked",
+      argv: [process.execPath, "-e", "process.exit(0)"],
+      timeout_seconds: 5,
+    });
+
+    expect(refused).toMatchObject({ status: "spawn_error", exit_code: null });
+    expect(refused.stderr).toContain("Another authoritative verification");
   });
 });

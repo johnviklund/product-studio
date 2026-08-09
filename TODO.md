@@ -128,11 +128,13 @@ delivery phases.
 
 ### Run authoritative verification without colliding with the founder's dev server
 
-- **Status:** Proposed — defect, fails a correct result. Found 2026-08-09 on `wi_b9b852f6`.
+- **Status:** Delivered — `NodeVerificationRunner` now holds an exclusive per-workspace lease around
+  every required command, so two imports can never run `next build` at the same time. Found
+  2026-08-09 on `wi_b9b852f6`.
 - **Idea:** The import's required `Build` command failed with "Another next build process is already
   running" while Lint, Typecheck, and Test all passed. The same build succeeded standalone moments
-  later. Verification runs `next build` against the shared build directory, so it collides with the
-  founder's running dev server or with a concurrent import, and a correct result is recorded as an
+  later. Verification ran `next build` against the shared build directory with no mutual exclusion,
+  so a second concurrent import collided with the first, and a correct result was recorded as an
   immutable failure that cannot be retried away.
 - **Purpose:** Authoritative verification decides whether work is accepted. It must not be able to
   fail for a reason that has nothing to do with the work.
@@ -140,6 +142,11 @@ delivery phases.
   behind a lease, and a spawn-level collision is distinguishable from a genuine build failure.
 - **Boundary:** Do not drop `Build` from required verification, and do not treat a failed build as
   advisory; isolate the run instead.
+- **Delivered:** Each `run` acquires `.founder/.verification.lock` with an exclusive create before
+  spawning and releases it afterwards, waiting up to 15 minutes for a peer to finish. A run that
+  cannot acquire the lease records `spawn_error` — never `failed` — so a collision stays
+  distinguishable from a genuine build failure. `next build` was separately confirmed not to
+  conflict with a running dev server, so isolation only had to cover concurrent verification.
 
 ### Report an unnormalizable permission request as a failure the founder can act on
 
