@@ -81,8 +81,13 @@ delivery phases.
 
 ### Freeze the mission Git base so a committed-then-failed attempt can still validate
 
-- **Status:** Proposed — defect, deadlocks execute. Found 2026-08-09 on `wi_b9b852f6`.
-- **Idea:** `compileMission` captures `source_revision.git_base_commit` from current `HEAD` every
+- **Status:** Delivered — commits `325ca57`, `1364584`. `writeMissionPackage` now anchors
+  `source_revision.git_base_commit` to attempt 0 of the governed tuple instead of re-reading `HEAD`
+  at every compile; only attempt 0 reads `HEAD`, which stays correct because a scope correction
+  resets the attempt and legitimately re-bases. Anchoring on the *first* attempt rather than the
+  previous one also heals a chain a pre-fix attempt already poisoned. `validateGitProof` was not
+  weakened. Regression test: "freezes the mission Git base across attempts in one governed tuple".
+- **Idea:** `compileMission` captured `source_revision.git_base_commit` from current `HEAD` every
   time it compiles, and a fresh attempt recompiles. So when an attempt commits its work and *then*
   dies for an unrelated reason (here: attempt 5 committed `718b7ff`, then terminated on a denied
   `git log --oneline -10`), the next attempt's mission is compiled with that commit as its base.
@@ -100,6 +105,29 @@ delivery phases.
   and a blocked item carries a recovery that can actually succeed.
 - **Boundary:** Do not weaken `validateGitProof`'s scope, ancestry, HEAD-equality, or clean-worktree
   checks — the fix is *which base is compared*, not relaxing the proof.
+
+### Stop requiring a work item to be the sole author of history since its Git base
+
+- **Status:** Proposed — defect, blocks recovery. Found 2026-08-09 on `wi_b9b852f6`.
+- **Idea:** `validateGitProof` requires HEAD to equal the result commit and then walks every file in
+  `git_base_commit..HEAD`, rejecting any path outside the item's `allowed_scope` and requiring the
+  diff to match the agent's reported `changed_files` exactly. That is only sound if nothing else
+  commits to the branch between the item's base and its result. In practice the founder does commit
+  — while an item is blocked, they are usually committing the very fix that unblocks it. Here the
+  two commits repairing the frozen-base defect (`src/workspace/`, `tests/`) landed on top of the
+  agent's `718b7ff`, so the correctly-based item then failed for a *new* reason: "Changed path is
+  outside allowed_scope." Every unrelated commit permanently invalidates every open item beneath it.
+- **Purpose:** An item's proof should be about the item's own change, not about the branch staying
+  frozen for its whole lifetime. Today the only escapes are widening `allowed_scope` until it lies,
+  or reverting and re-running work that was already correct — both of which cost a full approval
+  loop and neither of which is discoverable.
+- **Definition of done:** The proof is evaluated against the item's own contribution — e.g. the
+  commit range the attempt actually authored, or a three-dot/merge-base comparison, or the tree diff
+  restricted to the attempt's commits — so that unrelated commits landing on the branch neither
+  invalidate a valid result nor let out-of-scope changes pass unnoticed.
+- **Boundary:** Do not solve this by widening scope or by trusting the agent's self-reported file
+  list; the point is to compare the right range, not to check less. Interaction with the frozen base
+  above is deliberate — both concern *which revisions are compared*, not the strictness of the proof.
 
 ### Connected model configuration settings page
 
