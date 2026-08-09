@@ -40,6 +40,12 @@ tooling exists in this baseline yet.
 ## Execution and review
 
 - Keep writers and reviewers independent where configured. Reviewers are read-only.
+- Every connected seat must narrow its tool grant to the write policy that will judge it, at the
+  point the runtime profile is built — never rely on the permission evaluator to deny a tool the
+  seat should not have been offered. A denial is terminal: a forbidden call ends the run as
+  `missing_permission`, so an over-broad grant is a latent, model-dependent run failure that a
+  green test suite and one well-behaved model will not reveal. Shared runtime-profile config is
+  the union across seats; each runtime is responsible for the intersection with its own policy.
 - Run required deterministic verification before accepting a result as review-ready.
 - An agent cannot override a required red check, self-authorize completion, or set an item
   to `completed`; the controller and authorized human or policy gate decide progression.

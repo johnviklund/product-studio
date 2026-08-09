@@ -15,6 +15,45 @@ idea backlog.
 
 ## Learnings
 
+### 2026-08-09 — A connected seat's tool grant must be narrowed at profile-build time; a terminal denial is not a safety net
+
+- **Scope:** `CopilotConnectedShapingRuntime` (`src/application/shaping-connected-run.ts`),
+  `createCopilotReviewRuntimeProfile` / `narrowCopilotShapingTools`
+  (`src/infrastructure/acp/copilot-runtime-profile.ts`), and any future connected seat built from
+  the shared `PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON` profile.
+- **Evidence:** `prepare()` spread the shared profile's `available_tools` through unchanged, so the
+  CLI offered `bash` to a shaping session whose `single_ingress_file` policy sets
+  `commands: forbidden`. Spec run `42e0bbd4-29c2-4b0c-a92f-ed92860705c6` (`claude-opus-4.5`)
+  emitted `tool_kind: "execute"`, `evaluateShapingPermissionRequest` returned
+  `request_kind_forbidden`, and the run died `missing_permission` — while brainstorm run
+  `0482460f` (`claude-sonnet-4.5`) completed against the identical profile. The review runtime had
+  narrowed its own grant since 2026-07-26; only shaping had not. Fixed by `narrowCopilotShapingTools()`
+  applied in `prepare()` so both profile constructions inherit it; regression test in
+  `tests/application/shaping-connected-run.test.ts` proved non-vacuous by stashing the fix.
+- **Guidance:** See `AGENTS.md` § Execution and review for the rule. The trap specific to this repo:
+  one shared env profile is the *union* of every seat's needs (Execute requires `bash`, shaping
+  requires `view`/`apply_patch`), so a seat that does not intersect it with its own policy is
+  silently over-granted, and the resulting failure is model-dependent — a full green suite and one
+  well-behaved model prove nothing.
+- **Supersession:** active.
+
+### 2026-08-09 — Open gap: the connected runtime profile's declared version and auth are trusted, not preflighted
+
+- **Scope:** `PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON` consumers —
+  `copilotRuntimeProfileSchema` (`src/application/portfolio-service.ts`) and
+  `createCopilotRuntimeProfile` (`src/infrastructure/acp/copilot-runtime-profile.ts`).
+- **Evidence:** `preflightCopilotExecutable()` is exported and covered by
+  `tests/infrastructure/acp/copilot-runtime-profile.test.ts`, but no application path calls it —
+  only the tests do. `createCopilotRuntimeProfile` runs `requireSafeIdentifier` on
+  `preflight.version` (format only) and accepts `preflight.authentication` as declared, then
+  records the declared version as `adapter_version` in run provenance marked
+  `adapter_attested`.
+- **Guidance:** Treat the profile's `version`/`authentication` as operator-declared, not attested,
+  when reasoning about run evidence; keep them hand-synced with `copilot --version`. Closing this
+  means calling the existing preflight helper at service construction — a natural companion to the
+  durable-config work already tracked in `TODO.md` ("Connected model configuration settings page").
+- **Supersession:** active.
+
 ### 2026-08-09 — Test-vacuity risk: extracted helpers and shared-`kind` error guards mask what a regression test actually proves
 
 - **Scope:** Any regression test written for `src/workspace/product-workspace.ts` (which has
