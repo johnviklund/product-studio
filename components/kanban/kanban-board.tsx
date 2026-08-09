@@ -196,6 +196,7 @@ export function KanbanBoard() {
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor),
   );
+  const projectsMenuRef = useRef<HTMLDetailsElement>(null);
 
   const openCapturePanel = useCallback(() => {
     setPanel((current) => current ?? { kind: "capture" });
@@ -335,6 +336,51 @@ export function KanbanBoard() {
     });
     restoredScrollRef.current = true;
   }, [loading, view.scroll.x, view.scroll.y, viewReady]);
+
+  // Close Projects menu on click outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        projectsMenuRef.current &&
+        projectsMenuRef.current.open &&
+        !projectsMenuRef.current.contains(event.target as Node)
+      ) {
+        projectsMenuRef.current.open = false;
+      }
+    }
+
+    function handleScroll() {
+      if (projectsMenuRef.current && projectsMenuRef.current.open) {
+        projectsMenuRef.current.open = false;
+      }
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    boardViewportRef.current?.addEventListener("scroll", handleScroll);
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      boardViewportRef.current?.removeEventListener("scroll", handleScroll);
+    };
+  }, []);
+
+  // Close Projects menu on Escape key
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (
+        event.key === "Escape" &&
+        projectsMenuRef.current &&
+        projectsMenuRef.current.open
+      ) {
+        event.preventDefault();
+        projectsMenuRef.current.open = false;
+        projectsMenuRef.current.querySelector("summary")?.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const visibleItems = useMemo(
     () => items.filter((item) => isBoardSourceVisible(item, view)),
@@ -587,7 +633,7 @@ export function KanbanBoard() {
           </button>
 
           <div className="flex items-center gap-2">
-            <details className="group relative">
+            <details className="group relative" ref={projectsMenuRef}>
               <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border bg-secondary px-3 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
                 <SlidersHorizontal className="size-4" strokeWidth={1.75} />
                 Projects
