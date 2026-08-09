@@ -53,7 +53,7 @@ const reviewSubmission: ExecuteReviewExternalResultSubmission = {
   execute_mission_content_sha256: executeSubmission.mission_content_sha256,
   execute_result_content_sha256: "d".repeat(64),
   git_base_commit: "e".repeat(40),
-  accepted_result_commit: executeSubmission.commit,
+  accepted_result_commit: executeSubmission.commit ?? "f".repeat(40),
   summary: "One acceptance criterion is not satisfied.",
   verdict: "findings",
   findings: [

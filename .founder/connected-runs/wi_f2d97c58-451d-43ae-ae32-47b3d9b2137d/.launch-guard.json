@@ -1,27 +1,27 @@
 {
   "schema_version": 1,
   "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
-  "connected_run_id": "16acfc10-1670-4f29-8e27-ca304ee1705a",
-  "launch_fingerprint": "74189ef7a8fa50fff32458a0c3a01b8f796dbcb8ef31f171df52a4d4d35d6902",
+  "connected_run_id": "86ca1682-81a8-44d4-9292-ddad8d820339",
+  "launch_fingerprint": "c2224a8d045bf03c1ac3230324a6a309fc9675a7bab43ca4813832912127a29a",
   "record": {
     "schema_version": 2,
-    "connected_run_id": "16acfc10-1670-4f29-8e27-ca304ee1705a",
+    "connected_run_id": "86ca1682-81a8-44d4-9292-ddad8d820339",
     "mission": {
       "identity": {
         "phase": "execute",
         "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
         "goal_version": 1,
         "input_revision": 1,
-        "attempt": 0
+        "attempt": 4
       },
-      "path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/mission.json",
-      "content_sha256": "68eba59a683b626e955d19a58eec42f7e2f7d78291453357fb269c146bb37a2d",
+      "path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-4/mission.json",
+      "content_sha256": "6a64b4e8014ab7ed4b71bdee922acc2ef7e5a6cd3308ad4ab0792495dc8ddc14",
       "source_commit": "4133c875769f85e69492e57986c122937fbe040b"
     },
     "governed_tuple": {
       "goal_version": 1,
       "input_revision": 1,
-      "attempt": 0,
+      "attempt": 4,
       "patch_cycle": 0
     },
     "provenance": {
@@ -71,7 +71,7 @@
         "assurance": "unknown"
       },
       "authorization_sha256": {
-        "value": "0bd39672ed8db869dd72de713a2b2522fe527cb367afb31aea2242226abe2ed0",
+        "value": "06e0a41172a59e0ca9d7787e34bce0051f8bb703586dc311b290e8868d1d9495",
         "assurance": "controller_observed"
       }
     },
@@ -87,13 +87,44 @@
         "runtime": {
           "containment_assurance": "not_independently_enforced",
           "machine_authority": "launching_user",
-          "approved_command_forms": [],
+          "approved_command_forms": [
+            {
+              "executable": "git",
+              "args": [
+                "log",
+                "--oneline",
+                "--all",
+                "-20"
+              ]
+            },
+            {
+              "executable": "ls",
+              "args": [
+                "-la",
+                "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/"
+              ]
+            },
+            {
+              "executable": "ls",
+              "args": [
+                "-la",
+                "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-2/"
+              ]
+            },
+            {
+              "executable": "wc",
+              "args": [
+                "-l",
+                "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/tests/detail-panel.test.tsx"
+              ]
+            }
+          ],
           "approved_url_operations": [],
           "mcp": "forbidden",
           "credentials": "forbidden"
         }
       },
-      "envelope_sha256": "6a76c2333962734555a1843aac3e289ce55379b1340c435a9dcfbe0cca428569"
+      "envelope_sha256": "5c628e07ee7334272881a0c1d2d9afbd5b9f01627e7196c511844a7f5a9e7bf3"
     },
     "acp": {
       "protocol_version": {
@@ -107,8 +138,8 @@
     },
     "lifecycle": {
       "status": "starting",
-      "started_at": "2026-08-09T18:12:55.953Z",
-      "updated_at": "2026-08-09T18:12:55.953Z",
+      "started_at": "2026-08-09T19:32:10.539Z",
+      "updated_at": "2026-08-09T19:32:10.539Z",
       "completed_at": null,
       "terminal": null
     },
@@ -126,5 +157,5 @@
       "truncated": false
     }
   },
-  "created_at": "2026-08-09T18:12:56.016Z"
+  "created_at": "2026-08-09T19:32:10.654Z"
 }

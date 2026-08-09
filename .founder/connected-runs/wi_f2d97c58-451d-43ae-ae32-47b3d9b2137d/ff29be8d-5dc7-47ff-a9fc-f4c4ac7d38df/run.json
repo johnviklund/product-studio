@@ -1,0 +1,146 @@
+{
+  "schema_version": 2,
+  "connected_run_id": "ff29be8d-5dc7-47ff-a9fc-f4c4ac7d38df",
+  "mission": {
+    "identity": {
+      "phase": "execute",
+      "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+      "goal_version": 1,
+      "input_revision": 1,
+      "attempt": 2
+    },
+    "path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-2/mission.json",
+    "content_sha256": "b09c0701a85acd0eda25e6a2555538bd611b88f7dc42ec68b78490fd818a038d",
+    "source_commit": "4133c875769f85e69492e57986c122937fbe040b"
+  },
+  "governed_tuple": {
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 2,
+    "patch_cycle": 0
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "executor",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "claude-sonnet-4.5",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "claude-sonnet-4.5",
+      "deployment_id": null,
+      "observed_event_sha256": "13b91effdeecd48672aa4f7e94fc151a072d739a24e1a02ff6960bf1ab388cb7"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "de66538eae54aa29f757540b16644d971ed78107cf1957c531a93abb396a701e",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    },
+    "authorization_sha256": {
+      "value": "1d497bb3340a84e4fc73f6262222a065f8bc4f5a3a9b09f3fa9ced30d0d7e0e1",
+      "assurance": "controller_observed"
+    }
+  },
+  "authorization": {
+    "kind": "capability_envelope",
+    "envelope": {
+      "schema_version": 1,
+      "workspace": {
+        "allowed_scope_digest": "dc03f47661422bb0b33922ac46bafaae8080cb7ea68a100f8cebdda3f2276802",
+        "execution_mode": "permission_mediated_local",
+        "scope_assurance": "result_scope_validation"
+      },
+      "runtime": {
+        "containment_assurance": "not_independently_enforced",
+        "machine_authority": "launching_user",
+        "approved_command_forms": [
+          {
+            "executable": "ls",
+            "args": [
+              "-la",
+              "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/"
+            ]
+          },
+          {
+            "executable": "wc",
+            "args": [
+              "-l",
+              "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/tests/detail-panel.test.tsx"
+            ]
+          }
+        ],
+        "approved_url_operations": [],
+        "mcp": "forbidden",
+        "credentials": "forbidden"
+      }
+    },
+    "envelope_sha256": "74b632ed7709578dcf309ccadc41485c7540d3057e99fc6cff84f55132c0b175"
+  },
+  "acp": {
+    "protocol_version": {
+      "value": 1,
+      "assurance": "adapter_attested"
+    },
+    "session_id": {
+      "value": "12d2d173-db08-4ff2-874b-26c705c79473",
+      "assurance": "adapter_attested"
+    }
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-09T19:15:04.768Z",
+    "updated_at": "2026-08-09T19:16:46.377Z",
+    "completed_at": "2026-08-09T19:16:46.377Z",
+    "terminal": {
+      "outcome": "failed",
+      "partial": true,
+      "reason": "The ACP runtime failed before the governed mission completed."
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 1000,
+    "max_event_bytes": 1000000,
+    "max_output_bytes": 1000000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 93302,
+    "process_group_id": 93302,
+    "started_at": "2026-08-09T19:15:08.145Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

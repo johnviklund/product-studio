@@ -61,7 +61,11 @@ export interface ExecuteExternalResultSubmission {
   result_schema_version: 2;
   mission_content_sha256: string;
   identity: MissionIdentity<"execute">;
-  commit: string;
+  /**
+   * Absent when the agent left its work in the worktree for the controller to
+   * commit. Agents are not required to run Git.
+   */
+  commit?: string;
   summary: string;
   changed_files: string[];
   verification: ReportedVerification[];
@@ -358,7 +362,7 @@ export const executeExternalResultSubmissionSchema: z.ZodType<ExecuteExternalRes
     result_schema_version: z.literal(2),
     mission_content_sha256: sha256Schema,
     identity: executeMissionIdentitySchema,
-    commit: gitCommitSchema,
+    commit: gitCommitSchema.optional(),
     summary: nonEmptyTrimmedStringSchema,
     changed_files: z
       .array(workspaceRelativePosixPathSchema)

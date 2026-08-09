@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "run_id": "b54b6f8c-1c67-54e2-805b-2b50e7a6c595",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:1:1:4",
+  "phase": "execute",
+  "goal_version": 1,
+  "input_revision": 1,
+  "attempt": 4,
+  "started_at": "2026-08-09T19:32:00.827Z",
+  "completed_at": "2026-08-09T19:32:00.952Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "ce17a110d9d6245efbf2463caa308f9725c8c012ddb34368836110a2d17d20b6",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "log",
+            "--oneline",
+            "--all",
+            "-20"
+          ]
+        },
+        {
+          "executable": "ls",
+          "args": [
+            "-la",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/"
+          ]
+        },
+        {
+          "executable": "ls",
+          "args": [
+            "-la",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-2/"
+          ]
+        },
+        {
+          "executable": "wc",
+          "args": [
+            "-l",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/tests/detail-panel.test.tsx"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "2ac080b9648303a62d77e1e409423c55acde3b7e5c9086fad06ba9aa151d448d"
+  }
+}

@@ -39,6 +39,25 @@ delivery phases.
   reformulate it.
 - **Boundary:** Do not widen `parseRestrictedShellWords` — it is the containment boundary. Explain
   the rejection; never accept the request.
+- **Note 2026-08-09:** The ACP permission response carries only `outcome` plus a `_meta` field that
+  implementations must not rely on, so there is no protocol channel to explain a rejection inline.
+  The controller-authored commit below removes the largest source of these rejections, but the
+  general case still needs a design that does not depend on `_meta`.
+
+### Author the result commit in the controller so agents never run Git
+
+- **Status:** Delivered 2026-08-09. Execute results may now omit `commit`; the controller validates
+  the retained worktree against `allowed_scope` and the reported `changed_files`, then commits it
+  with the work item title via `commitWorktreeExcludingFounder`. `.founder/` is excluded from the
+  commit by pathspec. Mission guidance now tells the agent not to run Git at all.
+- **Why it was a defect:** Every execute mission starts with zero approved commands, the capability
+  envelope matches commands by exact argv, and the result contract required the agent to commit. An
+  agent could therefore only commit if the founder had pre-approved the exact commit argv, message
+  included — which nobody can know in advance. On `wi_f2d97c58` that produced 8 runs across 4
+  attempts, 4 approved commands (all of them incidental exploration), 1 edit attempt and 0 results.
+- **Boundary preserved:** out-of-scope worktree paths still reject before anything is committed, the
+  reported `changed_files` must still match the worktree exactly, and the controller still runs
+  authoritative verification rather than trusting the agent's self-report.
 
 ### Report why a shaping run failed instead of a generic sentence
 

@@ -3657,6 +3657,106 @@ describe("WorkItemController", () => {
     expect(imported.work_item.state.status).not.toBe("blocked");
   });
 
+  it("commits the work an agent left in the worktree so no founder approves Git plumbing", async () => {
+    const authoredCommit = "d".repeat(40);
+    const fixture = await createImportFixture({
+      transformResult: (result) => {
+        const { commit: _omitted, ...withoutCommit } = result;
+        return withoutCommit as ExecuteExternalResultSubmission;
+      },
+    });
+    const commitMessages: string[] = [];
+    let committed = false;
+    const authoringGit: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return committed ? [] : ["src/domain/result.ts"];
+      },
+      async commitWorktreeExcludingFounder(message: string) {
+        commitMessages.push(message);
+        committed = true;
+        return authoredCommit;
+      },
+      async resolveCommit(revision: string) {
+        return revision === authoredCommit ? authoredCommit : null;
+      },
+      async readHeadCommit() {
+        return authoredCommit;
+      },
+    };
+    const imported = await createController(
+      fixture.repository,
+      authoringGit,
+    ).importExternalResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(commitMessages).toEqual(["Build the controller foundation"]);
+    expect(imported.evidence).toMatchObject({ outcome: "applied", reasons: [] });
+    expect([...fixture.evidence.values()][0]?.evidence.result_commit).toBe(
+      authoredCommit,
+    );
+  });
+
+  it("refuses to author a commit for worktree changes outside allowed_scope", async () => {
+    const fixture = await createImportFixture({
+      transformResult: (result) => {
+        const { commit: _omitted, ...withoutCommit } = result;
+        return {
+          ...withoutCommit,
+          changed_files: ["src/outside.ts"],
+        } as ExecuteExternalResultSubmission;
+      },
+    });
+    let commitAttempted = false;
+    const outsideGit: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return ["src/outside.ts"];
+      },
+      async commitWorktreeExcludingFounder() {
+        commitAttempted = true;
+        return "d".repeat(40);
+      },
+    };
+    const rejected = await createController(
+      fixture.repository,
+      outsideGit,
+    ).importExternalResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(commitAttempted).toBe(false);
+    expect(rejected.evidence.outcome).toBe("rejected");
+    expect(rejected.evidence.reasons[0]).toContain("allowed_scope");
+  });
+
+  it("refuses to author a commit when the worktree disagrees with the reported changed_files", async () => {
+    const fixture = await createImportFixture({
+      transformResult: (result) => {
+        const { commit: _omitted, ...withoutCommit } = result;
+        return withoutCommit as ExecuteExternalResultSubmission;
+      },
+    });
+    let commitAttempted = false;
+    const mismatchedGit: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return ["src/domain/result.ts", "src/domain/work-item.ts"];
+      },
+      async commitWorktreeExcludingFounder() {
+        commitAttempted = true;
+        return "d".repeat(40);
+      },
+    };
+    const rejected = await createController(
+      fixture.repository,
+      mismatchedGit,
+    ).importExternalResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(commitAttempted).toBe(false);
+    expect(rejected.evidence.outcome).toBe("rejected");
+    expect(rejected.evidence.reasons[0]).toContain(
+      "changed_files do not exactly match",
+    );
+  });
+
   it.each([
     {
       name: "a mismatched mission hash",

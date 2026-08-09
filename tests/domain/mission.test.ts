@@ -705,9 +705,11 @@ describe("mission domain", () => {
     );
 
     expect(task).toContain(`Write the structured result to \`${paths.output_path}\`.`);
-    expect(task).toContain("Commit the code changes before returning the result.");
+    expect(task).toContain(
+      "Do not run Git. Leave your edits uncommitted in the working tree: the controller commits them for you once it has proven they are in scope.",
+    );
     expect(task).toContain('"mission_content_sha256"');
-    expect(task).toContain('"commit"');
+    expect(task).not.toContain('"commit"');
     expect(task).toContain(
       "The controller validates the commit and runs the authoritative checks.",
     );

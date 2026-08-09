@@ -3,46 +3,9 @@
   "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
   "phase": "execute",
   "status": "active",
-  "updated_at": "2026-08-09T18:14:48.079Z",
+  "updated_at": "2026-08-09T19:32:10.657Z",
   "goal_version": 1,
   "input_revision": 1,
-  "attempt": 0,
-  "patch_cycle": 0,
-  "attention": {
-    "kind": "missing_permission",
-    "question": "Allow this exact out-of-envelope operation once and retry the fresh execute attempt?",
-    "recommendation": "Keep it denied unless it is required; allowing once creates a new immutable attempt.",
-    "created_at": "2026-08-09T18:14:48.079Z",
-    "governed_tuple": {
-      "goal_version": 1,
-      "input_revision": 1,
-      "attempt": 0,
-      "patch_cycle": 0
-    },
-    "pins": {
-      "artifact_paths": [
-        ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/mission.json",
-        ".founder/connected-runs/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/16acfc10-1670-4f29-8e27-ca304ee1705a/run.json"
-      ],
-      "evidence_paths": [],
-      "git_commit": "4133c875769f85e69492e57986c122937fbe040b",
-      "mission_content_sha256": "68eba59a683b626e955d19a58eec42f7e2f7d78291453357fb269c146bb37a2d"
-    },
-    "operation": {
-      "normalized_operation": {
-        "schema_version": 1,
-        "kind": "command",
-        "executable": "wc",
-        "args": [
-          "-l",
-          "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/tests/detail-panel.test.tsx"
-        ]
-      },
-      "canonical_args_sha256": "25731498b695fbb40568dc405a3ca138101bed03574ef72efc90ed1b0e268d4f",
-      "operation_sha256": "d93a4566088df179add03933fd4fb59be3f25d7594f390c60f23725d02a1c3d1",
-      "reason": "outside_capability_envelope",
-      "resolved_envelope_sha256": "6a76c2333962734555a1843aac3e289ce55379b1340c435a9dcfbe0cca428569",
-      "connected_run_id": "16acfc10-1670-4f29-8e27-ca304ee1705a"
-    }
-  }
+  "attempt": 4,
+  "patch_cycle": 0
 }

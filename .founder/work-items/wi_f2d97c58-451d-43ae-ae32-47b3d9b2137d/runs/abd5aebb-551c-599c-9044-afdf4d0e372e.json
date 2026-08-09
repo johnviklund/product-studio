@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "run_id": "abd5aebb-551c-599c-9044-afdf4d0e372e",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:1:1:2",
+  "phase": "execute",
+  "goal_version": 1,
+  "input_revision": 1,
+  "attempt": 2,
+  "started_at": "2026-08-09T19:12:50.654Z",
+  "completed_at": "2026-08-09T19:12:50.717Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "e1335b0d44445dee5a8f89f54d0d00bae72096ce9c958582e4f91e453c3664d8",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "ls",
+          "args": [
+            "-la",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/"
+          ]
+        },
+        {
+          "executable": "wc",
+          "args": [
+            "-l",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/tests/detail-panel.test.tsx"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "52ac7580d8743ab5000b428de69281a5edc69af93fc1d228806238ce8cf43060"
+  }
+}

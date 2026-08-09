@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "run_id": "fa72fb9e-8bdd-5c36-b417-f93cd7869402",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:1:1:1",
+  "phase": "execute",
+  "goal_version": 1,
+  "input_revision": 1,
+  "attempt": 1,
+  "started_at": "2026-08-09T18:57:10.384Z",
+  "completed_at": "2026-08-09T18:57:10.482Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "68eba59a683b626e955d19a58eec42f7e2f7d78291453357fb269c146bb37a2d",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "wc",
+          "args": [
+            "-l",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/tests/detail-panel.test.tsx"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "b92539c4ce8d821b6f0f09ec3c6b3af224c73184e22d8e72263328c3116b33a4"
+  }
+}

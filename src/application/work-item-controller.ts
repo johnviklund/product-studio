@@ -4394,12 +4394,20 @@ export class WorkItemController {
         verification: [],
       };
     }
-    const result = parsedResult.data;
+    let result = parsedResult.data;
     if (result.mission_content_sha256 !== snapshot.mission.content_sha256) {
       reasons.push("Result mission hash does not match the immutable mission.");
     }
     if (JSON.stringify(result.identity) !== JSON.stringify(identity)) {
       reasons.push("Result identity does not match the requested governed tuple.");
+    }
+    if (reasons.length === 0 && result.commit === undefined) {
+      const authored = await this.authorResultCommit(snapshot, result);
+      if (typeof authored === "string") {
+        result = { ...result, commit: authored };
+      } else {
+        reasons.push(...authored.reasons);
+      }
     }
     if (reasons.length === 0) {
       reasons.push(...(await this.validateGitProof(snapshot, result)));
@@ -4424,6 +4432,68 @@ export class WorkItemController {
           result,
           verification: verification.records,
         };
+  }
+
+  /**
+   * Commits the work an agent left in the worktree. Agents never run Git: the
+   * capability envelope matches commands by exact argv, so an agent could only
+   * commit if the founder pre-approved the exact message, which no one can know
+   * in advance. The controller authors the commit instead, after proving the
+   * retained changes are in scope and exactly what the agent reported.
+   */
+  private async authorResultCommit(
+    snapshot: ActiveMissionResultSnapshot,
+    result: ExecuteExternalResultSubmission,
+  ): Promise<string | { reasons: string[] }> {
+    const commitWorktree = this.git.commitWorktreeExcludingFounder;
+    if (
+      commitWorktree === undefined ||
+      this.git.listWorktreeChangedFilesExcludingFounder === undefined
+    ) {
+      return {
+        reasons: [
+          "Result omitted a commit and the Git adapter cannot author one.",
+        ],
+      };
+    }
+    const worktreeFiles = [
+      ...new Set(await this.git.listWorktreeChangedFilesExcludingFounder()),
+    ].sort();
+    if (worktreeFiles.length === 0) {
+      return {
+        reasons: [
+          "Result omitted a commit and the worktree holds no changes to commit.",
+        ],
+      };
+    }
+    for (const path of worktreeFiles) {
+      if (!workspaceRelativePosixPathSchema.safeParse(path).success) {
+        return { reasons: [`Git reported an unsafe changed path: ${path}`] };
+      }
+      if (path === ".founder" || path.startsWith(".founder/")) {
+        return {
+          reasons: [
+            `Controller-owned path is outside external result scope: ${path}`,
+          ],
+        };
+      }
+      if (
+        !snapshot.mission.goal.allowed_scope.some((scopeEntry) =>
+          scopeMatchesPath(scopeEntry, path),
+        )
+      ) {
+        return { reasons: [`Changed path is outside allowed_scope: ${path}`] };
+      }
+    }
+    if (
+      JSON.stringify(worktreeFiles) !==
+      JSON.stringify([...result.changed_files].sort())
+    ) {
+      return {
+        reasons: ["Result changed_files do not exactly match the Git diff."],
+      };
+    }
+    return commitWorktree.call(this.git, snapshot.mission.goal.title);
   }
 
   private async assessPatchResult(
@@ -4569,6 +4639,9 @@ export class WorkItemController {
     snapshot: ActiveMissionResultSnapshot,
     result: ExecuteExternalResultSubmission | PatchExternalResultSubmission,
   ): Promise<string[]> {
+    if (result.commit === undefined) {
+      return ["Result did not provide a commit and none could be authored."];
+    }
     const resolvedCommit = await this.git.resolveCommit(result.commit);
     if (resolvedCommit === null || resolvedCommit !== result.commit) {
       return ["Result commit is not a canonical local commit object."];

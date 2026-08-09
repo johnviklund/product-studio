@@ -14,6 +14,12 @@ export interface GitVerificationAdapter {
     baseCommit: string,
     resultCommit: string,
   ): Promise<string[]>;
+  /**
+   * Commits every worktree change outside `.founder/` and returns the new commit.
+   * Agents never run Git themselves: the controller authors the commit so that no
+   * founder ever has to approve Git plumbing to let a result land.
+   */
+  commitWorktreeExcludingFounder?(message: string): Promise<string>;
 }
 
 export interface VerificationRunner {

@@ -678,6 +678,25 @@ export class NodeGitVerificationAdapter implements GitVerificationAdapter {
     return output.split("\0").filter((path) => path.length > 0);
   }
 
+  async commitWorktreeExcludingFounder(message: string): Promise<string> {
+    const trimmed = message.trim();
+    if (trimmed.length === 0 || trimmed.includes("\n")) {
+      throw new Error(
+        "A controller commit message must be one non-empty single line.",
+      );
+    }
+    await this.run([
+      "add",
+      "--all",
+      "--",
+      ".",
+      ":(exclude).founder",
+      ":(exclude).founder/**",
+    ]);
+    await this.run(["commit", "--no-verify", "-m", trimmed]);
+    return this.readHeadCommit();
+  }
+
   private async run(args: string[]): Promise<string> {
     const { stdout } = await execFileAsync("git", args, {
       cwd: this.workspaceRoot,
