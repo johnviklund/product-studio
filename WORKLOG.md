@@ -5,6 +5,27 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-08-09 · Connected Review/Patch continuation, Cycle 4 close-out (roadmap 3.4 slice 3) · Codex GPT-5.6 / Copilot Claude Opus 5 review
+- Delivered the connected Review and bounded Patch continuation of the guided handoff: a
+  source-read-only, single-result-ingress authorization shape for Review enforced by its own pure
+  evaluator (distinct from both the Execute capability envelope and the shaping evaluator), the
+  founder writer/reviewer model-independence attestation gate, disclosed (not silently
+  accepted/blocked) subject drift between the reviewed subject and the tree at ingress, and a
+  clean `connected_run.schema_version: 1` cut with no legacy reader or in-place migration.
+- Closed all four gaps a prior review cycle flagged in a same-day close-out delta: contract-test
+  negatives now fail under guard removal (proven both pre- and post-fix), the Review-import
+  evidence-refresh UI fix is now guarded at the helper, `PRODUCT.md`/`plan.md` durable-truth wording
+  matches the real code and real `.founder` state, and `plan.md`'s execution state was refreshed to
+  match durable evidence rather than trusted from memory.
+- Verified: 39 files / 804 tests pass; typecheck clean; lint 0 errors / 7 pre-existing warnings;
+  four cycles of cross-vendor review closed clean (Cycle 4 ship, no P0/P1; three P2/P3 items
+  recorded, none blocking — an extracted-helper UI regression guard not yet covering its call
+  site, a fresh-id half of a two-part test fix proven inert, a stale comment).
+- Commits: `ce9c4d7`..`2c5dd19`
+- Review: ship @ `2c5dd19` (cross-vendor, clean — no P0/P1, three deferred P2/P3s)
+- Why: extends ROADMAP 3.4's version-one guided handoff past Execute approval into Review/Patch,
+  the connected mechanism's remaining gap before the gated Step 21 end-to-end live-proof feature.
+
 ## 2026-08-05 · Plan approval → Execute, dedicated-transition enforcement (roadmap 3.4 slice 2) · Codex GPT-5 / Copilot Claude review
 - Added an exact-result Plan approval decision (`Approve & run Execute` / manual-recovery
   `Approve & prepare Execute`) mirroring the existing Brainstorm/Spec/Plan decision shape: durable
@@ -329,24 +350,3 @@ not archived — they remain in git history).
 - Commits: ace4a9a a8f7a76 525abf6 501aae5 174d231
 - Why: delivers roadmap 1.4's fast, frictionless capture with safe recoverable project transfer,
   keeping the refinement surface intentionally narrow ahead of any future promotion/AI-shaping work.
-
-## 2026-07-21 · Focused Kanban and project filtering (roadmap 1.3)
-- Renamed the durable `explore` phase to `brainstorm` and added a shared, pure board module:
-  seven-column projection, an adjacent-column transition policy, phase-derived next actions,
-  composite `(source_id, work_item_id)` identity, and fail-closed board-view parsing — imported
-  by both server and client so the policy cannot drift.
-- Made portfolio projections source-qualified with a nullable project, added a durable
-  `.portfolio/inbox` "Unassigned" source (atomic, never-overwrite manifest), and bumped the
-  SQLite cache to schema v2 with a drop/recreate migration.
-- Added an atomic, re-validated `state.json` phase-update seam (temp file + rename, goal
-  untouched) and a source-qualified `PATCH` route with stable mapped errors (404 unknown
-  source / 404 missing item / 409 invalid transition / 400 bad body).
-- Built the `"use client"` Kanban over the local APIs: seven scrollable columns, all/one/multi/
-  unassigned project filters, accessible `@dnd-kit` drag transitions with fail-closed recovery,
-  and a versioned `localStorage` board view; aligned PRODUCT/DESIGN/ROADMAP and the archived PRD.
-- Verified: lint, typecheck, 68 tests, and production build pass; delete-and-rebuild restores
-  both project and inbox sources with identical composite identities; Phase 4 review clean
-  (`.workflow/review.md`, no P0–P3). Live browser drag/filter/scroll unexercised (headless env).
-- Commits: c80f3ea 3698751 000208e 809a6ad 668d284 f9e79ce d57e865 ecdfc2b 8d924e7 a818e3e f432ab1 d3f716e 15e3546 b481276 1fec11a
-- Why: delivers roadmap 1.3's focused cross-project board so the founder can filter, move, and
-  return to stable work across products without GitHub Projects or raw repository files.
