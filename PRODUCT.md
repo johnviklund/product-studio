@@ -209,6 +209,15 @@ The following remain unresolved and must be decided with implementation evidence
     envelope evaluator permits every in-workspace write. This guarantee covers ACP-mediated
     permission requests only; unmediated writes are not prevented and repository reads are not
     isolated, under the same `permission_mediated_local` / `not_independently_enforced` disclosure.
+  - **Decided (2026-08-09, ROADMAP 3.4 Slice 3, commits `ce9c4d7`–`2c5dd19`):** connected Review
+    (and its bounded Patch continuation) uses a **third** authorization shape distinct from both of
+    the above — source-read-only, single-result-ingress, enforced by its own pure evaluator rather
+    than the shared Execute envelope or the shaping evaluator. A Review run may read the subject
+    tree but never write; exactly one structured result is accepted per launch, and drift between
+    the reviewed subject and the tree at ingress is disclosed (not silently accepted or blocked).
+    This strengthens, and does not alter, the existing "Reviewers are read-only" principle. Also
+    decided in this slice: `connected_run.schema_version: 1` is unsupported with **no legacy reader
+    and no in-place migration** — a clean version cut, not a compatibility shim.
 - Connected shaping runs record an adapter-observed effective model resolved from ACP `session/new`
   configuration options and `config_option_update` notifications. The evidence is hashed and
   redacted before persistence: option id, type, category, current value, choice values, and the

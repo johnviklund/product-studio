@@ -480,7 +480,7 @@ link to exact evidence when available. Raw tool and provider detail remains coll
 
 For a captured idea/todo, keep refinement in a narrow structural side panel: show the immutable original thought, kind, and captured-at timestamp read-only above the editable metadata (project, type, tags, notes). This panel may additionally carry the guided shaping handoff for an item in any of the three eligible phases: `brainstorm`, `spec`, or `plan`. Give a ready Brainstorm result a first-class selection action: selecting that result is an input selection, not result approval, while a ready Spec result has its own explicit approval action. Keep compile, external `TASK.md` execution, and result import in the collapsed recovery path. Do not let this panel accrete an activity feed or reviewer findings — those stay part of the full work-item detail panel once a capture has been promoted into a governed work item.
 
-#### Connected guided handoff through Execute approval (ROADMAP 3.4 Slice 2)
+#### Connected guided handoff through Review and Patch (ROADMAP 3.4 Slices 2–3)
 
 ![Directional mockup of the guided shaping handoff](docs/design/roadmap-3.4-slice-2-guided-handoff.png)
 
@@ -523,7 +523,18 @@ operations:
 6. Keep compile, external `TASK.md` execution, the manual ingress path and recovery task, result
    import, and similar artifact controls under a collapsed `Advanced recovery` disclosure. They
    remain fully supported and truthful, but they are not the normal founder journey once connected
-   launch is available.
+   launch is available. This collapsed-recovery rule already covers the Review and Patch manual
+   controls below and needs no separate carve-out.
+7. The guided handoff continues past Execute approval into connected Review and its bounded Patch
+   continuation (ROADMAP 3.4 Slice 3). Review carries **no permission-decision surface at all** —
+   deliberately, not by omission — because its authorization shape is source-read-only,
+   single-result-ingress rather than the Execute capability envelope. Its decision surface instead
+   shows an explicit `Read only` status and, before launch, requires the founder's writer/reviewer
+   **model independence attestation** (the human affirms the reviewing model differs from the one
+   that wrote the code under review; the workflow does not enforce this automatically). Bounded
+   drift between the reviewed subject and the tree at ingress is disclosed on the result rather than
+   silently accepted or blocked. Patch reuses the existing Execute-style decision surface and model
+   picker, scoped to the findings Review routed to it.
 
 At a 1440×1024 viewport, the proposal summary, acceptance criteria, unresolved questions, compact
 provenance, and both decision actions should be understandable and reachable without scrolling.

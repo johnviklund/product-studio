@@ -248,14 +248,20 @@ This is a scoped delivery map, not an execution backlog. Each MVP phase is one
   [directional mockup](docs/design/roadmap-3.4-slice-2-guided-handoff.png) supports the written
   contract but does not define lifecycle state. Slice 2 now reaches the governed Execute handoff
   through explicit Plan approval.
-- **Status:** In progress — the guided handoff mechanism is delivered through Execute approval.
-  Commits `6ca9b52`–`c0bf64f` delivered connected Brainstorm, Spec, and Plan launch, per-seat model
-  selection, the Plan mission, a headed end-to-end run with three distinct adapter-observed
-  effective model identities, and the closed three-cycle review. Commits `54de9de`–`874d7c0`
-  deliver exact-result Plan approval, recoverable controller execution, Execute model selection,
-  the approval API, the Plan decision surface, dedicated-transition enforcement inside the
-  controller, and the closed review. The 3.4 completion signal is not yet claimed because the
-  cycle does not reach approved implementation.
+- **Status:** In progress — the guided handoff mechanism now reaches Review and its bounded Patch
+  continuation, not just Execute. Commits `6ca9b52`–`c0bf64f` delivered connected Brainstorm, Spec,
+  and Plan launch, per-seat model selection, the Plan mission, a headed end-to-end run with three
+  distinct adapter-observed effective model identities, and the closed three-cycle review. Commits
+  `54de9de`–`874d7c0` deliver exact-result Plan approval, recoverable controller execution, Execute
+  model selection, the approval API, the Plan decision surface, dedicated-transition enforcement
+  inside the controller, and the closed review. Commits `ce9c4d7`–`2c5dd19` (ROADMAP 3.4 Slice 3)
+  deliver the connected Review and Patch continuation: the source-read-only single-result-ingress
+  Review authorization shape and its pure evaluator, the writer/reviewer model-independence
+  attestation gate, disclosed (not silently accepted) subject drift at ingress, the clean
+  `connected_run.schema_version: 1` cut with no legacy reader, and a closed four-cycle
+  cross-vendor review (verdict: ship). The 3.4 completion signal is not yet claimed because the
+  cycle still does not reach a real feature's approved implementation end to end (that is the
+  gated Step 21 live proof, deferred as its own future slice).
 - **Completion signal:** A real feature completes the version-one cycle without manual prompt or
   result assembly, uses at least two distinct recorded LLM model identities across its
   agent-driven steps, preserves every required human gate, and leaves reproducible mission, result,

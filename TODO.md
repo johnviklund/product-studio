@@ -35,6 +35,13 @@ delivery phases.
   (executable found, authenticated, model reachable) this item's definition of done would read.
   Groundwork only; durable config replacing the env var and model auto-discovery are untouched —
   the item stays open as written.*
+  *Pointer updated 2026-08-09 (ROADMAP 3.4 Slice 3, commits `ce9c4d7`–`2c5dd19`): the Review
+  connected runtime adds a second, independent `configuration()` preflight surface, and the guided
+  decision surfaces now expose per-seat preflight state and model-picker options over a route for
+  the first time — closer to this item's "surfaces preflight status inline" bar, but still
+  read-only groundwork. Durable config replacing
+  `PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON` and model auto-discovery remain untouched — the
+  item stays open as written.*
 
 ## Deferred Initiatives
 
