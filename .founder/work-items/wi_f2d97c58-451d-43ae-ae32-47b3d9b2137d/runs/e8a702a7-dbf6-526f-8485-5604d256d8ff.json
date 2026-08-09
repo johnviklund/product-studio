@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "run_id": "e8a702a7-dbf6-526f-8485-5604d256d8ff",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:1:1:8:import:f63a4cbacb1e3bf8b08a10ecdf1a24f31e34d9de95645c220021f17f891f5869",
+  "phase": "execute",
+  "goal_version": 1,
+  "input_revision": 1,
+  "attempt": 8,
+  "started_at": "2026-08-09T21:36:43.911Z",
+  "completed_at": "2026-08-09T21:36:44.318Z",
+  "outcome": "applied"
+}

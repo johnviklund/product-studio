@@ -2,7 +2,7 @@
 
 Mission schema version: 7
 Mission phase: execute
-Package hash: 6a64b4e8014ab7ed4b71bdee922acc2ef7e5a6cd3308ad4ab0792495dc8ddc14
+Package hash: 6084172b20fc50756656894e55775e250479d6dc376b95913992c61e31c85028
 
 ## Purpose
 
@@ -35,6 +35,7 @@ MCP: forbidden
 Credentials: forbidden
 
 Approved command forms:
+- ["find","/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d","-name","result.json","-o","-name","validation-*"]
 - ["git","log","--oneline","--all","-20"]
 - ["ls","-la","/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/"]
 - ["ls","-la","/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-2/"]
@@ -47,20 +48,20 @@ Approved URL operations:
 
 ## Result contract
 
-Write the structured result to `.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-4/result.json`.
+Write the structured result to `.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-5/result.json`.
 Do not run Git. Leave your edits uncommitted in the working tree: the controller commits them for you once it has proven they are in scope.
 Use this complete JSON shape:
 
 ```json
 {
   "result_schema_version": 2,
-  "mission_content_sha256": "6a64b4e8014ab7ed4b71bdee922acc2ef7e5a6cd3308ad4ab0792495dc8ddc14",
+  "mission_content_sha256": "6084172b20fc50756656894e55775e250479d6dc376b95913992c61e31c85028",
   "identity": {
     "phase": "execute",
     "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
     "goal_version": 1,
     "input_revision": 1,
-    "attempt": 4
+    "attempt": 5
   },
   "summary": "<concise implementation summary>",
   "changed_files": ["<workspace-relative POSIX path>"],

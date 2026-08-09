@@ -1,6 +1,7 @@
 import { ZodError } from "zod";
 
 import { UntrustedRequestOriginError } from "../../src/application/request-origin";
+import { AcpEventLimitError } from "../../src/infrastructure/acp/acp-client";
 import {
   DuplicateWorkspaceError,
   InvalidWorkItemTransitionError,
@@ -122,6 +123,19 @@ export function errorResponse(error: unknown): Response {
         },
       },
       { status: 403 },
+    );
+  }
+
+  if (error instanceof AcpEventLimitError) {
+    return Response.json(
+      {
+        error: {
+          code: error.kind,
+          message:
+            "The connected run exhausted its evidence budget and was recorded as failed. Retry the attempt; if it keeps happening, the run is producing more evidence than one attempt allows.",
+        },
+      },
+      { status: 409 },
     );
   }
 

@@ -933,8 +933,8 @@ export class CopilotConnectedReviewRuntime implements ConnectedReviewRuntime {
 
 const CONNECTED_RUN_LIMITS: ConnectedRunRecordV2["limits"] = {
   wall_clock_timeout_ms: 900_000,
-  max_event_count: 1_000,
-  max_event_bytes: 1_000_000,
+  max_event_count: 50_000,
+  max_event_bytes: 50_000_000,
   max_output_bytes: 1_000_000,
   termination_grace_ms: 5_000,
   drain_grace_ms: 1_000,

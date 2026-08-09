@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "run_id": "bb7957e9-8656-5051-995b-364248dcb6fb",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:1:1:7",
+  "phase": "execute",
+  "goal_version": 1,
+  "input_revision": 1,
+  "attempt": 7,
+  "started_at": "2026-08-09T21:30:34.904Z",
+  "completed_at": "2026-08-09T21:30:34.979Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "ecbf7f2c2e50e6486eeb3d07972fa85aaffef34eaccfa0205c5f09ca133df8cc",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "find",
+          "args": [
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+            "-name",
+            "result.json",
+            "-o",
+            "-name",
+            "validation-*"
+          ]
+        },
+        {
+          "executable": "find",
+          "args": [
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+            "-name",
+            "result.json"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "log",
+            "--oneline",
+            "--all",
+            "-20"
+          ]
+        },
+        {
+          "executable": "ls",
+          "args": [
+            "-la",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/"
+          ]
+        },
+        {
+          "executable": "ls",
+          "args": [
+            "-la",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-2/"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "executable": "wc",
+          "args": [
+            "-l",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/tests/detail-panel.test.tsx"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "4e52410201fe182f940cd14ae2da3c02b3524e064c4f454cc1c131815a9d2f25"
+  }
+}

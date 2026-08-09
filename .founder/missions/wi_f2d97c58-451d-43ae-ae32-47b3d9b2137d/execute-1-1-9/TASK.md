@@ -2,7 +2,7 @@
 
 Mission schema version: 7
 Mission phase: execute
-Package hash: 6a64b4e8014ab7ed4b71bdee922acc2ef7e5a6cd3308ad4ab0792495dc8ddc14
+Package hash: 8385090c970204085a91a68a7021e6d21da8504e53465079272896d5e4f953d9
 
 ## Purpose
 
@@ -35,10 +35,7 @@ MCP: forbidden
 Credentials: forbidden
 
 Approved command forms:
-- ["git","log","--oneline","--all","-20"]
-- ["ls","-la","/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/"]
-- ["ls","-la","/Users/JVIKLUN1/Documents/Projects/personal/product-studio/.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-2/"]
-- ["wc","-l","/Users/JVIKLUN1/Documents/Projects/personal/product-studio/tests/detail-panel.test.tsx"]
+- None
 Approved command arrays are exact. Do not add arguments, message paragraphs, attribution trailers, or metadata.
 Every command must be a single line built only from plain words and quoted words. Newlines, control characters, pipes, redirection, chaining, and substitution cannot be interpreted: the runtime refuses such a request outright and the run ends without a result. Keep commit messages to one line.
 
@@ -47,20 +44,20 @@ Approved URL operations:
 
 ## Result contract
 
-Write the structured result to `.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-4/result.json`.
+Write the structured result to `.founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-9/result.json`.
 Do not run Git. Leave your edits uncommitted in the working tree: the controller commits them for you once it has proven they are in scope.
 Use this complete JSON shape:
 
 ```json
 {
   "result_schema_version": 2,
-  "mission_content_sha256": "6a64b4e8014ab7ed4b71bdee922acc2ef7e5a6cd3308ad4ab0792495dc8ddc14",
+  "mission_content_sha256": "8385090c970204085a91a68a7021e6d21da8504e53465079272896d5e4f953d9",
   "identity": {
     "phase": "execute",
     "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
     "goal_version": 1,
     "input_revision": 1,
-    "attempt": 4
+    "attempt": 9
   },
   "summary": "<concise implementation summary>",
   "changed_files": ["<workspace-relative POSIX path>"],

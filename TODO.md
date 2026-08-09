@@ -503,3 +503,18 @@ delivery phases.
   read-only in the existing Inbox/DetailPanel recovery surfaces with "allow once and retry" /
   "keep denied" decisions bound to the exact operation hash. This was the half of the original
   combined item scoped to connected Execute; the `ambiguous_goal` half remains open above.
+
+## Stop sizing a connected run's evidence budget for exploration
+
+`CONNECTED_RUN_LIMITS.max_event_count` was 1,000 while a trivial exploration run
+alone recorded ~104 events, so the first run that actually implemented a change and
+ran type checking exhausted its budget mid-flight. Exhaustion also escaped the
+launch request as an unmapped error, so the founder saw "Unexpected server error"
+for a run that had already been recorded as failed.
+
+Raised the budget to 50,000 events / 50 MB and mapped the exhaustion to a legible
+409. Still open: the budget is a flat constant rather than something derived from
+observed run shapes, `wall_clock_timeout_ms` is still 15 minutes (untested against
+a real implementation run), and agent message chunks dominate event volume — 99 of
+104 events in a trivial run — so the cheaper fix may be to record fewer events
+rather than to allow more.

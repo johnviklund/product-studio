@@ -8,6 +8,7 @@ import {
   UnknownPortfolioSourceError,
 } from "../../src/domain/portfolio";
 import { ControllerConflictError } from "../../src/domain/work-item";
+import { AcpEventLimitError } from "../../src/infrastructure/acp/acp-client";
 
 describe("portfolio API error responses", () => {
   it("maps untrusted request origins to a stable 403", async () => {
@@ -90,5 +91,18 @@ describe("portfolio API error responses", () => {
         message: "Contracted work items require a version-bound goal update.",
       },
     });
+  });
+  it("maps an exhausted evidence budget to a legible 409 instead of an unexplained 500", async () => {
+    const response = errorResponse(
+      new AcpEventLimitError("Connected-run event limit reached."),
+    );
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as {
+      error: { code: string; message: string };
+    };
+    expect(body.error.code).toBe("evidence_budget_exhausted");
+    expect(body.error.message).toContain("evidence budget");
+    expect(body.error.message).not.toBe("Unexpected server error");
   });
 });

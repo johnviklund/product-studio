@@ -1,0 +1,16 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "d5cab521c6728cb0b70aed8662d13b0d7d99f864d5508ed3d35a16af2aabd06c",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 8
+  },
+  "summary": "Back-navigation flow from full work item page to details panel already exists and is fully implemented. The showFullWorkItem state controls the view toggle, with a visible back button displaying context-aware text ('Back to details panel' or 'Back to shaping decision') that restores the originating details-panel context.",
+  "changed_files": [],
+  "verification": [
+    { "name": "typecheck", "status": "passed", "detail": "TypeScript compilation successful with no errors" }
+  ]
+}

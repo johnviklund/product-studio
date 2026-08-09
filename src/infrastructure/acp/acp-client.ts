@@ -183,7 +183,9 @@ interface AcpStdioClientAdapterOptions {
 
 class AcpClientError extends Error {}
 
-class AcpEventLimitError extends AcpClientError {}
+export class AcpEventLimitError extends AcpClientError {
+  readonly kind = "evidence_budget_exhausted" as const;
+}
 
 class AcpTimeoutError extends AcpClientError {}
 
