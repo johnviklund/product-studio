@@ -33,9 +33,20 @@ export const COPILOT_PROFILE_ID = "noninteractive-execute-v1";
 export const COPILOT_REVIEW_PROFILE_ID = "noninteractive-review-v1";
 export const COPILOT_REVIEW_READ_TOOL = "view";
 export const COPILOT_WRITABLE_COMMAND_TOOL = "bash";
+export const COPILOT_SHAPING_READ_TOOL = "view";
+export const COPILOT_SHAPING_WRITE_TOOL = "apply_patch";
 const COPILOT_REVIEW_TOOLS = new Set([
   COPILOT_REVIEW_READ_TOOL,
   "read",
+]);
+const COPILOT_SHAPING_TOOLS = new Set([
+  COPILOT_SHAPING_READ_TOOL,
+  COPILOT_SHAPING_WRITE_TOOL,
+  "read",
+  "create",
+  "edit",
+  "glob",
+  "grep",
 ]);
 const VERSION_OUTPUT = /^GitHub Copilot CLI (\d+\.\d+\.\d+)\.?\s*$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -684,6 +695,26 @@ export function createCopilotReviewRuntimeProfile(
       ...prepared.sanitized_profile_evidence,
       profile_id: COPILOT_REVIEW_PROFILE_ID,
     },
+  };
+}
+
+export interface CopilotNarrowedTools {
+  readonly available_tools: readonly string[];
+  readonly excluded_tools: readonly string[];
+}
+
+export function narrowCopilotShapingTools(input: {
+  readonly available_tools: readonly string[];
+  readonly excluded_tools: readonly string[];
+}): CopilotNarrowedTools {
+  const removedTools = input.available_tools.filter(
+    (tool) => !COPILOT_SHAPING_TOOLS.has(tool),
+  );
+  return {
+    available_tools: input.available_tools.filter((tool) =>
+      COPILOT_SHAPING_TOOLS.has(tool),
+    ),
+    excluded_tools: [...new Set([...input.excluded_tools, ...removedTools])],
   };
 }
 

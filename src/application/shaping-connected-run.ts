@@ -21,8 +21,11 @@ import {
 import {
   COPILOT_ADAPTER_ID,
   COPILOT_PROFILE_ID,
+  COPILOT_SHAPING_READ_TOOL,
+  COPILOT_SHAPING_WRITE_TOOL,
   createCopilotRuntimeProfile,
   extractEffectiveModel,
+  narrowCopilotShapingTools,
   type CopilotRuntimeProfileInput,
 } from "../infrastructure/acp/copilot-runtime-profile";
 import type {
@@ -346,8 +349,12 @@ export class CopilotConnectedShapingRuntime implements ConnectedShapingRuntime {
   ): Promise<PreparedShapingRuntime> {
     const base = {
       ...this.options.profile,
+      ...narrowCopilotShapingTools(this.options.profile),
       requested_model: input.requested_model,
-      required_available_tools: ["view", "apply_patch"],
+      required_available_tools: [
+        COPILOT_SHAPING_READ_TOOL,
+        COPILOT_SHAPING_WRITE_TOOL,
+      ],
       workspace_cwd: input.workspace_cwd,
       limits: input.limits,
     };

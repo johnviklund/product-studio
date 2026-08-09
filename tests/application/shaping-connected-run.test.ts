@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   composeConnectedShapingPrompt,
+  CopilotConnectedShapingRuntime,
   startConnectedAcpRun,
 } from "../../src/application/shaping-connected-run";
 import {
@@ -81,6 +82,51 @@ function promptResultShape(phase: ShapingPhase): Record<string, unknown> {
 }
 
 describe("connected ACP run orchestration", () => {
+  it("denies the shaping seat every tool its write policy would reject", async () => {
+    const adapter = { start: vi.fn() };
+    const runtime = new CopilotConnectedShapingRuntime(
+      adapter as never,
+      {
+        profile: {
+          preflight: {
+            executable: "copilot",
+            version: "1.0.78",
+            authentication: "noninteractive_authenticated",
+            available_model_ids: ["gpt-5.4"],
+          },
+          reasoning_effort: "medium",
+          available_tools: ["view", "apply_patch", "bash", "fetch", "grep"],
+          excluded_tools: ["ask_user"],
+          environment: { PATH: "/usr/bin:/bin" },
+        },
+      },
+    );
+
+    const prepared = await runtime.prepare({
+      workspace_cwd: "/tmp/product-studio-shaping-tools",
+      mission: {} as never,
+      requested_model: "gpt-5.4",
+      limits: {
+        wall_clock_timeout_ms: 1_000,
+        max_event_count: 10,
+        max_event_bytes: 1_000,
+        max_output_bytes: 1_000,
+        termination_grace_ms: 10,
+        drain_grace_ms: 10,
+      } as never,
+    });
+
+    expect(prepared.sanitized_profile.available_tools).toEqual([
+      "apply_patch",
+      "grep",
+      "view",
+    ]);
+    expect(prepared.sanitized_profile.excluded_tools).toEqual(
+      expect.arrayContaining(["bash", "fetch", "ask_user"]),
+    );
+    expect(prepared.sanitized_profile.available_tools).not.toContain("bash");
+  });
+
   it("gives every shaping seat an exact schema-valid result shape", () => {
     const expectedIdentity = {
       phase: "brainstorm",
