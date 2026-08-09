@@ -1,0 +1,18 @@
+{
+  "result_schema_version": 2,
+  "review_mission_content_sha256": "be0b4e32bbf134af896c1d8ed09ef28ad99bc41bd3a25a52f6514f8cfca21baf",
+  "identity": {
+    "phase": "review",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 17
+  },
+  "execute_mission_content_sha256": "9f6db7d7c0e745ca4d8e87ae5d5cf062a476974efc580e8b6999dc8f6d18f601",
+  "execute_result_content_sha256": "5a8df318d1ade2c524e49caabd4a2d11a508da2d0c4688a773d66118bd3cb758",
+  "git_base_commit": "8dd4f2c435216622f42623927c43dc5e163e305d",
+  "accepted_result_commit": "fdcc3f87c7b7f50fb083c73dc3a07d0d873867d9",
+  "summary": "The shared mutation factory guards the exact 13 in-scope routes before parsing or controller access, uses capped schema-validated JSON where required, and preserves bodyless routes without a Content-Type gate.",
+  "verdict": "clean",
+  "findings": []
+}

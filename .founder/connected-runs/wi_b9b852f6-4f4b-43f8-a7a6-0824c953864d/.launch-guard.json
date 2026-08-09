@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+  "connected_run_id": "9ceccc72-038d-4784-bf41-b88ab8d73c8b",
+  "launch_fingerprint": "de1743a313d7ef792278fe1be367f03868df154bcb9d7084779bc4e38093e811",
+  "record": {
+    "schema_version": 2,
+    "connected_run_id": "9ceccc72-038d-4784-bf41-b88ab8d73c8b",
+    "mission": {
+      "identity": {
+        "phase": "execute",
+        "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+        "goal_version": 5,
+        "input_revision": 5,
+        "attempt": 10
+      },
+      "path": ".founder/missions/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/execute-5-5-10/mission.json",
+      "content_sha256": "31cb0e939b4e2f06015cd19debad5ceba461733043c8f264102b6ff6b69f0d1d",
+      "source_commit": "949e050468c67eaa359a2068901605900447b1c1"
+    },
+    "governed_tuple": {
+      "goal_version": 5,
+      "input_revision": 5,
+      "attempt": 10,
+      "patch_cycle": 0
+    },
+    "provenance": {
+      "role": {
+        "value": "writer",
+        "assurance": "controller_observed"
+      },
+      "seat": {
+        "value": "executor",
+        "assurance": "controller_observed"
+      },
+      "requested_model": {
+        "value": "claude-sonnet-4.5",
+        "assurance": "user_declared"
+      },
+      "effective_model": {
+        "assurance": "unknown",
+        "model_id": null,
+        "deployment_id": null,
+        "observed_event_sha256": null
+      },
+      "effort": {
+        "value": "medium",
+        "assurance": "user_declared"
+      },
+      "harness": {
+        "value": {
+          "id": "copilot-acp",
+          "version": "1.0.78"
+        },
+        "assurance": "adapter_attested"
+      },
+      "adapter_profile": {
+        "value": {
+          "adapter_id": "copilot-acp",
+          "adapter_version": "1.0.78",
+          "profile_id": "noninteractive-execute-v1"
+        },
+        "assurance": "adapter_attested"
+      },
+      "resolved_profile_sha256": {
+        "value": "de66538eae54aa29f757540b16644d971ed78107cf1957c531a93abb396a701e",
+        "assurance": "controller_observed"
+      },
+      "resolved_skill_set_sha256": {
+        "value": null,
+        "assurance": "unknown"
+      },
+      "authorization_sha256": {
+        "value": "2bfe8a0a1a736d1b18d90a81307b55c9a5ac3724a8cbd57fd60445974cf58c2c",
+        "assurance": "controller_observed"
+      }
+    },
+    "authorization": {
+      "kind": "capability_envelope",
+      "envelope": {
+        "schema_version": 1,
+        "workspace": {
+          "allowed_scope_digest": "651a926cc2f64b5d49af6c1833e43704249a8381e2268f554d66720e7666ddce",
+          "execution_mode": "permission_mediated_local",
+          "scope_assurance": "result_scope_validation"
+        },
+        "runtime": {
+          "containment_assurance": "not_independently_enforced",
+          "machine_authority": "launching_user",
+          "approved_command_forms": [
+            {
+              "executable": "git",
+              "args": [
+                "--no-pager",
+                "diff",
+                "components/kanban/kanban-board.tsx"
+              ]
+            },
+            {
+              "executable": "git",
+              "args": [
+                "add",
+                "components/kanban/kanban-board.tsx"
+              ]
+            },
+            {
+              "executable": "git",
+              "args": [
+                "commit",
+                "-m",
+                "Add click-outside and keyboard close behavior to Projects menu",
+                "-m",
+                "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+              ]
+            },
+            {
+              "executable": "git",
+              "args": [
+                "diff",
+                "--cached",
+                "components/kanban/kanban-board.tsx"
+              ]
+            },
+            {
+              "executable": "git",
+              "args": [
+                "diff",
+                "components/kanban/kanban-board.tsx"
+              ]
+            },
+            {
+              "executable": "git",
+              "args": [
+                "log",
+                "-1",
+                "--oneline",
+                "components/kanban/kanban-board.tsx"
+              ]
+            },
+            {
+              "executable": "git",
+              "args": [
+                "rev-parse",
+                "d7c992c"
+              ]
+            },
+            {
+              "executable": "git",
+              "args": [
+                "status",
+                "--short"
+              ]
+            },
+            {
+              "executable": "npx",
+              "args": [
+                "tsc",
+                "--noEmit"
+              ]
+            }
+          ],
+          "approved_url_operations": [],
+          "mcp": "forbidden",
+          "credentials": "forbidden"
+        }
+      },
+      "envelope_sha256": "27dc29f44de49a7349c0823f9c50de7fc692cfae22da7074d31a5d26933d5087"
+    },
+    "acp": {
+      "protocol_version": {
+        "value": null,
+        "assurance": "unknown"
+      },
+      "session_id": {
+        "value": null,
+        "assurance": "unknown"
+      }
+    },
+    "lifecycle": {
+      "status": "starting",
+      "started_at": "2026-08-09T16:37:00.253Z",
+      "updated_at": "2026-08-09T16:37:00.253Z",
+      "completed_at": null,
+      "terminal": null
+    },
+    "limits": {
+      "wall_clock_timeout_ms": 900000,
+      "max_event_count": 1000,
+      "max_event_bytes": 1000000,
+      "max_output_bytes": 1000000,
+      "termination_grace_ms": 5000,
+      "drain_grace_ms": 1000
+    },
+    "process": null,
+    "diagnostics": {
+      "entries": [],
+      "truncated": false
+    }
+  },
+  "created_at": "2026-08-09T16:37:00.824Z"
+}

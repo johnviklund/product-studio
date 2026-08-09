@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "decision_id": "97b13ea2b6edb0deb0420087a5fc2ec4d49e560ee16424ccbdfdb71d23d95b0a",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "operation": "use_brainstorm_result",
+  "phase_from": "brainstorm",
+  "phase_to": "spec",
+  "mission_content_sha256": "236bf1a5a2d7c7d0e7a038d0c70a878959befcd2787ce5abcfa2497cdc8395d9",
+  "result_content_sha256": "9c82e28802cea13da3cd8418877ef8ed4633c7fdfa7e681aef3dc7d52df6b505",
+  "feedback_sha256": null,
+  "expected_shaping_state_sha256": "b8e1ef5b94ab09339e93eb42009fd1fddb2b0b3fb7d50b02a9708b606decd87f",
+  "next_mission_content_sha256": "ec1c51531cbceda3c8526841e07a3fec59bcb6298b7a33c65f8bf168126b8500",
+  "goal_sha256": "dca4573b4e5129ce8c2720e1c07a1bcf91cb3f18ecd6c9923c6f5f209afa6f22",
+  "state_sha256": "93b5734be9063514379b829eb0badecd49309ce1455056c1d9ae60641f546934",
+  "goal_version": null,
+  "input_revision": null,
+  "started_at": "2026-08-05T22:18:59.545Z",
+  "completed_at": "2026-08-05T22:18:59.639Z",
+  "outcome": "applied"
+}

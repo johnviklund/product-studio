@@ -1,0 +1,79 @@
+{
+  "mission_schema_version": 7,
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 0
+  },
+  "controller_run": {
+    "run_id": "c7585476-d104-5139-ade1-dc778450c820",
+    "idempotency_key": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d:plan-approval:9f1ef52dc12610c8d6c15e38e3b1c3262448e07ed0c58bd290307fa3bcd29339",
+    "phase": "execute",
+    "started_at": "2026-08-09T14:10:49.460Z",
+    "completed_at": "2026-08-09T14:10:49.497Z"
+  },
+  "goal": {
+    "title": "Close project menu",
+    "purpose": "Make the Projects dropdown menu in the board header close when the user clicks outside the menu, following standard UI patterns for disclosure widgets.",
+    "acceptance_criteria": [
+      "Clicking anywhere outside the Projects menu closes it when open",
+      "Clicking on menu items or checkboxes inside the menu does NOT close the menu",
+      "Clicking the Projects summary/trigger toggles the menu open/closed as before",
+      "Menu closes correctly when user scrolls the board viewport while the menu is open",
+      "Pressing Escape while the menu is open closes it and returns focus to the trigger"
+    ],
+    "non_goals": [
+      "Converting the native details/summary element to a different component library (e.g., shadcn/ui Dropdown)",
+      "Changing the visual styling, position, or content of the Projects menu",
+      "Adding click-outside behavior to other menus or panels in the application",
+      "Implementing focus-trap or advanced accessibility features beyond Escape-key closing"
+    ],
+    "allowed_scope": [
+      "components/kanban/kanban-board.tsx"
+    ],
+    "review_ready": [
+      "The Projects menu closes when clicking outside its bounds while open",
+      "The menu remains open when interacting with checkboxes and labels inside it",
+      "Escape key closes the menu and restores focus to the trigger button",
+      "No regressions in existing menu toggle behavior when clicking the summary",
+      "Manual verification confirms expected behavior in Safari, Chrome, and Firefox"
+    ]
+  },
+  "source_revision": {
+    "git_base_commit": "bfa402f136dc7d6cef4c57107caa95bf6c8a8c96"
+  },
+  "capability_envelope": {
+    "schema_version": 1,
+    "workspace": {
+      "allowed_scope_digest": "651a926cc2f64b5d49af6c1833e43704249a8381e2268f554d66720e7666ddce",
+      "execution_mode": "permission_mediated_local",
+      "scope_assurance": "result_scope_validation"
+    },
+    "runtime": {
+      "containment_assurance": "not_independently_enforced",
+      "machine_authority": "launching_user",
+      "approved_command_forms": [],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    }
+  },
+  "result_contract": {
+    "schema_version": 4,
+    "output_path": ".founder/missions/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/execute-1-1-0/result.json",
+    "result_schema_version": 2,
+    "required_fields": [
+      "result_schema_version",
+      "mission_content_sha256",
+      "identity",
+      "commit",
+      "summary",
+      "changed_files",
+      "verification"
+    ]
+  },
+  "task_path": ".founder/missions/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/execute-1-1-0/TASK.md",
+  "content_sha256": "cf7cf7fc1f922d532f0f4d69a27d21769ef6c05df3b254c3f9e2a34c36c3239b"
+}

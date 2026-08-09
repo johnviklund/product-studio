@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "shaping_run_id": "42e0bbd4-29c2-4b0c-a92f-ed92860705c6",
+  "mission": {
+    "phase": "spec",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "input_sha256": "9d91be0a1e0e665d051cc44b7b1b66865b115bf7ca3aecd013cdca6cca8d1390",
+    "content_sha256": "cbd68ce81b1bedb6164e92483f8a57dda3f7e8167d59002dffd145fe54d486eb"
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "spec",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "claude-opus-4.5",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "claude-opus-4.5",
+      "deployment_id": null,
+      "observed_event_sha256": "496e9c27caa19dd303f6722861b4f871dceab76416aa5a4555d01e230be3dcb8"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "dee6abf9c8c0f536d360e835b3be3366fc07f845501d7f52e8ebe0f83f772592",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    }
+  },
+  "write_policy": {
+    "kind": "single_ingress_file",
+    "ingress_path": ".founder/shaping-runs/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/42e0bbd4-29c2-4b0c-a92f-ed92860705c6/ingress/result.json",
+    "instruction_sha256": "3e3f8dea6dc1aaa9a315b38dc36db9b38d1426f9bea730adc975a9a64adefae0",
+    "commands": "forbidden",
+    "urls": "forbidden",
+    "mcp": "forbidden",
+    "credentials": "forbidden",
+    "outside_workspace_writes": "forbidden",
+    "reads": "workspace_and_repository_unrestricted",
+    "execution_mode": "permission_mediated_local",
+    "result_assurance": "result_scope_validation",
+    "containment_assurance": "not_independently_enforced",
+    "machine_authority": "launching_user"
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-09T13:32:02.531Z",
+    "updated_at": "2026-08-09T13:32:46.362Z",
+    "completed_at": "2026-08-09T13:32:46.362Z",
+    "terminal": {
+      "outcome": "missing_permission",
+      "partial": true,
+      "reason": "The artifact-only shaping runtime denied a mediated request outside its single-ingress write policy."
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 1000,
+    "max_event_bytes": 1000000,
+    "max_output_bytes": 100000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 99193,
+    "process_group_id": 99193,
+    "started_at": "2026-08-09T13:32:04.672Z"
+  },
+  "diagnostics": {
+    "entries": [
+      {
+        "observed_at": "2026-08-09T13:32:46.362Z",
+        "code": "shaping_missing_permission",
+        "message": "The artifact-only shaping runtime denied a mediated request outside its single-ingress write policy."
+      }
+    ],
+    "truncated": false
+  }
+}

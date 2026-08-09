@@ -1,0 +1,56 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "9f6db7d7c0e745ca4d8e87ae5d5cf062a476974efc580e8b6999dc8f6d18f601",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 17
+  },
+  "commit": "fdcc3f87c7b7f50fb083c73dc3a07d0d873867d9",
+  "summary": "Guarded exactly the 13 named mutating API routes with a shared trusted-origin and capped-JSON route factory while preserving bodyless routes and existing schemas.",
+  "changed_files": [
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+    "app/api/portfolio/work-items/route.ts",
+    "app/api/request-body.ts",
+    "app/api/work-items/rebuild/route.ts",
+    "app/api/workspaces/route.ts",
+    "tests/api/portfolio-routes.test.ts"
+  ],
+  "verification": [
+    {
+      "name": "Focused portfolio route tests",
+      "status": "passed",
+      "detail": "46 tests passed."
+    },
+    {
+      "name": "Lint",
+      "status": "passed",
+      "detail": "Completed with no errors; 7 pre-existing warnings outside allowed scope."
+    },
+    {
+      "name": "Typecheck",
+      "status": "passed"
+    },
+    {
+      "name": "Production build",
+      "status": "passed"
+    },
+    {
+      "name": "Full test suite",
+      "status": "passed",
+      "detail": "787 tests passed."
+    }
+  ]
+}

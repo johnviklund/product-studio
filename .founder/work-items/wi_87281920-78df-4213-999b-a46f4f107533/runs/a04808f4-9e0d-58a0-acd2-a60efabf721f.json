@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "run_id": "a04808f4-9e0d-58a0-acd2-a60efabf721f",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "idempotency_key": "wi_87281920-78df-4213-999b-a46f4f107533:review-import-drift-recovery:014ea5a58e38caea7a4ef2514264ef9cb90af34a11c5ca0ded843321b128eea3",
+  "phase": "review",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 17,
+  "started_at": "2026-08-08T16:54:29.906Z",
+  "completed_at": "2026-08-08T16:54:30.386Z",
+  "outcome": "applied",
+  "review_import_drift_recovery": {
+    "schema_version": 1,
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "identity": {
+      "phase": "review",
+      "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 17
+    },
+    "patch_cycle": 0,
+    "review_mission_content_sha256": "be0b4e32bbf134af896c1d8ed09ef28ad99bc41bd3a25a52f6514f8cfca21baf",
+    "result_content_sha256": "31b31b4bf734bbe6488c74dd0ed5e9565e1c0749e65e43d7f80b271cccbd0c47",
+    "rejected_import_run_id": "d866bbf479318bc94f8bc5f4c541494c3212f131f2e498225c2ccfb9d8b0ba7a",
+    "rejected_import_controller_run_id": "1cde196d-af62-5bc6-b12f-f70d7d256c03",
+    "rejected_import_evidence_path": ".founder/run-evidence/wi_87281920-78df-4213-999b-a46f4f107533/review-2-2-17/d866bbf479318bc94f8bc5f4c541494c3212f131f2e498225c2ccfb9d8b0ba7a",
+    "accepted_result_commit": "fdcc3f87c7b7f50fb083c73dc3a07d0d873867d9",
+    "current_head_commit": "2d5b8169b02a0e47a46fb10e10991fcd8347582c",
+    "changed_files": [
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/connected/recover-result/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import-drift-recovery/route.ts",
+      "components/kanban/detail-panel.tsx",
+      "src/application/portfolio.ts",
+      "src/application/shaping-connected-run.ts",
+      "src/application/work-item-controller.ts",
+      "src/domain/result.ts",
+      "src/domain/work-item.ts",
+      "src/infrastructure/acp/acp-client.ts",
+      "src/infrastructure/acp/copilot-runtime-profile.ts",
+      "src/workspace/product-workspace.ts",
+      "tests/api/portfolio-routes.test.ts",
+      "tests/api/review-import-drift-recovery-route.test.ts",
+      "tests/application/portfolio.test.ts",
+      "tests/application/shaping-connected-run.test.ts",
+      "tests/application/work-item-controller.test.ts",
+      "tests/detail-panel.test.tsx",
+      "tests/domain/work-item.test.ts",
+      "tests/helpers/fake-acp-agent.mjs",
+      "tests/infrastructure/acp/acp-client.test.ts",
+      "tests/infrastructure/acp/copilot-runtime-profile.test.ts",
+      "tests/workspace-contract.test.ts",
+      "tests/workspace/connected-run-workspace.test.ts"
+    ],
+    "subject_changed_files": [
+      "tests/api/portfolio-routes.test.ts"
+    ],
+    "proposal_sha256": "014ea5a58e38caea7a4ef2514264ef9cb90af34a11c5ca0ded843321b128eea3"
+  }
+}

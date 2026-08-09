@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "identity": {
+    "phase": "review",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 17
+  },
+  "patch_cycle": 0,
+  "review_mission_content_sha256": "be0b4e32bbf134af896c1d8ed09ef28ad99bc41bd3a25a52f6514f8cfca21baf",
+  "result_content_sha256": "1d25c6297bff0219f1fdb3dbef8b9cd1711f1a14df600fbf32af32bbd9eba511",
+  "original_result_path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/review-2-2-17/result.json",
+  "archived_result_path": ".founder/review-result-recoveries/wi_87281920-78df-4213-999b-a46f4f107533/6f0eb6b5-4e95-4d3f-b4af-b66b5a119021/result.json",
+  "recovery_path": ".founder/review-result-recoveries/wi_87281920-78df-4213-999b-a46f4f107533/6f0eb6b5-4e95-4d3f-b4af-b66b5a119021/recovery.json",
+  "recovery_trigger_connected_run_id": "6f0eb6b5-4e95-4d3f-b4af-b66b5a119021"
+}

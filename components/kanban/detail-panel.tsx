@@ -8224,17 +8224,18 @@ export function DetailPanel({
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {shapingDecisionProjection === null ? null : (
-              <div className="border-b px-4 py-2">
-                <button
-                  type="button"
-                  onClick={() => setShowFullWorkItem(false)}
-                  className="text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-                >
-                  Back to shaping decision
-                </button>
-              </div>
-            )}
+            <div className="border-b px-4 py-2">
+              <button
+                type="button"
+                onClick={() => setShowFullWorkItem(false)}
+                className="flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              >
+                <ArrowLeft className="size-3.5" strokeWidth={1.75} />
+                {shapingDecisionProjection === null
+                  ? "Back to details panel"
+                  : "Back to shaping decision"}
+              </button>
+            </div>
             <div className="flex border-b px-4" role="tablist" aria-label="Work item details">
               {(["overview", "activity", "files"] as const).map((tab) => (
                 <button

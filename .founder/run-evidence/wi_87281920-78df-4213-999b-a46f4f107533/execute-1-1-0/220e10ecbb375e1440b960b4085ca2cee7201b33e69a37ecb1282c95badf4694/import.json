@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "import_run_id": "220e10ecbb375e1440b960b4085ca2cee7201b33e69a37ecb1282c95badf4694",
+  "result_content_sha256": "6a8b63701fddd606f66a7e44b5b02beb4d76c6e1b5725c4f7784b6552c67d651",
+  "mission_content_sha256": "204cc830eaa7fe3ab22c1e6a2eccdfdda8aef3f83262381bcbba67700a8a1022",
+  "git_base_commit": "0cce77d40c57b7e374a7bcc485528543364ea2d1",
+  "controller_run_id": "9eb480cf-1c65-50ab-b673-84c78e449a42",
+  "started_at": "2026-08-06T05:05:30.243Z",
+  "completed_at": "2026-08-06T05:05:30.434Z",
+  "outcome": "rejected",
+  "reasons": [
+    "Workspace HEAD does not equal the submitted result commit."
+  ],
+  "phase": "execute",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 0
+  },
+  "result_commit": "0cce77d40c57b7e374a7bcc485528543364ea2d1"
+}

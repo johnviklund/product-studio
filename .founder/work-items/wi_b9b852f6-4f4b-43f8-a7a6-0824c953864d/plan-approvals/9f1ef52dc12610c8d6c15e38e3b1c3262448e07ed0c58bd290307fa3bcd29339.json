@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "approval_id": "9f1ef52dc12610c8d6c15e38e3b1c3262448e07ed0c58bd290307fa3bcd29339",
+  "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+  "launch_mode": "connected",
+  "requested_model": "claude-opus-4.5",
+  "expected_mission_content_sha256": "17f99dc018a115e6214598cec87f2beb58fb2a7ee2c50d22480bb4283d69449a",
+  "expected_result_content_sha256": "9bf268f9993183ac89280aee9203dad65a443161ac6d195fb3074a7d7a14979b",
+  "expected_shaping_state_sha256": "716fcac339fa6a216cdb46f9a5db0f149f2715a85cd3a42af1f5132ada51574b",
+  "goal_contract_sha256": "880ec9fbe75156ea232a0ce74fb000b75b58ffab42618c6c0c6b9dff8d6a5ad5",
+  "goal_version": 1,
+  "receipt_sha256": "830254530af761f14b20728bb93f5360d77809d963da5636ae70a1945c90f466",
+  "execute_tuple": {
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 0
+  },
+  "goal_sha256": "c62b4cec77735d5006ace35446c74c0cad156a1996387ee345016f2c8822795f",
+  "state_sha256": "12c778462924b804358052ece768504de0e25b0ac86bd79b13cf9c71f10537bd",
+  "started_at": "2026-08-09T14:10:49.460Z",
+  "completed_at": "2026-08-09T14:10:49.497Z",
+  "outcome": "applied"
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "produced_at": "2026-08-09T17:21:10.152Z",
+  "ingress_path": ".founder/shaping-runs/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/ead6c53e-c779-4e2b-ac95-914360fc7b0b/ingress/result.json",
+  "result_content_sha256": "fe51cd2fc391200edf20d439f2450ece82836360e5bd8e183ed35330c851f531",
+  "production_id": "ead6c53e-c779-4e2b-ac95-914360fc7b0b",
+  "origin": "connected_run",
+  "shaping_run_id": "ead6c53e-c779-4e2b-ac95-914360fc7b0b",
+  "requested_model": {
+    "value": "gpt-5.4",
+    "assurance": "user_declared"
+  },
+  "effective_model": {
+    "assurance": "adapter_attested",
+    "model_id": "gpt-5.4",
+    "deployment_id": null,
+    "observed_event_sha256": "e79494058f3011184a06717455079bf7d6679609311c2ec7e20cb9e3c504838b"
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "run_id": "c6d6752f-4fc0-58ad-a296-e54cf3151907",
+  "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+  "idempotency_key": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d:execute:3:3:5",
+  "phase": "execute",
+  "goal_version": 3,
+  "input_revision": 3,
+  "attempt": 5,
+  "started_at": "2026-08-09T15:34:39.484Z",
+  "completed_at": "2026-08-09T15:34:39.643Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "fbadf357494b7b1bf4841bba8df5e09e631d4cc65f1884a00bfa295f63c393e5",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "--",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "commit",
+            "-m",
+            "Close project menu"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "diff",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "build"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "lint"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "13a721f614d1877d96c2ea10d0bf92149b69b3e08d6acdaf20ee61ef7f677ddb"
+  }
+}

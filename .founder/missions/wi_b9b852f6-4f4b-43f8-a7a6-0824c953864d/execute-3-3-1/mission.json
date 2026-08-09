@@ -1,0 +1,87 @@
+{
+  "mission_schema_version": 7,
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "goal_version": 3,
+    "input_revision": 3,
+    "attempt": 1
+  },
+  "controller_run": {
+    "run_id": "1271e0a6-f0d9-58d7-9d05-6f6fd977c851",
+    "idempotency_key": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d:execute:3:3:1",
+    "phase": "execute",
+    "started_at": "2026-08-09T15:25:29.803Z",
+    "completed_at": "2026-08-09T15:25:29.887Z"
+  },
+  "goal": {
+    "title": "Close project menu",
+    "purpose": "Make the Projects dropdown menu in the board header close when the user clicks outside the menu, following standard UI patterns for disclosure widgets.",
+    "acceptance_criteria": [
+      "Clicking anywhere outside the Projects menu closes it when open",
+      "Clicking on menu items or checkboxes inside the menu does NOT close the menu",
+      "Clicking the Projects summary/trigger toggles the menu open/closed as before",
+      "Menu closes correctly when user scrolls the board viewport while the menu is open",
+      "Pressing Escape while the menu is open closes it and returns focus to the trigger"
+    ],
+    "non_goals": [
+      "Converting the native details/summary element to a different component library (e.g., shadcn/ui Dropdown)",
+      "Changing the visual styling, position, or content of the Projects menu",
+      "Adding click-outside behavior to other menus or panels in the application",
+      "Implementing focus-trap or advanced accessibility features beyond Escape-key closing"
+    ],
+    "allowed_scope": [
+      "TODO.md",
+      "components/kanban/kanban-board.tsx"
+    ],
+    "review_ready": [
+      "The Projects menu closes when clicking outside its bounds while open",
+      "The menu remains open when interacting with checkboxes and labels inside it",
+      "Escape key closes the menu and restores focus to the trigger button",
+      "No regressions in existing menu toggle behavior when clicking the summary",
+      "Manual verification confirms expected behavior in Safari, Chrome, and Firefox"
+    ]
+  },
+  "source_revision": {
+    "git_base_commit": "1b2a012fec18ac641b980663d2714084e6b23a3d"
+  },
+  "capability_envelope": {
+    "schema_version": 1,
+    "workspace": {
+      "allowed_scope_digest": "7a7a96d970bfecd8fe7f79071bfc9b70838f47c7d5a9ba0cf3fb0f03437ceec8",
+      "execution_mode": "permission_mediated_local",
+      "scope_assurance": "result_scope_validation"
+    },
+    "runtime": {
+      "containment_assurance": "not_independently_enforced",
+      "machine_authority": "launching_user",
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "status"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    }
+  },
+  "result_contract": {
+    "schema_version": 4,
+    "output_path": ".founder/missions/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/execute-3-3-1/result.json",
+    "result_schema_version": 2,
+    "required_fields": [
+      "result_schema_version",
+      "mission_content_sha256",
+      "identity",
+      "commit",
+      "summary",
+      "changed_files",
+      "verification"
+    ]
+  },
+  "task_path": ".founder/missions/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/execute-3-3-1/TASK.md",
+  "content_sha256": "913f52a3630d27f250e40db800586484912f72770decb4dde97bed00000b54b4"
+}

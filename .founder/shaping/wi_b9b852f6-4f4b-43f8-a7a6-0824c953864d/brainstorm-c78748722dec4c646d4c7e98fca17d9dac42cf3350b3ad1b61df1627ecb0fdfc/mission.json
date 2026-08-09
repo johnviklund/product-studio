@@ -1,0 +1,28 @@
+{
+  "shaping_schema_version": 2,
+  "identity": {
+    "phase": "brainstorm",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "input_sha256": "c78748722dec4c646d4c7e98fca17d9dac42cf3350b3ad1b61df1627ecb0fdfc"
+  },
+  "input": {
+    "phase": "brainstorm",
+    "title": "Close project menu",
+    "notes": "The project menu in the top panel does not hide/close when I click out side the menu. I want it to close when I click somewhere else."
+  },
+  "result_contract": {
+    "schema_version": 1,
+    "result_file": "result.json",
+    "result_schema_version": 1,
+    "required_fields": [
+      "result_schema_version",
+      "brainstorm_mission_content_sha256",
+      "identity",
+      "problem_statement",
+      "approach",
+      "non_goals",
+      "open_questions"
+    ]
+  },
+  "content_sha256": "720205cabfb7f85f783c6c32b33129ce94c616474b84268684374992eb52bcb2"
+}

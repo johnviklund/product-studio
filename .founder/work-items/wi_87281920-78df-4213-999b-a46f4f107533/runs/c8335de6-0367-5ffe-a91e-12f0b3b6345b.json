@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "run_id": "c8335de6-0367-5ffe-a91e-12f0b3b6345b",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "idempotency_key": "wi_87281920-78df-4213-999b-a46f4f107533:execute:2:2:14",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 14,
+  "started_at": "2026-08-07T07:05:19.637Z",
+  "completed_at": "2026-08-07T07:05:19.801Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "a364faab6f833adcbb1b39c2f77dcf75ba7d3139c4779795f235d29858c49012",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "--no-pager",
+            "diff",
+            "--",
+            "app/api/portfolio/work-items",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "--no-pager",
+            "diff",
+            "--cached",
+            "--",
+            "app/api/portfolio/work-items",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "--",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/edit/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/import/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/patch/import/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/patch/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/retry/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/review/import/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/review/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/patch-plan/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/route-factory.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/route.ts",
+            "app/api/portfolio/work-items/route.ts",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "--",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+            "app/api/portfolio/work-items/route.ts",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "commit",
+            "-m",
+            "Guard the remaining 13 mutating API routes"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status",
+            "--short"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "rebuild",
+            "better-sqlite3"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "build"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "lint"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test",
+            "--",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "81303ae32538d90916c5dd4c5b2ae9a262f4f8266d2ada790be96e43cd124d46"
+  }
+}

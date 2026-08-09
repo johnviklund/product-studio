@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "run_id": "f9bf3884-fd85-5dd3-bf7c-98d944391de9",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "idempotency_key": "wi_87281920-78df-4213-999b-a46f4f107533:execute:2:2:5",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 5,
+  "started_at": "2026-08-06T15:31:48.698Z",
+  "completed_at": "2026-08-06T15:31:48.782Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "e04e27446c86e1eaab055ed4fed7041071ad4a6ea962b8e94e8e0b4b4d0ac1e9",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "--no-pager",
+            "diff",
+            "--",
+            "app/api/portfolio/work-items",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status",
+            "--short"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test",
+            "--",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "c16d16a96322b106e98e8c9bbb0f5dc97f48c5e75d101eab6798bcb8eb185ca5"
+  }
+}

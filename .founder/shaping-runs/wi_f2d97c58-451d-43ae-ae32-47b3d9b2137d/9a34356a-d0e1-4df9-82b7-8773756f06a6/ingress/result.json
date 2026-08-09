@@ -1,0 +1,36 @@
+{
+  "result_schema_version": 1,
+  "plan_mission_content_sha256": "83c13f18c5c38ba85a53e6e4044b0f089aafc9ad5267ac795a2866f51bc65a06",
+  "identity": {
+    "phase": "plan",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "input_sha256": "0b4243853638975627f42a3fe4917b3fd7729be41d9026a3bab78b3f4cce76ed"
+  },
+  "summary": "Add unconditional back navigation from the full work item view to the shaping decision panel. Currently the 'Back to shaping decision' button only renders when shapingDecisionProjection is non-null, leaving no visible back affordance when the user clicks 'View full work item' from the loading state. The fix decouples the back button visibility from the shaping projection state by always showing the back strip when showFullWorkItem is true and shapingEligible was true at entry. The back button text adapts contextually: 'Back to shaping decision' when shaping projection is available, 'Back' otherwise.",
+  "checklist": [
+    {
+      "id": "step-1",
+      "step": "Update the full work item view conditional branch in detail-panel.tsx to always render a back button when showFullWorkItem is true and the item was shaping-eligible, removing the shapingDecisionProjection !== null guard.",
+      "verification_check": "The back button element renders in the DOM when showFullWorkItem is true, verified by searching for the button with onClick={() => setShowFullWorkItem(false)} in the full work item view branch regardless of shapingDecisionProjection state."
+    },
+    {
+      "id": "step-2",
+      "step": "Conditionally set the back button label: use 'Back to shaping decision' when shapingDecisionProjection is available, and 'Back' when it is null, preserving context for the user.",
+      "verification_check": "Button text is 'Back to shaping decision' when shapingDecisionProjection !== null and 'Back' when shapingDecisionProjection === null, verified by inspecting the ternary expression in the button's children."
+    },
+    {
+      "id": "step-3",
+      "step": "Verify that clicking the back button from the full work item view returns the user to the shaping decision panel (or loading state) without closing the entire detail panel.",
+      "verification_check": "After clicking the back button, showFullWorkItem state is false and the detail panel remains open with the shaping decision view or loading state visible, verified by running the existing detail-panel.test.tsx tests."
+    },
+    {
+      "id": "step-4",
+      "step": "Ensure keyboard accessibility: the back button remains focusable and activatable with Enter/Space, matching the existing focus-visible styles.",
+      "verification_check": "The button retains type='button', the existing focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary classes, and no tabindex=-1 is added."
+    }
+  ],
+  "relevant_skills": [],
+  "product_doc_impacts": [],
+  "todo_impacts": [],
+  "open_questions": []
+}

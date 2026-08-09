@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "run_id": "adcf9026-c297-5a41-986f-e860d4728b9a",
+  "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+  "idempotency_key": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d:execute:5:5:9",
+  "phase": "execute",
+  "goal_version": 5,
+  "input_revision": 5,
+  "attempt": 9,
+  "started_at": "2026-08-09T16:35:58.611Z",
+  "completed_at": "2026-08-09T16:35:58.687Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "d657133a47dd7923f25b48f12821066eb82d2389f88262fb017247392471bc50",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "--no-pager",
+            "diff",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "commit",
+            "-m",
+            "Add click-outside and keyboard close behavior to Projects menu",
+            "-m",
+            "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "diff",
+            "--cached",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "diff",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "log",
+            "-1",
+            "--oneline",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status",
+            "--short"
+          ]
+        },
+        {
+          "executable": "npx",
+          "args": [
+            "tsc",
+            "--noEmit"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "cef567535534bb86b7e25831630a934c561d5ef75b8b79f767fb0a28ec8255b7"
+  }
+}

@@ -1,0 +1,33 @@
+schema_version: 2
+work_item_id: wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d
+title: View full work item page lacks a to navigate back
+capture:
+  kind: idea
+  original_title: View full work item page lacks a to navigate back
+  captured_at: 2026-08-09T17:10:27.659Z
+priority: high
+tags:
+  - Front-end
+notes: When clicking "View full work item" in the details panel, there is no
+  option to navigate back. User must close the details panel and open it again.
+  Users should be able to open the full view, and then be able to navigate back.
+goal_contract:
+  schema_version: 1
+  goal_version: 1
+  purpose: Define a focused back-navigation flow from the full work item page to
+    the details-panel context the user came from.
+  acceptance_criteria:
+    - From the full work item page opened via 'View full work item', the user
+      can trigger a visible back action that returns to the previously open work
+      item details panel without manually closing and reopening it.
+  non_goals:
+    - Redesigning global application navigation, breadcrumbs, or multi-step
+      history beyond returning from the full work item page to its originating
+      details-panel context.
+  allowed_scope:
+    - work-item details panel to full-page work-item navigation and return
+      behavior
+  review_ready:
+    - The proposal specifies the entry point, the back-navigation affordance on
+      the full work item page, and the expected restored destination context
+      when returning to the details panel.

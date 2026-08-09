@@ -1,0 +1,248 @@
+{
+  "schema_version": 2,
+  "connected_run_id": "5ac1bbdc-46d0-4b96-9572-6798bd8de9e7",
+  "mission": {
+    "identity": {
+      "phase": "execute",
+      "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 9
+    },
+    "path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/execute-2-2-9/mission.json",
+    "content_sha256": "3aeea5ada14d1caad0697effbc65b603875654f61dbee0e291821c793fa2cac3",
+    "source_commit": "5c2948ae34bbe7c65be03ae926c65bee73536682"
+  },
+  "governed_tuple": {
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 9,
+    "patch_cycle": 0
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "executor",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "gpt-5.6-sol",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "gpt-5.6-sol",
+      "deployment_id": null,
+      "observed_event_sha256": "25963c393366e69565aff7bc0fa72310e74d969feb0f228069da1f71bbde080b"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "f034bce92ee3aaa8306d733e66dff5a7e50a345e52611808f5b5a43122792ac2",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    },
+    "authorization_sha256": {
+      "value": "2b6dea825169d5030ca6b5fde9169b4312780c684fab6b1380466eeaeed410a2",
+      "assurance": "controller_observed"
+    }
+  },
+  "authorization": {
+    "kind": "capability_envelope",
+    "envelope": {
+      "schema_version": 1,
+      "workspace": {
+        "allowed_scope_digest": "675e74aede901f57ce18f749737e45fb944bc506c8766d4649d56e3012212309",
+        "execution_mode": "permission_mediated_local",
+        "scope_assurance": "result_scope_validation"
+      },
+      "runtime": {
+        "containment_assurance": "not_independently_enforced",
+        "machine_authority": "launching_user",
+        "approved_command_forms": [
+          {
+            "executable": "git",
+            "args": [
+              "--no-pager",
+              "diff",
+              "--",
+              "app/api/portfolio/work-items",
+              "app/api/request-body.ts",
+              "app/api/work-items/rebuild/route.ts",
+              "app/api/workspaces/route.ts",
+              "tests/api/portfolio-routes.test.ts"
+            ]
+          },
+          {
+            "executable": "git",
+            "args": [
+              "add",
+              "--",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/edit/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/import/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/patch/import/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/patch/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/retry/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/review/import/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/review/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/patch-plan/route.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/route-factory.ts",
+              "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/route.ts",
+              "app/api/portfolio/work-items/route.ts",
+              "app/api/request-body.ts",
+              "app/api/work-items/rebuild/route.ts",
+              "app/api/workspaces/route.ts",
+              "tests/api/portfolio-routes.test.ts"
+            ]
+          },
+          {
+            "executable": "git",
+            "args": [
+              "add",
+              "--",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+              "app/api/portfolio/work-items/route.ts",
+              "app/api/request-body.ts",
+              "app/api/work-items/rebuild/route.ts",
+              "app/api/workspaces/route.ts",
+              "tests/api/portfolio-routes.test.ts"
+            ]
+          },
+          {
+            "executable": "git",
+            "args": [
+              "commit",
+              "-m",
+              "Guard the remaining 13 mutating API routes"
+            ]
+          },
+          {
+            "executable": "git",
+            "args": [
+              "status",
+              "--short"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "rebuild",
+              "better-sqlite3"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "run",
+              "build"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "run",
+              "lint"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "run",
+              "typecheck"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "test",
+              "--",
+              "tests/api/portfolio-routes.test.ts"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "test"
+            ]
+          }
+        ],
+        "approved_url_operations": [],
+        "mcp": "forbidden",
+        "credentials": "forbidden"
+      }
+    },
+    "envelope_sha256": "86a89e5c8f45f2ccc66a59d204ca49479cee4a9ea138ffef8fbef287e454ef34"
+  },
+  "acp": {
+    "protocol_version": {
+      "value": 1,
+      "assurance": "adapter_attested"
+    },
+    "session_id": {
+      "value": "962bcc7c-99f9-4ca9-aa23-bc5a779ec406",
+      "assurance": "adapter_attested"
+    }
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-06T20:52:18.479Z",
+    "updated_at": "2026-08-06T20:55:54.596Z",
+    "completed_at": "2026-08-06T20:55:54.596Z",
+    "terminal": {
+      "outcome": "completed",
+      "partial": false,
+      "reason": null
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 1000,
+    "max_event_bytes": 1000000,
+    "max_output_bytes": 1000000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 17133,
+    "process_group_id": 17133,
+    "started_at": "2026-08-06T20:52:24.847Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

@@ -1,0 +1,59 @@
+# Spec shaping task
+
+Use the immutable input below. Write one JSON result named `result.json`.
+
+Mission content SHA-256: `af5600257cdcd0a69250569bc59682b647ec7ef011068c5ab983a448059677b4`
+
+## Input
+
+```json
+{
+  "phase": "spec",
+  "title": "View full work item page lacks a to navigate back",
+  "notes": "When clicking \"View full work item\" in the details panel, there is no option to navigate back. User must close the details panel and open it again. Users should be able to open the full view, and then be able to navigate back.",
+  "brainstorm_selection_sha256": "55fbfcbf95c92c05042ac7867ee55046a65397c1d2edeabd74defb02fa065128",
+  "brainstorm_selection": {
+    "shaping_schema_version": 2,
+    "identity": {
+      "phase": "brainstorm",
+      "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+      "input_sha256": "24342e84b4bff411743d99b3ead431c630cc4d92ac6afffa7e5f371ba6e0a705"
+    },
+    "mission_content_sha256": "faf6320ef0c208b63553e35ce6331c92100303c7e96292db640d748935c61889",
+    "result_content_sha256": "e5afcc83a0a01a933073224028488ab5fc8b9d08434858958c4c4dc90fe3dd1c"
+  },
+  "brainstorm_result": {
+    "result_schema_version": 1,
+    "brainstorm_mission_content_sha256": "faf6320ef0c208b63553e35ce6331c92100303c7e96292db640d748935c61889",
+    "identity": {
+      "phase": "brainstorm",
+      "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+      "input_sha256": "24342e84b4bff411743d99b3ead431c630cc4d92ac6afffa7e5f371ba6e0a705"
+    },
+    "problem_statement": "When users click 'View full work item' from the details panel, they navigate to a full-page view with no way to return to the previous context. They must manually close the details panel and reopen it to restore their original view, creating a frustrating navigation dead-end.",
+    "approach": "Add a back navigation option (e.g., a back button or browser-like navigation control) to the full work item page that returns the user to the details panel view they came from. This could leverage browser history state or maintain context state to preserve the exact panel state (which item was open, scroll position, etc.) when navigating back.",
+    "non_goals": [
+      "Adding breadcrumb navigation across the entire application",
+      "Implementing a full navigation history stack beyond this specific back action",
+      "Redesigning the overall details panel or work item page layout",
+      "Adding forward navigation or arbitrary navigation between work items from the full view"
+    ],
+    "open_questions": [
+      "Should the back navigation use browser history (allowing browser back button to work) or a dedicated UI element only?",
+      "What specific state needs to be preserved when returning (scroll position, filter settings, selection state)?",
+      "Should there be a keyboard shortcut for the back action?",
+      "If the details panel was closed before navigating to full view, where should 'back' take the user?",
+      "Should this work consistently across all full-page views or only work item details?"
+    ]
+  }
+}
+```
+
+## Required result fields
+
+- `result_schema_version`
+- `spec_mission_content_sha256`
+- `identity`
+- `proposal`
+
+Do not modify the work item, advance its phase, or treat this proposal as adopted state.

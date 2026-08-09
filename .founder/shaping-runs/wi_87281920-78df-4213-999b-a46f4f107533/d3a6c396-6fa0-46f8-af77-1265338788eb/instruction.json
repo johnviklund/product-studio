@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "origin": "connected_run",
+  "shaping_run_id": "d3a6c396-6fa0-46f8-af77-1265338788eb",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "phase": "plan",
+  "mission_input_sha256": "a52a737e9e80a215316642ac741975bc13e43f61556cc9a68308395fce1791ad",
+  "mission_content_sha256": "16113ba6de260569e50e7652a054b3129db8426bb835f4f521c17dcf31189341",
+  "task_path": ".founder/shaping/wi_87281920-78df-4213-999b-a46f4f107533/plan-a52a737e9e80a215316642ac741975bc13e43f61556cc9a68308395fce1791ad/TASK.md",
+  "mission_path": ".founder/shaping/wi_87281920-78df-4213-999b-a46f4f107533/plan-a52a737e9e80a215316642ac741975bc13e43f61556cc9a68308395fce1791ad/mission.json",
+  "ingress_path": ".founder/shaping-runs/wi_87281920-78df-4213-999b-a46f4f107533/d3a6c396-6fa0-46f8-af77-1265338788eb/ingress/result.json",
+  "result_schema_version": 1,
+  "required_fields": [
+    "result_schema_version",
+    "plan_mission_content_sha256",
+    "identity",
+    "summary",
+    "checklist",
+    "relevant_skills",
+    "product_doc_impacts",
+    "todo_impacts",
+    "open_questions"
+  ],
+  "max_result_bytes": 262144,
+  "created_at": "2026-08-05T22:22:11.353Z",
+  "instruction_sha256": "9b4e7eaf81636f3d7dc52e3e08b817ec9151ca1eec614f198423895dd8e2ef71"
+}

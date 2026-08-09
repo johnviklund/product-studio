@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "connected_run_id": "16acfc10-1670-4f29-8e27-ca304ee1705a",
+  "launch_fingerprint": "74189ef7a8fa50fff32458a0c3a01b8f796dbcb8ef31f171df52a4d4d35d6902",
+  "record": {
+    "schema_version": 2,
+    "connected_run_id": "16acfc10-1670-4f29-8e27-ca304ee1705a",
+    "mission": {
+      "identity": {
+        "phase": "execute",
+        "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+        "goal_version": 1,
+        "input_revision": 1,
+        "attempt": 0
+      },
+      "path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-0/mission.json",
+      "content_sha256": "68eba59a683b626e955d19a58eec42f7e2f7d78291453357fb269c146bb37a2d",
+      "source_commit": "4133c875769f85e69492e57986c122937fbe040b"
+    },
+    "governed_tuple": {
+      "goal_version": 1,
+      "input_revision": 1,
+      "attempt": 0,
+      "patch_cycle": 0
+    },
+    "provenance": {
+      "role": {
+        "value": "writer",
+        "assurance": "controller_observed"
+      },
+      "seat": {
+        "value": "executor",
+        "assurance": "controller_observed"
+      },
+      "requested_model": {
+        "value": "claude-sonnet-4.5",
+        "assurance": "user_declared"
+      },
+      "effective_model": {
+        "assurance": "unknown",
+        "model_id": null,
+        "deployment_id": null,
+        "observed_event_sha256": null
+      },
+      "effort": {
+        "value": "medium",
+        "assurance": "user_declared"
+      },
+      "harness": {
+        "value": {
+          "id": "copilot-acp",
+          "version": "1.0.78"
+        },
+        "assurance": "adapter_attested"
+      },
+      "adapter_profile": {
+        "value": {
+          "adapter_id": "copilot-acp",
+          "adapter_version": "1.0.78",
+          "profile_id": "noninteractive-execute-v1"
+        },
+        "assurance": "adapter_attested"
+      },
+      "resolved_profile_sha256": {
+        "value": "de66538eae54aa29f757540b16644d971ed78107cf1957c531a93abb396a701e",
+        "assurance": "controller_observed"
+      },
+      "resolved_skill_set_sha256": {
+        "value": null,
+        "assurance": "unknown"
+      },
+      "authorization_sha256": {
+        "value": "0bd39672ed8db869dd72de713a2b2522fe527cb367afb31aea2242226abe2ed0",
+        "assurance": "controller_observed"
+      }
+    },
+    "authorization": {
+      "kind": "capability_envelope",
+      "envelope": {
+        "schema_version": 1,
+        "workspace": {
+          "allowed_scope_digest": "dc03f47661422bb0b33922ac46bafaae8080cb7ea68a100f8cebdda3f2276802",
+          "execution_mode": "permission_mediated_local",
+          "scope_assurance": "result_scope_validation"
+        },
+        "runtime": {
+          "containment_assurance": "not_independently_enforced",
+          "machine_authority": "launching_user",
+          "approved_command_forms": [],
+          "approved_url_operations": [],
+          "mcp": "forbidden",
+          "credentials": "forbidden"
+        }
+      },
+      "envelope_sha256": "6a76c2333962734555a1843aac3e289ce55379b1340c435a9dcfbe0cca428569"
+    },
+    "acp": {
+      "protocol_version": {
+        "value": null,
+        "assurance": "unknown"
+      },
+      "session_id": {
+        "value": null,
+        "assurance": "unknown"
+      }
+    },
+    "lifecycle": {
+      "status": "starting",
+      "started_at": "2026-08-09T18:12:55.953Z",
+      "updated_at": "2026-08-09T18:12:55.953Z",
+      "completed_at": null,
+      "terminal": null
+    },
+    "limits": {
+      "wall_clock_timeout_ms": 900000,
+      "max_event_count": 1000,
+      "max_event_bytes": 1000000,
+      "max_output_bytes": 1000000,
+      "termination_grace_ms": 5000,
+      "drain_grace_ms": 1000
+    },
+    "process": null,
+    "diagnostics": {
+      "entries": [],
+      "truncated": false
+    }
+  },
+  "created_at": "2026-08-09T18:12:56.016Z"
+}

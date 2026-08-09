@@ -1,0 +1,13 @@
+{
+  "shaping_schema_version": 2,
+  "shaping_mission_content_sha256": "faf6320ef0c208b63553e35ce6331c92100303c7e96292db640d748935c61889",
+  "result_content_sha256": "e5afcc83a0a01a933073224028488ab5fc8b9d08434858958c4c4dc90fe3dd1c",
+  "first_published_at": "2026-08-09T17:11:06.491Z",
+  "identity": {
+    "phase": "brainstorm",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "input_sha256": "24342e84b4bff411743d99b3ead431c630cc4d92ac6afffa7e5f371ba6e0a705"
+  },
+  "outcome": "applied",
+  "reasons": []
+}

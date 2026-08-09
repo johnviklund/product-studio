@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml";
 
 import {
   MISSION_SCHEMA_VERSION,
+  missionScopeBaseCommit,
   reviewSubjectSchema,
   type MissionIdentity,
   type MissionPhase,
@@ -1923,7 +1924,9 @@ export class WorkItemController {
         result_content_sha256: resultContentSha256,
         mission_content_sha256: snapshot.mission.content_sha256,
         identity,
-        git_base_commit: snapshot.mission.source_revision.git_base_commit,
+        git_base_commit: missionScopeBaseCommit(
+          snapshot.mission.source_revision,
+        ),
         result_commit: assessment.result?.commit ?? null,
         controller_run_id: runId,
         started_at: activeRun.acquired_at,
@@ -2730,10 +2733,12 @@ export class WorkItemController {
         result_content_sha256: resultContentSha256,
         mission_content_sha256: snapshot.mission.content_sha256,
         identity,
-        git_base_commit: snapshot.mission.source_revision.git_base_commit,
+        git_base_commit: missionScopeBaseCommit(
+          snapshot.mission.source_revision,
+        ),
         result_commit:
           assessment.result?.commit ??
-          snapshot.mission.source_revision.git_base_commit,
+          missionScopeBaseCommit(snapshot.mission.source_revision),
         controller_run_id: runId,
         started_at: activeRun.acquired_at,
         completed_at: completedAt,
@@ -3851,7 +3856,7 @@ export class WorkItemController {
       stored.evidence.mission_content_sha256 !==
         snapshot.mission.content_sha256 ||
       stored.evidence.git_base_commit !==
-        snapshot.mission.source_revision.git_base_commit
+        missionScopeBaseCommit(snapshot.mission.source_revision)
     ) {
       throw this.conflict(
         "repair_required",
@@ -4579,8 +4584,24 @@ export class WorkItemController {
       return ["Workspace has uncommitted changes outside .founder/."];
     }
 
+    const scopeBaseCommit = missionScopeBaseCommit(
+      snapshot.mission.source_revision,
+    );
+    if (scopeBaseCommit !== baseCommit) {
+      if (!(await this.git.isAncestor(baseCommit, scopeBaseCommit))) {
+        return [
+          "Mission Git base is not an ancestor of the mission scope base commit.",
+        ];
+      }
+      if (!(await this.git.isAncestor(scopeBaseCommit, resolvedCommit))) {
+        return [
+          "Mission scope base is not an ancestor of the result commit.",
+        ];
+      }
+    }
+
     const changedFiles = await this.git.listChangedFiles(
-      baseCommit,
+      scopeBaseCommit,
       resolvedCommit,
     );
     if (changedFiles.length === 0) {
@@ -5184,7 +5205,7 @@ export class WorkItemController {
         snapshot.mission.content_sha256 ||
       stored.evidence.result_content_sha256 !== resultContentSha256 ||
       stored.evidence.git_base_commit !==
-        snapshot.mission.source_revision.git_base_commit ||
+        missionScopeBaseCommit(snapshot.mission.source_revision) ||
       stored.summary.import_run_id !== stored.evidence.import_run_id ||
       stored.summary.phase !== "patch" ||
       stored.summary.outcome !== stored.evidence.outcome ||

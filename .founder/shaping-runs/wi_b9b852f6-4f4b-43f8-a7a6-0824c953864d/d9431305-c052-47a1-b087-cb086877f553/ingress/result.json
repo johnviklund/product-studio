@@ -1,0 +1,35 @@
+{
+  "result_schema_version": 1,
+  "spec_mission_content_sha256": "cbd68ce81b1bedb6164e92483f8a57dda3f7e8167d59002dffd145fe54d486eb",
+  "identity": {
+    "phase": "spec",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "input_sha256": "9d91be0a1e0e665d051cc44b7b1b66865b115bf7ca3aecd013cdca6cca8d1390"
+  },
+  "proposal": {
+    "purpose": "Make the Projects dropdown menu in the board header close when the user clicks outside the menu, following standard UI patterns for disclosure widgets.",
+    "acceptance_criteria": [
+      "Clicking anywhere outside the Projects menu closes it when open",
+      "Clicking on menu items or checkboxes inside the menu does NOT close the menu",
+      "Clicking the Projects summary/trigger toggles the menu open/closed as before",
+      "Menu closes correctly when user scrolls the board viewport while the menu is open",
+      "Pressing Escape while the menu is open closes it and returns focus to the trigger"
+    ],
+    "non_goals": [
+      "Converting the native details/summary element to a different component library (e.g., shadcn/ui Dropdown)",
+      "Changing the visual styling, position, or content of the Projects menu",
+      "Adding click-outside behavior to other menus or panels in the application",
+      "Implementing focus-trap or advanced accessibility features beyond Escape-key closing"
+    ],
+    "allowed_scope": [
+      "components/kanban/kanban-board.tsx"
+    ],
+    "review_ready": [
+      "The Projects menu closes when clicking outside its bounds while open",
+      "The menu remains open when interacting with checkboxes and labels inside it",
+      "Escape key closes the menu and restores focus to the trigger button",
+      "No regressions in existing menu toggle behavior when clicking the summary",
+      "Manual verification confirms expected behavior in Safari, Chrome, and Firefox"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "identity": {
+    "phase": "review",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 17
+  },
+  "patch_cycle": 0,
+  "review_mission_content_sha256": "be0b4e32bbf134af896c1d8ed09ef28ad99bc41bd3a25a52f6514f8cfca21baf",
+  "result_content_sha256": "bfae519196d4c2abed13d16eff6dea1f78b60256f93e29c6845df2bb7a1eb9d7",
+  "original_result_path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/review-2-2-17/result.json",
+  "archived_result_path": ".founder/review-result-recoveries/wi_87281920-78df-4213-999b-a46f4f107533/c7d96e6f-50f8-43ad-83ff-3a2eefd1908b/result.json",
+  "recovery_path": ".founder/review-result-recoveries/wi_87281920-78df-4213-999b-a46f4f107533/c7d96e6f-50f8-43ad-83ff-3a2eefd1908b/recovery.json",
+  "recovery_trigger_connected_run_id": "c7d96e6f-50f8-43ad-83ff-3a2eefd1908b"
+}

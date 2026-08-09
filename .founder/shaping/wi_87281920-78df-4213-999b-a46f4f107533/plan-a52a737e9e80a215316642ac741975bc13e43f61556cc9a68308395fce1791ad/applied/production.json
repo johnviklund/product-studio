@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "produced_at": "2026-08-05T22:22:25.115Z",
+  "ingress_path": ".founder/shaping-runs/wi_87281920-78df-4213-999b-a46f4f107533/d3a6c396-6fa0-46f8-af77-1265338788eb/ingress/result.json",
+  "result_content_sha256": "9455224bf174c47cd1d87d91eb2e042b3558774283c6f08f9bd4e67b9aa6f265",
+  "production_id": "d3a6c396-6fa0-46f8-af77-1265338788eb",
+  "origin": "connected_run",
+  "shaping_run_id": "d3a6c396-6fa0-46f8-af77-1265338788eb",
+  "requested_model": {
+    "value": "gpt-5.6-luna",
+    "assurance": "user_declared"
+  },
+  "effective_model": {
+    "assurance": "adapter_attested",
+    "model_id": "gpt-5.6-luna",
+    "deployment_id": null,
+    "observed_event_sha256": "a4d008ce4dbe6fa8b3e5ff9522a691e53a2417f0db1c794ad4b65f83bb23dbce"
+  }
+}

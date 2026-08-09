@@ -1,0 +1,31 @@
+{
+  "result_schema_version": 1,
+  "plan_mission_content_sha256": "83c13f18c5c38ba85a53e6e4044b0f089aafc9ad5267ac795a2866f51bc65a06",
+  "identity": {
+    "phase": "plan",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "input_sha256": "0b4243853638975627f42a3fe4917b3fd7729be41d9026a3bab78b3f4cce76ed"
+  },
+  "summary": "Add unconditional back-navigation button to the full work item view in detail-panel.tsx. Currently the 'Back to shaping decision' button only appears when shapingDecisionProjection is non-null, leaving users without a visible return path when shaping context is unavailable. The fix moves the back button outside the conditional block so it always appears when showFullWorkItem is true, with context-appropriate labeling.",
+  "checklist": [
+    {
+      "id": "step-1",
+      "step": "Refactor the full work item view (line ~8227) in detail-panel.tsx to always render a back-navigation button at the top when showFullWorkItem is true, regardless of whether shapingDecisionProjection is null. Use conditional text: 'Back to shaping decision' when shaping is active, or 'Back to details panel' otherwise.",
+      "verification_check": "Run `npm run typecheck` to confirm no TypeScript errors. Manually verify the back button appears unconditionally in the full work item view by loading a work item with and without shaping context."
+    },
+    {
+      "id": "step-2",
+      "step": "Add an ArrowLeft icon prefix to the back button for visual clarity and consistency with common navigation patterns. The icon is already imported at the top of detail-panel.tsx.",
+      "verification_check": "Visual inspection confirms the ArrowLeft icon appears before the button text."
+    },
+    {
+      "id": "step-3",
+      "step": "Add a test case in tests/detail-panel.test.tsx that renders the DetailPanel in full work item view mode and asserts the back button is present and clickable, returning the user to the details panel state.",
+      "verification_check": "Run `npm test -- tests/detail-panel.test.tsx` and confirm the new test passes."
+    }
+  ],
+  "relevant_skills": [],
+  "product_doc_impacts": [],
+  "todo_impacts": [],
+  "open_questions": []
+}

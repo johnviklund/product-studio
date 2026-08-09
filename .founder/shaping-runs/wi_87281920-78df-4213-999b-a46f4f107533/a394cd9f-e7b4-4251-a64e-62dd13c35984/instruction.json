@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "origin": "connected_run",
+  "shaping_run_id": "a394cd9f-e7b4-4251-a64e-62dd13c35984",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "phase": "spec",
+  "mission_input_sha256": "02e49909d9b749e9a90d504782848807dcea0de6dc772cd0cca2f79c070dd71a",
+  "mission_content_sha256": "ec1c51531cbceda3c8526841e07a3fec59bcb6298b7a33c65f8bf168126b8500",
+  "task_path": ".founder/shaping/wi_87281920-78df-4213-999b-a46f4f107533/spec-02e49909d9b749e9a90d504782848807dcea0de6dc772cd0cca2f79c070dd71a/TASK.md",
+  "mission_path": ".founder/shaping/wi_87281920-78df-4213-999b-a46f4f107533/spec-02e49909d9b749e9a90d504782848807dcea0de6dc772cd0cca2f79c070dd71a/mission.json",
+  "ingress_path": ".founder/shaping-runs/wi_87281920-78df-4213-999b-a46f4f107533/a394cd9f-e7b4-4251-a64e-62dd13c35984/ingress/result.json",
+  "result_schema_version": 1,
+  "required_fields": [
+    "result_schema_version",
+    "spec_mission_content_sha256",
+    "identity",
+    "proposal"
+  ],
+  "max_result_bytes": 262144,
+  "created_at": "2026-08-05T22:18:59.688Z",
+  "instruction_sha256": "7f69c860bb4839a4f33043cf82322b03055f3dfd86fbb7571ce33b727d5d231f"
+}

@@ -1,0 +1,190 @@
+{
+  "schema_version": 2,
+  "connected_run_id": "c3bb7fbc-cd1b-4852-8b34-c7bf7e37dcbd",
+  "mission": {
+    "identity": {
+      "phase": "execute",
+      "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 1
+    },
+    "path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/execute-2-2-1/mission.json",
+    "content_sha256": "45c1b6ed87910c684c302725a43724b23c7895323e90ae25775bae99c377b1f5",
+    "source_commit": "10b924e5223ff81e82938951562b0e54f60d32b3"
+  },
+  "governed_tuple": {
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 1,
+    "patch_cycle": 0
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "executor",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "gpt-5.6-sol",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "gpt-5.6-sol",
+      "deployment_id": null,
+      "observed_event_sha256": "25963c393366e69565aff7bc0fa72310e74d969feb0f228069da1f71bbde080b"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "8d9784b0a5e50a4f4a53a3219db3bd3bbd507f102f9fc495d0b17879684205f1",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    },
+    "authorization_sha256": {
+      "value": "aa5fff9b352a762e3fe1881a3395da04d543f2d24ca6a3bc29b5429dea9bb284",
+      "assurance": "controller_observed"
+    }
+  },
+  "authorization": {
+    "kind": "capability_envelope",
+    "envelope": {
+      "schema_version": 1,
+      "workspace": {
+        "allowed_scope_digest": "675e74aede901f57ce18f749737e45fb944bc506c8766d4649d56e3012212309",
+        "execution_mode": "permission_mediated_local",
+        "scope_assurance": "result_scope_validation"
+      },
+      "runtime": {
+        "containment_assurance": "not_independently_enforced",
+        "machine_authority": "launching_user",
+        "approved_command_forms": [
+          {
+            "executable": "git",
+            "args": [
+              "add",
+              "--",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+              "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+              "app/api/portfolio/work-items/route.ts",
+              "app/api/request-body.ts",
+              "app/api/work-items/rebuild/route.ts",
+              "app/api/workspaces/route.ts",
+              "tests/api/portfolio-routes.test.ts"
+            ]
+          },
+          {
+            "executable": "git",
+            "args": [
+              "commit",
+              "-m",
+              "Guard the remaining 13 mutating API routes"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "run",
+              "build"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "run",
+              "lint"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "run",
+              "typecheck"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "test"
+            ]
+          }
+        ],
+        "approved_url_operations": [],
+        "mcp": "forbidden",
+        "credentials": "forbidden"
+      }
+    },
+    "envelope_sha256": "9a75453b20fdc49b898198457ebea6cd1e32ecfb970322e4df3e21943036a091"
+  },
+  "acp": {
+    "protocol_version": {
+      "value": 1,
+      "assurance": "adapter_attested"
+    },
+    "session_id": {
+      "value": "2db072b2-1612-40db-859d-4ae0e4e09202",
+      "assurance": "adapter_attested"
+    }
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-06T13:21:46.647Z",
+    "updated_at": "2026-08-06T13:22:37.085Z",
+    "completed_at": "2026-08-06T13:22:37.085Z",
+    "terminal": {
+      "outcome": "completed",
+      "partial": false,
+      "reason": null
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 1000,
+    "max_event_bytes": 1000000,
+    "max_output_bytes": 1000000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 32135,
+    "process_group_id": 32135,
+    "started_at": "2026-08-06T13:21:51.491Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

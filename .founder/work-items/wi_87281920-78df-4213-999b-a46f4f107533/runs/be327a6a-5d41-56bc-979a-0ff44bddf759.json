@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "run_id": "be327a6a-5d41-56bc-979a-0ff44bddf759",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "idempotency_key": "wi_87281920-78df-4213-999b-a46f4f107533:execute:command-authorization:e5876b4fa05133cd5c5a17591687b7780b8f5dd8bd16e5fb39b105aa900d83a9",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 0,
+  "started_at": "2026-08-06T12:08:46.621Z",
+  "completed_at": "2026-08-06T12:08:46.779Z",
+  "outcome": "applied",
+  "command_authorization": {
+    "schema_version": 1,
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "governed_tuple": {
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 0,
+      "patch_cycle": 0
+    },
+    "source_mission_content_sha256": "0702ffa69d7ec7ed0b21e7e5143aa6195be9834fc806c14471fc178f99f5ecbc",
+    "terminal_connected_run_id": "ec926d97-8b0e-4f60-a0b7-0182ad55de69",
+    "changed_files": [
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+      "app/api/portfolio/work-items/route.ts",
+      "app/api/request-body.ts",
+      "app/api/work-items/rebuild/route.ts",
+      "app/api/workspaces/route.ts",
+      "tests/api/portfolio-routes.test.ts"
+    ],
+    "commands": [
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "npm",
+        "args": [
+          "run",
+          "lint"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "npm",
+        "args": [
+          "run",
+          "typecheck"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "npm",
+        "args": [
+          "test"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "npm",
+        "args": [
+          "run",
+          "build"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "git",
+        "args": [
+          "add",
+          "--",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+          "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+          "app/api/portfolio/work-items/route.ts",
+          "app/api/request-body.ts",
+          "app/api/work-items/rebuild/route.ts",
+          "app/api/workspaces/route.ts",
+          "tests/api/portfolio-routes.test.ts"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "git",
+        "args": [
+          "commit",
+          "-m",
+          "Guard the remaining 13 mutating API routes"
+        ]
+      }
+    ],
+    "proposal_sha256": "e5876b4fa05133cd5c5a17591687b7780b8f5dd8bd16e5fb39b105aa900d83a9"
+  }
+}

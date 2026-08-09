@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "import_run_id": "8c93dde36427555e69a6846fa837264ba649be64876501a1ddb6c4dcd6faab9b",
+  "result_content_sha256": "c71eb4367c7171196454b114c22ff72ddb86cb4e785cc7a38c6522a707a65abc",
+  "mission_content_sha256": "31cb0e939b4e2f06015cd19debad5ceba461733043c8f264102b6ff6b69f0d1d",
+  "git_base_commit": "949e050468c67eaa359a2068901605900447b1c1",
+  "controller_run_id": "33fe5a98-62ec-534b-b492-0789fc02e77f",
+  "started_at": "2026-08-09T16:37:51.511Z",
+  "completed_at": "2026-08-09T16:39:31.684Z",
+  "outcome": "failed",
+  "reasons": [
+    "Required verification command Build ended with failed."
+  ],
+  "phase": "execute",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "goal_version": 5,
+    "input_revision": 5,
+    "attempt": 10
+  },
+  "result_commit": "d7c992c7c3dab9a79495b9f95243b0beaafb8330"
+}

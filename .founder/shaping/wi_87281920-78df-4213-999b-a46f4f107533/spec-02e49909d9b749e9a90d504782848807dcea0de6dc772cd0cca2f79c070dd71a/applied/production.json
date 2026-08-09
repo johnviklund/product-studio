@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "produced_at": "2026-08-05T22:19:21.739Z",
+  "ingress_path": ".founder/shaping-runs/wi_87281920-78df-4213-999b-a46f4f107533/a394cd9f-e7b4-4251-a64e-62dd13c35984/ingress/result.json",
+  "result_content_sha256": "61ef39409866b335e9167430ebb0987e136c02b15a667b1f63b872349576f2c2",
+  "production_id": "a394cd9f-e7b4-4251-a64e-62dd13c35984",
+  "origin": "connected_run",
+  "shaping_run_id": "a394cd9f-e7b4-4251-a64e-62dd13c35984",
+  "requested_model": {
+    "value": "gpt-5.6-terra",
+    "assurance": "user_declared"
+  },
+  "effective_model": {
+    "assurance": "adapter_attested",
+    "model_id": "gpt-5.6-terra",
+    "deployment_id": null,
+    "observed_event_sha256": "ea8895c861a9a4c21cc1274e3a9317abd350417c7653943e81880925c0119cf0"
+  }
+}

@@ -255,7 +255,13 @@ delivery phases.
 
 ### Stop requiring a work item to be the sole author of history since its Git base
 
-- **Status:** Proposed — defect, blocks recovery. Found 2026-08-09 on `wi_b9b852f6`.
+- **Status:** Delivered 2026-08-09 — missions now record a `scope_base_commit` (the HEAD the
+  attempt was actually compiled at) alongside the frozen `git_base_commit`. Identity and ancestry
+  still anchor to the frozen base; `allowed_scope` and `changed_files` are measured from the scope
+  base, so commits authored outside the work item before an attempt was compiled no longer
+  invalidate it. Recovery is a normal retry: the new attempt compiles a fresh scope base.
+  Remaining gap: work the item itself committed in an *earlier failed attempt* still falls outside
+  the next attempt's scope base — tracked separately under the committed-then-failed retry entry.
 - **Idea:** `validateGitProof` requires HEAD to equal the result commit and then walks every file in
   `git_base_commit..HEAD`, rejecting any path outside the item's `allowed_scope` and requiring the
   diff to match the agent's reported `changed_files` exactly. That is only sound if nothing else

@@ -155,6 +155,7 @@ interface MissionGoal {
 
 interface MissionSourceRevision {
   git_base_commit: string;
+  scope_base_commit?: string;
 }
 
 interface MissionResultContract<
@@ -520,6 +521,7 @@ export interface MissionPaths {
   task_path: string;
   output_path: string;
   git_base_commit: string;
+  scope_base_commit?: string;
 }
 
 type MissionPathBoundPackage = Pick<
@@ -631,6 +633,7 @@ const missionGoalSchema: z.ZodType<MissionGoal> = z.strictObject({
 const missionSourceRevisionSchema: z.ZodType<MissionSourceRevision> =
   z.strictObject({
     git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
+    scope_base_commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   });
 
 const reviewCommandEvidenceRecordSchema: z.ZodType<ReviewCommandEvidenceRecord> =
@@ -1680,6 +1683,7 @@ const missionPathsSchema = z
     task_path: workspaceRelativePosixPathSchema,
     output_path: workspaceRelativePosixPathSchema,
     git_base_commit: z.string().regex(/^[0-9a-f]{40}$/),
+    scope_base_commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   })
   .superRefine((paths, context) => {
     const taskSegments = paths.task_path.split("/");
@@ -2001,6 +2005,9 @@ function historicalMissionContentV3(mission: HistoricalMissionPackageV3) {
     },
     source_revision: {
       git_base_commit: mission.source_revision.git_base_commit,
+      ...(mission.source_revision.scope_base_commit === undefined
+        ? {}
+        : { scope_base_commit: mission.source_revision.scope_base_commit }),
     },
   };
   const resultContract = {
@@ -2098,6 +2105,9 @@ function missionContentWithoutCapability(
     },
     source_revision: {
       git_base_commit: mission.source_revision.git_base_commit,
+      ...(mission.source_revision.scope_base_commit === undefined
+        ? {}
+        : { scope_base_commit: mission.source_revision.scope_base_commit }),
     },
   };
 
@@ -2318,6 +2328,19 @@ function missionGoal(workItem: {
   };
 }
 
+/**
+ * The commit an agent's changes are measured against. Mission identity stays
+ * anchored to the tuple's frozen `git_base_commit`, but work authored outside
+ * the work item can land after that base was frozen, so scope and changed-file
+ * proofs are measured from the commit the mission was actually compiled at.
+ */
+export function missionScopeBaseCommit(sourceRevision: {
+  git_base_commit: string;
+  scope_base_commit?: string;
+}): string {
+  return sourceRevision.scope_base_commit ?? sourceRevision.git_base_commit;
+}
+
 export function compileMission(
   workItem: WorkItem,
   executeManifest: ControllerRunManifest,
@@ -2366,6 +2389,9 @@ export function compileMission(
     goal: missionGoal(input.work_item),
     source_revision: {
       git_base_commit: input.paths.git_base_commit,
+      ...(input.paths.scope_base_commit === undefined
+        ? {}
+        : { scope_base_commit: input.paths.scope_base_commit }),
     },
     capability_envelope: resolveCapabilityEnvelope(
       input.work_item.goal.goal_contract.allowed_scope,
@@ -2415,6 +2441,9 @@ export function compileReviewMission(
     goal: missionGoal(validated.work_item),
     source_revision: {
       git_base_commit: validated.paths.git_base_commit,
+      ...(validated.paths.scope_base_commit === undefined
+        ? {}
+        : { scope_base_commit: validated.paths.scope_base_commit }),
     },
     review_subject: validated.review_subject,
     independence_attested: validated.independence_attested,
@@ -2484,6 +2513,9 @@ export function compilePatchMission(
     goal: missionGoal(validated.work_item),
     source_revision: {
       git_base_commit: validated.paths.git_base_commit,
+      ...(validated.paths.scope_base_commit === undefined
+        ? {}
+        : { scope_base_commit: validated.paths.scope_base_commit }),
     },
     capability_envelope: resolveCapabilityEnvelope(
       validated.work_item.goal.goal_contract.allowed_scope,

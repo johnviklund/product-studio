@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "mission_content_sha256": "cbd68ce81b1bedb6164e92483f8a57dda3f7e8167d59002dffd145fe54d486eb",
+  "result_content_sha256": "f5b0bbcbe3b0a451e5729a093a7a9bb3ecd72a5f3e6a9b90ee141c0426cfa596",
+  "component_sha256": {
+    "result": "f5b0bbcbe3b0a451e5729a093a7a9bb3ecd72a5f3e6a9b90ee141c0426cfa596",
+    "import": "2d4be77d4782c05a6a8a6bd68be62d0e57dff20980378053cb488e27a0bf5c53",
+    "production": "70b18eddb2c921304f4a55100a7a2de094f4196796a0fbfc236634b2875e47bf"
+  },
+  "component_bytes": {
+    "result": 1886,
+    "import": 518,
+    "production": 770
+  },
+  "committed_at": "2026-08-09T14:05:40.731Z"
+}

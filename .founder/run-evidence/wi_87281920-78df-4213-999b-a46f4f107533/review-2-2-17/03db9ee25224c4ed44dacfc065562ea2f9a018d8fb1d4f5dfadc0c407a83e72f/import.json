@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "import_run_id": "03db9ee25224c4ed44dacfc065562ea2f9a018d8fb1d4f5dfadc0c407a83e72f",
+  "result_content_sha256": "31b31b4bf734bbe6488c74dd0ed5e9565e1c0749e65e43d7f80b271cccbd0c47",
+  "mission_content_sha256": "be0b4e32bbf134af896c1d8ed09ef28ad99bc41bd3a25a52f6514f8cfca21baf",
+  "git_base_commit": "8dd4f2c435216622f42623927c43dc5e163e305d",
+  "controller_run_id": "a04808f4-9e0d-58a0-acd2-a60efabf721f",
+  "started_at": "2026-08-08T16:54:29.906Z",
+  "completed_at": "2026-08-08T16:54:30.359Z",
+  "outcome": "applied",
+  "reasons": [],
+  "phase": "review",
+  "identity": {
+    "phase": "review",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 17
+  },
+  "result_commit": "fdcc3f87c7b7f50fb083c73dc3a07d0d873867d9",
+  "recovery_proposal_sha256": "014ea5a58e38caea7a4ef2514264ef9cb90af34a11c5ca0ded843321b128eea3"
+}

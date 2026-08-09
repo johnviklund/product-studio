@@ -1,0 +1,13 @@
+{
+  "shaping_schema_version": 2,
+  "shaping_mission_content_sha256": "17f99dc018a115e6214598cec87f2beb58fb2a7ee2c50d22480bb4283d69449a",
+  "result_content_sha256": "9bf268f9993183ac89280aee9203dad65a443161ac6d195fb3074a7d7a14979b",
+  "first_published_at": "2026-08-09T14:10:11.742Z",
+  "identity": {
+    "phase": "plan",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "input_sha256": "ac0eae2eb2e43632cee4f1db98adcff3b9260e7ca0d55ecf653eb3c6e448372a"
+  },
+  "outcome": "applied",
+  "reasons": []
+}

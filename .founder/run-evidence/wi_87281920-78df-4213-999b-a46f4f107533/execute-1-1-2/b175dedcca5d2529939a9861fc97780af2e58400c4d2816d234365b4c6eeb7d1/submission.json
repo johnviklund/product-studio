@@ -1,0 +1,48 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "1ddfbc5cc461eecabe02ea3019ba5572029c40e88094cf29e46be74aac1e1278",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 2
+  },
+  "commit": "cbb54afb3830cddf8fb1acff15d017127dd24988",
+  "summary": "The complete 13-route candidate is present, but the mission authorizes no command forms, so it could not be tested or committed.",
+  "changed_files": [
+    "app/api/request-body.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+    "app/api/portfolio/work-items/route.ts",
+    "app/api/work-items/rebuild/route.ts",
+    "app/api/workspaces/route.ts",
+    "tests/api/portfolio-routes.test.ts"
+  ],
+  "verification": [
+    {
+      "name": "13-route inventory and shared-factory inspection",
+      "status": "passed",
+      "detail": "Exactly the 13 named mutations use createTrustedMutationRoute; JSON routes retain strict existing schemas and bodyless routes remain bodyless."
+    },
+    {
+      "name": "focused route tests",
+      "status": "not_run",
+      "detail": "No command forms are authorized by the mission capability envelope."
+    },
+    {
+      "name": "required implementation commit",
+      "status": "failed",
+      "detail": "The current HEAD remains the mission source revision because git commands are not authorized."
+    }
+  ]
+}

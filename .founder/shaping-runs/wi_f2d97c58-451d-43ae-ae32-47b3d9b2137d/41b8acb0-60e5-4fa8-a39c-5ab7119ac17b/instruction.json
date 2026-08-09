@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "origin": "connected_run",
+  "shaping_run_id": "41b8acb0-60e5-4fa8-a39c-5ab7119ac17b",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "phase": "brainstorm",
+  "mission_input_sha256": "24342e84b4bff411743d99b3ead431c630cc4d92ac6afffa7e5f371ba6e0a705",
+  "mission_content_sha256": "faf6320ef0c208b63553e35ce6331c92100303c7e96292db640d748935c61889",
+  "task_path": ".founder/shaping/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/brainstorm-24342e84b4bff411743d99b3ead431c630cc4d92ac6afffa7e5f371ba6e0a705/TASK.md",
+  "mission_path": ".founder/shaping/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/brainstorm-24342e84b4bff411743d99b3ead431c630cc4d92ac6afffa7e5f371ba6e0a705/mission.json",
+  "ingress_path": ".founder/shaping-runs/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/41b8acb0-60e5-4fa8-a39c-5ab7119ac17b/ingress/result.json",
+  "result_schema_version": 1,
+  "required_fields": [
+    "result_schema_version",
+    "brainstorm_mission_content_sha256",
+    "identity",
+    "problem_statement",
+    "approach",
+    "non_goals",
+    "open_questions"
+  ],
+  "max_result_bytes": 262144,
+  "created_at": "2026-08-09T17:10:39.602Z",
+  "instruction_sha256": "a5151bed1af3d3db4f982220f261c1987f19f08af4c5bbaea27540c75721effa"
+}

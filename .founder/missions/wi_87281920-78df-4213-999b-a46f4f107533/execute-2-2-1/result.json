@@ -1,0 +1,26 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "45c1b6ed87910c684c302725a43724b23c7895323e90ae25775bae99c377b1f5",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 1
+  },
+  "commit": "ff902fad2841bc2d7e1616200c09148cb794d536",
+  "summary": "Execution is blocked because the required permission-mediation shell tool is unavailable; no command was run and no implementation commit was created.",
+  "changed_files": [],
+  "verification": [
+    {
+      "name": "required permission-mediated command invocation",
+      "status": "failed",
+      "detail": "The shell tool is unavailable in this session, so the exact required command could not be submitted for controller authorization."
+    },
+    {
+      "name": "required implementation commit",
+      "status": "failed",
+      "detail": "No command execution or commit was claimed; the commit field records the last known HEAD from the preceding governed attempt."
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "run_id": "198a6bba-e90e-50ba-aa72-263f6cab77db",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "idempotency_key": "wi_87281920-78df-4213-999b-a46f4f107533:execute:2:2:3",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 3,
+  "started_at": "2026-08-06T14:44:50.141Z",
+  "completed_at": "2026-08-06T14:44:50.212Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "2f17e3efa9511834ab312005671125027f1f8628a5ac04deeb2ff8743b30d14f",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "status",
+            "--short"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "783175fa565229674d508d41b9287db687fe808cf54c61a0c7107c73644b6ee8"
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "mission_schema_version": 7,
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "goal_version": 5,
+    "input_revision": 5,
+    "attempt": 4
+  },
+  "controller_run": {
+    "run_id": "9a7f1b9f-a3f0-5204-a6db-3a1d4e1624fb",
+    "idempotency_key": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d:execute:5:5:4",
+    "phase": "execute",
+    "started_at": "2026-08-09T16:21:17.113Z",
+    "completed_at": "2026-08-09T16:21:17.177Z"
+  },
+  "goal": {
+    "title": "Close project menu",
+    "purpose": "Make the Projects dropdown menu in the board header close when the user clicks outside the menu, following standard UI patterns for disclosure widgets.",
+    "acceptance_criteria": [
+      "Clicking anywhere outside the Projects menu closes it when open",
+      "Clicking on menu items or checkboxes inside the menu does NOT close the menu",
+      "Clicking the Projects summary/trigger toggles the menu open/closed as before",
+      "Menu closes correctly when user scrolls the board viewport while the menu is open",
+      "Pressing Escape while the menu is open closes it and returns focus to the trigger"
+    ],
+    "non_goals": [
+      "Converting the native details/summary element to a different component library (e.g., shadcn/ui Dropdown)",
+      "Changing the visual styling, position, or content of the Projects menu",
+      "Adding click-outside behavior to other menus or panels in the application",
+      "Implementing focus-trap or advanced accessibility features beyond Escape-key closing"
+    ],
+    "allowed_scope": [
+      "components/kanban/kanban-board.tsx"
+    ],
+    "review_ready": [
+      "The Projects menu closes when clicking outside its bounds while open",
+      "The menu remains open when interacting with checkboxes and labels inside it",
+      "Escape key closes the menu and restores focus to the trigger button",
+      "No regressions in existing menu toggle behavior when clicking the summary",
+      "Manual verification confirms expected behavior in Safari, Chrome, and Firefox"
+    ]
+  },
+  "source_revision": {
+    "git_base_commit": "949e050468c67eaa359a2068901605900447b1c1"
+  },
+  "capability_envelope": {
+    "schema_version": 1,
+    "workspace": {
+      "allowed_scope_digest": "651a926cc2f64b5d49af6c1833e43704249a8381e2268f554d66720e7666ddce",
+      "execution_mode": "permission_mediated_local",
+      "scope_assurance": "result_scope_validation"
+    },
+    "runtime": {
+      "containment_assurance": "not_independently_enforced",
+      "machine_authority": "launching_user",
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "diff",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status",
+            "--short"
+          ]
+        },
+        {
+          "executable": "npx",
+          "args": [
+            "tsc",
+            "--noEmit"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    }
+  },
+  "result_contract": {
+    "schema_version": 4,
+    "output_path": ".founder/missions/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/execute-5-5-4/result.json",
+    "result_schema_version": 2,
+    "required_fields": [
+      "result_schema_version",
+      "mission_content_sha256",
+      "identity",
+      "commit",
+      "summary",
+      "changed_files",
+      "verification"
+    ]
+  },
+  "task_path": ".founder/missions/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/execute-5-5-4/TASK.md",
+  "content_sha256": "daba839c89ad23d4d089143519f02e2639938d09abdc2a2accdec3f6d3615ff7"
+}

@@ -1,0 +1,68 @@
+# Plan shaping task
+
+Use the immutable input below. Write one JSON result named `result.json`.
+
+Mission content SHA-256: `83c13f18c5c38ba85a53e6e4044b0f089aafc9ad5267ac795a2866f51bc65a06`
+
+## Input
+
+```json
+{
+  "phase": "plan",
+  "title": "View full work item page lacks a to navigate back",
+  "notes": "When clicking \"View full work item\" in the details panel, there is no option to navigate back. User must close the details panel and open it again. Users should be able to open the full view, and then be able to navigate back.",
+  "spec_approval_sha256": "770cc9e7bdd67862b61ea9d09141c3320c9ba7005cb7e63997e0a3d00806e0eb",
+  "spec_approval": {
+    "shaping_schema_version": 2,
+    "identity": {
+      "phase": "spec",
+      "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+      "input_sha256": "65968033b583598922e44841c015826369c9d5bb94a87661a9bde878d39242e7"
+    },
+    "mission_content_sha256": "af5600257cdcd0a69250569bc59682b647ec7ef011068c5ab983a448059677b4",
+    "result_content_sha256": "fe51cd2fc391200edf20d439f2450ece82836360e5bd8e183ed35330c851f531",
+    "goal_contract_sha256": "2600e6eef71a4ed11168d2972a721a5397f10d25492c0e6a59b706953e2a6f7c"
+  },
+  "spec_result": {
+    "result_schema_version": 1,
+    "spec_mission_content_sha256": "af5600257cdcd0a69250569bc59682b647ec7ef011068c5ab983a448059677b4",
+    "identity": {
+      "phase": "spec",
+      "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+      "input_sha256": "65968033b583598922e44841c015826369c9d5bb94a87661a9bde878d39242e7"
+    },
+    "proposal": {
+      "purpose": "Define a focused back-navigation flow from the full work item page to the details-panel context the user came from.",
+      "acceptance_criteria": [
+        "From the full work item page opened via 'View full work item', the user can trigger a visible back action that returns to the previously open work item details panel without manually closing and reopening it."
+      ],
+      "non_goals": [
+        "Redesigning global application navigation, breadcrumbs, or multi-step history beyond returning from the full work item page to its originating details-panel context."
+      ],
+      "allowed_scope": [
+        "work-item details panel to full-page work-item navigation and return behavior"
+      ],
+      "review_ready": [
+        "The proposal specifies the entry point, the back-navigation affordance on the full work item page, and the expected restored destination context when returning to the details panel."
+      ]
+    }
+  },
+  "repository_base_commit": "240bfb6ebc72e1d2ed214c04535a83e4a188e148",
+  "goal_contract_sha256": "2600e6eef71a4ed11168d2972a721a5397f10d25492c0e6a59b706953e2a6f7c",
+  "goal_version": 1
+}
+```
+
+## Required result fields
+
+- `result_schema_version`
+- `plan_mission_content_sha256`
+- `identity`
+- `summary`
+- `checklist`
+- `relevant_skills`
+- `product_doc_impacts`
+- `todo_impacts`
+- `open_questions`
+
+Do not modify the work item, advance its phase, or treat this proposal as adopted state.

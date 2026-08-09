@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "approval_id": "37d51990bb0730ddcff590ca3cce5d39d0ee9d456086e33111dd230894f1bc8c",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "launch_mode": "connected",
+  "requested_model": "gpt-5.4",
+  "expected_mission_content_sha256": "83c13f18c5c38ba85a53e6e4044b0f089aafc9ad5267ac795a2866f51bc65a06",
+  "expected_result_content_sha256": "3ba0a1c845fb997e6529967b1f44d4aab72594e492c0bf1bb8c134efec7bed89",
+  "expected_shaping_state_sha256": "a7e9756e16a89205e3f4dd573c495ada59b7e8103088bcb4307b6dc9bed98200",
+  "goal_contract_sha256": "2600e6eef71a4ed11168d2972a721a5397f10d25492c0e6a59b706953e2a6f7c",
+  "goal_version": 1,
+  "receipt_sha256": "1a68d621bbb0d66331c09b57c0260fede65833a9241f49820606b4dfa5e6b713",
+  "execute_tuple": {
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 0
+  },
+  "goal_sha256": "d98d9c38ca62a65abbd1034f2e0443f0e1bd3be25f8b6ff1ca94655ce4d0f710",
+  "state_sha256": "30bd50128b01f2e7714e9ee6f60dc0d4c5f55bfa08512308f70fa27b58949a8a",
+  "started_at": "2026-08-09T17:54:43.757Z",
+  "completed_at": "2026-08-09T17:54:43.798Z",
+  "outcome": "applied"
+}

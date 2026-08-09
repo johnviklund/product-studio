@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "decision_id": "67efa62c2e02871681aa77427589a09d27fb510ca8020c00ffdba083d71fe30f",
+  "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+  "operation": "approve_spec",
+  "phase_from": "spec",
+  "phase_to": "plan",
+  "mission_content_sha256": "cbd68ce81b1bedb6164e92483f8a57dda3f7e8167d59002dffd145fe54d486eb",
+  "result_content_sha256": "f5b0bbcbe3b0a451e5729a093a7a9bb3ecd72a5f3e6a9b90ee141c0426cfa596",
+  "feedback_sha256": null,
+  "expected_shaping_state_sha256": "78c259615386132d1e5a89f10684f0fceed715689186d73480cc43cd90ef856d",
+  "next_mission_content_sha256": "17f99dc018a115e6214598cec87f2beb58fb2a7ee2c50d22480bb4283d69449a",
+  "goal_sha256": "c62b4cec77735d5006ace35446c74c0cad156a1996387ee345016f2c8822795f",
+  "state_sha256": "ad2d42d4e2003bf5918bd6fa75f38a8cc049444d8f58ef44da619cd67db06c47",
+  "goal_version": 1,
+  "input_revision": 1,
+  "started_at": "2026-08-09T14:09:28.932Z",
+  "completed_at": "2026-08-09T14:09:29.124Z",
+  "outcome": "applied"
+}

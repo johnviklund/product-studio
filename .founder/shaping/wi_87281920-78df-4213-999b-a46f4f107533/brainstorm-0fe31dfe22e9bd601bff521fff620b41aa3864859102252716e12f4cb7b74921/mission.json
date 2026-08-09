@@ -1,0 +1,28 @@
+{
+  "shaping_schema_version": 2,
+  "identity": {
+    "phase": "brainstorm",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "input_sha256": "0fe31dfe22e9bd601bff521fff620b41aa3864859102252716e12f4cb7b74921"
+  },
+  "input": {
+    "phase": "brainstorm",
+    "title": "Guard the remaining 13 mutating API routes",
+    "notes": "Use one shared origin-plus-capped-JSON route factory across exactly the 13 pre-existing unguarded mutating routes named in TODO.md. Preserve existing request schemas and controller semantics. Do not add a Content-Type gate. Verify wrong or missing Origin, oversize or malformed JSON, unknown keys, and valid same-origin behavior. Keep this work within the accepted TODO boundary."
+  },
+  "result_contract": {
+    "schema_version": 1,
+    "result_file": "result.json",
+    "result_schema_version": 1,
+    "required_fields": [
+      "result_schema_version",
+      "brainstorm_mission_content_sha256",
+      "identity",
+      "problem_statement",
+      "approach",
+      "non_goals",
+      "open_questions"
+    ]
+  },
+  "content_sha256": "236bf1a5a2d7c7d0e7a038d0c70a878959befcd2787ce5abcfa2497cdc8395d9"
+}

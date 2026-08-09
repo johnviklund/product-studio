@@ -1,0 +1,43 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "204cc830eaa7fe3ab22c1e6a2eccdfdda8aef3f83262381bcbba67700a8a1022",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 0
+  },
+  "commit": "0cce77d40c57b7e374a7bcc485528543364ea2d1",
+  "summary": "Applied the shared trusted mutation route factory and capped JSON parser to the exactly 13 in-scope mutating routes, preserving schemas, controller behavior, bodyless rebuild behavior, and missing/wrong Origin rejection.",
+  "changed_files": [
+    "app/api/request-body.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+    "app/api/portfolio/work-items/route.ts",
+    "app/api/work-items/rebuild/route.ts",
+    "app/api/workspaces/route.ts",
+    "tests/api/portfolio-routes.test.ts"
+  ],
+  "verification": [
+    {
+      "name": "13-route inventory and guard inspection",
+      "status": "passed",
+      "detail": "The focused route test enumerates exactly 13 guarded mutations and verifies missing and wrong Origin rejection before service access."
+    },
+    {
+      "name": "shared capped JSON parser coverage",
+      "status": "passed",
+      "detail": "Focused tests cover unknown keys, malformed JSON, and oversized bodies on the guarded JSON routes."
+    }
+  ]
+}

@@ -1,0 +1,221 @@
+{
+  "mission_schema_version": 7,
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 14
+  },
+  "controller_run": {
+    "run_id": "c8335de6-0367-5ffe-a91e-12f0b3b6345b",
+    "idempotency_key": "wi_87281920-78df-4213-999b-a46f4f107533:execute:2:2:14",
+    "phase": "execute",
+    "started_at": "2026-08-07T07:05:19.637Z",
+    "completed_at": "2026-08-07T07:05:19.801Z"
+  },
+  "goal": {
+    "title": "Guard the remaining 13 mutating API routes",
+    "purpose": "Protect exactly the 13 pre-existing unguarded mutating API routes within the accepted TODO boundary by adopting one shared route factory that fails closed for untrusted origins and caps JSON request bodies, while preserving each route's existing request schema and controller semantics.",
+    "acceptance_criteria": [
+      "A single shared route factory applies assertTrustedRequestOrigin and readCappedJsonRequest across exactly the 13 named pre-existing routes: [workItemId] PATCH, [workItemId]/edit PATCH, mission/{route,retry,import}, mission/patch{,/import}, mission/review{,/import}, patch-plan, portfolio/work-items POST, work-items/rebuild POST, and workspaces POST.",
+      "Each of the 13 routes rejects requests with a missing or wrong Origin before its mutating behavior runs, while valid same-origin requests retain their current success behavior and controller semantics.",
+      "JSON-consuming routes reject oversized bodies, malformed JSON, and unknown request keys using the shared capped parser and their existing schemas; work-items/rebuild retains its bodyless behavior while receiving the origin guard.",
+      "The shared factory does not require a JSON Content-Type header, preserving the current intentional request-parsing behavior while Origin validation remains fail-closed."
+    ],
+    "non_goals": [
+      "Guarding mutating API routes outside the 13 pre-existing routes named in TODO.md.",
+      "Changing existing route request schemas, controller semantics, or closed-transition policy.",
+      "Adding a Content-Type gate or relaxing missing-Origin rejection for non-browser clients."
+    ],
+    "allowed_scope": [
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+      "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+      "app/api/portfolio/work-items/route.ts",
+      "app/api/request-body.ts",
+      "app/api/work-items/rebuild/route.ts",
+      "app/api/workspaces/route.ts",
+      "tests/api/portfolio-routes.test.ts"
+    ],
+    "review_ready": [
+      "The 13-route inventory is confirmed against TODO.md, with no additional mutating route adoption.",
+      "Focused route tests demonstrate rejection for missing or wrong Origin, oversized or malformed JSON, and unknown keys, plus unchanged valid same-origin behavior.",
+      "The implementation is inspected to confirm every JSON-consuming route uses the common factory/parser and no Content-Type gate was introduced."
+    ]
+  },
+  "source_revision": {
+    "git_base_commit": "65d1feac0f5d0df4a2233ab47669ce7db7483a6c"
+  },
+  "capability_envelope": {
+    "schema_version": 1,
+    "workspace": {
+      "allowed_scope_digest": "675e74aede901f57ce18f749737e45fb944bc506c8766d4649d56e3012212309",
+      "execution_mode": "permission_mediated_local",
+      "scope_assurance": "result_scope_validation"
+    },
+    "runtime": {
+      "containment_assurance": "not_independently_enforced",
+      "machine_authority": "launching_user",
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "--no-pager",
+            "diff",
+            "--",
+            "app/api/portfolio/work-items",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "--no-pager",
+            "diff",
+            "--cached",
+            "--",
+            "app/api/portfolio/work-items",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "--",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/edit/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/import/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/patch/import/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/patch/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/retry/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/review/import/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/review/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/mission/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/patch-plan/route.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/route-factory.ts",
+            "app/api/portfolio/work-items/[[]sourceId[]]/[[]workItemId[]]/route.ts",
+            "app/api/portfolio/work-items/route.ts",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "--",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+            "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+            "app/api/portfolio/work-items/route.ts",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "commit",
+            "-m",
+            "Guard the remaining 13 mutating API routes"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status",
+            "--short"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "rebuild",
+            "better-sqlite3"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "build"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "lint"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test",
+            "--",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    }
+  },
+  "result_contract": {
+    "schema_version": 4,
+    "output_path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/execute-2-2-14/result.json",
+    "result_schema_version": 2,
+    "required_fields": [
+      "result_schema_version",
+      "mission_content_sha256",
+      "identity",
+      "commit",
+      "summary",
+      "changed_files",
+      "verification"
+    ]
+  },
+  "task_path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/execute-2-2-14/TASK.md",
+  "content_sha256": "04ce8c661f1691188fb7d0e1ef63dbd199a1462627ff1a70f06fb8e409dce575"
+}

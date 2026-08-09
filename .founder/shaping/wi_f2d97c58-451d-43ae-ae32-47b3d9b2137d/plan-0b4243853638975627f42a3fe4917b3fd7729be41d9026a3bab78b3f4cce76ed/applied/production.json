@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "produced_at": "2026-08-09T17:52:06.545Z",
+  "ingress_path": ".founder/shaping-runs/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/1ab87ed7-9cdb-4caf-82b1-54b902c108a0/ingress/result.json",
+  "result_content_sha256": "3ba0a1c845fb997e6529967b1f44d4aab72594e492c0bf1bb8c134efec7bed89",
+  "production_id": "1ab87ed7-9cdb-4caf-82b1-54b902c108a0",
+  "origin": "connected_run",
+  "shaping_run_id": "1ab87ed7-9cdb-4caf-82b1-54b902c108a0",
+  "requested_model": {
+    "value": "claude-opus-4.5",
+    "assurance": "user_declared"
+  },
+  "effective_model": {
+    "assurance": "adapter_attested",
+    "model_id": "claude-opus-4.5",
+    "deployment_id": null,
+    "observed_event_sha256": "496e9c27caa19dd303f6722861b4f871dceab76416aa5a4555d01e230be3dcb8"
+  }
+}

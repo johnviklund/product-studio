@@ -1,0 +1,56 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "89b75ec88dad4de7773715be51b5745b94699f694fe181b4c08f55157689cb49",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 15
+  },
+  "commit": "52f1bc5e4768b5f4287542ef61286d0c72bf3354",
+  "summary": "Guarded exactly the 13 named mutating API routes with a shared fail-closed origin and capped JSON route factory while preserving bodyless and schema behavior.",
+  "changed_files": [
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+    "app/api/portfolio/work-items/route.ts",
+    "app/api/request-body.ts",
+    "app/api/work-items/rebuild/route.ts",
+    "app/api/workspaces/route.ts",
+    "tests/api/portfolio-routes.test.ts"
+  ],
+  "verification": [
+    {
+      "name": "Focused portfolio route tests",
+      "status": "passed",
+      "detail": "46 tests passed."
+    },
+    {
+      "name": "Full test suite",
+      "status": "passed",
+      "detail": "785 tests passed."
+    },
+    {
+      "name": "Lint",
+      "status": "passed",
+      "detail": "Completed with no errors."
+    },
+    {
+      "name": "Typecheck",
+      "status": "passed"
+    },
+    {
+      "name": "Production build",
+      "status": "passed"
+    }
+  ]
+}

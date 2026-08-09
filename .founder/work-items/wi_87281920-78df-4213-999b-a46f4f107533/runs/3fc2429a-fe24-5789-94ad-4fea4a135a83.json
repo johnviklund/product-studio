@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "run_id": "3fc2429a-fe24-5789-94ad-4fea4a135a83",
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "idempotency_key": "wi_87281920-78df-4213-999b-a46f4f107533:execute:2:2:4",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 4,
+  "started_at": "2026-08-06T14:59:09.490Z",
+  "completed_at": "2026-08-06T14:59:09.933Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "8bc64532ed960dd7849739c9b25e03be65191135e7dea29437e31b602b5c8b15",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "--no-pager",
+            "diff",
+            "--",
+            "app/api/portfolio/work-items",
+            "app/api/request-body.ts",
+            "app/api/work-items/rebuild/route.ts",
+            "app/api/workspaces/route.ts",
+            "tests/api/portfolio-routes.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status",
+            "--short"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "4eca4ce73ddcf58438dd81c73b3fa714dc4f14cda745b6e905fed58d6b60fa8e"
+  }
+}

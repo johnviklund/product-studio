@@ -1,0 +1,91 @@
+{
+  "mission_schema_version": 6,
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 1
+  },
+  "controller_run": {
+    "run_id": "ec32985a-fc66-5468-9676-cba492a9a056",
+    "idempotency_key": "wi_87281920-78df-4213-999b-a46f4f107533:execute:1:1:1",
+    "phase": "execute",
+    "started_at": "2026-08-06T05:13:05.695Z",
+    "completed_at": "2026-08-06T05:13:05.759Z"
+  },
+  "goal": {
+    "title": "Guard the remaining 13 mutating API routes",
+    "purpose": "Protect exactly the 13 pre-existing unguarded mutating API routes within the accepted TODO boundary by adopting one shared route factory that fails closed for untrusted origins and caps JSON request bodies, while preserving each route's existing request schema and controller semantics.",
+    "acceptance_criteria": [
+      "A single shared route factory applies assertTrustedRequestOrigin and readCappedJsonRequest across exactly the 13 named pre-existing routes: [workItemId] PATCH, [workItemId]/edit PATCH, mission/{route,retry,import}, mission/patch{,/import}, mission/review{,/import}, patch-plan, portfolio/work-items POST, work-items/rebuild POST, and workspaces POST.",
+      "Each of the 13 routes rejects requests with a missing or wrong Origin before its mutating behavior runs, while valid same-origin requests retain their current success behavior and controller semantics.",
+      "JSON-consuming routes reject oversized bodies, malformed JSON, and unknown request keys using the shared capped parser and their existing schemas; work-items/rebuild retains its bodyless behavior while receiving the origin guard.",
+      "The shared factory does not require a JSON Content-Type header, preserving the current intentional request-parsing behavior while Origin validation remains fail-closed."
+    ],
+    "non_goals": [
+      "Guarding mutating API routes outside the 13 pre-existing routes named in TODO.md.",
+      "Changing existing route request schemas, controller semantics, or closed-transition policy.",
+      "Adding a Content-Type gate or relaxing missing-Origin rejection for non-browser clients."
+    ],
+    "allowed_scope": [
+      "src/application/request-origin.ts",
+      "The existing shared capped JSON request parser and its direct tests",
+      "The route factory used by shaping POST routes and its direct tests",
+      "app/api/**/[workItemId]/route.ts",
+      "app/api/**/[workItemId]/edit/route.ts",
+      "app/api/**/mission/route.ts",
+      "app/api/**/mission/retry/route.ts",
+      "app/api/**/mission/import/route.ts",
+      "app/api/**/mission/patch/route.ts",
+      "app/api/**/mission/patch/import/route.ts",
+      "app/api/**/mission/review/route.ts",
+      "app/api/**/mission/review/import/route.ts",
+      "app/api/**/patch-plan/route.ts",
+      "app/api/**/portfolio/work-items/route.ts",
+      "app/api/**/work-items/rebuild/route.ts",
+      "app/api/**/workspaces/route.ts",
+      "Focused tests covering the shared factory and these 13 route behaviors"
+    ],
+    "review_ready": [
+      "The 13-route inventory is confirmed against TODO.md, with no additional mutating route adoption.",
+      "Focused route tests demonstrate rejection for missing or wrong Origin, oversized or malformed JSON, and unknown keys, plus unchanged valid same-origin behavior.",
+      "The implementation is inspected to confirm every JSON-consuming route uses the common factory/parser and no Content-Type gate was introduced."
+    ]
+  },
+  "source_revision": {
+    "git_base_commit": "cbb54afb3830cddf8fb1acff15d017127dd24988"
+  },
+  "capability_envelope": {
+    "schema_version": 1,
+    "workspace": {
+      "allowed_scope_digest": "7e71d30cfdebe08e6ec9783c3d446998189a97bdd3e477ee6290541aead490c5",
+      "execution_mode": "permission_mediated_local",
+      "scope_assurance": "result_scope_validation"
+    },
+    "runtime": {
+      "containment_assurance": "not_independently_enforced",
+      "machine_authority": "launching_user",
+      "approved_command_forms": [],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    }
+  },
+  "result_contract": {
+    "schema_version": 4,
+    "output_path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/execute-1-1-1/result.json",
+    "result_schema_version": 2,
+    "required_fields": [
+      "result_schema_version",
+      "mission_content_sha256",
+      "identity",
+      "commit",
+      "summary",
+      "changed_files",
+      "verification"
+    ]
+  },
+  "task_path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/execute-1-1-1/TASK.md",
+  "content_sha256": "f723f2ba7961de11bd67f6c82edb9dce1f664eeafd4e9d3c500b9a995fa15188"
+}

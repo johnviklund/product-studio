@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "produced_at": "2026-08-09T13:30:41.909Z",
+  "ingress_path": ".founder/shaping-runs/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/0482460f-067a-4233-abe1-7061c01bfad4/ingress/result.json",
+  "result_content_sha256": "00d595ecc40f1658e2aa8250677006276bfc6300c40cbb8e0c6e3c7469185355",
+  "production_id": "0482460f-067a-4233-abe1-7061c01bfad4",
+  "origin": "connected_run",
+  "shaping_run_id": "0482460f-067a-4233-abe1-7061c01bfad4",
+  "requested_model": {
+    "value": "claude-sonnet-4.5",
+    "assurance": "user_declared"
+  },
+  "effective_model": {
+    "assurance": "adapter_attested",
+    "model_id": "claude-sonnet-4.5",
+    "deployment_id": null,
+    "observed_event_sha256": "13b91effdeecd48672aa4f7e94fc151a072d739a24e1a02ff6960bf1ab388cb7"
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "run_id": "25e71d4d-8e75-547d-bfec-15f7dd98ddf0",
+  "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+  "idempotency_key": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d:execute:3:3:6",
+  "phase": "execute",
+  "goal_version": 3,
+  "input_revision": 3,
+  "attempt": 6,
+  "started_at": "2026-08-09T15:35:55.411Z",
+  "completed_at": "2026-08-09T15:35:55.485Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "b5296bed85a45b7ea67d7f592469518a4f1c9808707fff360401a00dc42cbae4",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "--",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "commit",
+            "-m",
+            "Close project menu"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "diff",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "log",
+            "--oneline",
+            "-10"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "build"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "lint"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "4108b9911cd00e8c4397f4e3a31ec1954e0d08b23336ec430dbf365d38bd7f71"
+  }
+}

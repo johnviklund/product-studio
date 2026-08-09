@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "approval_id": "37d51990bb0730ddcff590ca3cce5d39d0ee9d456086e33111dd230894f1bc8c",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "launch_mode": "connected",
+  "requested_model": "gpt-5.4",
+  "expected_mission_content_sha256": "83c13f18c5c38ba85a53e6e4044b0f089aafc9ad5267ac795a2866f51bc65a06",
+  "expected_result_content_sha256": "3ba0a1c845fb997e6529967b1f44d4aab72594e492c0bf1bb8c134efec7bed89",
+  "expected_shaping_state_sha256": "a7e9756e16a89205e3f4dd573c495ada59b7e8103088bcb4307b6dc9bed98200",
+  "goal_contract_sha256": "2600e6eef71a4ed11168d2972a721a5397f10d25492c0e6a59b706953e2a6f7c",
+  "goal_version": 1,
+  "previous_goal_bytes": "schema_version: 2\nwork_item_id: wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d\ntitle: View full work item page lacks a to navigate back\ncapture:\n  kind: idea\n  original_title: View full work item page lacks a to navigate back\n  captured_at: 2026-08-09T17:10:27.659Z\npriority: high\ntags:\n  - Front-end\nnotes: When clicking \"View full work item\" in the details panel, there is no\n  option to navigate back. User must close the details panel and open it again.\n  Users should be able to open the full view, and then be able to navigate back.\ngoal_contract:\n  schema_version: 1\n  goal_version: 1\n  purpose: Define a focused back-navigation flow from the full work item page to\n    the details-panel context the user came from.\n  acceptance_criteria:\n    - From the full work item page opened via 'View full work item', the user\n      can trigger a visible back action that returns to the previously open work\n      item details panel without manually closing and reopening it.\n  non_goals:\n    - Redesigning global application navigation, breadcrumbs, or multi-step\n      history beyond returning from the full work item page to its originating\n      details-panel context.\n  allowed_scope:\n    - work-item details panel to full-page work-item navigation and return\n      behavior\n  review_ready:\n    - The proposal specifies the entry point, the back-navigation affordance on\n      the full work item page, and the expected restored destination context\n      when returning to the details panel.\n",
+  "previous_goal_sha256": "d98d9c38ca62a65abbd1034f2e0443f0e1bd3be25f8b6ff1ca94655ce4d0f710",
+  "previous_state_bytes": "{\n  \"schema_version\": 2,\n  \"work_item_id\": \"wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d\",\n  \"phase\": \"plan\",\n  \"status\": \"active\",\n  \"updated_at\": \"2026-08-09T17:26:47.153Z\",\n  \"goal_version\": 1,\n  \"input_revision\": 1,\n  \"attempt\": 0,\n  \"patch_cycle\": 0\n}\n",
+  "previous_state_sha256": "98ee455727657e486f9aad2c5846a96b7cbd447f35b1ec807b0fa7cd12a4bf3d",
+  "next_goal_bytes": "schema_version: 2\nwork_item_id: wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d\ntitle: View full work item page lacks a to navigate back\ncapture:\n  kind: idea\n  original_title: View full work item page lacks a to navigate back\n  captured_at: 2026-08-09T17:10:27.659Z\npriority: high\ntags:\n  - Front-end\nnotes: When clicking \"View full work item\" in the details panel, there is no\n  option to navigate back. User must close the details panel and open it again.\n  Users should be able to open the full view, and then be able to navigate back.\ngoal_contract:\n  schema_version: 1\n  goal_version: 1\n  purpose: Define a focused back-navigation flow from the full work item page to\n    the details-panel context the user came from.\n  acceptance_criteria:\n    - From the full work item page opened via 'View full work item', the user\n      can trigger a visible back action that returns to the previously open work\n      item details panel without manually closing and reopening it.\n  non_goals:\n    - Redesigning global application navigation, breadcrumbs, or multi-step\n      history beyond returning from the full work item page to its originating\n      details-panel context.\n  allowed_scope:\n    - work-item details panel to full-page work-item navigation and return\n      behavior\n  review_ready:\n    - The proposal specifies the entry point, the back-navigation affordance on\n      the full work item page, and the expected restored destination context\n      when returning to the details panel.\n",
+  "next_goal_sha256": "d98d9c38ca62a65abbd1034f2e0443f0e1bd3be25f8b6ff1ca94655ce4d0f710",
+  "next_state_bytes": "{\n  \"schema_version\": 2,\n  \"work_item_id\": \"wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d\",\n  \"phase\": \"execute\",\n  \"status\": \"active\",\n  \"updated_at\": \"2026-08-09T17:54:43.723Z\",\n  \"goal_version\": 1,\n  \"input_revision\": 1,\n  \"attempt\": 0,\n  \"patch_cycle\": 0\n}\n",
+  "next_state_sha256": "30bd50128b01f2e7714e9ee6f60dc0d4c5f55bfa08512308f70fa27b58949a8a",
+  "receipt_bytes": "{\n  \"shaping_schema_version\": 2,\n  \"identity\": {\n    \"phase\": \"plan\",\n    \"work_item_id\": \"wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d\",\n    \"input_sha256\": \"0b4243853638975627f42a3fe4917b3fd7729be41d9026a3bab78b3f4cce76ed\"\n  },\n  \"mission_content_sha256\": \"83c13f18c5c38ba85a53e6e4044b0f089aafc9ad5267ac795a2866f51bc65a06\",\n  \"result_content_sha256\": \"3ba0a1c845fb997e6529967b1f44d4aab72594e492c0bf1bb8c134efec7bed89\",\n  \"goal_contract_sha256\": \"2600e6eef71a4ed11168d2972a721a5397f10d25492c0e6a59b706953e2a6f7c\",\n  \"goal_version\": 1,\n  \"execute_tuple\": {\n    \"goal_version\": 1,\n    \"input_revision\": 1,\n    \"attempt\": 0\n  },\n  \"approved_at\": \"2026-08-09T17:54:43.723Z\"\n}\n",
+  "receipt_sha256": "1a68d621bbb0d66331c09b57c0260fede65833a9241f49820606b4dfa5e6b713",
+  "execute_tuple": {
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 0
+  },
+  "created_at": "2026-08-09T17:54:43.757Z"
+}

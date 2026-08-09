@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+  "phase": "learn",
+  "status": "active",
+  "updated_at": "2026-08-08T17:09:26.861Z",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 17,
+  "patch_cycle": 0,
+  "attention": {
+    "kind": "review_ready",
+    "question": "The pinned result passed deterministic checks and independent review. What human decision should happen next?",
+    "recommendation": "Open the exact review evidence; completion remains governed by the authorized human or policy gate.",
+    "created_at": "2026-08-08T16:54:30.359Z",
+    "governed_tuple": {
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 17,
+      "patch_cycle": 0
+    },
+    "pins": {
+      "artifact_paths": [
+        ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/review-2-2-17/mission.json",
+        ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/review-2-2-17/result.json"
+      ],
+      "evidence_paths": [
+        ".founder/run-evidence/wi_87281920-78df-4213-999b-a46f4f107533/review-2-2-17/03db9ee25224c4ed44dacfc065562ea2f9a018d8fb1d4f5dfadc0c407a83e72f"
+      ],
+      "git_commit": "fdcc3f87c7b7f50fb083c73dc3a07d0d873867d9",
+      "mission_content_sha256": "be0b4e32bbf134af896c1d8ed09ef28ad99bc41bd3a25a52f6514f8cfca21baf",
+      "result_content_sha256": "31b31b4bf734bbe6488c74dd0ed5e9565e1c0749e65e43d7f80b271cccbd0c47"
+    }
+  }
+}

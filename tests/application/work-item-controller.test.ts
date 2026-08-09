@@ -399,6 +399,7 @@ async function governToExecute(
 async function createImportFixture(options?: {
   resultSource?: string;
   executionDefaults?: ExecutionDefaultsV1;
+  missionScopeBaseCommit?: string;
   transformResult?: (
     result: ExecuteExternalResultSubmission,
   ) => ExecuteExternalResultSubmission;
@@ -426,7 +427,14 @@ async function createImportFixture(options?: {
     attempt: workItem.state.attempt!,
   };
   const artifact = await workspace.writeMissionPackage(identity, (paths) =>
-    compileMission(workItem, manifest, paths, options?.executionDefaults),
+    compileMission(
+      workItem,
+      manifest,
+      options?.missionScopeBaseCommit === undefined
+        ? paths
+        : { ...paths, scope_base_commit: options.missionScopeBaseCommit },
+      options?.executionDefaults,
+    ),
   );
   const mission = artifact.mission;
   const defaultResult: ExecuteExternalResultSubmission = {
@@ -3616,6 +3624,37 @@ describe("WorkItemController", () => {
     expect(outsideResult.work_item.state.status).toBe("blocked");
     expect(outsideResult.evidence).toMatchObject({ outcome: "rejected" });
     expect(outsideResult.evidence.reasons[0]).toContain("allowed_scope");
+  });
+
+  it("measures result scope from the mission scope base so commits authored outside the work item cannot reject it", async () => {
+    const founderCommit = "c".repeat(40);
+    const fixture = await createImportFixture({
+      missionScopeBaseCommit: founderCommit,
+    });
+    const diffBases: string[] = [];
+    const soleAuthorGit: GitVerificationAdapter = {
+      ...passingGit,
+      async listChangedFiles(base: string) {
+        diffBases.push(base);
+        return base === founderCommit
+          ? ["src/domain/result.ts"]
+          : ["docs/unrelated-founder-note.md", "src/domain/result.ts"];
+      },
+    };
+    const imported = await createController(
+      fixture.repository,
+      soleAuthorGit,
+    ).importExternalResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(diffBases).toEqual([founderCommit]);
+    expect(imported.evidence).toMatchObject({
+      outcome: "applied",
+      reasons: [],
+    });
+    expect([...fixture.evidence.values()][0]?.evidence.git_base_commit).toBe(
+      founderCommit,
+    );
+    expect(imported.work_item.state.status).not.toBe("blocked");
   });
 
   it.each([

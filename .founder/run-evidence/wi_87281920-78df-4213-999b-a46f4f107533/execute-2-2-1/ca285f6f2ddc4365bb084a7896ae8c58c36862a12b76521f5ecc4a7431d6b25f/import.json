@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "import_run_id": "ca285f6f2ddc4365bb084a7896ae8c58c36862a12b76521f5ecc4a7431d6b25f",
+  "result_content_sha256": "c2717dab8d7c3a4ed229021bae14026ff4cbf2f6cc9e13c907019162ab42cdc2",
+  "mission_content_sha256": "45c1b6ed87910c684c302725a43724b23c7895323e90ae25775bae99c377b1f5",
+  "git_base_commit": "10b924e5223ff81e82938951562b0e54f60d32b3",
+  "controller_run_id": "edd417dd-5e55-5dc9-8199-5327b914521d",
+  "started_at": "2026-08-06T13:22:37.109Z",
+  "completed_at": "2026-08-06T13:22:37.227Z",
+  "outcome": "rejected",
+  "reasons": [
+    "Mission Git base is not an ancestor of the result commit."
+  ],
+  "phase": "execute",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 1
+  },
+  "result_commit": "ff902fad2841bc2d7e1616200c09148cb794d536"
+}

@@ -1,0 +1,12 @@
+schema_version: 2
+work_item_id: wi_1e76ae89-125d-40f4-862a-9cc8913ea133
+title: Spec card font size
+capture:
+  kind: idea
+  original_title: Spec card font size
+  captured_at: 2026-08-09T17:26:29.082Z
+priority: normal
+notes: Cards in the Spec column have a smaller font then other cards. We should
+  use the same font size for all cards and kanban columns. We should always aim
+  to simplify for the human user. This workflow is the opposite to complex, but
+  still very powerful.

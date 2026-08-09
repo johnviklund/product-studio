@@ -1,0 +1,18 @@
+{
+  "shaping_schema_version": 2,
+  "identity": {
+    "phase": "plan",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "input_sha256": "0b4243853638975627f42a3fe4917b3fd7729be41d9026a3bab78b3f4cce76ed"
+  },
+  "mission_content_sha256": "83c13f18c5c38ba85a53e6e4044b0f089aafc9ad5267ac795a2866f51bc65a06",
+  "result_content_sha256": "3ba0a1c845fb997e6529967b1f44d4aab72594e492c0bf1bb8c134efec7bed89",
+  "goal_contract_sha256": "2600e6eef71a4ed11168d2972a721a5397f10d25492c0e6a59b706953e2a6f7c",
+  "goal_version": 1,
+  "execute_tuple": {
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 0
+  },
+  "approved_at": "2026-08-09T17:54:43.723Z"
+}

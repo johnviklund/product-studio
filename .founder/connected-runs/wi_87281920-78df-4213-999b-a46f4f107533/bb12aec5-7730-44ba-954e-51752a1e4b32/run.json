@@ -1,0 +1,152 @@
+{
+  "schema_version": 2,
+  "connected_run_id": "bb12aec5-7730-44ba-954e-51752a1e4b32",
+  "mission": {
+    "identity": {
+      "phase": "execute",
+      "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 4
+    },
+    "path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/execute-2-2-4/mission.json",
+    "content_sha256": "e04e27446c86e1eaab055ed4fed7041071ad4a6ea962b8e94e8e0b4b4d0ac1e9",
+    "source_commit": "e3c72a90da26fad5681d728d64a110b305f8f92a"
+  },
+  "governed_tuple": {
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 4,
+    "patch_cycle": 0
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "executor",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "gpt-5.6-sol",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "gpt-5.6-sol",
+      "deployment_id": null,
+      "observed_event_sha256": "25963c393366e69565aff7bc0fa72310e74d969feb0f228069da1f71bbde080b"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "f034bce92ee3aaa8306d733e66dff5a7e50a345e52611808f5b5a43122792ac2",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    },
+    "authorization_sha256": {
+      "value": "4cc079cc5f25c87e673eb84c46b3c1a1f3c5cd82352a4ca08126b523d6ef5c15",
+      "assurance": "controller_observed"
+    }
+  },
+  "authorization": {
+    "kind": "capability_envelope",
+    "envelope": {
+      "schema_version": 1,
+      "workspace": {
+        "allowed_scope_digest": "675e74aede901f57ce18f749737e45fb944bc506c8766d4649d56e3012212309",
+        "execution_mode": "permission_mediated_local",
+        "scope_assurance": "result_scope_validation"
+      },
+      "runtime": {
+        "containment_assurance": "not_independently_enforced",
+        "machine_authority": "launching_user",
+        "approved_command_forms": [
+          {
+            "executable": "git",
+            "args": [
+              "--no-pager",
+              "diff",
+              "--",
+              "app/api/portfolio/work-items",
+              "app/api/request-body.ts",
+              "app/api/work-items/rebuild/route.ts",
+              "app/api/workspaces/route.ts",
+              "tests/api/portfolio-routes.test.ts"
+            ]
+          },
+          {
+            "executable": "git",
+            "args": [
+              "status",
+              "--short"
+            ]
+          }
+        ],
+        "approved_url_operations": [],
+        "mcp": "forbidden",
+        "credentials": "forbidden"
+      }
+    },
+    "envelope_sha256": "007524dcbac9ad9c89bdb3c54fbb670623799fd6ebb753d499f39d41bbb3a3ca"
+  },
+  "acp": {
+    "protocol_version": {
+      "value": 1,
+      "assurance": "adapter_attested"
+    },
+    "session_id": {
+      "value": "a8eba480-7b30-4e37-a2a7-d3ebfef0cc06",
+      "assurance": "adapter_attested"
+    }
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-06T15:26:05.389Z",
+    "updated_at": "2026-08-06T15:26:42.320Z",
+    "completed_at": "2026-08-06T15:26:42.320Z",
+    "terminal": {
+      "outcome": "missing_permission",
+      "partial": true,
+      "reason": "The ACP adapter denied an operation outside the approved capability envelope."
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 1000,
+    "max_event_bytes": 1000000,
+    "max_output_bytes": 1000000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 45718,
+    "process_group_id": 45718,
+    "started_at": "2026-08-06T15:26:10.619Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

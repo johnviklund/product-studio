@@ -1,0 +1,13 @@
+{
+  "shaping_schema_version": 2,
+  "shaping_mission_content_sha256": "ec1c51531cbceda3c8526841e07a3fec59bcb6298b7a33c65f8bf168126b8500",
+  "result_content_sha256": "61ef39409866b335e9167430ebb0987e136c02b15a667b1f63b872349576f2c2",
+  "first_published_at": "2026-08-05T22:19:21.739Z",
+  "identity": {
+    "phase": "spec",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "input_sha256": "02e49909d9b749e9a90d504782848807dcea0de6dc772cd0cca2f79c070dd71a"
+  },
+  "outcome": "applied",
+  "reasons": []
+}

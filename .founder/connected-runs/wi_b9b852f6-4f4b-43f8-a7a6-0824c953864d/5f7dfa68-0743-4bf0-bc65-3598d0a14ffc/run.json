@@ -1,0 +1,152 @@
+{
+  "schema_version": 2,
+  "connected_run_id": "5f7dfa68-0743-4bf0-bc65-3598d0a14ffc",
+  "mission": {
+    "identity": {
+      "phase": "execute",
+      "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+      "goal_version": 3,
+      "input_revision": 3,
+      "attempt": 3
+    },
+    "path": ".founder/missions/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/execute-3-3-3/mission.json",
+    "content_sha256": "c7127891bf85ad4f2549b6c269fc50c690036d1b1e29e2c5f25cbe1fdda5b6d5",
+    "source_commit": "1b2a012fec18ac641b980663d2714084e6b23a3d"
+  },
+  "governed_tuple": {
+    "goal_version": 3,
+    "input_revision": 3,
+    "attempt": 3,
+    "patch_cycle": 0
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "executor",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "claude-sonnet-4.5",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "claude-sonnet-4.5",
+      "deployment_id": null,
+      "observed_event_sha256": "13b91effdeecd48672aa4f7e94fc151a072d739a24e1a02ff6960bf1ab388cb7"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "de66538eae54aa29f757540b16644d971ed78107cf1957c531a93abb396a701e",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    },
+    "authorization_sha256": {
+      "value": "0c2ec9e39282ecb7cecd6635f7c593ea82cec934eafb33e531fe0cd075c89c21",
+      "assurance": "controller_observed"
+    }
+  },
+  "authorization": {
+    "kind": "capability_envelope",
+    "envelope": {
+      "schema_version": 1,
+      "workspace": {
+        "allowed_scope_digest": "7a7a96d970bfecd8fe7f79071bfc9b70838f47c7d5a9ba0cf3fb0f03437ceec8",
+        "execution_mode": "permission_mediated_local",
+        "scope_assurance": "result_scope_validation"
+      },
+      "runtime": {
+        "containment_assurance": "not_independently_enforced",
+        "machine_authority": "launching_user",
+        "approved_command_forms": [
+          {
+            "executable": "git",
+            "args": [
+              "add",
+              "components/kanban/kanban-board.tsx"
+            ]
+          },
+          {
+            "executable": "git",
+            "args": [
+              "diff",
+              "components/kanban/kanban-board.tsx"
+            ]
+          },
+          {
+            "executable": "git",
+            "args": [
+              "status"
+            ]
+          }
+        ],
+        "approved_url_operations": [],
+        "mcp": "forbidden",
+        "credentials": "forbidden"
+      }
+    },
+    "envelope_sha256": "c54e85037a0f056633fc48e65ffb9df5cdcb0dbaa2fbda837e9e14c02749170a"
+  },
+  "acp": {
+    "protocol_version": {
+      "value": 1,
+      "assurance": "adapter_attested"
+    },
+    "session_id": {
+      "value": "c6af7f3d-85e4-4d30-87f0-4744128f2a72",
+      "assurance": "adapter_attested"
+    }
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-09T15:27:38.709Z",
+    "updated_at": "2026-08-09T15:27:54.549Z",
+    "completed_at": "2026-08-09T15:27:54.549Z",
+    "terminal": {
+      "outcome": "completed",
+      "partial": false,
+      "reason": null
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 1000,
+    "max_event_bytes": 1000000,
+    "max_output_bytes": 1000000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 21897,
+    "process_group_id": 21897,
+    "started_at": "2026-08-09T15:27:40.883Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

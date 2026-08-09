@@ -1,0 +1,131 @@
+{
+  "schema_version": 2,
+  "connected_run_id": "ec926d97-8b0e-4f60-a0b7-0182ad55de69",
+  "mission": {
+    "identity": {
+      "phase": "execute",
+      "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+      "goal_version": 1,
+      "input_revision": 1,
+      "attempt": 4
+    },
+    "path": ".founder/missions/wi_87281920-78df-4213-999b-a46f4f107533/execute-1-1-4/mission.json",
+    "content_sha256": "7309dc6566c0a93b66a115d149d527f9e7066f431eb2cf6df366fc85814e98c7",
+    "source_commit": "ff902fad2841bc2d7e1616200c09148cb794d536"
+  },
+  "governed_tuple": {
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 4,
+    "patch_cycle": 0
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "executor",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "gpt-5.6-sol",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "gpt-5.6-sol",
+      "deployment_id": null,
+      "observed_event_sha256": "25963c393366e69565aff7bc0fa72310e74d969feb0f228069da1f71bbde080b"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "8d9784b0a5e50a4f4a53a3219db3bd3bbd507f102f9fc495d0b17879684205f1",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    },
+    "authorization_sha256": {
+      "value": "f29315f07d39775fe75c959565862e14073806c3232b5a58e8da6c2ff8a3cdaf",
+      "assurance": "controller_observed"
+    }
+  },
+  "authorization": {
+    "kind": "capability_envelope",
+    "envelope": {
+      "schema_version": 1,
+      "workspace": {
+        "allowed_scope_digest": "7e71d30cfdebe08e6ec9783c3d446998189a97bdd3e477ee6290541aead490c5",
+        "execution_mode": "permission_mediated_local",
+        "scope_assurance": "result_scope_validation"
+      },
+      "runtime": {
+        "containment_assurance": "not_independently_enforced",
+        "machine_authority": "launching_user",
+        "approved_command_forms": [],
+        "approved_url_operations": [],
+        "mcp": "forbidden",
+        "credentials": "forbidden"
+      }
+    },
+    "envelope_sha256": "d5729eac03a1b401bd8a4f4965d010a45b35e3285161146a0cc82f6665e2bfe8"
+  },
+  "acp": {
+    "protocol_version": {
+      "value": 1,
+      "assurance": "adapter_attested"
+    },
+    "session_id": {
+      "value": "c2cdac69-29ea-4fe8-90df-08c50ebdcd5d",
+      "assurance": "adapter_attested"
+    }
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-06T06:04:57.762Z",
+    "updated_at": "2026-08-06T06:05:13.582Z",
+    "completed_at": "2026-08-06T06:05:13.582Z",
+    "terminal": {
+      "outcome": "completed",
+      "partial": false,
+      "reason": null
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 1000,
+    "max_event_bytes": 1000000,
+    "max_output_bytes": 1000000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 60666,
+    "process_group_id": 60666,
+    "started_at": "2026-08-06T06:05:00.846Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "shaping_run_id": "a9bf0b3d-e972-4b16-97e2-21ecfcc0bfe1",
+  "mission": {
+    "phase": "plan",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "input_sha256": "ac0eae2eb2e43632cee4f1db98adcff3b9260e7ca0d55ecf653eb3c6e448372a",
+    "content_sha256": "17f99dc018a115e6214598cec87f2beb58fb2a7ee2c50d22480bb4283d69449a"
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "plan",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "gpt-5.4",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "gpt-5.4",
+      "deployment_id": null,
+      "observed_event_sha256": "e79494058f3011184a06717455079bf7d6679609311c2ec7e20cb9e3c504838b"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "5c02666e8bb2c412dc9ca993ac10dd3bb135949e0ce753f6b2e6773e9e9f8fa6",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    }
+  },
+  "write_policy": {
+    "kind": "single_ingress_file",
+    "ingress_path": ".founder/shaping-runs/wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d/a9bf0b3d-e972-4b16-97e2-21ecfcc0bfe1/ingress/result.json",
+    "instruction_sha256": "9c236e79d88a43d91cda2abf9cf76a056d6d0a2236e22f897d8b4a3ceb823e09",
+    "commands": "forbidden",
+    "urls": "forbidden",
+    "mcp": "forbidden",
+    "credentials": "forbidden",
+    "outside_workspace_writes": "forbidden",
+    "reads": "workspace_and_repository_unrestricted",
+    "execution_mode": "permission_mediated_local",
+    "result_assurance": "result_scope_validation",
+    "containment_assurance": "not_independently_enforced",
+    "machine_authority": "launching_user"
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-09T14:09:29.181Z",
+    "updated_at": "2026-08-09T14:10:11.760Z",
+    "completed_at": "2026-08-09T14:10:11.760Z",
+    "terminal": {
+      "outcome": "completed",
+      "partial": false,
+      "reason": null
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 1000,
+    "max_event_bytes": 1000000,
+    "max_output_bytes": 100000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 6356,
+    "process_group_id": 6356,
+    "started_at": "2026-08-09T14:09:31.922Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

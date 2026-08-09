@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "run_id": "bfad5f7c-b68f-5a14-9d16-c52a40b952df",
+  "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+  "idempotency_key": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d:execute:command-authorization:297a7a62a887f53f20f229b407aadaed6965678b879092e10c179376f4b7c6d0",
+  "phase": "execute",
+  "goal_version": 3,
+  "input_revision": 3,
+  "attempt": 3,
+  "started_at": "2026-08-09T15:29:06.008Z",
+  "completed_at": "2026-08-09T15:29:06.118Z",
+  "outcome": "applied",
+  "command_authorization": {
+    "schema_version": 1,
+    "phase": "execute",
+    "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+    "governed_tuple": {
+      "goal_version": 3,
+      "input_revision": 3,
+      "attempt": 3,
+      "patch_cycle": 0
+    },
+    "source_mission_content_sha256": "c7127891bf85ad4f2549b6c269fc50c690036d1b1e29e2c5f25cbe1fdda5b6d5",
+    "terminal_connected_run_id": "5f7dfa68-0743-4bf0-bc65-3598d0a14ffc",
+    "changed_files": [
+      "components/kanban/kanban-board.tsx"
+    ],
+    "commands": [
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "npm",
+        "args": [
+          "run",
+          "lint"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "npm",
+        "args": [
+          "run",
+          "typecheck"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "npm",
+        "args": [
+          "test"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "npm",
+        "args": [
+          "run",
+          "build"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "git",
+        "args": [
+          "add",
+          "--",
+          "components/kanban/kanban-board.tsx"
+        ]
+      },
+      {
+        "schema_version": 1,
+        "kind": "command",
+        "executable": "git",
+        "args": [
+          "commit",
+          "-m",
+          "Close project menu"
+        ]
+      }
+    ],
+    "proposal_sha256": "297a7a62a887f53f20f229b407aadaed6965678b879092e10c179376f4b7c6d0"
+  }
+}

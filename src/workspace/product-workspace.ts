@@ -83,6 +83,7 @@ import {
   renderReadableTaskMd,
   renderTaskMd,
   reviewSubjectSchema,
+  missionScopeBaseCommit,
   serializeReadableMissionPackage,
   serializeMissionPackage,
   type MissionArtifactWriteResult,
@@ -3528,6 +3529,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const paths = this.missionPaths(
       validatedIdentity,
       await this.governedTupleGitBaseCommit(validatedIdentity),
+      undefined,
+      await this.resolveGitBaseCommit(),
     );
     const mission = missionPackageSchema.parse(buildPackage(paths)) as TMission;
     if (
@@ -4498,7 +4501,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     if (
       missionSnapshot.mission.content_sha256 !==
         evidence.mission_content_sha256 ||
-      missionSnapshot.mission.source_revision.git_base_commit !==
+      missionScopeBaseCommit(missionSnapshot.mission.source_revision) !==
         evidence.git_base_commit ||
       submission.mission_content_sha256 !== evidence.mission_content_sha256 ||
       JSON.stringify(submission.identity) !==
@@ -4628,7 +4631,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     if (
       missionSnapshot.mission.content_sha256 !==
         evidence.mission_content_sha256 ||
-      missionSnapshot.mission.source_revision.git_base_commit !==
+      missionScopeBaseCommit(missionSnapshot.mission.source_revision) !==
         evidence.git_base_commit ||
       submission.patch_mission_content_sha256 !==
         evidence.mission_content_sha256 ||
@@ -7777,6 +7780,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     identity: MissionIdentity,
     gitBaseCommit: string,
     reviewPatchCycle?: number,
+    scopeBaseCommit?: string,
   ): MissionPaths {
     const relativeDirectory = posix.join(
       FOUNDER_DIRECTORY,
@@ -7788,6 +7792,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       task_path: posix.join(relativeDirectory, TASK_MD_FILE),
       output_path: posix.join(relativeDirectory, RESULT_JSON_FILE),
       git_base_commit: gitBaseCommit,
+      ...(scopeBaseCommit === undefined || scopeBaseCommit === gitBaseCommit
+        ? {}
+        : { scope_base_commit: scopeBaseCommit }),
     };
   }
 

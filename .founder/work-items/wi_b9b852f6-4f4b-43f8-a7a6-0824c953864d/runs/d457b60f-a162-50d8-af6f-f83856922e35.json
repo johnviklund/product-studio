@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "run_id": "d457b60f-a162-50d8-af6f-f83856922e35",
+  "work_item_id": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d",
+  "idempotency_key": "wi_b9b852f6-4f4b-43f8-a7a6-0824c953864d:execute:3:3:2",
+  "phase": "execute",
+  "goal_version": 3,
+  "input_revision": 3,
+  "attempt": 2,
+  "started_at": "2026-08-09T15:26:50.097Z",
+  "completed_at": "2026-08-09T15:26:50.192Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "913f52a3630d27f250e40db800586484912f72770decb4dde97bed00000b54b4",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "diff",
+            "components/kanban/kanban-board.tsx"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "status"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "dde3fee58c0292691947113d0199c3f365f7af4a9cef426219c23ad585a3d68f"
+  }
+}

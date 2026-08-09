@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "decision_id": "0f4b6eee67b54a9f56b705abd627de72b4b19eedb4ff65125dc20e4c54b983c5",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "operation": "start_brainstorm",
+  "phase_from": "idea",
+  "phase_to": "brainstorm",
+  "mission_content_sha256": null,
+  "result_content_sha256": null,
+  "feedback_sha256": null,
+  "expected_shaping_state_sha256": "e7ebf3e8da2a34565cae4554749bdd761c3c5454843f533184f8be4a73021658",
+  "next_mission_content_sha256": "faf6320ef0c208b63553e35ce6331c92100303c7e96292db640d748935c61889",
+  "goal_sha256": "fd1aa77d764460ee2a0adb720e79b14fbec1eead1fa4aea7bae0651e973dc828",
+  "state_sha256": "d00efe49dda0ac0c16ce0763788543b5ad2ecb6a4a1e7acb7a967d573524dcdd",
+  "goal_version": null,
+  "input_revision": null,
+  "started_at": "2026-08-09T17:10:39.543Z",
+  "completed_at": "2026-08-09T17:10:39.587Z",
+  "outcome": "applied"
+}

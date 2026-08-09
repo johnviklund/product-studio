@@ -1,0 +1,48 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "9105bfe9d07d3247b35ed7b2b9a8c79bda455b996d8c2668df41e44d0c9fc2f9",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_87281920-78df-4213-999b-a46f4f107533",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 3
+  },
+  "commit": "ff902fad2841bc2d7e1616200c09148cb794d536",
+  "summary": "The complete 13-route candidate is present, but the mission authorizes no command forms and no mediated command tool is available, so it could not be tested or committed.",
+  "changed_files": [
+    "app/api/request-body.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route-factory.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/edit/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/retry/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/patch/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/mission/review/import/route.ts",
+    "app/api/portfolio/work-items/[sourceId]/[workItemId]/patch-plan/route.ts",
+    "app/api/portfolio/work-items/route.ts",
+    "app/api/work-items/rebuild/route.ts",
+    "app/api/workspaces/route.ts",
+    "tests/api/portfolio-routes.test.ts"
+  ],
+  "verification": [
+    {
+      "name": "13-route inventory and shared-factory inspection",
+      "status": "passed",
+      "detail": "Exactly the 13 named mutations use createTrustedMutationRoute; JSON routes retain strict existing schemas and bodyless routes remain bodyless."
+    },
+    {
+      "name": "focused route tests",
+      "status": "not_run",
+      "detail": "No command forms are authorized and no mediated command tool is available."
+    },
+    {
+      "name": "required implementation commit",
+      "status": "failed",
+      "detail": "The current HEAD is reported; a new commit could not be created without an authorized mediated command."
+    }
+  ]
+}
