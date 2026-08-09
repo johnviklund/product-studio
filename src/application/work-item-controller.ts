@@ -4401,16 +4401,20 @@ export class WorkItemController {
     if (JSON.stringify(result.identity) !== JSON.stringify(identity)) {
       reasons.push("Result identity does not match the requested governed tuple.");
     }
+    let authoredScopeBase: string | undefined;
     if (reasons.length === 0 && result.commit === undefined) {
       const authored = await this.authorResultCommit(snapshot, result);
-      if (typeof authored === "string") {
-        result = { ...result, commit: authored };
+      if ("commit" in authored) {
+        result = { ...result, commit: authored.commit };
+        authoredScopeBase = authored.parent;
       } else {
         reasons.push(...authored.reasons);
       }
     }
     if (reasons.length === 0) {
-      reasons.push(...(await this.validateGitProof(snapshot, result)));
+      reasons.push(
+        ...(await this.validateGitProof(snapshot, result, authoredScopeBase)),
+      );
     }
     if (reasons.length > 0) {
       return { outcome: "rejected", reasons, result, verification: [] };
@@ -4440,11 +4444,15 @@ export class WorkItemController {
    * commit if the founder pre-approved the exact message, which no one can know
    * in advance. The controller authors the commit instead, after proving the
    * retained changes are in scope and exactly what the agent reported.
+   *
+   * Returns the commit's parent alongside it so the caller can measure the
+   * result against the commit's own diff. Anything the founder committed while
+   * the agent was working sits below that parent and is correctly ignored.
    */
   private async authorResultCommit(
     snapshot: ActiveMissionResultSnapshot,
     result: ExecuteExternalResultSubmission,
-  ): Promise<string | { reasons: string[] }> {
+  ): Promise<{ commit: string; parent: string } | { reasons: string[] }> {
     const commitWorktree = this.git.commitWorktreeExcludingFounder;
     if (
       commitWorktree === undefined ||
@@ -4493,7 +4501,12 @@ export class WorkItemController {
         reasons: ["Result changed_files do not exactly match the Git diff."],
       };
     }
-    return commitWorktree.call(this.git, snapshot.mission.goal.title);
+    const parent = await this.git.readHeadCommit();
+    const commit = await commitWorktree.call(
+      this.git,
+      snapshot.mission.goal.title,
+    );
+    return { commit, parent };
   }
 
   private async assessPatchResult(
@@ -4638,6 +4651,7 @@ export class WorkItemController {
   private async validateGitProof(
     snapshot: ActiveMissionResultSnapshot,
     result: ExecuteExternalResultSubmission | PatchExternalResultSubmission,
+    authoredScopeBase?: string,
   ): Promise<string[]> {
     if (result.commit === undefined) {
       return ["Result did not provide a commit and none could be authored."];
@@ -4657,9 +4671,9 @@ export class WorkItemController {
       return ["Workspace has uncommitted changes outside .founder/."];
     }
 
-    const scopeBaseCommit = missionScopeBaseCommit(
-      snapshot.mission.source_revision,
-    );
+    const scopeBaseCommit =
+      authoredScopeBase ??
+      missionScopeBaseCommit(snapshot.mission.source_revision);
     if (scopeBaseCommit !== baseCommit) {
       if (!(await this.git.isAncestor(baseCommit, scopeBaseCommit))) {
         return [

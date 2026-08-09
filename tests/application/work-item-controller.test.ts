@@ -3696,6 +3696,54 @@ describe("WorkItemController", () => {
     );
   });
 
+  it("measures an authored commit against its own parent so founder commits made mid-run cannot reject it", async () => {
+    const staleScopeBase = "c".repeat(40);
+    const founderCommitDuringRun = "e".repeat(40);
+    const authoredCommit = "d".repeat(40);
+    const fixture = await createImportFixture({
+      missionScopeBaseCommit: staleScopeBase,
+      transformResult: (result) => {
+        const { commit: _omitted, ...withoutCommit } = result;
+        return withoutCommit as ExecuteExternalResultSubmission;
+      },
+    });
+    const diffBases: string[] = [];
+    let committed = false;
+    const midRunCommitGit: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return committed ? [] : ["src/domain/result.ts"];
+      },
+      async commitWorktreeExcludingFounder() {
+        committed = true;
+        return authoredCommit;
+      },
+      async resolveCommit(revision: string) {
+        return revision === authoredCommit ? authoredCommit : null;
+      },
+      async readHeadCommit() {
+        return committed ? authoredCommit : founderCommitDuringRun;
+      },
+      async listChangedFiles(base: string) {
+        diffBases.push(base);
+        return base === founderCommitDuringRun
+          ? ["src/domain/result.ts"]
+          : ["src/application/work-item-controller.ts", "src/domain/result.ts"];
+      },
+    };
+
+    const imported = await createController(
+      fixture.repository,
+      midRunCommitGit,
+    ).importExternalResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(diffBases).toEqual([founderCommitDuringRun]);
+    expect(imported.evidence).toMatchObject({
+      outcome: "applied",
+      reasons: [],
+    });
+  });
+
   it("refuses to author a commit for worktree changes outside allowed_scope", async () => {
     const fixture = await createImportFixture({
       transformResult: (result) => {
