@@ -1024,13 +1024,20 @@ describe("stdio ACP client adapter", () => {
 
     const invalidResult = await invalidSession.run("Try an unnormalizable request.");
 
-    expect(invalidResult).toMatchObject({ outcome: "completed", partial: false });
+    expect(invalidResult).toMatchObject({ outcome: "failed", partial: true });
     expect(invalidResult.permissions).toEqual([
       {
         kind: "invalid_request",
         reason: "missing_or_unnormalizable_permission_detail",
       },
     ]);
+    expect(
+      invalidSink.events.some(
+        (event) =>
+          event.kind === "permission" &&
+          event.payload.decision === "missing_permission",
+      ),
+    ).toBe(false);
     expect(await exists(`${sentinel}.1`)).toBe(false);
 
     const refusalSink = new MemoryEventSink();

@@ -895,6 +895,18 @@ class StdioAcpSession implements AcpSession {
         output_text: this.outputText,
       };
     }
+    const hasInvalidRequest = this.permissionOutcomes.some(
+      (outcome) => outcome.kind === "invalid_request",
+    );
+    if (hasInvalidRequest) {
+      return {
+        outcome: "failed",
+        partial: true,
+        stop_reason: stopReason,
+        permissions: [...this.permissionOutcomes],
+        output_text: this.outputText,
+      };
+    }
     if (stopReason === "end_turn") {
       return {
         outcome: "completed",

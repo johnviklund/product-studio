@@ -2590,6 +2590,7 @@ function renderCapabilityEnvelope(
     ...(includeExactArrayGuidance
       ? [
           "Approved command arrays are exact. Do not add arguments, message paragraphs, attribution trailers, or metadata.",
+          "Every command must be a single line built only from plain words and quoted words. Newlines, control characters, pipes, redirection, chaining, and substitution cannot be interpreted: the runtime refuses such a request outright and the run ends without a result. Keep commit messages to one line.",
         ]
       : []),
     "",

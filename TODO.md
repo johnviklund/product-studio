@@ -106,6 +106,26 @@ delivery phases.
 - **Boundary:** Do not weaken `validateGitProof`'s scope, ancestry, HEAD-equality, or clean-worktree
   checks — the fix is *which base is compared*, not relaxing the proof.
 
+### Report an unnormalizable permission request as a failure the founder can act on
+
+- **Status:** Partly delivered — the phantom success is closed (commit below); the recovery path is
+  still open. Found 2026-08-09 on `wi_b9b852f6`, where it killed 3 of 11 connected runs.
+- **Idea:** When the runtime cannot normalize a permission request, `recordPermissionEvaluation`
+  records `invalid_request` and rejects the tool call — but `resultFromStopReason` only inspected
+  `missing_permission`, so the run reported `completed` / `partial: false` with no result and no
+  attention. From the board it looked like a clean success that mysteriously produced nothing.
+  The concrete trigger is ordinary: `parseRestrictedShellWords` refuses any command containing a
+  control character, so a conventional multi-line commit message is unnormalizable, and the agent
+  was never told that constraint. The run now reports `failed` / `partial: true`, and the execute
+  and patch task guidance states the single-line command rule explicitly.
+- **Purpose:** A silent phantom success is the worst failure mode in the system — it burns a run,
+  teaches the founder nothing, and looks like the agent simply did nothing.
+- **Definition of done:** An `invalid_request` raises a founder-visible attention naming the
+  operation the runtime could not interpret, and the agent receives a distinguishable signal so it
+  can retry with an expressible command instead of ending its turn.
+- **Boundary:** Do not widen `parseRestrictedShellWords` to accept shell metacharacters; the
+  restricted grammar is the containment boundary. Fix the reporting and the guidance, not the parser.
+
 ### Give a blocked item a route back to active from any phase
 
 - **Status:** Partly delivered — the bricking path is closed (commit below); the recovery gap is
