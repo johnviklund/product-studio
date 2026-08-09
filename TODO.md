@@ -6,6 +6,79 @@ delivery phases.
 
 ## Active Initiatives
 
+### Compile the mission package that a tuple-advancing transition points at
+
+- **Status:** Proposed — defect, found 2026-08-09 running a live connected cycle.
+- **Idea:** Transitions that advance the governed tuple rewrite `goal`/`state` but never compile
+  the mission package for the new tuple, so the very next controller call resolves a directory
+  that does not exist. Observed twice in one cycle on `wi_b9b852f6` ("Close project menu"):
+  `applyScopeCorrection` bumped `2-2-0` and left `.founder/missions/.../execute-2-2-0` missing, and
+  `decideCommandAuthorization` (`allow_once`) bumped `attempt` to 1 and left `execute-2-2-1`
+  missing. Both surfaced to the founder as a raw
+  `invalid_workspace: required directory is missing` with an `.founder/...` artifact path — no
+  recovery affordance, no hint that "Compile mission" is the unblock.
+- **Purpose:** Each occurrence dead-ends the founder mid-cycle on an error that names an internal
+  path rather than an action. `commandAuthorizationPreflightEligible`'s `correctedExecuteRestart`
+  branch deliberately makes the preflight eligible right after a scope correction, so the app
+  routes the founder straight into the call that cannot succeed yet.
+- **Definition of done:** A tuple-advancing transition either compiles the package for the tuple it
+  commits, in the same lease, or the resolve failure raises a typed controller conflict carrying
+  the recovery action instead of a workspace error. No founder-visible path leaks an
+  `invalid_workspace` artifact path as its only guidance.
+- **Boundary:** Scope to the transitions that already advance the tuple (scope correction, command
+  authorization, attempt retry). Not a redesign of mission compilation, and not the broader
+  step-count reduction tracked below.
+
+### Reduce founder step count with supervised auto-recovery
+
+- **Status:** Proposed — direction, not yet scoped.
+- **User story:** As the founder, I want the workflow to carry an item forward on its own and ask
+  me only for the decisions that genuinely need human authority, so that a single idea does not
+  cost me a chain of small mechanical clicks and hand-diagnosed errors.
+- **Purpose:** Measured on one real cycle (2026-08-09, "Close project menu"): reaching a committed
+  implementation required the founder to hit a scope correction, a command preflight, a command
+  authorization, two mission compilations, and a launch — plus two dead-end errors that needed
+  source-level diagnosis to interpret. Most of those steps carried no human judgment; they were
+  the controller asking the founder to perform its own bookkeeping. The steps that *did* need a
+  human — approving exact commands, approving scope — were buried among the mechanical ones, which
+  is the opposite of the intended "human authority is preserved where it matters" shape.
+- **Definition of done:** A supervised recovery path advances an item through mechanically-implied
+  next steps (compile the package a committed tuple implies, re-derive a stale proposal, resume a
+  terminal run that produced no result) without founder action, while every capability, scope, and
+  completion gate stays an explicit human decision. The founder-facing surface distinguishes "I am
+  waiting on you" from "I am working", and never asks the founder to perform a step the controller
+  could have taken itself.
+- **Boundary:** Recovery only — it may not approve commands, widen scope, accept a result, or set an
+  item to `completed`. Those remain human-only gates per AGENTS.md. Explicitly not an autonomous
+  agent that decides product direction; the open design question is whether this is controller
+  logic or a distinct orchestrator role, and that should be settled before scoping.
+
+### Bound scope correction to the item, and freeze the tuple during a live run
+
+- **Status:** Proposed — defect, found 2026-08-09 during the same live cycle.
+- **Idea:** Two coupled failures observed on `wi_b9b852f6`. First, the scope-correction proposal is
+  derived from the **entire retained worktree** (`listWorktreeChangedFilesExcludingFounder`), so any
+  dirty file — including one edited by a human or a different tool, with no relationship to the work
+  item — is proposed into that item's `allowed_scope` and written into its goal contract. In this
+  cycle an unrelated `TODO.md` edit was absorbed into the goal contract of a UI work item. Second,
+  the correction was applied **while a connected run was executing**: it bumped the tuple from
+  `2-2-1` to `3-3-0` 90 seconds into the run, so when the run terminated `missing_permission`, its
+  governed tuple no longer matched state and the denial was **silently discarded** — no attention,
+  no surfaced command to approve, and the capability grant was reset because it was bound to the
+  superseded mission.
+- **Purpose:** Together these let an unrelated edit rewrite a work item's goal contract *and*
+  destroy the outcome of an in-flight run, leaving the founder with a card that looks idle and no
+  record of what the agent actually needed. It also silently widens the scope an agent is permitted
+  to write to, which is a governance boundary, not a convenience.
+- **Definition of done:** Scope-correction proposals only consider paths plausibly attributable to
+  the work item's own run, and never absorb a path solely because it is dirty. A tuple-advancing
+  transition is refused, or explicitly quarantined, while a connected run holds the tuple it would
+  supersede; a terminal run whose tuple was superseded still records its outcome somewhere the
+  founder can see rather than being dropped.
+- **Boundary:** Not a change to what the founder may approve — widening scope stays a human
+  decision. The fix is *which paths get proposed* and *when a transition may fire*, not who
+  authorizes it.
+
 ### Connected model configuration settings page
 
 - **Status:** Proposed.
