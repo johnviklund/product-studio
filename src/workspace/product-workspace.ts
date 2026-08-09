@@ -7725,14 +7725,16 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   private async governedTupleGitBaseCommit(
     identity: MissionIdentity,
   ): Promise<string> {
-    if (identity.attempt < 1) {
-      return this.resolveGitBaseCommit();
+    for (let attempt = 0; attempt < identity.attempt; attempt += 1) {
+      const compiledBase = await this.compiledGitBaseCommit({
+        ...identity,
+        attempt,
+      });
+      if (compiledBase !== null) {
+        return compiledBase;
+      }
     }
-    const tupleBase = await this.compiledGitBaseCommit({
-      ...identity,
-      attempt: 0,
-    });
-    return tupleBase ?? this.resolveGitBaseCommit();
+    return this.resolveGitBaseCommit();
   }
 
   private async compiledGitBaseCommit(

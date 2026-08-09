@@ -2586,6 +2586,58 @@ describe("ProductWorkspace", () => {
     expect(second.mission.source_revision.git_base_commit).toBe(baseCommit);
   });
 
+  it("anchors the mission Git base on a tuple whose first attempt is not zero", async () => {
+    const root = await createWorkspace();
+    const item = await writeMissionReadyWorkItem(root, firstId);
+    const manifest = appliedExecuteManifest();
+
+    const baseCommit = "a".repeat(40);
+    let head = baseCommit;
+    const workspace = new ProductWorkspace(root, {
+      git: {
+        ...testGit,
+        async readHeadCommit() {
+          return head;
+        },
+      },
+    });
+    const statePath = join(
+      root,
+      ".founder",
+      "work-items",
+      firstId,
+      "state.json",
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      attempt: number;
+    };
+    const compileAt = async (attempt: number) => {
+      await writeFile(
+        statePath,
+        `${JSON.stringify({ ...state, attempt }, null, 2)}\n`,
+        "utf8",
+      );
+      return workspace.writeMissionPackage(
+        missionIdentity(firstId, { attempt }),
+        (paths: Parameters<typeof compileMission>[2]) =>
+          compileMission(
+            { ...item, state: { ...item.state, attempt } },
+            { ...manifest, attempt },
+            paths,
+          ),
+      );
+    };
+
+    // A repaired item can enter execute at a later attempt, so attempt 0 never
+    // compiles a mission and cannot be the anchor.
+    const first = await compileAt(3);
+    expect(first.mission.source_revision.git_base_commit).toBe(baseCommit);
+
+    head = "b".repeat(40);
+    const retry = await compileAt(4);
+    expect(retry.mission.source_revision.git_base_commit).toBe(baseCommit);
+  });
+
   it("publishes byte-identical v2 Brainstorm, Spec, and Plan missions without Git", async () => {
     const root = await createWorkspace();
     const item = await writeShapingReadyWorkItem(root, firstId);
