@@ -44,8 +44,24 @@ delivery phases.
   The controller-authored commit below removes the largest source of these rejections, but the
   general case still needs a design that does not depend on `_meta`.
 
-### Author the result commit in the controller so agents never run Git
+### Stop letting guidance-text changes strand every compiled mission
 
+- **Status:** Delivered 2026-08-09 (commit `fc5b153`).
+- **Why it was a defect:** `TASK.md` is a pure rendering of `mission.json`, but the snapshot check
+  compared it by re-rendering and erroring on any difference. Editing the guidance text therefore
+  invalidated every mission package compiled before that edit, on both the read and the write path,
+  with `immutable mission snapshot differs from the compiled package` and no recovery. The previous
+  commit changed the execute guidance and stranded every execute mission in the workspace, which is
+  how it was found — `Launch connected run` could not compile or read anything.
+- **Fix:** `mission.json` is still compared byte-for-byte, since it is the governed contract and the
+  only real tamper signal. A differing `TASK.md` is treated as staleness and re-derived atomically
+  from the verified mission, so the agent still reads exactly what the mission says. Shaping
+  snapshots had the same flaw and share the repair.
+- **Tradeoff accepted:** a historical `TASK.md` is rewritten to the wording its own schema version
+  renders, so its bytes are no longer preserved verbatim across a renderer change. Version-specific
+  renderers still keep older schema versions rendering their own text.
+
+### Author the result commit in the controller so agents never run Git
 - **Status:** Delivered 2026-08-09. Execute results may now omit `commit`; the controller validates
   the retained worktree against `allowed_scope` and the reported `changed_files`, then commits it
   with the work item title via `commitWorktreeExcludingFounder`. `.founder/` is excluded from the
@@ -279,6 +295,12 @@ delivery phases.
   still anchor to the frozen base; `allowed_scope` and `changed_files` are measured from the scope
   base, so commits authored outside the work item before an attempt was compiled no longer
   invalidate it. Recovery is a normal retry: the new attempt compiles a fresh scope base.
+  Extended 2026-08-09 (commit `cee4e87`): the scope base only bounded commits made *before* an
+  attempt compiled, so founder commits made *during* a run still poisoned it — the common case,
+  since bugs get fixed mid-run. Because the controller now authors the result commit, the agent's
+  contribution is exactly that commit's diff against its parent, which is captured at commit time
+  and used as the scope base. Commits from any other author, before or during the run, are now
+  outside the measured range entirely.
   Remaining gap: work the item itself committed in an *earlier failed attempt* still falls outside
   the next attempt's scope base — tracked separately under the committed-then-failed retry entry.
 - **Idea:** `validateGitProof` requires HEAD to equal the result commit and then walks every file in
