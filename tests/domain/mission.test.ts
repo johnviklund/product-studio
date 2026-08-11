@@ -753,6 +753,15 @@ describe("mission domain", () => {
     expect(task).toContain(
       "Do not run Git. Leave your edits uncommitted in the working tree: the controller commits them for you once it has proven they are in scope.",
     );
+    expect(task).toContain(
+      "List every task-owned path that is currently changed in the working tree, even when an earlier attempt made the change.",
+    );
+    expect(task).toContain(
+      "Report an empty changed_files array only after proving the workspace is clean outside .founder/",
+    );
+    expect(task).not.toContain(
+      "If every approved checklist entry is already satisfied at the compiled commit, report an empty changed_files array",
+    );
     expect(task).toContain('"mission_content_sha256"');
     expect(task).not.toContain('"commit"');
     expect(task).toContain(
