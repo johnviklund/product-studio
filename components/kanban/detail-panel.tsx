@@ -4777,6 +4777,26 @@ export function ConnectedPhaseSection({
   );
 }
 
+export function FullWorkItemBackButton({
+  onBack,
+  label = "Back to workflow details",
+}: {
+  onBack: () => void;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label="Back to workflow details"
+      onClick={onBack}
+      className="flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+    >
+      <ArrowLeft className="size-3.5" strokeWidth={1.75} />
+      {label}
+    </button>
+  );
+}
+
 export function DetailPanel({
   item,
   workspaces,
@@ -8225,16 +8245,14 @@ export function DetailPanel({
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="border-b px-4 py-2">
-              <button
-                type="button"
-                onClick={() => setShowFullWorkItem(false)}
-                className="flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-              >
-                <ArrowLeft className="size-3.5" strokeWidth={1.75} />
-                {shapingDecisionProjection === null
-                  ? "Back to details panel"
-                  : "Back to shaping decision"}
-              </button>
+              <FullWorkItemBackButton
+                onBack={() => setShowFullWorkItem(false)}
+                label={
+                  shapingDecisionProjection === null
+                    ? "Back to details panel"
+                    : "Back to shaping decision"
+                }
+              />
             </div>
             <div className="flex border-b px-4" role="tablist" aria-label="Work item details">
               {(["overview", "activity", "files"] as const).map((tab) => (

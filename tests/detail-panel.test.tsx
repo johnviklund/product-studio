@@ -11,6 +11,7 @@ import {
   ConnectedExecuteSection,
   ConnectedPhaseSection,
   dispatchShapingManualRecoveryAction,
+  FullWorkItemBackButton,
   PatchWorkflowSection,
   ReviewImportDriftRecoverySection,
   retainedControllerLeaseRepairForConflict,
@@ -65,6 +66,19 @@ const missionContentSha256 = "a".repeat(64);
 const resultContentSha256 = "b".repeat(64);
 const gitCommit = "c".repeat(40);
 const evidencePath = `.founder/run-evidence/${workItemId}/review-1-1-0/${"d".repeat(64)}`;
+
+describe("Full work item navigation", () => {
+  it("returns from the full work item view through its visible back control", () => {
+    const onBack = vi.fn();
+    const button = FullWorkItemBackButton({ onBack });
+
+    expect(button.props["aria-label"]).toBe("Back to workflow details");
+    expect(button.props.children).toBeDefined();
+    button.props.onClick();
+
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+});
 
 const attention = {
   kind: "patch_plan_approval" as const,
