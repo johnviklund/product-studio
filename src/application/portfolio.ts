@@ -48,6 +48,7 @@ import {
   compilePatchMission as compilePatchMissionPackage,
   compileReviewMission as compileReviewMissionPackage,
   patchSubjectSchema,
+  type ExecuteApprovedPlan,
   type ExecuteMissionPackage,
   type MissionArtifactWriteResult,
   type MissionIdentity,
@@ -1497,12 +1498,66 @@ export class PortfolioService {
       }
     }
 
+    const approvedPlanArtifacts = (
+      await source.workspace.listShapingArtifacts(workItemId)
+    ).filter(
+      (artifact) =>
+        artifact.mission.identity.phase === "plan" &&
+        artifact.result !== null &&
+        artifact.decision !== null &&
+        "execute_tuple" in artifact.decision.receipt,
+    );
+    if (approvedPlanArtifacts.length > 1) {
+      throw this.missionNotReady(
+        workItemId,
+        "More than one approved Plan is bound to this Execute work item.",
+      );
+    }
+    let approvedPlan: ExecuteApprovedPlan | undefined;
+    const approvedPlanArtifact = approvedPlanArtifacts[0];
+    if (
+      approvedPlanArtifact !== undefined &&
+      approvedPlanArtifact.result !== null &&
+      approvedPlanArtifact.decision !== null &&
+      "execute_tuple" in approvedPlanArtifact.decision.receipt
+    ) {
+      const receipt = approvedPlanArtifact.decision.receipt;
+      const result = planResultSubmissionSchema.parse(
+        JSON.parse(approvedPlanArtifact.result.result_source),
+      );
+      if (
+        receipt.mission_content_sha256 !==
+          approvedPlanArtifact.mission.content_sha256 ||
+        receipt.result_content_sha256 !==
+          approvedPlanArtifact.result.result_content_sha256 ||
+        result.plan_mission_content_sha256 !== receipt.mission_content_sha256
+      ) {
+        throw this.missionNotReady(
+          workItemId,
+          "The approved Plan receipt is not bound to its immutable mission and result.",
+        );
+      }
+      approvedPlan = {
+        mission_content_sha256: receipt.mission_content_sha256,
+        result_content_sha256: receipt.result_content_sha256,
+        goal_contract_sha256: receipt.goal_contract_sha256,
+        approved_at: receipt.approved_at,
+        summary: result.summary,
+        checklist: result.checklist,
+        relevant_skills: result.relevant_skills,
+        product_doc_impacts: result.product_doc_impacts,
+        todo_impacts: result.todo_impacts,
+        open_questions: result.open_questions,
+      };
+    }
+
     return source.workspace.writeMissionPackage(identity, (paths) =>
       compileMissionPackage(
         workItem,
         executeManifest,
         paths,
         capabilityAuthorization?.execution_defaults,
+        approvedPlan,
       ),
     ) as Promise<MissionCompilation>;
   }
@@ -3575,9 +3630,27 @@ export class PortfolioService {
     if (current === null) {
       throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
     }
-    const prepared = await this.workItemController(
-      source.workspace,
-    ).prepareCommandAuthorization(workItemId, phase);
+    const controller = this.workItemController(source.workspace);
+    const prepare = () =>
+      controller.prepareCommandAuthorization(workItemId, phase);
+    const prepared = await (async () => {
+      try {
+        return await prepare();
+      } catch (error) {
+        const missingFreshExecuteMission =
+          phase === "execute" &&
+          error instanceof InvalidWorkspaceError &&
+          error.reason === "required directory is missing" &&
+          error.artifactPath.startsWith(
+            `.founder/missions/${workItemId}/execute-`,
+          );
+        if (!missingFreshExecuteMission) {
+          throw error;
+        }
+        await this.compileMission(sourceId, workItemId);
+        return prepare();
+      }
+    })();
     await this.rebuild();
     return {
       source_id: source.source_id,

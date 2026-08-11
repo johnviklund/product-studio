@@ -129,6 +129,9 @@ controller fields, while governed items carry a complete nested version-1 goal c
 purpose, acceptance criteria, non-goals, allowed scope, and review readiness. Its `goal_version`
 must match state `goal_version`, `input_revision`, and `attempt`. Controller runs use exclusive
 per-item leases and strict durable manifests; incompatible or partial combinations fail closed.
+Before Plan can authorize Execute, every allowed-scope entry must be a concrete
+workspace-relative path prefix without prose-like whitespace; semantic descriptions cannot stand
+in for paths that Git proof will match exactly.
 SQLite schema v6 is a rebuildable projection of those files, including purpose, non-goals,
 patch-cycle state, and attention, not
 a migration authority. A further immutable artifact family exists at

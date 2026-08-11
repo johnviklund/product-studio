@@ -4,10 +4,12 @@ import {
   compileMission,
   compilePatchMission,
   compileReviewMission,
+  hashHistoricalMissionContentV7,
   hashHistoricalMissionContentV6,
   hashHistoricalMissionContentV5,
   hashHistoricalMissionContentV4,
   hashMissionContent,
+  historicalMissionPackageV7Schema,
   historicalMissionPackageV6Schema,
   historicalMissionPackageV5Schema,
   historicalMissionPackageV4Schema,
@@ -20,6 +22,7 @@ import {
   serializeReadableMissionPackage,
   serializeMissionPackage,
   type ExecuteReviewSubject,
+  type HistoricalExecuteMissionPackageV7,
   type HistoricalExecuteMissionPackageV6,
   type HistoricalExecuteMissionPackageV5,
   type HistoricalExecuteMissionPackageV4,
@@ -273,7 +276,7 @@ describe("mission domain", () => {
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(renderTaskMd(second)).toBe(renderTaskMd(first));
     expect(first.content_sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(first.mission_schema_version).toBe(7);
+    expect(first.mission_schema_version).toBe(8);
     expect(first.identity.phase).toBe("execute");
     expect(first.source_revision.git_base_commit).toBe(paths.git_base_commit);
     expect(first.result_contract).toEqual({
@@ -324,6 +327,7 @@ describe("mission domain", () => {
       source_revision: mission.source_revision,
       goal: mission.goal,
       capability_envelope: mission.capability_envelope,
+      approved_plan: mission.approved_plan,
       controller_run: mission.controller_run,
       identity: mission.identity,
       mission_schema_version: mission.mission_schema_version,
@@ -553,6 +557,41 @@ describe("mission domain", () => {
     expect(() => missionPackageSchema.parse(historical)).toThrow();
   });
 
+  it("reads stored v7 Execute missions without inventing an approved Plan", () => {
+    const current = compileMission(
+      workItem,
+      executeManifest,
+      paths,
+      executionDefaults,
+    );
+    const { approved_plan: _approvedPlan, ...beforeApprovedPlan } = current;
+    void _approvedPlan;
+    const draft: HistoricalExecuteMissionPackageV7 = {
+      ...beforeApprovedPlan,
+      mission_schema_version: 7,
+      content_sha256: "0".repeat(64),
+    };
+    const historical = {
+      ...draft,
+      content_sha256: hashHistoricalMissionContentV7(draft),
+    };
+
+    expect(historicalMissionPackageV7Schema.parse(historical)).toEqual(
+      historical,
+    );
+    expect(readableMissionPackageSchema.parse(historical)).toEqual(historical);
+    expect(serializeReadableMissionPackage(historical)).toContain(
+      '"mission_schema_version": 7',
+    );
+    expect(renderReadableTaskMd(historical)).not.toContain("## Approved Plan");
+    expect(() =>
+      historicalMissionPackageV7Schema.parse({
+        ...historical,
+        approved_plan: null,
+      }),
+    ).toThrow();
+  });
+
   it("reads stored v6 Execute/Patch TASKs without current-only command guidance", () => {
     const currentExecute = compileMission(
       workItem,
@@ -560,8 +599,11 @@ describe("mission domain", () => {
       paths,
       executionDefaults,
     );
+    const { approved_plan: _currentApprovedPlan, ...executeBeforeApprovedPlan } =
+      currentExecute;
+    void _currentApprovedPlan;
     const historicalExecuteDraft: HistoricalExecuteMissionPackageV6 = {
-      ...currentExecute,
+      ...executeBeforeApprovedPlan,
       mission_schema_version: 6,
       content_sha256: "0".repeat(64),
     };
@@ -616,8 +658,11 @@ describe("mission domain", () => {
       paths,
       executionDefaults,
     );
+    const { approved_plan: _currentApprovedPlan, ...executeBeforeApprovedPlan } =
+      currentExecute;
+    void _currentApprovedPlan;
     const historicalExecuteDraft: HistoricalExecuteMissionPackageV5 = {
-      ...currentExecute,
+      ...executeBeforeApprovedPlan,
       mission_schema_version: 5,
       content_sha256: "0".repeat(64),
     };
@@ -743,11 +788,11 @@ describe("mission domain", () => {
     expect(second).toEqual(first);
     expect(serializeMissionPackage(second)).toBe(serializeMissionPackage(first));
     expect(first.content_sha256).toBe(
-      "4654b69f72ce81544cf2584c13492fa1827b26a14c1119f958f69f3c7fdf3a29",
+      "01bfb0271ea81c86692598d9afb6053e613d4168c0acafb1fdc08e22e407c5e8",
     );
     expect(first.content_sha256).not.toBe(execute.content_sha256);
     expect(first.identity.phase).toBe("review");
-    expect(first.mission_schema_version).toBe(7);
+    expect(first.mission_schema_version).toBe(8);
     expect(first.controller_run.phase).toBe("review");
     expect(first.independence_attested).toBe(true);
     expect(first.review_subject).toEqual(reviewSubject);
@@ -852,7 +897,7 @@ describe("mission domain", () => {
     };
 
     expect(second).toEqual(first);
-    expect(first.mission_schema_version).toBe(7);
+    expect(first.mission_schema_version).toBe(8);
     expect(first.identity).toMatchObject({ phase: "patch", patch_cycle: 1 });
     expect(first.capability_envelope).toEqual({
       schema_version: 1,

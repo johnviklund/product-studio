@@ -3806,8 +3806,11 @@ describe("ProductWorkspace", () => {
       identity,
       (paths) => compileMission(item, appliedExecuteManifest(), paths),
     );
+    const { approved_plan: _approvedPlan, ...executeBeforeApprovedPlan } =
+      artifact.mission;
+    void _approvedPlan;
     const historicalDraft: HistoricalExecuteMissionPackageV6 = {
-      ...artifact.mission,
+      ...executeBeforeApprovedPlan,
       mission_schema_version: 6 as const,
       content_sha256: "0".repeat(64),
     };
@@ -4032,7 +4035,7 @@ describe("ProductWorkspace", () => {
     }
   });
 
-  it("builds one immutable execute subject and writes a phase-distinct review mission", async () => {
+  it("builds Review from evidence when the controller authored the Execute commit", async () => {
     const root = await createWorkspace();
     const executeItem = await writeMissionReadyWorkItem(root, firstId);
     const workspace = missionWorkspace(root);
@@ -4045,7 +4048,6 @@ describe("ProductWorkspace", () => {
       result_schema_version: 2,
       mission_content_sha256: executeArtifact.mission.content_sha256,
       identity: missionIdentity(),
-      commit: "a".repeat(40),
       summary: "Implement the accepted execute result.",
       changed_files: ["src/domain/result.ts"],
       verification: [{ name: "Tests", status: "passed" }],

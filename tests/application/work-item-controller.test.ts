@@ -1335,6 +1335,7 @@ async function createAppliedBrainstormDecisionFixture(
 
 async function createAppliedSpecDecisionFixture(
   repository: ProductWorkspace,
+  options: { allowedScope?: string[] } = {},
 ) {
   const brainstorm = await createAppliedBrainstormDecisionFixture(repository);
   const used = await createController(repository).useBrainstormResult(
@@ -1342,9 +1343,16 @@ async function createAppliedSpecDecisionFixture(
     brainstorm.input,
   );
   const tip = await currentShapingTip(repository, used.work_item);
-  const result = shapingResultForMission(
+  const baseResult = shapingResultForMission(
     tip.mission,
   ) as SpecResultSubmission;
+  const result: SpecResultSubmission = {
+    ...baseResult,
+    proposal: {
+      ...baseResult.proposal,
+      allowed_scope: options.allowedScope ?? baseResult.proposal.allowed_scope,
+    },
+  };
   const resultContentSha256 = await writeAppliedControllerShapingBundle(
     repository,
     tip,
@@ -1374,9 +1382,9 @@ async function createAppliedSpecDecisionFixture(
 
 async function createAppliedPlanDecisionFixture(
   repository: ProductWorkspace,
-  options: { applyResult?: boolean } = {},
+  options: { applyResult?: boolean; allowedScope?: string[] } = {},
 ) {
-  const spec = await createAppliedSpecDecisionFixture(repository);
+  const spec = await createAppliedSpecDecisionFixture(repository, options);
   const approved = await createController(repository).approveSpecResult(
     spec.used.work_item.goal.work_item_id,
     spec.input,
@@ -3662,6 +3670,7 @@ describe("WorkItemController", () => {
     const fixture = await createImportFixture({
       transformResult: (result) => {
         const { commit: _omitted, ...withoutCommit } = result;
+        void _omitted;
         return withoutCommit as ExecuteExternalResultSubmission;
       },
     });
@@ -3694,6 +3703,46 @@ describe("WorkItemController", () => {
     expect([...fixture.evidence.values()][0]?.evidence.result_commit).toBe(
       authoredCommit,
     );
+  });
+
+  it("accepts an already-satisfied clean result at the compiled HEAD and still verifies it", async () => {
+    const fixture = await createImportFixture({
+      transformResult: (result) => {
+        const { commit: _omitted, ...withoutCommit } = result;
+        void _omitted;
+        return {
+          ...withoutCommit,
+          changed_files: [],
+        } as ExecuteExternalResultSubmission;
+      },
+    });
+    const run = vi.fn(passingRunner.run);
+    const alreadySatisfiedGit: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return [];
+      },
+      async listChangedFiles() {
+        return [];
+      },
+    };
+
+    const imported = await createController(
+      fixture.repository,
+      alreadySatisfiedGit,
+      { run },
+    ).importExternalResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(imported.evidence).toMatchObject({ outcome: "applied", reasons: [] });
+    expect([...fixture.evidence.values()][0]?.evidence).toMatchObject({
+      result_commit: testCommit,
+      outcome: "applied",
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(imported.work_item.state).toMatchObject({
+      phase: "review",
+      status: "active",
+    });
   });
 
   it("measures an authored commit against its own parent so founder commits made mid-run cannot reject it", async () => {
@@ -3744,6 +3793,66 @@ describe("WorkItemController", () => {
     });
   });
 
+  it("commits only reported result paths and preserves other retained in-scope worktree changes", async () => {
+    const authoredCommit = "d".repeat(40);
+    const retainedPath = "src/application/work-item-controller.ts";
+    const resultPath = "src/domain/result.ts";
+    const fixture = await createImportFixture({
+      transformResult: (result) => {
+        const { commit: _omitted, ...withoutCommit } = result;
+        void _omitted;
+        return withoutCommit as ExecuteExternalResultSubmission;
+      },
+    });
+    let committed = false;
+    let worktreeFiles = [retainedPath, resultPath];
+    const committedPaths: string[][] = [];
+    const selectiveGit: GitVerificationAdapter = {
+      ...passingGit,
+      async listWorktreeChangedFilesExcludingFounder() {
+        return [...worktreeFiles];
+      },
+      async commitWorktreeExcludingFounder(_message, paths) {
+        committedPaths.push([...paths]);
+        const pathSet = new Set(paths);
+        worktreeFiles = worktreeFiles.filter((path) => !pathSet.has(path));
+        committed = true;
+        return authoredCommit;
+      },
+      async resolveCommit(revision: string) {
+        return revision === authoredCommit ? authoredCommit : null;
+      },
+      async readHeadCommit() {
+        return committed ? authoredCommit : testCommit;
+      },
+      async isWorktreeCleanExcludingFounder() {
+        return worktreeFiles.length === 0;
+      },
+      async listChangedFiles(base: string) {
+        return base === testCommit ? [resultPath] : [retainedPath, resultPath];
+      },
+    };
+
+    const imported = await createController(
+      fixture.repository,
+      selectiveGit,
+    ).importExternalResult(fixture.workItem.goal.work_item_id, fixture.input);
+
+    expect(committedPaths).toEqual([[resultPath]]);
+    expect(worktreeFiles).toEqual([retainedPath]);
+    expect(imported.evidence).toMatchObject({
+      outcome: "applied",
+      reasons: [],
+    });
+    expect([...fixture.evidence.values()][0]?.evidence.result_commit).toBe(
+      authoredCommit,
+    );
+    expect(imported.work_item.state).toMatchObject({
+      phase: "review",
+      status: "active",
+    });
+  });
+
   it("refuses to author a commit for worktree changes outside allowed_scope", async () => {
     const fixture = await createImportFixture({
       transformResult: (result) => {
@@ -3775,7 +3884,7 @@ describe("WorkItemController", () => {
     expect(rejected.evidence.reasons[0]).toContain("allowed_scope");
   });
 
-  it("refuses to author a commit when the worktree disagrees with the reported changed_files", async () => {
+  it("refuses to author a commit when a reported path is absent from the worktree", async () => {
     const fixture = await createImportFixture({
       transformResult: (result) => {
         const { commit: _omitted, ...withoutCommit } = result;
@@ -3786,7 +3895,7 @@ describe("WorkItemController", () => {
     const mismatchedGit: GitVerificationAdapter = {
       ...passingGit,
       async listWorktreeChangedFilesExcludingFounder() {
-        return ["src/domain/result.ts", "src/domain/work-item.ts"];
+        return ["src/domain/work-item.ts"];
       },
       async commitWorktreeExcludingFounder() {
         commitAttempted = true;
@@ -3800,9 +3909,7 @@ describe("WorkItemController", () => {
 
     expect(commitAttempted).toBe(false);
     expect(rejected.evidence.outcome).toBe("rejected");
-    expect(rejected.evidence.reasons[0]).toContain(
-      "changed_files do not exactly match",
-    );
+    expect(rejected.evidence.reasons[0]).toContain("not changed in the Git worktree");
   });
 
   it.each([
@@ -5471,6 +5578,22 @@ describe("WorkItemController", () => {
     expect(
       await capturePlanApprovalDurableState(repository, workItemId),
     ).toEqual(appliedBefore);
+  });
+
+  it("rejects a Plan approval whose allowed_scope is prose instead of concrete path prefixes", async () => {
+    const { repository } = await createWorkspace();
+    const fixture = await createAppliedPlanDecisionFixture(repository, {
+      allowedScope: [
+        "work-item details panel to full-page work-item navigation and return behavior",
+      ],
+    });
+
+    await expectPlanApprovalRejectionWithoutMutation(
+      repository,
+      fixture.approved.work_item.goal.work_item_id,
+      fixture.input,
+      "stale_expectation",
+    );
   });
 
   it("rejects every stale Plan approval hash without durable mutation", async () => {

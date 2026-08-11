@@ -16,7 +16,7 @@ import type {
 } from "./work-item";
 import { workspaceRelativePosixPathSchema } from "./workspace-path";
 
-export const MISSION_SCHEMA_VERSION = 7 as const;
+export const MISSION_SCHEMA_VERSION = 8 as const;
 const RESULT_CONTRACT_SCHEMA_VERSION = 4 as const;
 const RESULT_SCHEMA_VERSION = 2 as const;
 const FAIL_CLOSED_EXECUTION_DEFAULTS: ExecutionDefaultsV1 = {
@@ -158,6 +158,23 @@ interface MissionSourceRevision {
   scope_base_commit?: string;
 }
 
+export interface ExecuteApprovedPlan {
+  mission_content_sha256: string;
+  result_content_sha256: string;
+  goal_contract_sha256: string;
+  approved_at: string;
+  summary: string;
+  checklist: {
+    id: string;
+    step: string;
+    verification_check: string;
+  }[];
+  relevant_skills: string[];
+  product_doc_impacts: string[];
+  todo_impacts: string[];
+  open_questions: string[];
+}
+
 interface MissionResultContract<
   TRequiredFields extends readonly string[],
 > {
@@ -179,6 +196,7 @@ interface MissionPackageBase<TPhase extends MissionPhase> {
 
 export interface ExecuteMissionPackage extends MissionPackageBase<"execute"> {
   capability_envelope: CapabilityEnvelopeV1;
+  approved_plan: ExecuteApprovedPlan | null;
   result_contract: MissionResultContract<
     typeof EXECUTE_RESULT_REQUIRED_FIELDS
   >;
@@ -294,12 +312,34 @@ export type MissionPackage =
   | ReviewMissionPackage
   | PatchMissionPackage;
 
-type HistoricalMissionPackageVariantV6<TPackage> =
-  TPackage extends MissionPackage
+type HistoricalMissionPackageVariantBeforeApprovedPlan<
+  TPackage,
+  TVersion extends 6 | 7,
+> = TPackage extends ExecuteMissionPackage
+  ? Omit<TPackage, "mission_schema_version" | "approved_plan"> & {
+      mission_schema_version: TVersion;
+    }
+  : TPackage extends MissionPackage
     ? Omit<TPackage, "mission_schema_version"> & {
-        mission_schema_version: 6;
+        mission_schema_version: TVersion;
       }
     : never;
+
+type HistoricalMissionPackageVariantV7<TPackage> =
+  HistoricalMissionPackageVariantBeforeApprovedPlan<TPackage, 7>;
+type HistoricalMissionPackageVariantV6<TPackage> =
+  HistoricalMissionPackageVariantBeforeApprovedPlan<TPackage, 6>;
+
+export type HistoricalExecuteMissionPackageV7 =
+  HistoricalMissionPackageVariantV7<ExecuteMissionPackage>;
+export type HistoricalReviewMissionPackageV7 =
+  HistoricalMissionPackageVariantV7<ReviewMissionPackage>;
+export type HistoricalPatchMissionPackageV7 =
+  HistoricalMissionPackageVariantV7<PatchMissionPackage>;
+export type HistoricalMissionPackageV7 =
+  | HistoricalExecuteMissionPackageV7
+  | HistoricalReviewMissionPackageV7
+  | HistoricalPatchMissionPackageV7;
 
 export type HistoricalExecuteMissionPackageV6 =
   HistoricalMissionPackageVariantV6<ExecuteMissionPackage>;
@@ -469,6 +509,7 @@ export type HistoricalMissionPackageV3 =
 
 export type ReadableMissionPackage =
   | MissionPackage
+  | HistoricalMissionPackageV7
   | HistoricalMissionPackageV6
   | HistoricalMissionPackageV5
   | HistoricalMissionPackageV4
@@ -820,6 +861,43 @@ const patchSubjectFindingListSchema: z.ZodType<
     }
   });
 
+const executeApprovedPlanStringListSchema = z
+  .array(nonEmptyTrimmedStringSchema)
+  .refine(
+    (values) =>
+      new Set(values.map((value) => value.toLocaleLowerCase())).size ===
+      values.length,
+    "must not contain case-insensitive duplicates",
+  );
+
+const executeApprovedPlanSchema: z.ZodType<ExecuteApprovedPlan> = z
+  .strictObject({
+    mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    result_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    goal_contract_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    approved_at: z.iso.datetime(),
+    summary: nonEmptyTrimmedStringSchema,
+    checklist: z
+      .array(
+        z.strictObject({
+          id: nonEmptyTrimmedStringSchema.max(100),
+          step: nonEmptyTrimmedStringSchema,
+          verification_check: nonEmptyTrimmedStringSchema,
+        }),
+      )
+      .min(1, "checklist must not be empty")
+      .refine(
+        (entries) =>
+          new Set(entries.map((entry) => entry.id.toLocaleLowerCase())).size ===
+          entries.length,
+        "checklist ids must be unique",
+      ),
+    relevant_skills: executeApprovedPlanStringListSchema,
+    product_doc_impacts: executeApprovedPlanStringListSchema,
+    todo_impacts: executeApprovedPlanStringListSchema,
+    open_questions: executeApprovedPlanStringListSchema,
+  });
+
 export const patchSubjectSchema: z.ZodType<PatchSubject> = z
   .strictObject({
     review_mission_content_sha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -962,6 +1040,7 @@ const executeMissionPackageSchema: z.ZodType<ExecuteMissionPackage> =
         completed_at: z.iso.datetime(),
       }),
       capability_envelope: capabilityEnvelopeV1Schema,
+      approved_plan: executeApprovedPlanSchema.nullable(),
       result_contract: executeResultContractSchema,
     })
     .superRefine((mission, context) => {
@@ -1084,50 +1163,109 @@ export const missionPackageSchema: z.ZodType<MissionPackage> = z
     }
   });
 
-function historicalMissionPackageV6VariantSchema<
+function historicalMissionPackageBeforeApprovedPlanVariantSchema<
   TCurrent extends MissionPackage,
-  THistorical extends HistoricalMissionPackageV6,
->(currentSchema: z.ZodType<TCurrent>): z.ZodType<THistorical> {
+  THistorical extends HistoricalMissionPackageV7 | HistoricalMissionPackageV6,
+>(
+  version: 7 | 6,
+  currentSchema: z.ZodType<TCurrent>,
+): z.ZodType<THistorical> {
   return z
     .preprocess((input) => {
       if (input === null || typeof input !== "object" || Array.isArray(input)) {
         return input;
       }
       const candidate = input as Record<string, unknown>;
+      if (
+        candidate.mission_schema_version !== version ||
+        "approved_plan" in candidate
+      ) {
+        return { ...candidate, mission_schema_version: null };
+      }
+      const identity = candidate.identity as
+        | { phase?: unknown }
+        | null
+        | undefined;
       return {
         ...candidate,
-        mission_schema_version:
-          candidate.mission_schema_version === 6
-            ? MISSION_SCHEMA_VERSION
-            : null,
+        mission_schema_version: MISSION_SCHEMA_VERSION,
+        ...(identity?.phase === "execute" ? { approved_plan: null } : {}),
       };
     }, currentSchema)
-    .transform(
-      (mission) =>
-        ({ ...mission, mission_schema_version: 6 }) as unknown as THistorical,
-    ) as z.ZodType<THistorical>;
+    .transform((mission) => {
+      const { approved_plan: _approvedPlan, ...historical } = mission as TCurrent & {
+        approved_plan?: ExecuteApprovedPlan | null;
+      };
+      void _approvedPlan;
+      return {
+        ...historical,
+        mission_schema_version: version,
+      } as unknown as THistorical;
+    }) as z.ZodType<THistorical>;
 }
 
+const historicalExecuteMissionPackageV7Schema =
+  historicalMissionPackageBeforeApprovedPlanVariantSchema<
+    ExecuteMissionPackage,
+    HistoricalExecuteMissionPackageV7
+  >(7, executeMissionPackageSchema);
+const historicalExecuteReviewMissionPackageV7Schema =
+  historicalMissionPackageBeforeApprovedPlanVariantSchema<
+    ExecuteReviewMissionPackage,
+    HistoricalMissionPackageVariantV7<ExecuteReviewMissionPackage>
+  >(7, executeReviewMissionPackageSchema);
+const historicalPatchReviewMissionPackageV7Schema =
+  historicalMissionPackageBeforeApprovedPlanVariantSchema<
+    PatchReviewMissionPackage,
+    HistoricalMissionPackageVariantV7<PatchReviewMissionPackage>
+  >(7, patchReviewMissionPackageSchema);
+const historicalPatchMissionPackageV7Schema =
+  historicalMissionPackageBeforeApprovedPlanVariantSchema<
+    PatchMissionPackage,
+    HistoricalPatchMissionPackageV7
+  >(7, patchMissionPackageSchema);
+
+export const historicalMissionPackageV7Schema: z.ZodType<
+  HistoricalMissionPackageV7
+> = z
+  .union([
+    historicalExecuteMissionPackageV7Schema,
+    historicalExecuteReviewMissionPackageV7Schema,
+    historicalPatchReviewMissionPackageV7Schema,
+    historicalPatchMissionPackageV7Schema,
+  ])
+  .superRefine((mission, context) => {
+    if (mission.content_sha256 !== hashHistoricalMissionContentV7(mission)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "content_sha256 must match the canonical historical mission content",
+        path: ["content_sha256"],
+        input: mission.content_sha256,
+      });
+    }
+  });
+
 const historicalExecuteMissionPackageV6Schema =
-  historicalMissionPackageV6VariantSchema<
+  historicalMissionPackageBeforeApprovedPlanVariantSchema<
     ExecuteMissionPackage,
     HistoricalExecuteMissionPackageV6
-  >(executeMissionPackageSchema);
+  >(6, executeMissionPackageSchema);
 const historicalExecuteReviewMissionPackageV6Schema =
-  historicalMissionPackageV6VariantSchema<
+  historicalMissionPackageBeforeApprovedPlanVariantSchema<
     ExecuteReviewMissionPackage,
     HistoricalMissionPackageVariantV6<ExecuteReviewMissionPackage>
-  >(executeReviewMissionPackageSchema);
+  >(6, executeReviewMissionPackageSchema);
 const historicalPatchReviewMissionPackageV6Schema =
-  historicalMissionPackageV6VariantSchema<
+  historicalMissionPackageBeforeApprovedPlanVariantSchema<
     PatchReviewMissionPackage,
     HistoricalMissionPackageVariantV6<PatchReviewMissionPackage>
-  >(patchReviewMissionPackageSchema);
+  >(6, patchReviewMissionPackageSchema);
 const historicalPatchMissionPackageV6Schema =
-  historicalMissionPackageV6VariantSchema<
+  historicalMissionPackageBeforeApprovedPlanVariantSchema<
     PatchMissionPackage,
     HistoricalPatchMissionPackageV6
-  >(patchMissionPackageSchema);
+  >(6, patchMissionPackageSchema);
 
 export const historicalMissionPackageV6Schema: z.ZodType<
   HistoricalMissionPackageV6
@@ -1567,6 +1705,7 @@ export const historicalMissionPackageV3Schema: z.ZodType<
 export const readableMissionPackageSchema: z.ZodType<ReadableMissionPackage> =
   z.union([
     missionPackageSchema,
+    historicalMissionPackageV7Schema,
     historicalMissionPackageV6Schema,
     historicalMissionPackageV5Schema,
     historicalMissionPackageV4Schema,
@@ -1723,6 +1862,7 @@ const missionCompileInputSchema = z
     execute_manifest: appliedExecuteManifestSchema,
     paths: missionPathsSchema,
     execution_defaults: executionDefaultsV1Schema,
+    approved_plan: executeApprovedPlanSchema.nullable(),
   })
   .superRefine(({ work_item: workItem, execute_manifest: manifest }, context) => {
     const expected = {
@@ -2071,6 +2211,7 @@ function missionContentWithoutCapability(
   mission:
     | MissionPackageWithoutHash
     | MissionPackage
+    | HistoricalMissionPackageV7
     | HistoricalMissionPackageV6
     | HistoricalMissionPackageV5
     | HistoricalMissionPackageV4,
@@ -2139,9 +2280,64 @@ function missionContentWithoutCapability(
 
   return {
     ...common,
+    ...(mission.mission_schema_version === MISSION_SCHEMA_VERSION &&
+    "approved_plan" in mission
+      ? {
+          approved_plan:
+            mission.approved_plan === null
+              ? null
+              : canonicalExecuteApprovedPlan(mission.approved_plan),
+        }
+      : {}),
     result_contract: resultContract,
     task_path: mission.task_path,
   };
+}
+
+function canonicalExecuteApprovedPlan(
+  plan: ExecuteApprovedPlan,
+): ExecuteApprovedPlan {
+  return {
+    mission_content_sha256: plan.mission_content_sha256,
+    result_content_sha256: plan.result_content_sha256,
+    goal_contract_sha256: plan.goal_contract_sha256,
+    approved_at: plan.approved_at,
+    summary: plan.summary,
+    checklist: plan.checklist.map((entry) => ({
+      id: entry.id,
+      step: entry.step,
+      verification_check: entry.verification_check,
+    })),
+    relevant_skills: plan.relevant_skills,
+    product_doc_impacts: plan.product_doc_impacts,
+    todo_impacts: plan.todo_impacts,
+    open_questions: plan.open_questions,
+  };
+}
+
+function historicalMissionContentV7(mission: HistoricalMissionPackageV7) {
+  return missionContentWithOptionalCapability(mission);
+}
+
+export function hashHistoricalMissionContentV7(
+  mission: HistoricalMissionPackageV7,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(historicalMissionContentV7(mission)))
+    .digest("hex");
+}
+
+function serializeHistoricalMissionPackageV7(
+  mission: HistoricalMissionPackageV7,
+): string {
+  return `${JSON.stringify(
+    {
+      ...historicalMissionContentV7(mission),
+      content_sha256: mission.content_sha256,
+    },
+    null,
+    2,
+  )}\n`;
 }
 
 function historicalMissionContentV6(mission: HistoricalMissionPackageV6) {
@@ -2223,6 +2419,7 @@ function missionContentWithOptionalCapability(
   mission:
     | MissionPackageWithoutHash
     | MissionPackage
+    | HistoricalMissionPackageV7
     | HistoricalMissionPackageV6
     | HistoricalMissionPackageV5,
 ) {
@@ -2291,6 +2488,9 @@ export function serializeReadableMissionPackage(
   if (validatedMission.mission_schema_version === MISSION_SCHEMA_VERSION) {
     return serializeMissionPackage(validatedMission);
   }
+  if (validatedMission.mission_schema_version === 7) {
+    return serializeHistoricalMissionPackageV7(validatedMission);
+  }
   if (validatedMission.mission_schema_version === 6) {
     return serializeHistoricalMissionPackageV6(validatedMission);
   }
@@ -2346,6 +2546,7 @@ export function compileMission(
   executeManifest: ControllerRunManifest,
   paths: MissionPaths,
   executionDefaults?: ExecutionDefaultsV1,
+  approvedPlan?: ExecuteApprovedPlan,
 ): ExecuteMissionPackage {
   const missionControllerManifest = {
     schema_version: executeManifest.schema_version,
@@ -2369,6 +2570,7 @@ export function compileMission(
       executeManifest.capability_grant?.execution_defaults ??
       executeManifest.capability_carry_forward?.execution_defaults ??
       FAIL_CLOSED_EXECUTION_DEFAULTS,
+    approved_plan: approvedPlan ?? null,
   });
   const content: Omit<ExecuteMissionPackage, "content_sha256"> = {
     mission_schema_version: MISSION_SCHEMA_VERSION,
@@ -2397,6 +2599,7 @@ export function compileMission(
       input.work_item.goal.goal_contract.allowed_scope,
       input.execution_defaults,
     ),
+    approved_plan: input.approved_plan,
     result_contract: {
       schema_version: RESULT_CONTRACT_SCHEMA_VERSION,
       output_path: input.paths.output_path,
@@ -2577,6 +2780,7 @@ function renderMissionHeader(mission: ReadableMissionPackage): string[] {
 
 type ReadableExecuteMissionPackage =
   | ExecuteMissionPackage
+  | HistoricalExecuteMissionPackageV7
   | HistoricalExecuteMissionPackageV6
   | HistoricalExecuteMissionPackageV5
   | HistoricalExecuteMissionPackageV4
@@ -2584,6 +2788,7 @@ type ReadableExecuteMissionPackage =
 
 type ReadablePatchMissionPackage =
   | PatchMissionPackage
+  | HistoricalPatchMissionPackageV7
   | HistoricalPatchMissionPackageV6
   | HistoricalPatchMissionPackageV5
   | HistoricalPatchMissionPackageV4;
@@ -2636,13 +2841,66 @@ function renderExecuteTaskMd(
   mission: ReadableExecuteMissionPackage,
   includeExactArrayGuidance = true,
 ): string {
+  const approvedPlanLines =
+    "approved_plan" in mission && mission.approved_plan !== null
+      ? [
+          "## Approved Plan",
+          "",
+          "This is the exact human-approved implementation package. Complete every checklist entry and its verification check.",
+          `Plan mission hash: \`${mission.approved_plan.mission_content_sha256}\``,
+          `Plan result hash: \`${mission.approved_plan.result_content_sha256}\``,
+          `Goal contract hash: \`${mission.approved_plan.goal_contract_sha256}\``,
+          `Approved at: ${mission.approved_plan.approved_at}`,
+          "",
+          mission.approved_plan.summary,
+          "",
+          ...mission.approved_plan.checklist.flatMap((entry) => [
+            `### ${entry.id}`,
+            "",
+            entry.step,
+            "",
+            `Verification: ${entry.verification_check}`,
+            "",
+          ]),
+          "Relevant skills:",
+          renderList(
+            mission.approved_plan.relevant_skills.length === 0
+              ? ["None"]
+              : mission.approved_plan.relevant_skills,
+          ),
+          "",
+          "Product document impacts:",
+          renderList(
+            mission.approved_plan.product_doc_impacts.length === 0
+              ? ["None"]
+              : mission.approved_plan.product_doc_impacts,
+          ),
+          "",
+          "TODO impacts:",
+          renderList(
+            mission.approved_plan.todo_impacts.length === 0
+              ? ["None"]
+              : mission.approved_plan.todo_impacts,
+          ),
+          "",
+          "Open questions:",
+          renderList(
+            mission.approved_plan.open_questions.length === 0
+              ? ["None"]
+              : mission.approved_plan.open_questions,
+          ),
+          "",
+        ]
+      : [];
   return [
     ...renderMissionHeader(mission),
+    ...approvedPlanLines,
     ...renderCapabilityEnvelope(mission, includeExactArrayGuidance),
     "## Result contract",
     "",
     `Write the structured result to \`${mission.result_contract.output_path}\`.`,
     "Do not run Git. Leave your edits uncommitted in the working tree: the controller commits them for you once it has proven they are in scope.",
+    "If every approved checklist entry is already satisfied at the compiled commit, report an empty changed_files array; the controller still runs authoritative verification.",
     "Use this complete JSON shape:",
     "",
     "```json",
@@ -2856,6 +3114,16 @@ export function renderReadableTaskMd(
   const validatedMission = readableMissionPackageSchema.parse(mission);
   if (validatedMission.mission_schema_version === MISSION_SCHEMA_VERSION) {
     return renderTaskMd(validatedMission);
+  }
+  if (validatedMission.mission_schema_version === 7) {
+    if ("patch_subject" in validatedMission) {
+      return renderPatchTaskMd(validatedMission, false);
+    }
+    return "review_subject" in validatedMission
+      ? renderReviewTaskMd(
+          validatedMission as unknown as ReviewMissionPackage,
+        )
+      : renderExecuteTaskMd(validatedMission, false);
   }
   if (validatedMission.mission_schema_version === 6) {
     if ("patch_subject" in validatedMission) {

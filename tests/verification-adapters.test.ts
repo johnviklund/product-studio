@@ -70,6 +70,39 @@ describe("Node Git verification adapter", () => {
     await writeFile(join(root, "src", "dirty.ts"), "export {};\n", "utf8");
     expect(await adapter.isWorktreeCleanExcludingFounder()).toBe(false);
   });
+
+  it("authors a commit from only the declared literal paths and preserves other worktree changes", async () => {
+    const root = await createRoot("product-studio-selective-git-commit-");
+    await git(root, ["init"]);
+    await git(root, ["config", "user.name", "Product Studio Test"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await writeFile(join(root, "README.md"), "base\n", "utf8");
+    await git(root, ["add", "README.md"]);
+    await git(root, ["commit", "-m", "base"]);
+    const baseCommit = await git(root, ["rev-parse", "HEAD"]);
+    await mkdir(join(root, "src"));
+    const resultPath = "src/[result].ts";
+    const retainedPath = "src/retained.ts";
+    await writeFile(join(root, resultPath), "export const result = true;\n", "utf8");
+    await writeFile(join(root, retainedPath), "export const retained = true;\n", "utf8");
+    const adapter = new NodeGitVerificationAdapter(root);
+
+    const commit = await adapter.commitWorktreeExcludingFounder?.(
+      "Selective result",
+      [resultPath],
+    );
+
+    expect(commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(await adapter.listChangedFiles(baseCommit, commit!)).toEqual([
+      resultPath,
+    ]);
+    expect(await adapter.listWorktreeChangedFilesExcludingFounder()).toEqual([
+      retainedPath,
+    ]);
+    expect(await git(root, ["log", "-1", "--pretty=%B"])).toContain(
+      "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>",
+    );
+  });
 });
 
 describe("Node verification runner", () => {

@@ -4401,19 +4401,35 @@ export class WorkItemController {
     if (JSON.stringify(result.identity) !== JSON.stringify(identity)) {
       reasons.push("Result identity does not match the requested governed tuple.");
     }
-    let authoredScopeBase: string | undefined;
+    let authoredProof:
+      | { scope_base_commit: string; retained_worktree_files: string[] }
+      | undefined;
+    let acceptedExistingResult = false;
     if (reasons.length === 0 && result.commit === undefined) {
-      const authored = await this.authorResultCommit(snapshot, result);
-      if ("commit" in authored) {
-        result = { ...result, commit: authored.commit };
-        authoredScopeBase = authored.parent;
+      if (result.changed_files.length === 0) {
+        const accepted = await this.acceptAlreadySatisfiedResult(snapshot);
+        if ("commit" in accepted) {
+          result = { ...result, commit: accepted.commit };
+          acceptedExistingResult = true;
+        } else {
+          reasons.push(...accepted.reasons);
+        }
       } else {
-        reasons.push(...authored.reasons);
+        const authored = await this.authorResultCommit(snapshot, result);
+        if ("commit" in authored) {
+          result = { ...result, commit: authored.commit };
+          authoredProof = {
+            scope_base_commit: authored.parent,
+            retained_worktree_files: authored.retained_worktree_files,
+          };
+        } else {
+          reasons.push(...authored.reasons);
+        }
       }
     }
-    if (reasons.length === 0) {
+    if (reasons.length === 0 && !acceptedExistingResult) {
       reasons.push(
-        ...(await this.validateGitProof(snapshot, result, authoredScopeBase)),
+        ...(await this.validateGitProof(snapshot, result, authoredProof)),
       );
     }
     if (reasons.length > 0) {
@@ -4439,11 +4455,63 @@ export class WorkItemController {
   }
 
   /**
+   * Accepts a no-op Execute result only when the immutable mission was compiled
+   * at the exact clean HEAD being proposed. This lets retries prove work that is
+   * already present without weakening normal commit/diff validation.
+   */
+  private async acceptAlreadySatisfiedResult(
+    snapshot: ActiveMissionResultSnapshot,
+  ): Promise<{ commit: string } | { reasons: string[] }> {
+    const expectedHead = missionScopeBaseCommit(
+      snapshot.mission.source_revision,
+    );
+    const head = await this.git.readHeadCommit();
+    if (head !== expectedHead) {
+      return {
+        reasons: [
+          "An already-satisfied result requires workspace HEAD to equal the mission scope base commit.",
+        ],
+      };
+    }
+    if (
+      !(await this.git.isAncestor(
+        snapshot.mission.source_revision.git_base_commit,
+        head,
+      ))
+    ) {
+      return {
+        reasons: [
+          "Mission Git base is not an ancestor of the already-satisfied result commit.",
+        ],
+      };
+    }
+    if (!(await this.git.isWorktreeCleanExcludingFounder())) {
+      return {
+        reasons: [
+          "An already-satisfied result requires a clean workspace outside .founder/.",
+        ],
+      };
+    }
+    if (this.git.listWorktreeChangedFilesExcludingFounder !== undefined) {
+      const worktreeFiles = await this.git.listWorktreeChangedFilesExcludingFounder();
+      if (worktreeFiles.length > 0) {
+        return {
+          reasons: [
+            "An already-satisfied result cannot discard retained worktree changes.",
+          ],
+        };
+      }
+    }
+    return { commit: head };
+  }
+
+  /**
    * Commits the work an agent left in the worktree. Agents never run Git: the
    * capability envelope matches commands by exact argv, so an agent could only
    * commit if the founder pre-approved the exact message, which no one can know
    * in advance. The controller authors the commit instead, after proving the
-   * retained changes are in scope and exactly what the agent reported.
+   * every retained change is in scope, then commits exactly the paths the agent
+   * reported. Other in-scope worktree changes remain available for their owner.
    *
    * Returns the commit's parent alongside it so the caller can measure the
    * result against the commit's own diff. Anything the founder committed while
@@ -4452,7 +4520,14 @@ export class WorkItemController {
   private async authorResultCommit(
     snapshot: ActiveMissionResultSnapshot,
     result: ExecuteExternalResultSubmission,
-  ): Promise<{ commit: string; parent: string } | { reasons: string[] }> {
+  ): Promise<
+    | {
+        commit: string;
+        parent: string;
+        retained_worktree_files: string[];
+      }
+    | { reasons: string[] }
+  > {
     const commitWorktree = this.git.commitWorktreeExcludingFounder;
     if (
       commitWorktree === undefined ||
@@ -4493,20 +4568,30 @@ export class WorkItemController {
         return { reasons: [`Changed path is outside allowed_scope: ${path}`] };
       }
     }
-    if (
-      JSON.stringify(worktreeFiles) !==
-      JSON.stringify([...result.changed_files].sort())
-    ) {
+    const reportedFiles = [...new Set(result.changed_files)].sort();
+    const worktreeFileSet = new Set(worktreeFiles);
+    if (reportedFiles.some((path) => !worktreeFileSet.has(path))) {
       return {
-        reasons: ["Result changed_files do not exactly match the Git diff."],
+        reasons: [
+          "Result changed_files include paths that are not changed in the Git worktree.",
+        ],
       };
     }
+    const reportedFileSet = new Set(reportedFiles);
+    const retainedWorktreeFiles = worktreeFiles.filter(
+      (path) => !reportedFileSet.has(path),
+    );
     const parent = await this.git.readHeadCommit();
     const commit = await commitWorktree.call(
       this.git,
       snapshot.mission.goal.title,
+      reportedFiles,
     );
-    return { commit, parent };
+    return {
+      commit,
+      parent,
+      retained_worktree_files: retainedWorktreeFiles,
+    };
   }
 
   private async assessPatchResult(
@@ -4651,7 +4736,10 @@ export class WorkItemController {
   private async validateGitProof(
     snapshot: ActiveMissionResultSnapshot,
     result: ExecuteExternalResultSubmission | PatchExternalResultSubmission,
-    authoredScopeBase?: string,
+    authoredProof?: {
+      scope_base_commit: string;
+      retained_worktree_files: string[];
+    },
   ): Promise<string[]> {
     if (result.commit === undefined) {
       return ["Result did not provide a commit and none could be authored."];
@@ -4667,12 +4755,32 @@ export class WorkItemController {
     if ((await this.git.readHeadCommit()) !== resolvedCommit) {
       return ["Workspace HEAD does not equal the submitted result commit."];
     }
-    if (!(await this.git.isWorktreeCleanExcludingFounder())) {
-      return ["Workspace has uncommitted changes outside .founder/."];
+    if (authoredProof === undefined) {
+      if (!(await this.git.isWorktreeCleanExcludingFounder())) {
+        return ["Workspace has uncommitted changes outside .founder/."];
+      }
+    } else {
+      const listWorktree = this.git.listWorktreeChangedFilesExcludingFounder;
+      if (listWorktree === undefined) {
+        return [
+          "The Git adapter cannot prove retained worktree paths after authoring the result commit.",
+        ];
+      }
+      const retainedAfterCommit = [
+        ...new Set(await listWorktree.call(this.git)),
+      ].sort();
+      if (
+        JSON.stringify(retainedAfterCommit) !==
+        JSON.stringify(authoredProof.retained_worktree_files)
+      ) {
+        return [
+          "Retained worktree paths changed while the controller authored the result commit.",
+        ];
+      }
     }
 
     const scopeBaseCommit =
-      authoredScopeBase ??
+      authoredProof?.scope_base_commit ??
       missionScopeBaseCommit(snapshot.mission.source_revision);
     if (scopeBaseCommit !== baseCommit) {
       if (!(await this.git.isAncestor(baseCommit, scopeBaseCommit))) {
@@ -5117,7 +5225,13 @@ export class WorkItemController {
     const evidence = await this.repository.listImportEvidence(
       item.goal.work_item_id,
     );
+    const correctedExecuteRestart =
+      phase === "execute" &&
+      governedTuple.attempt === 0 &&
+      latest.governed_tuple.goal_version < governedTuple.goal_version &&
+      latest.governed_tuple.input_revision < governedTuple.input_revision;
     if (
+      !correctedExecuteRestart &&
       evidence.some(
         (stored) =>
           stored.evidence.mission_content_sha256 ===
@@ -6251,6 +6365,16 @@ export class WorkItemController {
         "stale_expectation",
         workItemId,
         "Plan approval requires the current governed contract and unchanged execution tuple.",
+      );
+    }
+    const nonConcreteScope = goalContract.allowed_scope.find((entry) =>
+      /\s/u.test(entry),
+    );
+    if (nonConcreteScope !== undefined) {
+      throw this.conflict(
+        "stale_expectation",
+        workItemId,
+        `Plan approval requires concrete workspace-relative path prefixes; allowed_scope contains prose-like whitespace: ${nonConcreteScope}`,
       );
     }
     const artifact = this.requireBoundAppliedShapingTip(

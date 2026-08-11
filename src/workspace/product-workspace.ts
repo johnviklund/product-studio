@@ -129,6 +129,7 @@ import {
   executionDefaultsV1Schema,
   type ExecutionDefaultsV1,
 } from "../domain/capability-envelope";
+import { workspaceRelativePosixPathSchema } from "../domain/workspace-path";
 import {
   connectedRunLaunchFingerprint,
   connectedRunProcessIdentitySchema,
@@ -678,22 +679,45 @@ export class NodeGitVerificationAdapter implements GitVerificationAdapter {
     return output.split("\0").filter((path) => path.length > 0);
   }
 
-  async commitWorktreeExcludingFounder(message: string): Promise<string> {
+  async commitWorktreeExcludingFounder(
+    message: string,
+    paths: readonly string[],
+  ): Promise<string> {
     const trimmed = message.trim();
     if (trimmed.length === 0 || trimmed.includes("\n")) {
       throw new Error(
         "A controller commit message must be one non-empty single line.",
       );
     }
+    const exactPaths = [...new Set(paths)].sort();
+    if (exactPaths.length === 0) {
+      throw new Error("A controller result commit requires at least one path.");
+    }
+    for (const path of exactPaths) {
+      workspaceRelativePosixPathSchema.parse(path);
+      if (path === ".founder" || path.startsWith(".founder/")) {
+        throw new Error("A controller result commit cannot include .founder/.");
+      }
+    }
     await this.run([
+      "--literal-pathspecs",
       "add",
       "--all",
       "--",
-      ".",
-      ":(exclude).founder",
-      ":(exclude).founder/**",
+      ...exactPaths,
     ]);
-    await this.run(["commit", "--no-verify", "-m", trimmed]);
+    await this.run([
+      "--literal-pathspecs",
+      "commit",
+      "--only",
+      "--no-verify",
+      "-m",
+      trimmed,
+      "-m",
+      "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>",
+      "--",
+      ...exactPaths,
+    ]);
     return this.readHeadCommit();
   }
 
@@ -4525,7 +4549,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       submission.mission_content_sha256 !== evidence.mission_content_sha256 ||
       JSON.stringify(submission.identity) !==
         JSON.stringify(validatedIdentity) ||
-      submission.commit !== evidence.result_commit
+      (submission.commit !== undefined &&
+        submission.commit !== evidence.result_commit)
     ) {
       throw this.invalid(
         evidenceDirectory,

@@ -49,6 +49,7 @@ import {
   type ShapingIngressInstructionV1,
   type ShapingMissionPackage,
   type ShapingPhase,
+  type PlanResultSubmission,
 } from "../../src/domain/shaping";
 import {
   evaluateShapingPermissionRequest,
@@ -2357,6 +2358,29 @@ describe("PortfolioService", () => {
         reason: "runtime_unavailable",
       },
     });
+    const approvedPlan = JSON.parse(
+      ready.plan.result!.result_source,
+    ) as PlanResultSubmission;
+    expect(first.mission!.mission).toMatchObject({
+      approved_plan: {
+        mission_content_sha256: ready.plan.mission.content_sha256,
+        result_content_sha256: ready.plan.result!.result_content_sha256,
+        goal_contract_sha256: ready.binding.goal_contract_sha256,
+        summary: approvedPlan.summary,
+        checklist: approvedPlan.checklist,
+        relevant_skills: approvedPlan.relevant_skills,
+        product_doc_impacts: approvedPlan.product_doc_impacts,
+        todo_impacts: approvedPlan.todo_impacts,
+        open_questions: approvedPlan.open_questions,
+      },
+    });
+    const approvedTask = await readFile(first.mission!.task_path, "utf8");
+    expect(approvedTask).toContain("## Approved Plan");
+    for (const entry of approvedPlan.checklist) {
+      expect(approvedTask).toContain(entry.id);
+      expect(approvedTask).toContain(entry.step);
+      expect(approvedTask).toContain(entry.verification_check);
+    }
     const durable = await repository.read(workItemId);
     expect(durable?.state).toMatchObject({
       phase: "execute",
@@ -4312,6 +4336,169 @@ describe("PortfolioService", () => {
     index.close();
   });
 
+  it("compiles a fresh Execute mission before preparing commands after scope correction", async () => {
+    const root = await createWorkspace("Corrected Command Preflight Workspace");
+    const changedFiles = ["components/kanban/detail-panel.tsx"];
+    const repository = new ProductWorkspace(root, {
+      git: {
+        ...controllerGit,
+        async listWorktreeChangedFilesExcludingFounder() {
+          return changedFiles;
+        },
+      },
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Prepare commands after correcting scope",
+      type: "Fix",
+    });
+    await governWorkItemThrough(repository, created, ["spec", "plan", "execute"]);
+    const result = deferred<AcpRunResult>();
+    const session: AcpSession = {
+      session_id: "018f1f72-6d7f-7c38-a2d2-c45f3a3dc7b5",
+      protocol_version: 1,
+      requested_mcp_server_count: 0,
+      config_options: [],
+      wall_clock_timeout_ms: 2_000,
+      process: {
+        pid: 4005,
+        process_group_id: 4005,
+        started_at: "2026-08-11T08:00:00.000Z",
+      },
+      run: vi.fn(() => result.promise),
+      cancel: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+    const fake = preparedRuntime(session);
+    const index = new SQLitePortfolioIndex(":memory:");
+    const { service } = await createService(
+      index,
+      () => repository,
+      fake.runtime,
+    );
+    const registration = await service.register({ workspace_path: root });
+    const sourceId = registration.workspace.workspace_id;
+    await service.compileMission(sourceId, created.goal.work_item_id);
+    const launched = await service.launchConnectedExecute(
+      sourceId,
+      created.goal.work_item_id,
+    );
+
+    result.resolve({
+      outcome: "completed",
+      partial: false,
+      stop_reason: "end_turn",
+      permissions: [],
+      output_text: "",
+    });
+    await expect.poll(async () => {
+      const run = await repository.readConnectedRun(
+        created.goal.work_item_id,
+        launched.connected_run.connected_run_id,
+      );
+      return run?.lifecycle.terminal?.outcome;
+    }).toBe("completed");
+
+    const proposal = await service.getScopeCorrectionProposal(
+      sourceId,
+      created.goal.work_item_id,
+    );
+    expect(proposal.proposal).not.toBeNull();
+    if (proposal.proposal === null) {
+      throw new Error("Expected an exact scope-correction proposal.");
+    }
+    const corrected = await service.applyScopeCorrection(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        source_goal_contract_sha256:
+          proposal.proposal.source_goal_contract_sha256,
+        governed_tuple: proposal.proposal.governed_tuple,
+        proposal_sha256: proposal.proposal.proposal_sha256,
+      },
+    );
+    expect(corrected.work_item.state).toMatchObject({
+      phase: "execute",
+      status: "active",
+      goal_version: 2,
+      input_revision: 2,
+      attempt: 0,
+    });
+    vi.spyOn(repository, "listImportEvidence").mockResolvedValue([
+      {
+        evidence: {
+          schema_version: 2,
+          phase: "execute",
+          import_run_id: "e".repeat(64),
+          result_content_sha256: "f".repeat(64),
+          mission_content_sha256:
+            launched.connected_run.mission.content_sha256,
+          identity: {
+            phase: "execute",
+            work_item_id: created.goal.work_item_id,
+            goal_version: 1,
+            input_revision: 1,
+            attempt: 0,
+          },
+          git_base_commit: launched.connected_run.mission.source_commit,
+          controller_run_id: "550e8400-e29b-41d4-a716-446655440000",
+          started_at: "2026-08-11T08:00:00.000Z",
+          completed_at: "2026-08-11T08:00:01.000Z",
+          outcome: "rejected",
+          reasons: ["The prior tuple result was rejected."],
+          result_commit: null,
+        },
+        summary: {
+          phase: "execute",
+          import_run_id: "e".repeat(64),
+          outcome: "rejected",
+          evidence_path: `.founder/run-evidence/${created.goal.work_item_id}/execute-1-1-0/${"e".repeat(64)}`,
+          reasons: ["The prior tuple result was rejected."],
+        },
+        verification: [],
+      },
+    ]);
+
+    const prepared = await service.prepareCommandAuthorization(
+      sourceId,
+      created.goal.work_item_id,
+      "execute",
+    );
+
+    expect(prepared.proposal).toMatchObject({
+      phase: "execute",
+      governed_tuple: {
+        goal_version: 2,
+        input_revision: 2,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      terminal_connected_run_id: launched.connected_run.connected_run_id,
+      changed_files: changedFiles,
+    });
+    expect(prepared.proposal.source_mission_content_sha256).not.toBe(
+      launched.connected_run.mission.content_sha256,
+    );
+    expect(prepared.work_item.state.attention).toMatchObject({
+      kind: "command_authorization",
+      proposal: { proposal_sha256: prepared.proposal.proposal_sha256 },
+    });
+    await expect(
+      readFile(
+        join(
+          root,
+          ".founder",
+          "missions",
+          created.goal.work_item_id,
+          "execute-2-2-0",
+          "mission.json",
+        ),
+        "utf8",
+      ),
+    ).resolves.toContain('"goal_version": 2');
+    index.close();
+  });
+
   it("reuses the immutable Execute mission when repository HEAD advances before a retry", async () => {
     const firstCommit = "a".repeat(40);
     let headCommit = firstCommit;
@@ -6253,7 +6440,7 @@ describe("PortfolioService", () => {
       created.goal.work_item_id,
     );
     expect(patchMission.mission).toMatchObject({
-      mission_schema_version: 7,
+      mission_schema_version: 8,
       identity: { phase: "patch", patch_cycle: 1 },
       capability_envelope: {
         runtime: {
