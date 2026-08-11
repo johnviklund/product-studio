@@ -109,6 +109,7 @@ import {
   summarizeConnectedRun,
   type ConnectedRunRecordV2,
   type ConnectedRunSummary,
+  type ConnectedRunTerminal,
   type LaunchConnectedInput,
 } from "../domain/connected-run";
 import {
@@ -737,6 +738,7 @@ interface PreparedConnectedLaunch {
     result: AcpRunResult,
     connected_run_id: string,
   ) => Promise<void>;
+  failure_terminal?: (error: unknown) => ConnectedRunTerminal;
   start_session: (
     event_sink: AcpEventSink,
     callbacks: AcpSessionCallbacks,
@@ -2690,7 +2692,7 @@ export class PortfolioService {
       controller,
       launch_input: launchInput,
       record,
-      prompt: `Review the exact immutable subject in ${mission.mission.task_path}. Return only the strict JSON Review result as your final response, with no Markdown fence or surrounding prose. Do not write or modify any workspace path, run commands, use URLs, or make approval decisions. Product Studio will validate and publish the response to ${mission.mission.result_contract.output_path}.`,
+      prompt: `Review the exact immutable subject in ${mission.mission.task_path}. Follow TASK.md's review criteria and JSON shape. TASK.md's instruction to write the result applies only to manual handoff. For this connected run, use the final response instead. Return only the strict JSON Review result as your final response. Return one JSON object as the entire final response: start with { and end with }, with no Markdown fence or surrounding prose. Do not write or modify any workspace path, run commands, use URLs, or make approval decisions. Product Studio will validate and publish the response to ${mission.mission.result_contract.output_path}.`,
       start_session: (eventSink, callbacks) =>
         prepared.start(eventSink, callbacks),
       before_complete: async (result, connectedRunId) => {
@@ -2712,6 +2714,8 @@ export class PortfolioService {
           content,
         );
       },
+      failure_terminal: (error) =>
+        this.connectedReviewFailureTerminal(error),
       preference: {
         adapter_id: configuration.adapter_id,
         seat: "review",
@@ -6174,13 +6178,11 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
         `Connected Review response must contain 1-${CONNECTED_RUN_LIMITS.max_output_bytes} bytes.`,
       );
     }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(output);
-    } catch {
+    const parsed = this.parseUniqueJsonObject(output);
+    if (parsed === null) {
       throw this.missionNotReady(
         workItemId,
-        "Connected Review response must be strict JSON without surrounding prose.",
+        "Connected Review response must contain exactly one JSON object.",
       );
     }
     const result = reviewExternalResultSubmissionForSubjectSchema(
@@ -6197,6 +6199,70 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       );
     }
     return serializeExternalResult(result.data);
+  }
+
+  private parseUniqueJsonObject(output: string): unknown | null {
+    try {
+      const parsed: unknown = JSON.parse(output);
+      return this.isJsonObject(parsed) ? parsed : null;
+    } catch {
+      // Connected models may wrap an otherwise valid object in prose or a Markdown fence.
+    }
+
+    const parsedObjects: unknown[] = [];
+    let objectStart = -1;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < output.length; index += 1) {
+      const character = output[index]!;
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === "{") {
+        if (depth === 0) {
+          objectStart = index;
+        }
+        depth += 1;
+        continue;
+      }
+      if (character !== "}" || depth === 0) {
+        continue;
+      }
+      depth -= 1;
+      if (depth !== 0 || objectStart < 0) {
+        continue;
+      }
+      try {
+        const candidate: unknown = JSON.parse(
+          output.slice(objectStart, index + 1),
+        );
+        if (this.isJsonObject(candidate)) {
+          parsedObjects.push(candidate);
+        }
+      } catch {
+        // Ignore balanced prose fragments that are not JSON objects.
+      }
+      objectStart = -1;
+    }
+
+    return parsedObjects.length === 1 ? parsedObjects[0]! : null;
+  }
+
+  private isJsonObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
   private connectedReviewRunRecord(
@@ -6359,12 +6425,13 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
           connectedRunId,
           result,
         ),
-      fail: async () => {
+      fail: async (error) => {
         await input.source.workspace
           .completeConnectedRun(
             input.work_item_id,
             connectedRunId,
-            this.failedConnectedTerminal(),
+            input.failure_terminal?.(error) ??
+              this.failedConnectedTerminal(),
           )
           .catch(() => undefined);
         await this.rebuild().catch(() => undefined);
@@ -6500,6 +6567,23 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
       partial: true,
       reason: "The ACP runtime failed before the governed mission completed.",
     };
+  }
+
+  private connectedReviewFailureTerminal(
+    error: unknown,
+  ): ConnectedRunTerminal {
+    if (
+      error instanceof ControllerConflictError &&
+      error.kind === "mission_not_ready" &&
+      error.reason.startsWith("Connected Review response ")
+    ) {
+      return {
+        outcome: "failed",
+        partial: true,
+        reason: error.reason,
+      };
+    }
+    return this.failedConnectedTerminal();
   }
 
   private cancelledConnectedTerminal() {

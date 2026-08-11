@@ -4750,6 +4750,16 @@ describe("PortfolioService", () => {
       expect.stringContaining("Return only the strict JSON Review result"),
     );
     expect(session.run).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "TASK.md's instruction to write the result applies only to manual handoff",
+      ),
+    );
+    expect(session.run).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Return one JSON object as the entire final response",
+      ),
+    );
+    expect(session.run).toHaveBeenCalledWith(
       expect.stringContaining("Do not write or modify any workspace path"),
     );
     expect(launched.connected_run).toMatchObject({
@@ -4793,7 +4803,7 @@ describe("PortfolioService", () => {
       partial: false,
       stop_reason: "end_turn",
       permissions: [],
-      output_text: JSON.stringify(JSON.parse(reviewResultSource)),
+      output_text: `Review complete.\n\`\`\`json\n${reviewResultSource.trim()}\n\`\`\``,
     });
     await expect.poll(async () => {
       const item = (await service.list()).find(
@@ -4854,7 +4864,7 @@ describe("PortfolioService", () => {
         partial: false,
         stop_reason: "end_turn" as const,
         permissions: [],
-        output_text: "```json\n{\"verdict\":\"clean\"}\n```",
+        output_text: "Review completed without a structured result.",
       })),
       cancel: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined),
@@ -4892,6 +4902,16 @@ describe("PortfolioService", () => {
       failedRunId = runs[0]?.connected_run_id ?? "";
       return runs[0]?.lifecycle.terminal_outcome;
     }).toBe("failed");
+    const failedRun = await repository.readConnectedRun(
+      created.goal.work_item_id,
+      failedRunId,
+    );
+    expect(failedRun?.lifecycle.terminal).toEqual({
+      outcome: "failed",
+      partial: true,
+      reason:
+        "Connected Review response must contain exactly one JSON object.",
+    });
     const current = await repository.read(created.goal.work_item_id);
     expect(current).toMatchObject({
       state: { phase: "review", status: "active" },
