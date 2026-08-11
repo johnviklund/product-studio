@@ -3547,6 +3547,75 @@ describe("WorkItemController", () => {
     });
   });
 
+  it("carries exact execution defaults after retained work makes an empty result invalid", async () => {
+    const executionDefaults: ExecutionDefaultsV1 = {
+      schema_version: 1,
+      approved_command_forms: [
+        { executable: "npm", args: ["run", "typecheck"] },
+        {
+          executable: "npm",
+          args: ["test", "--", "tests/detail-panel.test.tsx"],
+        },
+      ],
+      approved_url_operations: [],
+      mcp: "forbidden",
+      credentials: "forbidden",
+    };
+    const fixture = await createImportFixture({
+      executionDefaults,
+      transformResult: (result) => {
+        const { commit: _omitted, ...withoutCommit } = result;
+        void _omitted;
+        return {
+          ...withoutCommit,
+          changed_files: [],
+        } as ExecuteExternalResultSubmission;
+      },
+    });
+    const controller = createController(fixture.repository, {
+      ...passingGit,
+      async isWorktreeCleanExcludingFounder() {
+        return false;
+      },
+    });
+
+    const imported = await controller.importExternalResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    expect(imported.evidence).toMatchObject({
+      outcome: "rejected",
+      reasons: [
+        "An already-satisfied result requires a clean workspace outside .founder/.",
+      ],
+    });
+
+    const retried = await controller.retryExecuteAttempt(
+      fixture.workItem.goal.work_item_id,
+      {
+        expected_phase: "execute",
+        expected_status: "blocked",
+        expected_schema_version: 2,
+        expected_goal_version: fixture.input.expected_goal_version,
+        expected_input_revision: fixture.input.expected_input_revision,
+        attempt: fixture.input.attempt,
+      },
+    );
+    const prior = await fixture.repository.readMissionPackage({
+      phase: "execute",
+      work_item_id: fixture.workItem.goal.work_item_id,
+      goal_version: fixture.input.expected_goal_version,
+      input_revision: fixture.input.expected_input_revision,
+      attempt: fixture.input.attempt,
+    });
+    expect(retried.manifest.capability_grant).toBeUndefined();
+    expect(retried.manifest.capability_carry_forward).toMatchObject({
+      kind: "carry_forward",
+      source_mission_content_sha256: prior.mission.content_sha256,
+      execution_defaults: executionDefaults,
+    });
+  });
+
   it("releases the controller lease after timed-out verification blocks an import", async () => {
     const { repository, workItem, input } = await createImportFixture();
     const timedOutRunner: VerificationRunner = {

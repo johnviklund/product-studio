@@ -2849,7 +2849,7 @@ export class WorkItemController {
 
     try {
       const capabilityCarryForward =
-        await this.failedExecuteVerificationCapabilityCarryForward({
+        await this.retryableExecuteCapabilityCarryForward({
           phase: "execute",
           work_item_id: validatedId,
           goal_version: validatedInput.expected_goal_version,
@@ -3780,7 +3780,7 @@ export class WorkItemController {
     });
   }
 
-  private async failedExecuteVerificationAuthorization(
+  private async retryableExecuteAuthorization(
     identity: MissionIdentity<"execute">,
   ): Promise<
     | {
@@ -3795,17 +3795,27 @@ export class WorkItemController {
   > {
     const matches = (
       await this.repository.listImportEvidence(identity.work_item_id)
-    ).filter(
-      (stored) =>
-        stored.evidence.phase === "execute" &&
+    ).filter((stored) => {
+      const deterministicVerificationFailed =
         stored.evidence.outcome === "failed" &&
         stored.evidence.result_commit !== null &&
-        isDeepStrictEqual(stored.evidence.identity, identity) &&
         stored.verification.length > 0 &&
         stored.verification.some((record) =>
           ["failed", "timed_out", "spawn_error"].includes(record.status),
-        ),
-    );
+        );
+      const retainedResultMetadataWasRejected =
+        stored.evidence.outcome === "rejected" &&
+        stored.evidence.result_commit === null &&
+        stored.verification.length === 0 &&
+        isDeepStrictEqual(stored.evidence.reasons, [
+          "An already-satisfied result requires a clean workspace outside .founder/.",
+        ]);
+      return (
+        stored.evidence.phase === "execute" &&
+        isDeepStrictEqual(stored.evidence.identity, identity) &&
+        (deterministicVerificationFailed || retainedResultMetadataWasRejected)
+      );
+    });
     if (matches.length === 0) {
       return undefined;
     }
@@ -3813,7 +3823,7 @@ export class WorkItemController {
       throw this.conflict(
         "repair_required",
         identity.work_item_id,
-        "Deterministic-verification repair requires exactly one matching immutable Execute failure.",
+        "Execute repair requires exactly one matching immutable retryable failure.",
       );
     }
 
@@ -3827,7 +3837,7 @@ export class WorkItemController {
       throw this.conflict(
         "repair_required",
         identity.work_item_id,
-        "Deterministic-verification repair evidence has a mismatched immutable summary.",
+        "Execute repair evidence has a mismatched immutable summary.",
       );
     }
     const evidenceManifest =
@@ -3846,7 +3856,7 @@ export class WorkItemController {
       throw this.conflict(
         "repair_required",
         identity.work_item_id,
-        "Deterministic-verification repair evidence does not bind its applied controller run.",
+        "Execute repair evidence does not bind its applied controller run.",
       );
     }
     const snapshot = await this.repository.readMissionPackage(identity);
@@ -3875,11 +3885,11 @@ export class WorkItemController {
     };
   }
 
-  private async failedExecuteVerificationCapabilityCarryForward(
+  private async retryableExecuteCapabilityCarryForward(
     identity: MissionIdentity<"execute">,
   ): Promise<ControllerCapabilityCarryForward | undefined> {
     const authorization =
-      await this.failedExecuteVerificationAuthorization(identity);
+      await this.retryableExecuteAuthorization(identity);
     return authorization === undefined
       ? undefined
       : createControllerCapabilityCarryForward({
@@ -3949,7 +3959,7 @@ export class WorkItemController {
       );
     }
 
-    const predecessor = await this.failedExecuteVerificationAuthorization({
+    const predecessor = await this.retryableExecuteAuthorization({
       ...record.mission.identity,
       attempt: record.mission.identity.attempt - 1,
     });

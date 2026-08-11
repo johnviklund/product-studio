@@ -754,10 +754,13 @@ describe("mission domain", () => {
       "Do not run Git. Leave your edits uncommitted in the working tree: the controller commits them for you once it has proven they are in scope.",
     );
     expect(task).toContain(
-      "List every task-owned path that is currently changed in the working tree, even when an earlier attempt made the change.",
+      "List every task-owned path whose implementation you inspected and verified, even when an earlier attempt made the change.",
     );
     expect(task).toContain(
-      "Report an empty changed_files array only after proving the workspace is clean outside .founder/",
+      "Do not run Git merely to discover changed_files; the controller performs that comparison.",
+    );
+    expect(task).toContain(
+      "Report an empty array only when the mission itself establishes that the workspace is clean",
     );
     expect(task).not.toContain(
       "If every approved checklist entry is already satisfied at the compiled commit, report an empty changed_files array",
