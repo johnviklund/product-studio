@@ -4757,6 +4757,41 @@ describe("WorkItemController", () => {
     expect(fixture.evidenceWrites.count).toBe(2);
   });
 
+  it("offers Review drift recovery after the previously dirty workspace becomes clean", async () => {
+    const fixture = await createReviewImportFixture();
+    const currentHead = "b".repeat(40);
+    const driftGit: GitVerificationAdapter = {
+      ...passingGit,
+      readHeadCommit: async () => currentHead,
+      isWorktreeCleanExcludingFounder: async () => false,
+      listChangedFiles: async () => ["src/domain/result.ts"],
+    };
+    const rejected = await createController(
+      fixture.repository,
+      driftGit,
+    ).importReviewResult(fixture.workItem.goal.work_item_id, fixture.input);
+    expect(rejected.evidence).toMatchObject({
+      outcome: "rejected",
+      reasons: [
+        "Workspace HEAD no longer equals the accepted subject commit.",
+        "Workspace has uncommitted changes outside .founder/.",
+      ],
+    });
+
+    const proposal = await createController(fixture.repository, {
+      ...driftGit,
+      isWorktreeCleanExcludingFounder: async () => true,
+    }).proposeReviewImportDriftRecovery(fixture.workItem.goal.work_item_id);
+
+    expect(proposal).toMatchObject({
+      accepted_result_commit: testCommit,
+      current_head_commit: currentHead,
+      changed_files: ["src/domain/result.ts"],
+      subject_changed_files: ["src/domain/result.ts"],
+      rejected_import_run_id: rejected.evidence.import_run_id,
+    });
+  });
+
   it("rejects stale Review drift approval without writing recovery evidence", async () => {
     const fixture = await createReviewImportFixture();
     const currentHead = "b".repeat(40);

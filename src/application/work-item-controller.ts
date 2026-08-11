@@ -166,6 +166,19 @@ type Clock = () => Date;
 const SHA256_SCHEMA = z.string().regex(/^[0-9a-f]{64}$/u);
 const REVIEW_HEAD_DRIFT_REASON =
   "Workspace HEAD no longer equals the accepted subject commit.";
+const WORKTREE_DIRTY_REASON =
+  "Workspace has uncommitted changes outside .founder/.";
+
+function isRecoverableReviewImportDrift(reasons: string[]): boolean {
+  return (
+    isDeepStrictEqual(reasons, [REVIEW_HEAD_DRIFT_REASON]) ||
+    isDeepStrictEqual(reasons, [
+      REVIEW_HEAD_DRIFT_REASON,
+      WORKTREE_DIRTY_REASON,
+    ])
+  );
+}
+
 const nonEmptyTrimmedStringSchema = z
   .string()
   .refine((value) => value.trim().length > 0, "must not be empty")
@@ -4357,7 +4370,7 @@ export class WorkItemController {
         reasons.push(REVIEW_HEAD_DRIFT_REASON);
       }
       if (!(await this.git.isWorktreeCleanExcludingFounder())) {
-        reasons.push("Workspace has uncommitted changes outside .founder/.");
+        reasons.push(WORKTREE_DIRTY_REASON);
       }
     }
 
@@ -4767,7 +4780,7 @@ export class WorkItemController {
     }
     if (authoredProof === undefined) {
       if (!(await this.git.isWorktreeCleanExcludingFounder())) {
-        return ["Workspace has uncommitted changes outside .founder/."];
+        return [WORKTREE_DIRTY_REASON];
       }
     } else {
       const listWorktree = this.git.listWorktreeChangedFilesExcludingFounder;
@@ -4958,9 +4971,7 @@ export class WorkItemController {
         stored.evidence.phase === "review" &&
         stored.evidence.outcome === "rejected" &&
         isDeepStrictEqual(stored.evidence.identity, identity) &&
-        isDeepStrictEqual(stored.evidence.reasons, [
-          REVIEW_HEAD_DRIFT_REASON,
-        ]),
+        isRecoverableReviewImportDrift(stored.evidence.reasons),
     );
     if (candidateRejections.length === 0) {
       return null;
@@ -4999,15 +5010,11 @@ export class WorkItemController {
       rejected.evidence.result_commit !==
         snapshot.mission.review_subject.accepted_result_commit ||
       !isDeepStrictEqual(rejected.evidence.identity, identity) ||
-      !isDeepStrictEqual(rejected.evidence.reasons, [
-        REVIEW_HEAD_DRIFT_REASON,
-      ]) ||
+      !isRecoverableReviewImportDrift(rejected.evidence.reasons) ||
       rejected.summary.import_run_id !== rejectedImportRunId ||
       rejected.summary.phase !== "review" ||
       rejected.summary.outcome !== "rejected" ||
-      !isDeepStrictEqual(rejected.summary.reasons, [
-        REVIEW_HEAD_DRIFT_REASON,
-      ]) ||
+      !isRecoverableReviewImportDrift(rejected.summary.reasons) ||
       rejected.verification.length !== 0
     ) {
       return null;
