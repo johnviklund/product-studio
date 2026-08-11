@@ -2653,7 +2653,7 @@ function ModelPicker({
   compact = false,
 }: {
   picker: ShapingModelPickerProjection<WorkflowModelSeat>;
-  selectedModel: string;
+  selectedModel: string | null;
   busy: boolean;
   onSelectModel: (model: string) => void;
   compact?: boolean;
@@ -2665,11 +2665,16 @@ function ModelPicker({
     <>
       <select
         aria-label={`${shapingPhaseLabel(picker.seat)} model`}
-        value={selectedModel}
+        value={selectedModel ?? ""}
         disabled={busy}
         onChange={(event) => onSelectModel(event.target.value)}
         className={`${compact ? "mt-2 h-8 text-xs" : "mt-3 h-10 text-sm"} w-full rounded-md border bg-background px-3 outline-none focus:border-primary focus:ring-1 focus:ring-primary`}
       >
+        {selectedModel === null ? (
+          <option value="" disabled>
+            Choose a model
+          </option>
+        ) : null}
         {picker.options.map((option) => (
           <option key={option.model_id} value={option.model_id}>
             {option.model_id}
@@ -4543,7 +4548,7 @@ export function ConnectedPhaseSection({
           </h3>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
             {projection.read_only
-              ? "Review the pinned immutable subject and publish only the strict review result."
+              ? "A separate connected reviewer assesses the pinned code and evidence; you only confirm independence, choose its model, and launch it."
               : "Run the accepted Patch plan with its bounded capability authorization."}
           </p>
         </div>
@@ -4602,7 +4607,7 @@ export function ConnectedPhaseSection({
               </span>
             </label>
           ) : null}
-          {projection.model_picker === undefined || selectedModel === null ? (
+          {projection.model_picker === undefined ? (
             <p className="text-xs leading-5 text-muted-foreground">
               {modelsLoading
                 ? "Loading connected model preflight…"
@@ -4617,7 +4622,7 @@ export function ConnectedPhaseSection({
               <ModelPicker
                 picker={projection.model_picker}
                 selectedModel={selectedModel}
-                busy={busy}
+                busy={busy || modelsLoading}
                 onSelectModel={onSelectModel}
                 compact
               />

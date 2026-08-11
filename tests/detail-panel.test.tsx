@@ -3567,6 +3567,47 @@ describe("detail panel connected Review and Patch", () => {
     expect(attested).not.toContain("terminal output");
   });
 
+  it("keeps available Review models selectable when none is preselected", () => {
+    const selectionRequired = renderConnectedPhase(
+      {
+        ...reviewReady,
+        model_picker: {
+          ...reviewModelPicker,
+          options: [
+            {
+              ...decisionModelOption("claude-opus-4.5", {
+                used_by_seats: ["plan"],
+              }),
+              current_revision: false,
+            },
+            {
+              ...decisionModelOption("gpt-5.4", {
+                used_by_seats: ["spec", "execute"],
+              }),
+              current_revision: false,
+            },
+          ],
+          selected_model: null,
+        },
+      },
+      { reviewAttested: true },
+    );
+
+    expect(selectionRequired).toContain(
+      "A separate connected reviewer assesses the pinned code and evidence; you only confirm independence, choose its model, and launch it.",
+    );
+    expect(selectionRequired).toContain('aria-label="Review model"');
+    expect(selectionRequired).toContain("Choose a model");
+    expect(selectionRequired).toContain("claude-opus-4.5 · used by plan");
+    expect(selectionRequired).toContain("gpt-5.4 · used by spec, execute");
+    expect(selectionRequired).not.toContain(
+      "No connected model is currently available.",
+    );
+    expect(
+      buttonAttributes(selectionRequired, "Launch connected review"),
+    ).toContain('disabled=""');
+  });
+
   it("shows bounded running and failed states with phase-safe cancellation or retry", () => {
     const reviewRunning = renderConnectedPhase({
       ...reviewReady,
