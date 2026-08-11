@@ -54,7 +54,7 @@ describe("workflow transition policy", () => {
     expect(ALLOWED_PHASE_TRANSITIONS.idea).toEqual(["brainstorm", "spec"]);
   });
 
-  it("routes the four governed advances through their dedicated operations", () => {
+  it("routes governed advances through their dedicated operations", () => {
     expect(CONTROLLER_ONLY_PHASE_TRANSITIONS).toEqual([
       {
         from: "idea",
@@ -81,6 +81,13 @@ describe("workflow transition policy", () => {
         action_label: "Approve & run Execute",
         explanation:
           "Approval validates the exact Plan result and creates the governed Execute handoff.",
+      },
+      {
+        from: "review",
+        to: "ship",
+        action_label: "Approve result",
+        explanation:
+          "Approval must bind the exact clean Review result and its applied evidence.",
       },
     ]);
 
@@ -161,7 +168,10 @@ describe("workflow transition policy", () => {
           expect(result).toEqual({ kind: "generic_allowed" });
         }
 
-        if (postExecutePhases.has(from)) {
+        if (
+          postExecutePhases.has(from) &&
+          !namedArrows.has(`${from}->${to}`)
+        ) {
           expect(result).toEqual({ kind: "generic_allowed" });
         }
       }

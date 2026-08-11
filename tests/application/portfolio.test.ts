@@ -4834,6 +4834,49 @@ describe("PortfolioService", () => {
     await expect(
       preferences.getPreference("copilot-acp", "review"),
     ).resolves.toBe("review-model");
+    const readyItem = (await service.list()).find(
+      (candidate) =>
+        candidate.source_id === sourceId &&
+        candidate.work_item.goal.work_item_id === created.goal.work_item_id,
+    );
+    const attention = readyItem?.work_item.state.attention;
+    if (
+      readyItem === undefined ||
+      attention?.kind !== "review_ready" ||
+      attention.pins.mission_content_sha256 === undefined ||
+      attention.pins.result_content_sha256 === undefined ||
+      attention.pins.git_commit === undefined ||
+      attention.pins.evidence_paths[0] === undefined
+    ) {
+      throw new Error("Expected an exact Review-ready portfolio item.");
+    }
+    const approved = await service.approveReviewResult(
+      sourceId,
+      created.goal.work_item_id,
+      {
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: attention.governed_tuple.goal_version,
+        expected_input_revision: attention.governed_tuple.input_revision,
+        attempt: attention.governed_tuple.attempt,
+        expected_patch_cycle: attention.governed_tuple.patch_cycle,
+        expected_review_mission_content_sha256:
+          attention.pins.mission_content_sha256,
+        expected_result_content_sha256:
+          attention.pins.result_content_sha256,
+        expected_evidence_path: attention.pins.evidence_paths[0],
+        expected_result_commit: attention.pins.git_commit,
+      },
+    );
+    expect(approved.work_item.state).toMatchObject({
+      phase: "ship",
+      status: "active",
+    });
+    expect(approved.controller_run.review_result_approval).toMatchObject({
+      evidence_path: attention.pins.evidence_paths[0],
+      accepted_result_commit: attention.pins.git_commit,
+    });
     index.close();
   });
 

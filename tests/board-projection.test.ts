@@ -2748,11 +2748,37 @@ describe("board projection", () => {
         [
           {
             ...appliedReview,
-            submission: { ...appliedReview.submission, verdict: "clean" },
+            submission: {
+              ...appliedReview.submission,
+              summary: "Independent review found no blocking issues.",
+              verdict: "clean",
+            },
           },
         ],
       ),
-    ).toMatchObject({ mode: "review_ready", action: "review_result" });
+    ).toMatchObject({
+      mode: "review_ready",
+      action: "review_result",
+      result: {
+        summary: "Independent review found no blocking issues.",
+        verdict: "clean",
+        evidence_path: evidencePath,
+        accepted_result_commit: gitCommit,
+      },
+      approval: {
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: 3,
+        expected_input_revision: 2,
+        attempt: 1,
+        expected_patch_cycle: 0,
+        expected_review_mission_content_sha256: missionContentSha256,
+        expected_result_content_sha256: resultContentSha256,
+        expected_evidence_path: evidencePath,
+        expected_result_commit: gitCommit,
+      },
+    });
     expect(
       patchAttentionForItem(
         {

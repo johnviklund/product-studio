@@ -28,6 +28,7 @@ import type {
   PortfolioPatchImportResult,
   PortfolioPatchPlanResult,
   PortfolioPlanApprovalResult,
+  PortfolioReviewApprovalResult,
   PortfolioReviewImportDriftRecoveryListing,
   PortfolioReviewImportDriftRecoveryResult,
   PortfolioReviewImportResult,
@@ -113,6 +114,11 @@ import {
   type ShapingRefreshControllerSnapshot,
   type ShapingRefreshObservation,
 } from "@/src/presentation/shaping-interaction";
+import {
+  reviewApprovalRequest,
+  ReviewReadyDecisionSection,
+  shortEvidencePath,
+} from "./review-ready-decision";
 
 interface DetailPanelProps {
   item: PortfolioWorkItem;
@@ -680,14 +686,6 @@ export function specProposalToGoalContractDraft(
     allowedScope: goalContractLines(proposal.allowed_scope),
     reviewReady: goalContractLines(proposal.review_ready),
   };
-}
-
-function shortEvidencePath(path: string): string {
-  const segments = path.split("/").filter((segment) => segment.length > 0);
-  if (segments.length <= 4) {
-    return path;
-  }
-  return `…/${segments.slice(-4).join("/")}`;
 }
 
 async function requestRunEvidence(
@@ -3903,10 +3901,12 @@ interface PatchWorkflowSectionProps {
   compilation: PatchMissionCompilation | null;
   importedEvidence: PortfolioPatchImportResult["evidence"] | null;
   copied: boolean;
+  reviewApprovalPending: boolean;
   onAcceptPatchPlan: () => void;
   onCompilePatch: () => void;
   onImportPatch: () => void;
   onCopyLaunchInstruction: () => void;
+  onApproveReviewResult: () => void;
 }
 
 function patchWorkflowHeading(projection: PatchAttentionProjection): string {
@@ -3964,11 +3964,23 @@ export function PatchWorkflowSection({
   compilation,
   importedEvidence,
   copied,
+  reviewApprovalPending,
   onAcceptPatchPlan,
   onCompilePatch,
   onImportPatch,
   onCopyLaunchInstruction,
+  onApproveReviewResult,
 }: PatchWorkflowSectionProps) {
+  if (projection.mode === "review_ready") {
+    return (
+      <ReviewReadyDecisionSection
+        fieldId={fieldId}
+        projection={projection}
+        pending={reviewApprovalPending}
+        onApprove={onApproveReviewResult}
+      />
+    );
+  }
   if (
     projection.mode === "hidden" &&
     compilation === null &&
@@ -4071,12 +4083,6 @@ export function PatchWorkflowSection({
       {projection.mode === "escalation" ? (
         <p className="mt-3 text-xs font-medium" role="status">
           Resolve the decision above before another patch attempt.
-        </p>
-      ) : null}
-
-      {projection.mode === "review_ready" ? (
-        <p className="mt-3 text-xs font-medium" role="status">
-          Review the pinned result; completion remains a separate human gate.
         </p>
       ) : null}
 
@@ -4842,6 +4848,7 @@ export function DetailPanel({
   const [startingRepair, setStartingRepair] = useState(false);
   const [compilingReviewMission, setCompilingReviewMission] = useState(false);
   const [importingReviewResult, setImportingReviewResult] = useState(false);
+  const [approvingReviewResult, setApprovingReviewResult] = useState(false);
   const [patchMutation, setPatchMutation] = useState<PatchMutation | null>(null);
   const [missionCompilationState, setMissionCompilationState] =
     useState<MissionCompilationState | null>(null);
@@ -5339,6 +5346,11 @@ export function DetailPanel({
       ? connectedModelState.error
       : null;
   const patchAttention = patchAttentionForItem(item, runEvidence);
+  const reviewDecisionEligible =
+    mode === "governed" &&
+    state.phase === "review" &&
+    state.status === "active" &&
+    state.attention?.kind === "review_ready";
   const reviewHandoff = reviewHandoffForItem(item, runEvidence);
   const reviewEligible =
     reviewHandoff.mode === "active" && patchAttention.mode === "hidden";
@@ -7054,6 +7066,46 @@ export function DetailPanel({
     }
   }
 
+  async function handleApproveReviewResult() {
+    if (patchAttention.mode !== "review_ready" || approvingReviewResult) {
+      return;
+    }
+    setApprovingReviewResult(true);
+    setError(null);
+
+    try {
+      const request = reviewApprovalRequest(
+        item.source_id,
+        goal.work_item_id,
+        patchAttention.approval,
+      );
+      const response = await fetch(request.route, request.init);
+      const body = (await response.json()) as
+        | PortfolioReviewApprovalResult
+        | MutationErrorResponse;
+      if (!response.ok || "error" in body) {
+        setError(
+          "error" in body
+            ? body.error?.message ?? "The Review result could not be approved."
+            : "The Review result could not be approved.",
+        );
+        return;
+      }
+
+      setShowFullWorkItem(false);
+      onUpdated(
+        body as PortfolioReviewApprovalResult,
+        "Exact clean Review result approved and moved to Ship.",
+      );
+    } catch {
+      setError(
+        "The Review result could not be approved. Check the local server and try again.",
+      );
+    } finally {
+      setApprovingReviewResult(false);
+    }
+  }
+
   async function handleAcceptPatchPlan() {
     setPatchMutation("accepting_plan");
     setError(null);
@@ -7899,6 +7951,7 @@ export function DetailPanel({
             compilation={patchMissionCompilation}
             importedEvidence={patchMissionImport}
             copied={copiedMissionKey === patchMissionItemKey}
+            reviewApprovalPending={approvingReviewResult}
             onAcceptPatchPlan={() => void handleAcceptPatchPlan()}
             onCompilePatch={() => void handleCompilePatchMission()}
             onImportPatch={() => void handleImportPatchResult()}
@@ -7910,6 +7963,7 @@ export function DetailPanel({
                 );
               }
             }}
+            onApproveReviewResult={() => void handleApproveReviewResult()}
           />
         );
   const connectedManualRecovery =
@@ -8117,7 +8171,53 @@ export function DetailPanel({
           </button>
         </header>
 
-        {shapingEligible && !showFullWorkItem ? (
+        {reviewDecisionEligible && !showFullWorkItem ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+              {patchAttention.mode === "review_ready" ? (
+                <ReviewReadyDecisionSection
+                  fieldId={`${fieldId}-decision`}
+                  projection={patchAttention}
+                  pending={approvingReviewResult}
+                  onApprove={() =>
+                    void handleApproveReviewResult()
+                  }
+                />
+              ) : (
+                <div role={runEvidenceError === null ? "status" : "alert"}>
+                  <p className="text-sm font-medium">
+                    {runEvidenceError === null
+                      ? "Loading Review decision…"
+                      : "Review decision unavailable"}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {runEvidenceError ??
+                      (runEvidenceLoading
+                        ? "Reading the exact clean result and its applied evidence."
+                        : "The displayed result no longer matches the durable Review pins.")}
+                  </p>
+                </div>
+              )}
+
+              {error ? (
+                <p
+                  className="mt-4 border-l-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-foreground"
+                  role="alert"
+                >
+                  {error}
+                </p>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={() => setShowFullWorkItem(true)}
+                className="mt-4 text-xs font-medium text-primary hover:text-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              >
+                View full work item
+              </button>
+            </div>
+          </div>
+        ) : shapingEligible && !showFullWorkItem ? (
           shapingDecisionProjection === null ? (
             <div className="flex min-h-0 flex-1 flex-col">
               <div className="min-h-0 flex-1 px-5 py-5" role="status">
@@ -8253,7 +8353,9 @@ export function DetailPanel({
               <FullWorkItemBackButton
                 onBack={() => setShowFullWorkItem(false)}
                 label={
-                  shapingDecisionProjection === null
+                  reviewDecisionEligible
+                    ? "Back to Review decision"
+                    : shapingDecisionProjection === null
                     ? "Back to details panel"
                     : "Back to shaping decision"
                 }
@@ -8583,6 +8685,7 @@ export function DetailPanel({
                       compilation={patchMissionCompilation}
                       importedEvidence={patchMissionImport}
                       copied={copiedMissionKey === patchMissionItemKey}
+                      reviewApprovalPending={approvingReviewResult}
                       onAcceptPatchPlan={() => void handleAcceptPatchPlan()}
                       onCompilePatch={() => void handleCompilePatchMission()}
                       onImportPatch={() => void handleImportPatchResult()}
@@ -8594,6 +8697,9 @@ export function DetailPanel({
                           );
                         }
                       }}
+                      onApproveReviewResult={() =>
+                        void handleApproveReviewResult()
+                      }
                     />
                   )}
 

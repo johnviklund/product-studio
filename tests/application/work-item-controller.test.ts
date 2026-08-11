@@ -3212,7 +3212,7 @@ describe("WorkItemController", () => {
         reason: transition.explanation,
       })),
     ];
-    expect(transitions).toHaveLength(7);
+    expect(transitions).toHaveLength(8);
 
     for (const transition of transitions) {
       const { root, repository } = await createWorkspace();
@@ -4292,6 +4292,152 @@ describe("WorkItemController", () => {
     });
   });
 
+  it("approves and replays the exact clean Review result into Ship", async () => {
+    const fixture = await createReviewImportFixture();
+    const controller = createController(fixture.repository);
+    const imported = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    const attention = imported.work_item.state.attention;
+    if (
+      attention?.kind !== "review_ready" ||
+      attention.pins.mission_content_sha256 === undefined ||
+      attention.pins.result_content_sha256 === undefined ||
+      attention.pins.git_commit === undefined ||
+      attention.pins.evidence_paths[0] === undefined
+    ) {
+      throw new Error("Expected exact Review-ready pins.");
+    }
+    const input = {
+      expected_phase: "review" as const,
+      expected_status: "active" as const,
+      expected_schema_version: 2 as const,
+      expected_goal_version: imported.work_item.state.goal_version!,
+      expected_input_revision: imported.work_item.state.input_revision!,
+      attempt: imported.work_item.state.attempt!,
+      expected_patch_cycle: imported.work_item.state.patch_cycle!,
+      expected_review_mission_content_sha256:
+        attention.pins.mission_content_sha256,
+      expected_result_content_sha256:
+        attention.pins.result_content_sha256,
+      expected_evidence_path: attention.pins.evidence_paths[0],
+      expected_result_commit: attention.pins.git_commit,
+    };
+
+    const approved = await controller.approveReviewResult(
+      fixture.workItem.goal.work_item_id,
+      input,
+    );
+    expect(approved.work_item.state).toMatchObject({
+      phase: "ship",
+      status: "active",
+    });
+    expect(approved.work_item.state.attention).toBeUndefined();
+    expect(approved.manifest).toMatchObject({
+      phase: "ship",
+      outcome: "applied",
+      review_result_approval: {
+        governed_tuple: {
+          goal_version: input.expected_goal_version,
+          input_revision: input.expected_input_revision,
+          attempt: input.attempt,
+          patch_cycle: input.expected_patch_cycle,
+        },
+        review_mission_content_sha256:
+          input.expected_review_mission_content_sha256,
+        result_content_sha256: input.expected_result_content_sha256,
+        evidence_path: input.expected_evidence_path,
+        accepted_result_commit: input.expected_result_commit,
+      },
+    });
+
+    await expect(
+      controller.approveReviewResult(
+        fixture.workItem.goal.work_item_id,
+        input,
+      ),
+    ).resolves.toEqual(approved);
+  });
+
+  it("rejects Review approval when any displayed result pin is stale", async () => {
+    const fixture = await createReviewImportFixture();
+    const controller = createController(fixture.repository);
+    const imported = await controller.importReviewResult(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+    );
+    const attention = imported.work_item.state.attention;
+    if (
+      attention?.kind !== "review_ready" ||
+      attention.pins.mission_content_sha256 === undefined ||
+      attention.pins.result_content_sha256 === undefined ||
+      attention.pins.git_commit === undefined ||
+      attention.pins.evidence_paths[0] === undefined
+    ) {
+      throw new Error("Expected exact Review-ready pins.");
+    }
+
+    const validInput = {
+      expected_phase: "review" as const,
+      expected_status: "active" as const,
+      expected_schema_version: 2 as const,
+      expected_goal_version: imported.work_item.state.goal_version!,
+      expected_input_revision: imported.work_item.state.input_revision!,
+      attempt: imported.work_item.state.attempt!,
+      expected_patch_cycle: imported.work_item.state.patch_cycle!,
+      expected_review_mission_content_sha256:
+        attention.pins.mission_content_sha256,
+      expected_result_content_sha256: attention.pins.result_content_sha256,
+      expected_evidence_path: attention.pins.evidence_paths[0],
+      expected_result_commit: attention.pins.git_commit,
+    };
+    const staleInputs: Array<
+      [Partial<typeof validInput>, "stale_expectation" | "attempt_conflict"]
+    > = [
+      [
+        { expected_goal_version: validInput.expected_goal_version + 1 },
+        "stale_expectation",
+      ],
+      [
+        { expected_input_revision: validInput.expected_input_revision + 1 },
+        "stale_expectation",
+      ],
+      [{ attempt: validInput.attempt + 1 }, "attempt_conflict"],
+      [
+        { expected_patch_cycle: validInput.expected_patch_cycle + 1 },
+        "stale_expectation",
+      ],
+      [
+        { expected_review_mission_content_sha256: "e".repeat(64) },
+        "stale_expectation",
+      ],
+      [
+        { expected_result_content_sha256: "f".repeat(64) },
+        "stale_expectation",
+      ],
+      [
+        {
+          expected_evidence_path: `.founder/run-evidence/${fixture.workItem.goal.work_item_id}/review-stale/${"a".repeat(64)}`,
+        },
+        "stale_expectation",
+      ],
+      [{ expected_result_commit: "b".repeat(40) }, "stale_expectation"],
+    ];
+
+    for (const [stale, expectedKind] of staleInputs) {
+      await expect(
+        controller.approveReviewResult(fixture.workItem.goal.work_item_id, {
+          ...validInput,
+          ...stale,
+        }),
+      ).rejects.toMatchObject({ kind: expectedKind });
+    }
+    expect(
+      (await fixture.repository.read(fixture.workItem.goal.work_item_id))?.state,
+    ).toEqual(imported.work_item.state);
+  });
+
   it("imports and replays one green patch without consuming another cycle", async () => {
     const fixture = await createPatchImportFixture();
     let commandRuns = 0;
@@ -4755,6 +4901,42 @@ describe("WorkItemController", () => {
     );
     expect(replay).toEqual(applied);
     expect(fixture.evidenceWrites.count).toBe(2);
+
+    const attention = applied.work_item.state.attention;
+    if (
+      attention?.kind !== "review_ready" ||
+      attention.pins.mission_content_sha256 === undefined ||
+      attention.pins.result_content_sha256 === undefined ||
+      attention.pins.git_commit === undefined ||
+      attention.pins.evidence_paths[0] === undefined
+    ) {
+      throw new Error("Expected exact recovered Review-ready pins.");
+    }
+    const approved = await controller.approveReviewResult(
+      fixture.workItem.goal.work_item_id,
+      {
+        expected_phase: "review",
+        expected_status: "active",
+        expected_schema_version: 2,
+        expected_goal_version: attention.governed_tuple.goal_version,
+        expected_input_revision: attention.governed_tuple.input_revision,
+        attempt: attention.governed_tuple.attempt,
+        expected_patch_cycle: attention.governed_tuple.patch_cycle,
+        expected_review_mission_content_sha256:
+          attention.pins.mission_content_sha256,
+        expected_result_content_sha256:
+          attention.pins.result_content_sha256,
+        expected_evidence_path: attention.pins.evidence_paths[0],
+        expected_result_commit: attention.pins.git_commit,
+      },
+    );
+    expect(approved.work_item.state).toMatchObject({
+      phase: "ship",
+      status: "active",
+    });
+    expect(approved.manifest.review_result_approval?.evidence_path).toBe(
+      applied.evidence.evidence_path,
+    );
   });
 
   it("offers Review drift recovery after the previously dirty workspace becomes clean", async () => {

@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { PortfolioItemShapingSummary } from "../application/portfolio";
 import {
   workItemIdSchema,
+  type ApproveReviewResultInput,
   type GoalContract,
   type WorkItemCapture,
   type WorkItemAttention,
@@ -631,6 +632,15 @@ export type PatchAttentionProjection =
       action: "review_result";
       attention: Extract<WorkItemAttention, { kind: "review_ready" }>;
       patch_cycle: number;
+      result: {
+        summary: string;
+        verdict: "clean";
+        evidence_path: string;
+        accepted_result_commit: string;
+        review_mission_content_sha256: string;
+        result_content_sha256: string;
+      };
+      approval: ApproveReviewResultInput;
     }
   | {
       mode: "hidden";
@@ -642,6 +652,7 @@ export type PatchAttentionProjection =
 interface BoardReviewSubmissionProjection {
   review_mission_content_sha256: string;
   accepted_result_commit?: string;
+  summary?: string;
   verdict?: "clean" | "findings";
   execute_mission_content_sha256?: string;
   execute_result_content_sha256?: string;
@@ -2127,7 +2138,7 @@ function reviewSubmissionForEvidence(
     : null;
 }
 
-function attentionMatchesCurrentReview(
+function currentReviewEvidence(
   attention: WorkItemAttention,
   evidence: readonly BoardEvidenceProjection[],
   tuple: {
@@ -2136,7 +2147,7 @@ function attentionMatchesCurrentReview(
     input_revision: number;
     attempt: number;
   },
-): boolean {
+): BoardEvidenceProjection | null {
   const [missionPath, resultPath] = attention.pins.artifact_paths;
   if (
     attention.pins.artifact_paths.length !== 2 ||
@@ -2147,7 +2158,7 @@ function attentionMatchesCurrentReview(
     attention.pins.mission_content_sha256 === undefined ||
     attention.pins.result_content_sha256 === undefined
   ) {
-    return false;
+    return null;
   }
 
   const matching = evidence.filter((stored) => {
@@ -2170,12 +2181,68 @@ function attentionMatchesCurrentReview(
   });
 
   if (matching.length !== 1) {
-    return false;
+    return null;
   }
   const verdict = reviewSubmissionForEvidence(matching[0])?.verdict;
-  return attention.kind === "review_ready"
-    ? verdict === "clean"
-    : verdict === "findings";
+  const verdictMatches =
+    attention.kind === "review_ready"
+      ? verdict === "clean"
+      : verdict === "findings";
+  return verdictMatches ? matching[0]! : null;
+}
+
+function reviewReadyAttentionProjection(
+  attention: Extract<WorkItemAttention, { kind: "review_ready" }>,
+  matchedReview: BoardEvidenceProjection,
+  tuple: {
+    goal_version: number;
+    input_revision: number;
+    attempt: number;
+    patch_cycle: number;
+  },
+): PatchAttentionProjection {
+  const submission = reviewSubmissionForEvidence(matchedReview);
+  const evidencePath = matchedReview.summary?.evidence_path;
+  if (
+    submission?.verdict !== "clean" ||
+    submission.summary === undefined ||
+    submission.accepted_result_commit === undefined ||
+    matchedReview.evidence.mission_content_sha256 === undefined ||
+    matchedReview.evidence.result_content_sha256 === undefined ||
+    evidencePath === undefined
+  ) {
+    return hiddenPatchAttention();
+  }
+  return {
+    mode: "review_ready",
+    action: "review_result",
+    attention,
+    patch_cycle: tuple.patch_cycle,
+    result: {
+      summary: submission.summary,
+      verdict: "clean",
+      evidence_path: evidencePath,
+      accepted_result_commit: submission.accepted_result_commit,
+      review_mission_content_sha256:
+        matchedReview.evidence.mission_content_sha256,
+      result_content_sha256: matchedReview.evidence.result_content_sha256,
+    },
+    approval: {
+      expected_phase: "review",
+      expected_status: "active",
+      expected_schema_version: 2,
+      expected_goal_version: tuple.goal_version,
+      expected_input_revision: tuple.input_revision,
+      attempt: tuple.attempt,
+      expected_patch_cycle: tuple.patch_cycle,
+      expected_review_mission_content_sha256:
+        matchedReview.evidence.mission_content_sha256,
+      expected_result_content_sha256:
+        matchedReview.evidence.result_content_sha256,
+      expected_evidence_path: evidencePath,
+      expected_result_commit: submission.accepted_result_commit,
+    },
+  };
 }
 
 function activePatchMatchesReviewLineage(
@@ -2318,9 +2385,12 @@ export function patchAttentionForItem(
     attention.governed_tuple.goal_version !== state.goal_version ||
     attention.governed_tuple.input_revision !== state.input_revision ||
     attention.governed_tuple.attempt !== state.attempt ||
-    attention.governed_tuple.patch_cycle !== state.patch_cycle ||
-    !attentionMatchesCurrentReview(attention, evidence, tuple)
+    attention.governed_tuple.patch_cycle !== state.patch_cycle
   ) {
+    return hiddenPatchAttention();
+  }
+  const matchedReview = currentReviewEvidence(attention, evidence, tuple);
+  if (matchedReview === null) {
     return hiddenPatchAttention();
   }
 
@@ -2343,12 +2413,11 @@ export function patchAttentionForItem(
         patch_cycle: state.patch_cycle,
       };
     case "review_ready":
-      return {
-        mode: "review_ready",
-        action: "review_result",
+      return reviewReadyAttentionProjection(
         attention,
-        patch_cycle: state.patch_cycle,
-      };
+        matchedReview,
+        tuple,
+      );
     default:
       return hiddenPatchAttention();
   }

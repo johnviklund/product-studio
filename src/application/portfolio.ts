@@ -83,6 +83,7 @@ import {
   workItemSchema,
   workItemStateSchema,
   type ApprovePlanResultInput,
+  type ApproveReviewResultInput,
   type ApplyReviewImportDriftRecoveryInput,
   type ApplyScopeCorrectionInput,
   type CommandAuthorizationDecisionInput,
@@ -594,6 +595,10 @@ export interface PortfolioPatchImportResult extends PortfolioWorkItem {
 }
 
 export interface PortfolioPatchPlanResult extends PortfolioWorkItem {
+  controller_run: ControllerRunManifest;
+}
+
+export interface PortfolioReviewApprovalResult extends PortfolioWorkItem {
   controller_run: ControllerRunManifest;
 }
 
@@ -3368,6 +3373,27 @@ export class PortfolioService {
       project: source.project,
       work_item: accepted.work_item,
       controller_run: accepted.manifest,
+    };
+  }
+
+  async approveReviewResult(
+    sourceId: string,
+    workItemId: string,
+    input: ApproveReviewResultInput,
+  ): Promise<PortfolioReviewApprovalResult> {
+    const source = await this.resolveSource(sourceId);
+    if ((await source.workspace.read(workItemId)) === null) {
+      throw new PortfolioWorkItemNotFoundError(sourceId, workItemId);
+    }
+    const approved = await this.workItemController(
+      source.workspace,
+    ).approveReviewResult(workItemId, input);
+    await this.rebuild();
+    return {
+      source_id: source.source_id,
+      project: source.project,
+      work_item: approved.work_item,
+      controller_run: approved.manifest,
     };
   }
 

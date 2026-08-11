@@ -33,6 +33,7 @@ import {
   executeExternalResultSubmissionSchema,
   hashResultContent,
   importEvidenceEnvelopeSchema,
+  importRunIdSchema,
   patchExternalResultSubmissionSchema,
   reviewExternalResultSubmissionForSubjectSchema,
   type CommandEvidenceRecord,
@@ -91,6 +92,7 @@ import {
   ControllerConflictError,
   InvalidWorkspaceError,
   acceptPatchPlanInputSchema,
+  approveReviewResultInputSchema,
   approvePlanResultInputSchema,
   applyScopeCorrectionInputSchema,
   applyReviewImportDriftRecoveryInputSchema,
@@ -109,9 +111,11 @@ import {
   saveWorkItemInputSchema,
   hashScopeCorrectionProposal,
   hashReviewImportDriftRecoveryProposal,
+  hashReviewResultApproval,
   hashCommandAuthorizationProposal,
   scopeCorrectionProposalSchema,
   reviewImportDriftRecoveryProposalSchema,
+  reviewResultApprovalSchema,
   deriveControllerRunId,
   derivePlanApprovalId,
   parseWorkItemStateForRead,
@@ -121,6 +125,7 @@ import {
   workItemStateSchema,
   type ActiveRun,
   type AcceptPatchPlanInput,
+  type ApproveReviewResultInput,
   type ApprovePlanResultInput,
   type ApplyScopeCorrectionInput,
   type ApplyReviewImportDriftRecoveryInput,
@@ -146,6 +151,7 @@ import {
   type SaveWorkItemInput,
   type ScopeCorrectionProposalV1,
   type ReviewImportDriftRecoveryProposalV1,
+  type ReviewResultApprovalV1,
   type WorkItem,
   type WorkItemAttention,
   type WorkItemPhase,
@@ -2420,6 +2426,272 @@ export class WorkItemController {
         result: assessment.result,
         proposal,
       };
+    } finally {
+      await this.repository.releaseControllerLease(lease);
+    }
+  }
+
+  async approveReviewResult(
+    workItemId: string,
+    input: ApproveReviewResultInput,
+  ): Promise<ControllerMutationResult> {
+    const validatedId = workItemIdSchema.parse(workItemId);
+    const validatedInput = approveReviewResultInputSchema.parse(input);
+    const identity: MissionIdentity<"review"> = {
+      phase: "review",
+      work_item_id: validatedId,
+      goal_version: validatedInput.expected_goal_version,
+      input_revision: validatedInput.expected_input_revision,
+      attempt: validatedInput.attempt,
+    };
+    const approvalContent: Omit<
+      ReviewResultApprovalV1,
+      "approval_sha256"
+    > = {
+      schema_version: 1,
+      work_item_id: validatedId,
+      governed_tuple: {
+        goal_version: identity.goal_version,
+        input_revision: identity.input_revision,
+        attempt: identity.attempt,
+        patch_cycle: validatedInput.expected_patch_cycle,
+      },
+      review_mission_content_sha256:
+        validatedInput.expected_review_mission_content_sha256,
+      result_content_sha256: validatedInput.expected_result_content_sha256,
+      evidence_path: validatedInput.expected_evidence_path,
+      accepted_result_commit: validatedInput.expected_result_commit,
+    };
+    const approval = reviewResultApprovalSchema.parse({
+      ...approvalContent,
+      approval_sha256: hashReviewResultApproval(approvalContent),
+    });
+    const idempotencyKey = [
+      deriveControllerIdempotencyKey(
+        validatedId,
+        "ship",
+        identity.goal_version,
+        identity.input_revision,
+        identity.attempt,
+      ),
+      "approve-review",
+      approval.approval_sha256,
+    ].join(":");
+    const runId = deriveControllerRunId(
+      idempotencyKey,
+      JSON.stringify({ operation: "approve_review_result", input: validatedInput }),
+    );
+    const activeRun = this.activeRun(runId, idempotencyKey);
+    const lease = await this.repository.acquireControllerLease(
+      validatedId,
+      activeRun,
+    );
+    if (lease === null) {
+      throw this.conflict(
+        "work_item_not_found",
+        validatedId,
+        `Work item ${validatedId} was not found.`,
+      );
+    }
+
+    try {
+      const manifestIdentity = {
+        work_item_id: validatedId,
+        run_id: runId,
+        idempotency_key: idempotencyKey,
+        phase: "ship" as const,
+        goal_version: identity.goal_version,
+        input_revision: identity.input_revision,
+        attempt: identity.attempt,
+      };
+      const existing = await this.repository.readControllerRunManifest(
+        validatedId,
+        runId,
+      );
+      if (existing !== null) {
+        if (
+          manifestMatches(existing, manifestIdentity) &&
+          isDeepStrictEqual(existing.review_result_approval, approval) &&
+          lease.work_item.state.phase === "ship" &&
+          lease.work_item.state.status === "active" &&
+          lease.work_item.state.goal_version === identity.goal_version &&
+          lease.work_item.state.input_revision === identity.input_revision &&
+          lease.work_item.state.attempt === identity.attempt &&
+          lease.work_item.state.patch_cycle ===
+            validatedInput.expected_patch_cycle &&
+          lease.work_item.state.attention === undefined
+        ) {
+          return { work_item: lease.work_item, manifest: existing };
+        }
+        throw this.conflict(
+          "idempotency_conflict",
+          validatedId,
+          `Review approval ${runId} does not match its durable result.`,
+        );
+      }
+
+      this.validateReviewExpectation(
+        validatedId,
+        lease.work_item,
+        validatedInput,
+      );
+      const snapshot = await this.repository.readMissionResult(
+        identity,
+        validatedInput.expected_patch_cycle === 0
+          ? undefined
+          : validatedInput.expected_patch_cycle,
+      );
+      this.requireActiveMissionSnapshot(snapshot, validatedId);
+      if (!("review_subject" in snapshot.mission)) {
+        throw this.conflict(
+          "mission_not_ready",
+          validatedId,
+          "Review approval requires an immutable Review mission.",
+        );
+      }
+      const reviewSubject = snapshot.mission.review_subject;
+      const resultContentSha256 = hashResultContent(snapshot.result_source);
+      const attention = lease.work_item.state.attention;
+      if (
+        attention?.kind !== "review_ready" ||
+        attention.pins.mission_content_sha256 !==
+          validatedInput.expected_review_mission_content_sha256 ||
+        attention.pins.result_content_sha256 !==
+          validatedInput.expected_result_content_sha256 ||
+        attention.pins.git_commit !== validatedInput.expected_result_commit ||
+        !isDeepStrictEqual(attention.pins.artifact_paths, [
+          snapshot.mission_path,
+          snapshot.result_path,
+        ]) ||
+        !isDeepStrictEqual(attention.pins.evidence_paths, [
+          validatedInput.expected_evidence_path,
+        ]) ||
+        snapshot.mission.content_sha256 !==
+          validatedInput.expected_review_mission_content_sha256 ||
+        resultContentSha256 !==
+          validatedInput.expected_result_content_sha256 ||
+        reviewSubject.accepted_result_commit !==
+          validatedInput.expected_result_commit
+      ) {
+        throw this.conflict(
+          "stale_expectation",
+          validatedId,
+          "Review approval does not match the exact result currently displayed.",
+        );
+      }
+
+      const currentSubject = await this.currentReviewSubject(
+        this.repository,
+        identity,
+        reviewSubject,
+        validatedInput.expected_patch_cycle,
+      );
+      const assessment = await this.assessReviewResult(
+        snapshot,
+        identity,
+        currentSubject,
+        false,
+      );
+      if (
+        assessment.outcome !== "applied" ||
+        assessment.result?.verdict !== "clean"
+      ) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          "Review approval requires a valid clean Review result.",
+        );
+      }
+
+      const evidenceImportRunId = importRunIdSchema.safeParse(
+        validatedInput.expected_evidence_path.split("/").at(-1),
+      );
+      const evidence = evidenceImportRunId.success
+        ? await this.repository.readImportEvidence(
+            identity,
+            evidenceImportRunId.data,
+          )
+        : null;
+      if (
+        evidence === null ||
+        evidence.evidence.phase !== "review" ||
+        evidence.evidence.outcome !== "applied" ||
+        !isDeepStrictEqual(evidence.evidence.identity, identity) ||
+        evidence.evidence.mission_content_sha256 !==
+          snapshot.mission.content_sha256 ||
+        evidence.evidence.result_content_sha256 !== resultContentSha256 ||
+        evidence.evidence.git_base_commit !== reviewSubject.git_base_commit ||
+        evidence.evidence.result_commit !==
+          reviewSubject.accepted_result_commit ||
+        evidence.summary.phase !== "review" ||
+        evidence.summary.import_run_id !== evidence.evidence.import_run_id ||
+        evidence.summary.outcome !== "applied" ||
+        evidence.summary.evidence_path !==
+          validatedInput.expected_evidence_path ||
+        evidence.verification.length !== 0
+      ) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          "Review approval requires its matching applied evidence receipt.",
+        );
+      }
+      const reviewImportManifest =
+        await this.repository.readControllerRunManifest(
+          validatedId,
+          evidence.evidence.controller_run_id,
+        );
+      if (
+        reviewImportManifest === null ||
+        reviewImportManifest.phase !== "review" ||
+        reviewImportManifest.outcome !== "applied" ||
+        reviewImportManifest.goal_version !== identity.goal_version ||
+        reviewImportManifest.input_revision !== identity.input_revision ||
+        reviewImportManifest.attempt !== identity.attempt
+      ) {
+        throw this.conflict(
+          "repair_required",
+          validatedId,
+          "Review approval requires evidence bound to an applied controller run.",
+        );
+      }
+
+      const transition = validateWorkItemTransition(
+        lease.work_item.state.phase,
+        "ship",
+        lease.work_item.state.status,
+        "active",
+      );
+      if (!transition.ok) {
+        throw this.conflict(
+          "invalid_transition",
+          validatedId,
+          transition.reason,
+        );
+      }
+      const nextItem = workItemSchema.parse({
+        goal: lease.work_item.goal,
+        state: {
+          ...withoutAttention(lease.work_item.state),
+          phase: "ship",
+          status: "active",
+          updated_at: nextTimestamp(
+            lease.work_item.state.updated_at,
+            this.clock,
+          ),
+        },
+      });
+      return await this.repository.commitControllerMutation(lease, {
+        goal: nextItem.goal,
+        state: nextItem.state,
+        manifest: this.pendingManifest(
+          {
+            ...manifestIdentity,
+            review_result_approval: approval,
+          },
+          activeRun.acquired_at,
+        ),
+      });
     } finally {
       await this.repository.releaseControllerLease(lease);
     }
@@ -5886,7 +6158,10 @@ export class WorkItemController {
   private validateReviewExpectation(
     workItemId: string,
     current: WorkItem,
-    input: ImportReviewResultInput | AcceptPatchPlanInput,
+    input:
+      | ImportReviewResultInput
+      | AcceptPatchPlanInput
+      | ApproveReviewResultInput,
   ): void {
     if (current.goal.goal_contract === undefined) {
       throw this.conflict(

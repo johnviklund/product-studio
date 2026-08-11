@@ -26,6 +26,7 @@ import {
   updateShapingRequestChangesComposer,
 } from "../components/kanban/detail-panel";
 import { nextActionForCardState } from "../components/kanban/board-card";
+import { reviewApprovalRequest } from "../components/kanban/review-ready-decision";
 import type {
   BrainstormMissionCompilation,
   ManualShapingIngressResult,
@@ -3034,6 +3035,77 @@ describe("detail panel decision-first shaping", () => {
 });
 
 describe("detail panel patch workflow", () => {
+  it("renders the exact clean Review result as the primary human decision", () => {
+    const approval = {
+      expected_phase: "review" as const,
+      expected_status: "active" as const,
+      expected_schema_version: 2 as const,
+      expected_goal_version: 1,
+      expected_input_revision: 1,
+      attempt: 0,
+      expected_patch_cycle: 0,
+      expected_review_mission_content_sha256: missionContentSha256,
+      expected_result_content_sha256: resultContentSha256,
+      expected_evidence_path: evidencePath,
+      expected_result_commit: gitCommit,
+    };
+    const html = renderToStaticMarkup(
+      <PatchWorkflowSection
+        fieldId="detail"
+        projection={{
+          mode: "review_ready",
+          action: "review_result",
+          attention: {
+            ...attention,
+            kind: "review_ready",
+          },
+          patch_cycle: 0,
+          result: {
+            summary: "Independent review found no blocking issues.",
+            verdict: "clean",
+            evidence_path: evidencePath,
+            accepted_result_commit: gitCommit,
+            review_mission_content_sha256: missionContentSha256,
+            result_content_sha256: resultContentSha256,
+          },
+          approval,
+        }}
+        patchCycle={0}
+        mutation={null}
+        compilation={null}
+        importedEvidence={null}
+        copied={false}
+        reviewApprovalPending={false}
+        onAcceptPatchPlan={noop}
+        onCompilePatch={noop}
+        onImportPatch={noop}
+        onCopyLaunchInstruction={noop}
+        onApproveReviewResult={noop}
+      />,
+    );
+
+    expect(html).toContain("Independent review found no blocking issues.");
+    expect(html).toContain("Clean");
+    expect(html).toContain("Approve result");
+    expect(html).toContain(gitCommit.slice(0, 12));
+    expect(html).not.toContain("Move to Ship");
+    expect(html).not.toContain("Cost/capacity");
+
+    const request = reviewApprovalRequest(
+      "workspace / one",
+      workItemId,
+      approval,
+    );
+    expect(request).toEqual({
+      route: `/api/portfolio/work-items/workspace%20%2F%20one/${workItemId}/mission/review/approve`,
+      init: {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(approval),
+      },
+    });
+  });
+
   it("renders one evidence-bound patch-plan action with governed unknown cost", () => {
     const html = renderToStaticMarkup(
       <PatchWorkflowSection
@@ -3049,10 +3121,12 @@ describe("detail panel patch workflow", () => {
         compilation={null}
         importedEvidence={null}
         copied={false}
+        reviewApprovalPending={false}
         onAcceptPatchPlan={noop}
         onCompilePatch={noop}
         onImportPatch={noop}
         onCopyLaunchInstruction={noop}
+        onApproveReviewResult={noop}
       />,
     );
 

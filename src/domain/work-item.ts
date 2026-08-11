@@ -476,6 +476,7 @@ export interface ControllerRunManifest {
   capability_carry_forward?: ControllerCapabilityCarryForward;
   scope_correction?: ScopeCorrectionProposalV1;
   review_import_drift_recovery?: ReviewImportDriftRecoveryProposalV1;
+  review_result_approval?: ReviewResultApprovalV1;
   command_authorization?: CommandAuthorizationProposalV1;
 }
 
@@ -522,6 +523,31 @@ export interface ApplyReviewImportDriftRecoveryInput {
   accepted_result_commit: string;
   current_head_commit: string;
   proposal_sha256: string;
+}
+
+export interface ApproveReviewResultInput {
+  expected_phase: "review";
+  expected_status: "active";
+  expected_schema_version: 2;
+  expected_goal_version: number;
+  expected_input_revision: number;
+  attempt: number;
+  expected_patch_cycle: number;
+  expected_review_mission_content_sha256: string;
+  expected_result_content_sha256: string;
+  expected_evidence_path: string;
+  expected_result_commit: string;
+}
+
+export interface ReviewResultApprovalV1 {
+  schema_version: 1;
+  work_item_id: string;
+  governed_tuple: GovernedTuple;
+  review_mission_content_sha256: string;
+  result_content_sha256: string;
+  evidence_path: string;
+  accepted_result_commit: string;
+  approval_sha256: string;
 }
 
 export interface ControllerCapabilityGrant {
@@ -1697,6 +1723,9 @@ export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
     review_import_drift_recovery: z
       .lazy(() => reviewImportDriftRecoveryProposalSchema)
       .optional(),
+    review_result_approval: z
+      .lazy(() => reviewResultApprovalSchema)
+      .optional(),
     command_authorization: z
       .lazy(() => commandAuthorizationProposalSchema)
       .optional(),
@@ -1711,6 +1740,26 @@ export const controllerRunManifestSchema: z.ZodType<ControllerRunManifest> =
           "controller manifests cannot grant and carry forward capability authorization together",
         path: ["capability_carry_forward"],
         input: manifest.capability_carry_forward,
+      });
+    }
+    if (
+      manifest.review_result_approval !== undefined &&
+      (manifest.phase !== "ship" ||
+        manifest.work_item_id !==
+          manifest.review_result_approval.work_item_id ||
+        manifest.goal_version !==
+          manifest.review_result_approval.governed_tuple.goal_version ||
+        manifest.input_revision !==
+          manifest.review_result_approval.governed_tuple.input_revision ||
+        manifest.attempt !==
+          manifest.review_result_approval.governed_tuple.attempt)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "review_result_approval must bind the Ship controller manifest identity",
+        path: ["review_result_approval"],
+        input: manifest.review_result_approval,
       });
     }
   });
@@ -1891,6 +1940,63 @@ export const applyReviewImportDriftRecoveryInputSchema: z.ZodType<ApplyReviewImp
     current_head_commit: gitCommitSchema,
     proposal_sha256: sha256Schema,
   });
+
+export const approveReviewResultInputSchema: z.ZodType<ApproveReviewResultInput> =
+  z.strictObject({
+    expected_phase: z.literal("review"),
+    expected_status: z.literal("active"),
+    expected_schema_version: z.literal(2),
+    expected_goal_version: positiveSafeIntegerSchema,
+    expected_input_revision: positiveSafeIntegerSchema,
+    attempt: nonNegativeSafeIntegerSchema,
+    expected_patch_cycle: nonNegativeSafeIntegerSchema,
+    expected_review_mission_content_sha256: sha256Schema,
+    expected_result_content_sha256: sha256Schema,
+    expected_evidence_path: workspaceRelativePosixPathSchema,
+    expected_result_commit: gitCommitSchema,
+  });
+
+const reviewResultApprovalContentSchema = z.strictObject({
+  schema_version: z.literal(1),
+  work_item_id: workItemIdSchema,
+  governed_tuple: governedTupleSchema,
+  review_mission_content_sha256: sha256Schema,
+  result_content_sha256: sha256Schema,
+  evidence_path: workspaceRelativePosixPathSchema,
+  accepted_result_commit: gitCommitSchema,
+});
+
+export function hashReviewResultApproval(
+  input: Omit<ReviewResultApprovalV1, "approval_sha256">,
+): string {
+  const parsed = reviewResultApprovalContentSchema.parse({
+    schema_version: input.schema_version,
+    work_item_id: input.work_item_id,
+    governed_tuple: input.governed_tuple,
+    review_mission_content_sha256:
+      input.review_mission_content_sha256,
+    result_content_sha256: input.result_content_sha256,
+    evidence_path: input.evidence_path,
+    accepted_result_commit: input.accepted_result_commit,
+  });
+  return createHash("sha256")
+    .update(`${JSON.stringify(parsed, null, 2)}\n`)
+    .digest("hex");
+}
+
+export const reviewResultApprovalSchema: z.ZodType<ReviewResultApprovalV1> =
+  reviewResultApprovalContentSchema
+    .extend({ approval_sha256: sha256Schema })
+    .superRefine((approval, context) => {
+      if (approval.approval_sha256 !== hashReviewResultApproval(approval)) {
+        context.addIssue({
+          code: "custom",
+          message: "approval_sha256 must hash the exact Review approval",
+          path: ["approval_sha256"],
+          input: approval.approval_sha256,
+        });
+      }
+    });
 
 export function hashControllerCapabilityGrant(input: {
   source_mission_content_sha256: string;

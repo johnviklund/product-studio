@@ -54,6 +54,13 @@ export const CONTROLLER_ONLY_PHASE_TRANSITIONS = [
     explanation:
       "Approval validates the exact Plan result and creates the governed Execute handoff.",
   },
+  {
+    from: "review",
+    to: "ship",
+    action_label: "Approve result",
+    explanation:
+      "Approval must bind the exact clean Review result and its applied evidence.",
+  },
 ] as const satisfies readonly ControllerOnlyPhaseTransition[];
 
 export const CLOSED_IN_SLICE_PHASE_TRANSITIONS = [

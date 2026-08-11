@@ -1190,7 +1190,7 @@ describe("portfolio API routes", () => {
         reason: transition.explanation,
       })),
     ];
-    expect(transitions).toHaveLength(7);
+    expect(transitions).toHaveLength(8);
 
     for (const transition of transitions) {
       const updateWorkItemPhase = vi.fn().mockRejectedValue(
