@@ -6270,6 +6270,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       nextItem,
       validatedManifest,
     );
+    const semanticEventIntents = this.validateControllerSemanticEventIntents(
+      validatedLease,
+      nextItem,
+      validatedManifest,
+      input.semantic_event_intents,
+    );
     await this.assertControllerLeaseOwnership(validatedLease);
 
     const current = await this.readValidated(workItemId);
@@ -6297,10 +6303,18 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         existing.outcome === "applied" &&
         this.manifestIdentityMatches(existing, validatedManifest)
       ) {
-        return {
+        await this.writeSemanticEventIntents(
+          workItemId,
+          semanticEventIntents,
+        );
+        const replay = {
           work_item: this.withoutActiveRun(current),
           manifest: existing,
         };
+        for (const intent of semanticEventIntents) {
+          await this.publishSemanticEventIntent(workItemId, intent.intent_id);
+        }
+        return replay;
       }
       throw new ControllerConflictError(
         "idempotency_conflict",
@@ -6315,7 +6329,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       completed_at: undefined,
     });
     const workItemDirectory = join(this.workItemsDirectory, workItemId);
+    await this.writeSemanticEventIntents(workItemId, semanticEventIntents);
 
+    let committed: ControllerMutationResult;
     try {
       await this.writeControllerRunManifest(pendingManifest);
       await this.writeControllerArtifacts(
@@ -6331,8 +6347,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         completed_at: new Date().toISOString(),
       });
       await this.writeControllerRunManifest(appliedManifest);
-
-      return { work_item: nextItem, manifest: appliedManifest };
+      committed = { work_item: nextItem, manifest: appliedManifest };
     } catch (error) {
       const cleanupErrors: unknown[] = [];
       try {
@@ -6370,6 +6385,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       }
       throw error;
     }
+    for (const intent of semanticEventIntents) {
+      await this.publishSemanticEventIntent(workItemId, intent.intent_id);
+    }
+    return committed;
   }
 
   async releaseControllerLease(lease: ControllerLease): Promise<void> {
@@ -10069,6 +10088,73 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         "Controller manifest identity must match the lease and next durable state.",
       );
     }
+  }
+
+  private validateControllerSemanticEventIntents(
+    lease: ControllerLease,
+    nextItem: WorkItem,
+    manifest: ControllerRunManifest,
+    inputs: SemanticEventIntentV1[],
+  ): SemanticEventIntentV1[] {
+    const workItemId = lease.work_item.goal.work_item_id;
+    const intents = z.array(semanticEventIntentSchema).parse(inputs);
+    if (new Set(intents.map((intent) => intent.intent_id)).size !== intents.length) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Controller mutation semantic intents must have unique identities.",
+      );
+    }
+    for (const intent of intents) {
+      const bindingWorkItemIds = [intent.binding];
+      if (intent.details.kind === "workflow_transitioned") {
+        bindingWorkItemIds.push(
+          intent.details.before,
+          intent.details.after,
+        );
+      }
+      if (
+        intent.work_item_id !== workItemId ||
+        intent.source.kind !== "controller_run" ||
+        intent.source.controller_run_id !== manifest.run_id ||
+        intent.source.expected_outcome !== "applied" ||
+        bindingWorkItemIds.some(
+          (binding) =>
+            (binding.kind === "governed"
+              ? workItemId
+              : binding.identity.work_item_id) !== workItemId,
+        ) ||
+        (intent.binding.kind === "governed" &&
+          !this.semanticGovernedBindingMatchesEitherItem(
+            intent.binding,
+            lease.work_item,
+            nextItem,
+          ))
+      ) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          workItemId,
+          `Semantic intent ${intent.intent_id} must bind the exact controller source and before/after work item.`,
+        );
+      }
+    }
+    return intents;
+  }
+
+  private semanticGovernedBindingMatchesEitherItem(
+    binding: Extract<SemanticEventIntentV1["binding"], { kind: "governed" }>,
+    before: WorkItem,
+    after: WorkItem,
+  ): boolean {
+    return [before, after].some(
+      (item) =>
+        item.state.goal_version === binding.governed_tuple.goal_version &&
+        item.state.input_revision === binding.governed_tuple.input_revision &&
+        item.state.attempt === binding.governed_tuple.attempt &&
+        item.state.patch_cycle === binding.governed_tuple.patch_cycle &&
+        item.state.phase === binding.phase &&
+        item.state.status === binding.status,
+    );
   }
 
   private async assertControllerLeaseOwnership(
