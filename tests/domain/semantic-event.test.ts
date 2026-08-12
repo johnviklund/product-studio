@@ -295,4 +295,34 @@ describe("semantic-event domain", () => {
       }),
     ).toThrow();
   });
+
+  it("rejects a terminal run_launched detail while accepting a terminal source", () => {
+    const source = {
+      kind: "connected_run" as const,
+      connected_run_id: connectedRunId,
+      expected_lifecycle_status: "terminal" as const,
+      mission_content_sha256: contentSha256,
+    };
+    const intent = controllerIntent({
+      source,
+      slot: "run-launch",
+      kind: "run_launched",
+      details: {
+        kind: "run_launched",
+        run_family: "connected",
+        phase: "execute",
+        run_id: connectedRunId,
+        lifecycle_status: "starting",
+      },
+    });
+    intent.intent_id = deriveSemanticIntentId(intent);
+
+    expect(semanticEventIntentSchema.parse(intent).source).toEqual(source);
+    expect(() =>
+      semanticEventIntentSchema.parse({
+        ...intent,
+        details: { ...intent.details, lifecycle_status: "terminal" },
+      }),
+    ).toThrow();
+  });
 });

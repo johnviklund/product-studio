@@ -36,6 +36,10 @@ import { workspaceRelativePosixPathSchema } from "./workspace-path";
 export const SEMANTIC_EVENT_SCHEMA_VERSION = 1 as const;
 export const SEMANTIC_EVENT_STREAM_SCHEMA_VERSION = 1 as const;
 export const SEMANTIC_EVENT_OUTCOME_MAX_BYTES = 280 as const;
+export const SEMANTIC_RUN_LAUNCH_LIFECYCLE_STATUSES = [
+  "starting",
+  "running",
+] as const;
 
 export const SEMANTIC_EVENT_KINDS = [
   "run_launched",
@@ -183,7 +187,7 @@ export type SemanticEventDetailsV1 =
       run_family: "connected" | "shaping";
       phase: MissionPhase | ShapingPhase;
       run_id: string;
-      lifecycle_status: "starting" | "running";
+      lifecycle_status: (typeof SEMANTIC_RUN_LAUNCH_LIFECYCLE_STATUSES)[number];
     }
   | {
       kind: "run_finished";
@@ -406,7 +410,7 @@ const runLaunchedDetailsSchema = z.strictObject({
   run_family: z.enum(["connected", "shaping"]),
   phase: runPhaseSchema,
   run_id: uuidSchema,
-  lifecycle_status: z.enum(["starting", "running"]),
+  lifecycle_status: z.enum(SEMANTIC_RUN_LAUNCH_LIFECYCLE_STATUSES),
 });
 
 const runFinishedDetailsSchema = z.strictObject({
