@@ -897,6 +897,67 @@ function controllerMutation(
   };
 }
 
+async function addGoalContractSemanticIntent(
+  root: string,
+  mutation: ControllerMutationInput,
+  run: ActiveRun,
+): Promise<SemanticEventIntentV1> {
+  const productSource = await readFile(
+    join(root, ".founder", "product.yaml"),
+    "utf8",
+  );
+  const source = {
+    kind: "controller_run" as const,
+    controller_run_id: run.run_id,
+    expected_outcome: "applied" as const,
+  };
+  const kind = "goal_contract_revised" as const;
+  const slot = "goal-contract-revised";
+  const intent: SemanticEventIntentV1 = {
+    schema_version: 1,
+    intent_id: deriveSemanticIntentId({ source, kind, slot }),
+    source,
+    slot,
+    kind,
+    work_item_id: firstId,
+    binding: {
+      kind: "governed",
+      governed_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      phase: "spec",
+      status: "active",
+    },
+    run: null,
+    actor: { kind: "controller" },
+    outcome: "Revised the governed goal contract.",
+    occurred_at: "2026-07-21T20:02:00.000Z",
+    evidence: [
+      {
+        kind: "controller_run",
+        path: ".founder/product.yaml",
+        expected_content_sha256: hashSource(productSource),
+      },
+    ],
+    action: null,
+    details: {
+      kind,
+      previous_goal_version: null,
+      previous_input_revision: null,
+      next_goal_version: 1,
+      next_input_revision: 1,
+      goal_contract_sha256: hashGoalContract(
+        mutation.goal.goal_contract!,
+      ),
+    },
+  };
+  mutation.semantic_event_intents = [intent];
+  return intent;
+}
+
 class FailingControllerWorkspace extends ProductWorkspace {
   protected override async afterControllerGoalReplaced(): Promise<void> {
     throw new Error("injected controller state write failure");
@@ -906,6 +967,18 @@ class FailingControllerWorkspace extends ProductWorkspace {
 class FailingSemanticPublicationWorkspace extends ProductWorkspace {
   override async publishSemanticEventIntent(): Promise<SemanticEventV1> {
     throw new Error("injected semantic publication failure");
+  }
+}
+
+class FailingAfterSemanticIntentWorkspace extends ProductWorkspace {
+  protected override async afterSemanticIntentWritten(): Promise<void> {
+    throw new Error("injected failure after semantic intent write");
+  }
+}
+
+class FailingAfterSemanticEventWorkspace extends ProductWorkspace {
+  protected override async afterSemanticEventWritten(): Promise<void> {
+    throw new Error("injected failure after semantic event write");
   }
 }
 
@@ -2530,6 +2603,106 @@ describe("ProductWorkspace", () => {
         join(root, ".founder", "semantic-events", firstId, "events"),
       ),
     ).toEqual([]);
+
+    const repaired = new ProductWorkspace(root);
+    await expect(
+      repaired.reconcileSemanticEventIntents(firstId),
+    ).resolves.toHaveLength(1);
+    const publishedAfterRepair = await readdir(
+      join(root, ".founder", "semantic-events", firstId, "events"),
+    );
+    expect(publishedAfterRepair).toEqual(["0000000000000001.json"]);
+    await expect(
+      repaired.reconcileSemanticEventIntents(firstId),
+    ).resolves.toHaveLength(1);
+    expect(
+      await readdir(
+        join(root, ".founder", "semantic-events", firstId, "events"),
+      ),
+    ).toEqual(publishedAfterRepair);
+  });
+
+  it("leaves an intent pending when failure occurs before its authoritative mutation", async () => {
+    const root = await createWorkspace();
+    await writeWorkItem(root, firstId, "2026-07-21T20:00:00.000Z");
+    const workspace = new FailingAfterSemanticIntentWorkspace(root);
+    const run = activeRun();
+    const lease = await workspace.acquireControllerLease(firstId, run);
+    if (lease === null) {
+      throw new Error("Expected controller lease");
+    }
+    const mutation = controllerMutation(lease.work_item, run);
+    await addGoalContractSemanticIntent(root, mutation, run);
+
+    await expect(
+      workspace.commitControllerMutation(lease, mutation),
+    ).rejects.toThrow("injected failure after semantic intent write");
+    await workspace.releaseControllerLease(lease);
+
+    expect(await workspace.readControllerRunManifest(firstId, run.run_id)).toBeNull();
+    expect(
+      await readdir(
+        join(root, ".founder", "semantic-events", firstId, "intents"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      await readdir(
+        join(root, ".founder", "semantic-events", firstId, "events"),
+      ),
+    ).toEqual([]);
+    await expect(
+      new ProductWorkspace(root).reconcileSemanticEventIntents(firstId),
+    ).resolves.toEqual([]);
+  });
+
+  it("returns the identical durable event when failure occurs after its write", async () => {
+    const root = await createWorkspace();
+    await writeWorkItem(root, firstId, "2026-07-21T20:00:00.000Z");
+    const workspace = new FailingAfterSemanticEventWorkspace(root);
+    const run = activeRun();
+    const lease = await workspace.acquireControllerLease(firstId, run);
+    if (lease === null) {
+      throw new Error("Expected controller lease");
+    }
+    const mutation = controllerMutation(lease.work_item, run);
+    const intent = await addGoalContractSemanticIntent(root, mutation, run);
+
+    await expect(
+      workspace.commitControllerMutation(lease, mutation),
+    ).rejects.toThrow("injected failure after semantic event write");
+    await workspace.releaseControllerLease(lease);
+    const eventPath = join(
+      root,
+      ".founder",
+      "semantic-events",
+      firstId,
+      "events",
+      "0000000000000001.json",
+    );
+    const durableEvent = JSON.parse(
+      await readFile(eventPath, "utf8"),
+    ) as SemanticEventV1;
+
+    const replayWorkspace = new ProductWorkspace(root);
+    const replayLease = await replayWorkspace.acquireControllerLease(
+      firstId,
+      run,
+    );
+    if (replayLease === null) {
+      throw new Error("Expected replay controller lease");
+    }
+    await expect(
+      replayWorkspace.commitControllerMutation(replayLease, mutation),
+    ).resolves.toMatchObject({ manifest: { outcome: "applied" } });
+    await replayWorkspace.releaseControllerLease(replayLease);
+    await expect(
+      replayWorkspace.publishSemanticEventIntent(firstId, intent.intent_id),
+    ).resolves.toEqual(durableEvent);
+    expect(
+      await readdir(
+        join(root, ".founder", "semantic-events", firstId, "events"),
+      ),
+    ).toEqual(["0000000000000001.json"]);
   });
 
   it("selects the one applied execute manifest matching durable controller state", async () => {

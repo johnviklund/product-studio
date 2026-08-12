@@ -951,6 +951,15 @@ describe("connected-run workspace storage", () => {
         details: { terminal_outcome: "interrupted", partial: true },
       },
     ]);
+    await workspace.reconcileConnectedRuns();
+    expect(await semanticEvents(root)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "interrupted", partial: true },
+      },
+    ]);
     await expect(
       readFile(
         join(

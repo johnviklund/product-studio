@@ -1271,6 +1271,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         } finally {
           await eventHandle.close();
         }
+        await this.afterSemanticEventWritten();
 
         const publishedSource = await this.readRequiredFile(eventPath);
         if (publishedSource !== canonicalSerializeSemanticEvent(event)) {
@@ -6538,6 +6539,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   }
 
   protected async beforeSemanticEventWritten(): Promise<void> {
+    return;
+  }
+
+  protected async afterSemanticEventWritten(): Promise<void> {
     return;
   }
 
