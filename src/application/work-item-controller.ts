@@ -734,6 +734,7 @@ export class WorkItemController {
         scope_correction: proposal,
       };
       const committed = await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -884,6 +885,7 @@ export class WorkItemController {
         command_authorization: proposal,
       };
       const committed = await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -1045,6 +1047,7 @@ export class WorkItemController {
         command_authorization: proposal,
       };
       const committed = await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -1698,6 +1701,7 @@ export class WorkItemController {
       );
 
       return await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -1822,6 +1826,7 @@ export class WorkItemController {
       );
 
       return await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -1983,6 +1988,7 @@ export class WorkItemController {
         activeRun.acquired_at,
       );
       const mutation = await repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: pendingManifest,
@@ -2162,6 +2168,7 @@ export class WorkItemController {
         },
       });
       const mutation = await repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: pendingManifest,
@@ -2416,6 +2423,7 @@ export class WorkItemController {
         },
       });
       const mutation = await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: pendingManifest,
@@ -2682,6 +2690,7 @@ export class WorkItemController {
         },
       });
       return await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: this.pendingManifest(
@@ -2904,6 +2913,7 @@ export class WorkItemController {
         },
       });
       return await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: this.pendingManifest(
@@ -3080,6 +3090,7 @@ export class WorkItemController {
         attempt: identity.attempt,
       };
       const mutation = await repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: this.pendingManifest(
@@ -3282,6 +3293,7 @@ export class WorkItemController {
         },
       });
       const committed = await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
@@ -3425,6 +3437,7 @@ export class WorkItemController {
         },
       });
       const mutation = await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
@@ -3530,6 +3543,7 @@ export class WorkItemController {
         },
       });
       return await this.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
@@ -3753,6 +3767,7 @@ export class WorkItemController {
       state: nextState,
     });
     return this.repository.commitControllerMutation(input.lease, {
+      semantic_event_intents: [],
       goal: nextItem.goal,
       state: nextItem.state,
       manifest: this.pendingManifest(
@@ -5808,6 +5823,7 @@ export class WorkItemController {
       },
     });
     const mutation = await repository.commitControllerMutation(lease, {
+      semantic_event_intents: [],
       goal: nextItem.goal,
       state: nextItem.state,
       manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
@@ -5966,6 +5982,7 @@ export class WorkItemController {
       },
     });
     const mutation = await repository.commitControllerMutation(lease, {
+      semantic_event_intents: [],
       goal: nextItem.goal,
       state: nextItem.state,
       manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
@@ -6059,6 +6076,7 @@ export class WorkItemController {
       },
     });
     const mutation = await repository.commitControllerMutation(lease, {
+      semantic_event_intents: [],
       goal: nextItem.goal,
       state: nextItem.state,
       manifest: this.pendingManifest(
@@ -7173,6 +7191,7 @@ export class WorkItemController {
       outcome: "pending",
     };
     const committed = await repository.commitPlanApproval(lease, {
+      semantic_event_intents: [],
       state: nextItem.state,
       manifest: pendingManifest,
     });
@@ -7530,6 +7549,7 @@ export class WorkItemController {
       outcome: "pending",
     };
     const committed = await repository.commitShapingDecision(lease, {
+      semantic_event_intents: [],
       ...(intent.operation === "approve_spec"
         ? { goal: nextItem.goal }
         : {}),

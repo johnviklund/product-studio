@@ -956,6 +956,7 @@ async function governWorkItemThrough(
     }
     try {
       const result = await repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: current.goal,
         state: {
           ...current.state,
@@ -5054,6 +5055,7 @@ describe("PortfolioService", () => {
         }
         try {
           await repository.commitControllerMutation(lease, {
+            semantic_event_intents: [],
             goal: lease.work_item.goal,
             state: {
               ...lease.work_item.state,

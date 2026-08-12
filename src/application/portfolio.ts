@@ -218,6 +218,7 @@ type WorkspaceGateway = Pick<
   | "findAppliedExecuteManifest"
   | "findAppliedPatchManifest"
   | "findAppliedPatchAttemptManifest"
+  | "publishSemanticEventIntent"
   | "readAppliedExecuteReviewSubject"
   | "readAppliedPatchReviewSubject"
   | "readExecutionDefaults"

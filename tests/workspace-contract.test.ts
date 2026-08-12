@@ -855,6 +855,7 @@ function controllerMutation(
   const phase = overrides.phase ?? "spec";
 
   return {
+    semantic_event_intents: [],
     goal: {
       ...current.goal,
       goal_contract: {
@@ -1406,6 +1407,7 @@ describe("ProductWorkspace", () => {
     );
     await expect(
       interruptedDecision.commitShapingDecision(prepared.lease, {
+        semantic_event_intents: [],
         state: prepared.nextState,
         manifest: prepared.manifest,
       }),
@@ -1518,6 +1520,7 @@ describe("ProductWorkspace", () => {
     const committed = await workspace.commitShapingDecision(
       prepared.lease,
       {
+        semantic_event_intents: [],
         state: prepared.nextState,
         manifest: prepared.manifest,
       },
@@ -1541,6 +1544,7 @@ describe("ProductWorkspace", () => {
       throw new Error("Expected shaping decision replay lease");
     }
     const replay = await workspace.commitShapingDecision(replayLease, {
+      semantic_event_intents: [],
       state: prepared.nextState,
       manifest: {
         ...prepared.manifest,
@@ -1559,6 +1563,7 @@ describe("ProductWorkspace", () => {
     }
     await expect(
       workspace.commitShapingDecision(conflictingLease, {
+        semantic_event_intents: [],
         state: prepared.nextState,
         manifest: {
           ...prepared.manifest,
@@ -1832,6 +1837,7 @@ describe("ProductWorkspace", () => {
     );
     await expect(
       workspace.commitShapingDecision(prepared.lease, {
+        semantic_event_intents: [],
         state: prepared.nextState,
         manifest: prepared.manifest,
       }),
@@ -2007,12 +2013,14 @@ describe("ProductWorkspace", () => {
     };
     await expect(
       workspace.commitShapingDecision(lease, {
+        semantic_event_intents: [],
         goal: nextGoal,
         state: nextState,
         manifest: { ...manifest, goal_version: 2 },
       }),
     ).rejects.toMatchObject({ kind: "idempotency_conflict" });
     const committed = await workspace.commitShapingDecision(lease, {
+      semantic_event_intents: [],
       goal: nextGoal,
       state: nextState,
       manifest,
@@ -2035,6 +2043,7 @@ describe("ProductWorkspace", () => {
     );
     await expect(
       invalidWorkspace.commitShapingDecision(invalid.lease, {
+        semantic_event_intents: [],
         state: invalid.nextState,
         manifest: {
           ...invalid.manifest,
@@ -2067,6 +2076,7 @@ describe("ProductWorkspace", () => {
       const prepared = await prepareStartShapingDecision(root, failing);
       await expect(
         failing.commitShapingDecision(prepared.lease, {
+          semantic_event_intents: [],
           state: prepared.nextState,
           manifest: prepared.manifest,
         }),
@@ -2111,6 +2121,7 @@ describe("ProductWorkspace", () => {
     );
     await expect(
       unknownFailing.commitShapingDecision(unknown.lease, {
+        semantic_event_intents: [],
         state: unknown.nextState,
         manifest: unknown.manifest,
       }),
@@ -2150,6 +2161,7 @@ describe("ProductWorkspace", () => {
     );
     await expect(
       competingFailing.commitShapingDecision(competing.lease, {
+        semantic_event_intents: [],
         state: competing.nextState,
         manifest: competing.manifest,
       }),
@@ -2168,6 +2180,7 @@ describe("ProductWorkspace", () => {
     };
     await expect(
       competingFailing.commitShapingDecision(competing.lease, {
+        semantic_event_intents: [],
         state: competing.nextState,
         manifest: otherManifest,
       }),
@@ -2185,6 +2198,7 @@ describe("ProductWorkspace", () => {
     const prepared = await preparePlanApprovalCommit(root, workspace);
 
     const committed = await workspace.commitPlanApproval(prepared.lease, {
+      semantic_event_intents: [],
       state: prepared.nextState,
       manifest: prepared.manifest,
     });
@@ -2227,6 +2241,7 @@ describe("ProductWorkspace", () => {
     }
     await expect(
       workspace.commitPlanApproval(replayLease, {
+        semantic_event_intents: [],
         state: prepared.nextState,
         manifest: {
           ...prepared.manifest,

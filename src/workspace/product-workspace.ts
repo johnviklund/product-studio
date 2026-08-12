@@ -195,6 +195,15 @@ import {
   type ShapingRunRecordV1,
   type ShapingProductionReceipt,
 } from "../domain/shaping-run";
+import {
+  canonicalSerializeSemanticEventIntent,
+  semanticEventIntentSchema,
+  semanticEventSchema,
+  semanticEventStreamHeaderSchema,
+  type SemanticEventIntentV1,
+  type SemanticEventStreamHeaderV1,
+  type SemanticEventV1,
+} from "../domain/semantic-event";
 
 const FOUNDER_DIRECTORY = ".founder";
 const WORK_ITEMS_DIRECTORY = "work-items";
@@ -212,6 +221,10 @@ const SHAPING_RUN_EVENTS_LOCK_FILE = ".events.lock";
 const SHAPING_INGRESS_DIRECTORY = "shaping-ingress";
 const SHAPING_DECISIONS_DIRECTORY = "shaping-decisions";
 const PLAN_APPROVALS_DIRECTORY = "plan-approvals";
+const SEMANTIC_EVENTS_DIRECTORY = "semantic-events";
+const SEMANTIC_EVENT_STREAM_FILE = "stream.json";
+const SEMANTIC_EVENT_INTENTS_DIRECTORY = "intents";
+const SEMANTIC_EVENT_FILES_DIRECTORY = "events";
 const RUN_EVIDENCE_DIRECTORY = "run-evidence";
 const EXECUTION_DIRECTORY = "execution";
 const EXECUTION_DEFAULTS_FILE = "defaults.json";
@@ -255,6 +268,7 @@ const SHAPING_STAGING_DIRECTORY_PATTERN = new RegExp(
   `^\\.(brainstorm|spec|plan)-[0-9a-f]{64}\\.${UUID_PATTERN}\\.(?:shaping\\.tmp|applied\\.staging)$`,
   "i",
 );
+const SEMANTIC_EVENT_FILE_PATTERN = /^(\d{16})\.json$/u;
 
 interface StoredAppliedShapingBundle {
   resultPath: string;
@@ -1128,6 +1142,68 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
   verificationRunner(): VerificationRunner {
     return this.commandRunner;
+  }
+
+  async writeSemanticEventIntents(
+    workItemId: string,
+    intents: SemanticEventIntentV1[],
+  ): Promise<SemanticEventIntentV1[]> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedIntents = intents.map((intent) =>
+      semanticEventIntentSchema.parse(intent),
+    );
+    if (
+      new Set(validatedIntents.map((intent) => intent.intent_id)).size !==
+      validatedIntents.length
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        validatedWorkItemId,
+        "Semantic event intents must not repeat an intent_id.",
+      );
+    }
+
+    const written: SemanticEventIntentV1[] = [];
+    for (const intent of validatedIntents) {
+      if (intent.work_item_id !== validatedWorkItemId) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          validatedWorkItemId,
+          "Semantic event intent work_item_id must match its stream.",
+        );
+      }
+      written.push(
+        await this.writeSemanticEventIntentFile(
+          validatedWorkItemId,
+          intent,
+        ),
+      );
+    }
+    return written;
+  }
+
+  async publishSemanticEventIntent(
+    workItemId: string,
+    intentId: string,
+  ): Promise<SemanticEventV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedIntentId = SHA256_SCHEMA.parse(intentId);
+    const intent = await this.readSemanticEventIntentFile(
+      validatedWorkItemId,
+      validatedIntentId,
+    );
+    if (intent === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        validatedWorkItemId,
+        `Semantic event intent ${validatedIntentId} is missing.`,
+      );
+    }
+    throw new ControllerConflictError(
+      "repair_required",
+      validatedWorkItemId,
+      `Semantic event intent ${intent.intent_id} is durable but not yet publishable.`,
+    );
   }
 
   async readExecutionDefaults(): Promise<ExecutionDefaultsV1> {
@@ -6276,6 +6352,18 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return;
   }
 
+  protected async afterSemanticIntentWritten(): Promise<void> {
+    return;
+  }
+
+  protected async afterSemanticSequenceReserved(): Promise<void> {
+    return;
+  }
+
+  protected async beforeSemanticEventWritten(): Promise<void> {
+    return;
+  }
+
   protected async afterRetainedControllerStateCleared(): Promise<void> {
     return;
   }
@@ -8035,6 +8123,254 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       workItemId,
       reason,
     );
+  }
+
+  private semanticEventPaths(workItemId: string): {
+    root: string;
+    item: string;
+    stream: string;
+    intents: string;
+    events: string;
+    intent: (intentId: string) => string;
+    event: (sequence: number) => string;
+  } {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const root = join(this.founderDirectory, SEMANTIC_EVENTS_DIRECTORY);
+    const item = join(root, validatedWorkItemId);
+    const intents = join(item, SEMANTIC_EVENT_INTENTS_DIRECTORY);
+    const events = join(item, SEMANTIC_EVENT_FILES_DIRECTORY);
+    return {
+      root,
+      item,
+      stream: join(item, SEMANTIC_EVENT_STREAM_FILE),
+      intents,
+      events,
+      intent: (intentId) =>
+        join(intents, `${SHA256_SCHEMA.parse(intentId)}.json`),
+      event: (sequence) => {
+        const validatedSequence = z.number().int().positive().safe().parse(
+          sequence,
+        );
+        return join(events, `${String(validatedSequence).padStart(16, "0")}.json`);
+      },
+    };
+  }
+
+  private async ensureSemanticEventStream(
+    workItemId: string,
+  ): Promise<SemanticEventStreamHeaderV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    await this.readManifest();
+    if (
+      !(await this.hasSafeWorkItemsDirectory()) ||
+      (await this.readValidated(validatedWorkItemId)) === null
+    ) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        validatedWorkItemId,
+        `Work item ${validatedWorkItemId} was not found.`,
+      );
+    }
+
+    const paths = this.semanticEventPaths(validatedWorkItemId);
+    await this.ensureDirectory(paths.root);
+    await this.ensureDirectory(paths.item);
+    await this.ensureDirectory(paths.intents);
+    await this.ensureDirectory(paths.events);
+
+    const header = semanticEventStreamHeaderSchema.parse({
+      schema_version: 1,
+      work_item_id: validatedWorkItemId,
+    });
+    const source = `${JSON.stringify(header, null, 2)}\n`;
+    try {
+      await writeFile(paths.stream, source, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") {
+        throw error;
+      }
+      const existingSource = await this.readRequiredFile(paths.stream);
+      const existing = this.parseJson(
+        existingSource,
+        paths.stream,
+        semanticEventStreamHeaderSchema,
+      );
+      if (existingSource !== source || existing.work_item_id !== validatedWorkItemId) {
+        throw this.invalid(
+          paths.stream,
+          "semantic event stream header differs from its immutable identity",
+        );
+      }
+      return existing;
+    }
+    return header;
+  }
+
+  private async readSemanticEventStreamHeader(
+    workItemId: string,
+  ): Promise<SemanticEventStreamHeaderV1 | null> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const paths = this.semanticEventPaths(validatedWorkItemId);
+    if (!(await this.hasSafeDirectory(paths.root))) {
+      return null;
+    }
+    if (!(await this.hasSafeDirectory(paths.item))) {
+      return null;
+    }
+    await this.assertDirectory(paths.intents);
+    await this.assertDirectory(paths.events);
+    const source = await this.readRequiredFile(paths.stream);
+    const header = this.parseJson(
+      source,
+      paths.stream,
+      semanticEventStreamHeaderSchema,
+    );
+    if (header.work_item_id !== validatedWorkItemId) {
+      throw this.invalid(
+        paths.stream,
+        `work_item_id must equal containing directory name ${validatedWorkItemId}`,
+      );
+    }
+    return header;
+  }
+
+  private async writeSemanticEventIntentFile(
+    workItemId: string,
+    input: SemanticEventIntentV1,
+  ): Promise<SemanticEventIntentV1> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const intent = semanticEventIntentSchema.parse(input);
+    if (intent.work_item_id !== validatedWorkItemId) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        validatedWorkItemId,
+        "Semantic event intent work_item_id must match its stream.",
+      );
+    }
+    await this.ensureSemanticEventStream(validatedWorkItemId);
+    const paths = this.semanticEventPaths(validatedWorkItemId);
+    const intentPath = paths.intent(intent.intent_id);
+    const source = canonicalSerializeSemanticEventIntent(intent);
+    try {
+      await writeFile(intentPath, source, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await this.afterSemanticIntentWritten();
+      return intent;
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") {
+        throw error;
+      }
+      const existingSource = await this.readRequiredFile(intentPath);
+      const existing = this.parseJson(
+        existingSource,
+        intentPath,
+        semanticEventIntentSchema,
+      );
+      if (existingSource === source) {
+        return existing;
+      }
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        validatedWorkItemId,
+        `Semantic event intent ${intent.intent_id} differs from the immutable record.`,
+      );
+    }
+  }
+
+  private async readSemanticEventIntentFile(
+    workItemId: string,
+    intentId: string,
+  ): Promise<SemanticEventIntentV1 | null> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const validatedIntentId = SHA256_SCHEMA.parse(intentId);
+    if ((await this.readSemanticEventStreamHeader(validatedWorkItemId)) === null) {
+      return null;
+    }
+    const paths = this.semanticEventPaths(validatedWorkItemId);
+    const intentPath = paths.intent(validatedIntentId);
+    const source = await this.readOptionalFile(intentPath);
+    if (source === null) {
+      return null;
+    }
+    const intent = this.parseJson(
+      source,
+      intentPath,
+      semanticEventIntentSchema,
+    );
+    if (
+      intent.intent_id !== validatedIntentId ||
+      intent.work_item_id !== validatedWorkItemId
+    ) {
+      throw this.invalid(
+        intentPath,
+        "semantic event intent identity does not match its containing path",
+      );
+    }
+    if (source !== canonicalSerializeSemanticEventIntent(intent)) {
+      throw this.invalid(intentPath, "semantic event intent bytes are not canonical");
+    }
+    return intent;
+  }
+
+  private async readSemanticEventFiles(
+    workItemId: string,
+  ): Promise<SemanticEventV1[]> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    if ((await this.readSemanticEventStreamHeader(validatedWorkItemId)) === null) {
+      return [];
+    }
+    const paths = this.semanticEventPaths(validatedWorkItemId);
+    const entries = await readdir(paths.events, { withFileTypes: true });
+    const events: SemanticEventV1[] = [];
+    const intentIds = new Set<string>();
+    for (const entry of entries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      const match = SEMANTIC_EVENT_FILE_PATTERN.exec(entry.name);
+      if (
+        match === null ||
+        !entry.isFile() ||
+        entry.isSymbolicLink()
+      ) {
+        throw this.invalid(
+          join(paths.events, entry.name),
+          "semantic event entries must be fixed-width regular JSON files",
+        );
+      }
+      const sequence = Number.parseInt(match[1]!, 10);
+      if (!Number.isSafeInteger(sequence) || sequence < 1) {
+        throw this.invalid(
+          join(paths.events, entry.name),
+          "semantic event filename must contain a positive safe sequence",
+        );
+      }
+      const eventPath = paths.event(sequence);
+      const source = await this.readRequiredFile(eventPath);
+      const event = this.parseJson(source, eventPath, semanticEventSchema);
+      if (
+        event.stream_sequence !== sequence ||
+        event.work_item_id !== validatedWorkItemId
+      ) {
+        throw this.invalid(
+          eventPath,
+          "semantic event identity does not match its containing path",
+        );
+      }
+      if (intentIds.has(event.intent_id)) {
+        throw this.invalid(
+          eventPath,
+          `semantic event intent ${event.intent_id} is published more than once`,
+        );
+      }
+      intentIds.add(event.intent_id);
+      events.push(event);
+    }
+    return events;
   }
 
   private shapingDecisionPaths(

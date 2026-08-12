@@ -275,6 +275,7 @@ async function createMissionReadyWorkspace(): Promise<{
     try {
       current = (
         await repository.commitControllerMutation(lease, {
+          semantic_event_intents: [],
           goal: current.goal,
           state: {
             ...current.state,

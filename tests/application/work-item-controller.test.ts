@@ -368,6 +368,7 @@ async function governToExecute(
     }
     try {
       mutation = await repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: current.goal,
         state: {
           ...current.state,
@@ -568,6 +569,7 @@ async function createReviewImportFixture(options?: {
     });
     try {
       const mutation = await workspace.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: {
@@ -1932,6 +1934,7 @@ async function createPhaseConnectedFixture(
       const mutation = await fixture.repository.commitControllerMutation(
         lease,
         {
+          semantic_event_intents: [],
           goal: lease.work_item.goal,
           state: {
             ...lease.work_item.state,
@@ -2805,6 +2808,7 @@ describe("WorkItemController", () => {
     let emptyRepair: { work_item: WorkItem; manifest: ControllerRunManifest };
     try {
       emptyRepair = await fixture.repository.commitControllerMutation(lease, {
+        semantic_event_intents: [],
         goal: lease.work_item.goal,
         state: {
           ...lease.work_item.state,
