@@ -20,6 +20,10 @@ import type {
 } from "./mission";
 import type { ConnectedRunRecordV2 } from "./connected-run";
 import type {
+  SemanticEventIntentV1,
+  SemanticEventV1,
+} from "./semantic-event";
+import type {
   PlanApprovalExecuteTuple,
   ShapingArtifactWriteResult,
   ShapingDecisionIntentV1,
@@ -576,6 +580,7 @@ export interface ControllerMutationInput {
   goal: WorkItemGoal;
   state: WorkItemState;
   manifest: ControllerRunManifest;
+  semantic_event_intents: SemanticEventIntentV1[];
 }
 
 export interface ControllerMutationResult {
@@ -613,6 +618,7 @@ export interface ShapingDecisionCommitInput {
   goal?: WorkItemGoal;
   state: WorkItemState;
   manifest: ShapingDecisionManifestV1;
+  semantic_event_intents: SemanticEventIntentV1[];
 }
 
 export interface ShapingDecisionCommitResult {
@@ -650,6 +656,7 @@ export interface PlanApprovalCommitInput {
   goal?: WorkItemGoal;
   state: WorkItemState;
   manifest: PlanApprovalManifestV1;
+  semantic_event_intents: SemanticEventIntentV1[];
 }
 
 export interface PlanApprovalCommitResult {
@@ -749,6 +756,10 @@ export interface WorkItemRepository {
     lease: ControllerLease,
     input: ControllerMutationInput,
   ): Promise<ControllerMutationResult>;
+  publishSemanticEventIntent(
+    workItemId: string,
+    intentId: string,
+  ): Promise<SemanticEventV1>;
   writeShapingDecisionIntent(
     lease: ControllerLease,
     input: ShapingDecisionIntentCaptureInput,
