@@ -196,6 +196,7 @@ import {
   type ShapingProductionReceipt,
 } from "../domain/shaping-run";
 import {
+  SEMANTIC_RUN_LAUNCH_LIFECYCLE_STATUSES,
   canonicalSerializeSemanticEvent,
   canonicalSerializeSemanticEventIntent,
   deriveSemanticEventId,
@@ -11299,7 +11300,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     record: ShapingRunRecordV1,
     instructionInput?: ShapingIngressInstructionV1,
     publish = true,
-  ): Promise<void> {
+  ): Promise<SemanticEventIntentV1 | null> {
     const workItemId = record.mission.work_item_id;
     const existing = (
       await this.readSemanticEventIntentFiles(workItemId)
@@ -11309,6 +11310,14 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         intent.source.kind === "shaping_run" &&
         intent.source.shaping_run_id === record.shaping_run_id,
     );
+    if (
+      existing === undefined &&
+      !SEMANTIC_RUN_LAUNCH_LIFECYCLE_STATUSES.some(
+        (status) => status === record.lifecycle.status,
+      )
+    ) {
+      return null;
+    }
     const intent =
       existing ??
       this.buildShapingRunLaunchIntent(
@@ -11325,6 +11334,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     ) {
       await this.publishSemanticEventIntent(workItemId, intent.intent_id);
     }
+    return intent;
   }
 
   private async terminalizeShapingRun(
@@ -11354,9 +11364,18 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         },
       });
     }
-    await this.ensureShapingRunLaunchEvent(record, undefined, false);
-    const finishIntent = await this.buildShapingRunFinishedIntent(updated);
-    await this.writeSemanticEventIntents(workItemId, [finishIntent]);
+    const launchIntent = await this.ensureShapingRunLaunchEvent(
+      record,
+      undefined,
+      false,
+    );
+    const finishIntent =
+      launchIntent === null
+        ? null
+        : await this.buildShapingRunFinishedIntent(updated);
+    if (finishIntent !== null) {
+      await this.writeSemanticEventIntents(workItemId, [finishIntent]);
+    }
     const paths = this.shapingRunPaths(
       workItemId,
       record.shaping_run_id,
@@ -11365,7 +11384,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       await this.writeJsonAtomically(paths.run, updated);
     }
     await this.releaseShapingRunGuardForRecord(updated);
-    await this.publishSemanticEventIntent(workItemId, finishIntent.intent_id);
+    if (finishIntent !== null) {
+      await this.publishSemanticEventIntent(workItemId, finishIntent.intent_id);
+    }
     return updated;
   }
 
@@ -12067,7 +12088,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   private async ensureConnectedRunLaunchEvent(
     record: ConnectedRunRecordV2,
     publish = true,
-  ): Promise<void> {
+  ): Promise<SemanticEventIntentV1 | null> {
     const workItemId = record.mission.identity.work_item_id;
     const existing = (
       await this.readSemanticEventIntentFiles(workItemId)
@@ -12077,6 +12098,14 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         intent.source.kind === "connected_run" &&
         intent.source.connected_run_id === record.connected_run_id,
     );
+    if (
+      existing === undefined &&
+      !SEMANTIC_RUN_LAUNCH_LIFECYCLE_STATUSES.some(
+        (status) => status === record.lifecycle.status,
+      )
+    ) {
+      return null;
+    }
     const intent = existing ?? (await this.buildConnectedRunLaunchIntent(record));
     if (existing === undefined) {
       await this.writeSemanticEventIntents(workItemId, [intent]);
@@ -12088,6 +12117,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     ) {
       await this.publishSemanticEventIntent(workItemId, intent.intent_id);
     }
+    return intent;
   }
 
   private async terminalizeConnectedRun(
@@ -12118,9 +12148,14 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       });
     }
 
-    await this.ensureConnectedRunLaunchEvent(record, false);
-    const finishIntent = await this.buildConnectedRunFinishedIntent(updated);
-    await this.writeSemanticEventIntents(workItemId, [finishIntent]);
+    const launchIntent = await this.ensureConnectedRunLaunchEvent(record, false);
+    const finishIntent =
+      launchIntent === null
+        ? null
+        : await this.buildConnectedRunFinishedIntent(updated);
+    if (finishIntent !== null) {
+      await this.writeSemanticEventIntents(workItemId, [finishIntent]);
+    }
     if (record.lifecycle.status !== "terminal") {
       await this.writeJsonAtomically(
         this.connectedRunPaths(workItemId, record.connected_run_id).run,
@@ -12128,7 +12163,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
     await this.releaseConnectedRunGuardForRecord(updated);
-    await this.publishSemanticEventIntent(workItemId, finishIntent.intent_id);
+    if (finishIntent !== null) {
+      await this.publishSemanticEventIntent(workItemId, finishIntent.intent_id);
+    }
     return updated;
   }
 
