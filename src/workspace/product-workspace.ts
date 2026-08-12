@@ -1257,11 +1257,41 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           eventHandle = await open(eventPath, "wx");
         } catch (error) {
           if (isNodeError(error) && error.code === "EEXIST") {
-            continue;
+            let collision;
+            try {
+              collision = await lstat(eventPath);
+            } catch (collisionError) {
+              if (isNodeError(collisionError) && collisionError.code === "ENOENT") {
+                continue;
+              }
+              throw collisionError;
+            }
+            if (
+              collision.isFile() &&
+              !collision.isSymbolicLink() &&
+              collision.size === 0
+            ) {
+              // Reclaiming is safe only while the per-item append lock still
+              // excludes readers and other cooperating publishers.
+              await unlink(eventPath);
+              try {
+                eventHandle = await open(eventPath, "wx");
+              } catch (retryError) {
+                if (isNodeError(retryError) && retryError.code === "EEXIST") {
+                  continue;
+                }
+                throw retryError;
+              }
+            } else {
+              continue;
+            }
+          } else {
+            throw error;
           }
-          throw error;
         }
 
+        let eventPersisted = false;
+        let publicationError: unknown = null;
         try {
           await this.afterSemanticSequenceReserved();
           await this.beforeSemanticEventWritten();
@@ -1269,8 +1299,27 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
             encoding: "utf8",
           });
           await eventHandle.sync();
+          eventPersisted = true;
+        } catch (error) {
+          publicationError = error;
+          throw error;
         } finally {
-          await eventHandle.close();
+          let closeError: unknown = null;
+          try {
+            await eventHandle.close();
+          } catch (error) {
+            closeError = error;
+          }
+          if (!eventPersisted) {
+            try {
+              await unlink(eventPath);
+            } catch {
+              // Reservation cleanup must not mask the publication failure.
+            }
+          }
+          if (publicationError === null && closeError !== null) {
+            throw closeError;
+          }
         }
         await this.afterSemanticEventWritten();
 
@@ -8508,12 +8557,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       return [];
     }
     const paths = this.semanticEventPaths(validatedWorkItemId);
-    const entries = await readdir(paths.events, { withFileTypes: true });
+    const entries = (await readdir(paths.events, { withFileTypes: true })).sort(
+      (left, right) => left.name.localeCompare(right.name),
+    );
     const events: SemanticEventV1[] = [];
     const intentIds = new Set<string>();
-    for (const entry of entries.sort((left, right) =>
-      left.name.localeCompare(right.name),
-    )) {
+    for (const [entryIndex, entry] of entries.entries()) {
       const match = SEMANTIC_EVENT_FILE_PATTERN.exec(entry.name);
       if (
         match === null ||
@@ -8541,6 +8590,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       }
       const eventPath = paths.event(sequence);
       const source = await this.readRequiredFile(eventPath);
+      if (source.length === 0 && entryIndex === entries.length - 1) {
+        continue;
+      }
       const event = this.parseJson(source, eventPath, semanticEventSchema);
       if (
         event.stream_sequence !== sequence ||
