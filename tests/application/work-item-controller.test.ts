@@ -5,6 +5,7 @@ import {
   readFile,
   readdir,
   rm,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -322,6 +323,21 @@ async function expectSemanticProducer(
     }
   }
   return records;
+}
+
+function injectFirstSemanticPublicationFailure(
+  repository: ProductWorkspace,
+): () => number {
+  const publish = repository.publishSemanticEventIntent.bind(repository);
+  let attempts = 0;
+  repository.publishSemanticEventIntent = async (workItemId, intentId) => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error("injected first semantic publication failure");
+    }
+    return publish(workItemId, intentId);
+  };
+  return () => attempts;
 }
 
 type CommitFailureBoundary = "pending_manifest" | "applied_manifest";
@@ -2296,6 +2312,69 @@ describe("WorkItemController", () => {
     expect(replay.work_item.state.active_run).toBeUndefined();
   });
 
+  it("republishes a missing connected launch event on controller replay", async () => {
+    const fixture = await createConnectedFixture();
+    await fixture.controller.launchConnectedRun(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    const source = {
+      kind: "connected_run" as const,
+      connected_run_id: fixture.record.connected_run_id,
+      expected_lifecycle_status: fixture.record.lifecycle.status,
+      mission_content_sha256: fixture.record.mission.content_sha256,
+    };
+    const initialRecords = await semanticRecordsForSource(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      source,
+    );
+    expect(initialRecords).toHaveLength(1);
+    await unlink(
+      join(
+        fixture.repository.workspaceRoot,
+        ".founder",
+        "semantic-events",
+        fixture.workItem.goal.work_item_id,
+        "events",
+        `${String(initialRecords[0]!.event.stream_sequence).padStart(16, "0")}.json`,
+      ),
+    );
+    const publicationAttempts = injectFirstSemanticPublicationFailure(
+      fixture.repository,
+    );
+
+    await expect(
+      fixture.controller.launchConnectedRun(
+        fixture.workItem.goal.work_item_id,
+        fixture.input,
+        fixture.record,
+      ),
+    ).rejects.toThrow("injected first semantic publication failure");
+    const replay = await fixture.controller.launchConnectedRun(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+
+    expect(replay.created).toBe(false);
+    expect(publicationAttempts()).toBe(2);
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      source,
+      [
+        {
+          kind: "run_launched",
+          slot: "run-launch",
+          evidence_kind: "mission",
+          evidence_path: fixture.record.mission.path,
+        },
+      ],
+    );
+  });
+
   it("launches and replays one durable connected run per phase", async () => {
     const runIds = new Set<string>();
     for (const phase of ["execute", "review", "patch"] as const) {
@@ -2817,6 +2896,78 @@ describe("WorkItemController", () => {
     ]);
     expect(await readdir(semanticDirectory)).toEqual(
       semanticBeforeMissionRecompile,
+    );
+  });
+
+  it("republishes a permission decision after its first publication fails", async () => {
+    const fixture = await createConnectedFixture();
+    await fixture.controller.launchConnectedExecute(
+      fixture.workItem.goal.work_item_id,
+      fixture.input,
+      fixture.record,
+    );
+    const request = {
+      schema_version: 1 as const,
+      kind: "command" as const,
+      executable: "git",
+      args: ["status"],
+    };
+    const operation = {
+      normalized_operation: request,
+      canonical_args_sha256: "e".repeat(64),
+      operation_sha256: hashCanonicalCapabilityRequest(request),
+      reason: "outside_capability_envelope",
+      resolved_envelope_sha256:
+        fixture.record.authorization.envelope_sha256,
+      connected_run_id: fixture.record.connected_run_id,
+    };
+    await fixture.controller.recordConnectedPermissionDenial(
+      fixture.workItem.goal.work_item_id,
+      { ...withoutRunOrdinal(fixture.input), operation },
+    );
+    const decision = {
+      decision: "allow_once" as const,
+      expected_phase: "execute" as const,
+      governed_tuple: fixture.input.governed_tuple,
+      operation_sha256: operation.operation_sha256,
+      connected_run_id: operation.connected_run_id,
+      mission_content_sha256: fixture.input.mission_content_sha256,
+    };
+    const publicationAttempts = injectFirstSemanticPublicationFailure(
+      fixture.repository,
+    );
+
+    await expect(
+      fixture.controller.resolveConnectedPermission(
+        fixture.workItem.goal.work_item_id,
+        decision,
+      ),
+    ).rejects.toThrow("injected first semantic publication failure");
+    const replay = await fixture.controller.resolveConnectedPermission(
+      fixture.workItem.goal.work_item_id,
+      decision,
+    );
+
+    expect(publicationAttempts()).toBe(2);
+    if (replay.manifest === null) {
+      throw new Error("Expected an applied permission decision manifest.");
+    }
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: replay.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "permission_decided",
+          slot: "permission-decision",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${replay.manifest.run_id}.json`,
+        },
+      ],
     );
   });
 

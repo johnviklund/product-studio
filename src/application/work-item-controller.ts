@@ -3658,11 +3658,14 @@ export class WorkItemController {
               "A connected launch replay cannot change its phase, mission, tuple, model, or authorization.",
             );
           }
+          const replay = await this.repository.createConnectedRun(
+            validatedRecord,
+          );
           return {
             work_item: lease.work_item,
             manifest: existing,
-            connected_run: connected,
-            created: false,
+            connected_run: replay.record,
+            created: replay.created,
           };
         }
         throw this.conflict(
@@ -3870,6 +3873,22 @@ export class WorkItemController {
         input_revision: validatedInput.governed_tuple.input_revision,
         attempt: nextAttempt,
       };
+      const buildSemanticEventIntents = (
+        after: WorkItem,
+        manifest: ControllerRunManifest,
+      ): SemanticEventIntentV1[] => [
+        this.permissionDecidedIntent({
+          before: lease.work_item,
+          after,
+          manifest,
+          decision:
+            validatedInput.decision === "allow_once"
+              ? "allow_once"
+              : "retry_without_allowing",
+          operation_sha256: validatedInput.operation_sha256,
+          next_attempt: nextAttempt,
+        }),
+      ];
       if (validatedInput.decision !== "keep_denied") {
         const existing = await this.repository.readControllerRunManifest(
           validatedId,
@@ -3920,6 +3939,9 @@ export class WorkItemController {
               true,
             )
           ) {
+            await this.republishSemanticEventIntents(
+              buildSemanticEventIntents(lease.work_item, existing),
+            );
             return { work_item: lease.work_item, manifest: existing };
           }
           throw this.conflict(
@@ -3960,19 +3982,7 @@ export class WorkItemController {
         manifest_identity: retryManifestIdentity,
         next_attempt: nextAttempt,
         clear_attention: true,
-        build_semantic_event_intents: (after, manifest) => [
-          this.permissionDecidedIntent({
-            before: lease.work_item,
-            after,
-            manifest,
-            decision:
-              validatedInput.decision === "allow_once"
-                ? "allow_once"
-                : "retry_without_allowing",
-            operation_sha256: validatedInput.operation_sha256,
-            next_attempt: nextAttempt,
-          }),
-        ],
+        build_semantic_event_intents: buildSemanticEventIntents,
         validate_current: async () => {
           await this.validateConnectedPermissionResolution(
             validatedId,
