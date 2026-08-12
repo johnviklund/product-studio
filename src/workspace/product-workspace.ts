@@ -253,6 +253,8 @@ const INSTRUCTION_JSON_FILE = "instruction.json";
 const VERIFICATION_JSON_FILE = "verification.json";
 const CONTROLLER_LOCK_FILE = ".controller.lock";
 const VERIFICATION_LOCK_FILE = ".verification.lock";
+const DEFAULT_EXCLUSIVE_WAIT_MS = 900_000;
+const DEFAULT_EXCLUSIVE_POLL_MS = 250;
 const execFileAsync = promisify(execFile);
 const COMMAND_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const UUID_PATTERN =
@@ -776,8 +778,10 @@ export class NodeVerificationRunner implements VerificationRunner {
     this.killGraceMs = options.killGraceMs ?? 5_000;
     this.drainGraceMs = options.drainGraceMs ?? 1_000;
     this.now = options.now ?? (() => new Date());
-    this.exclusiveWaitMs = options.exclusiveWaitMs ?? 900_000;
-    this.exclusivePollMs = options.exclusivePollMs ?? 250;
+    this.exclusiveWaitMs =
+      options.exclusiveWaitMs ?? DEFAULT_EXCLUSIVE_WAIT_MS;
+    this.exclusivePollMs =
+      options.exclusivePollMs ?? DEFAULT_EXCLUSIVE_POLL_MS;
   }
 
   private killGroup(
@@ -8662,7 +8666,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const lockPath = join(paths.item, ".append.lock");
     const token = `${randomUUID()}\n`;
     let handle = null;
-    for (let attempt = 0; attempt < 5_000; attempt += 1) {
+    const deadline = Date.now() + DEFAULT_EXCLUSIVE_WAIT_MS;
+    for (;;) {
       try {
         handle = await open(lockPath, "wx");
         break;
@@ -8670,15 +8675,54 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         if (!isNodeError(error) || error.code !== "EEXIST") {
           throw error;
         }
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 1));
+
+        let lockStats;
+        try {
+          lockStats = await lstat(lockPath);
+        } catch (lockError) {
+          if (isNodeError(lockError) && lockError.code === "ENOENT") {
+            continue;
+          }
+          throw lockError;
+        }
+        const staleByAge =
+          Date.now() - lockStats.mtimeMs >= DEFAULT_EXCLUSIVE_WAIT_MS;
+        if (staleByAge) {
+          await unlink(lockPath);
+          continue;
+        }
+        if (lockStats.size === 0) {
+          await new Promise((resolveDelay) =>
+            setTimeout(resolveDelay, DEFAULT_EXCLUSIVE_POLL_MS),
+          );
+          let confirmedStats;
+          try {
+            confirmedStats = await lstat(lockPath);
+          } catch (lockError) {
+            if (isNodeError(lockError) && lockError.code === "ENOENT") {
+              continue;
+            }
+            throw lockError;
+          }
+          if (
+            confirmedStats.size === 0 &&
+            confirmedStats.mtimeMs === lockStats.mtimeMs
+          ) {
+            await unlink(lockPath);
+            continue;
+          }
+        }
+        if (Date.now() >= deadline) {
+          throw new ControllerConflictError(
+            "repair_required",
+            validatedWorkItemId,
+            `Semantic event append lock ${lockPath} remained unavailable.`,
+          );
+        }
+        await new Promise((resolveDelay) =>
+          setTimeout(resolveDelay, DEFAULT_EXCLUSIVE_POLL_MS),
+        );
       }
-    }
-    if (handle === null) {
-      throw new ControllerConflictError(
-        "repair_required",
-        validatedWorkItemId,
-        "Semantic event append lock remained unavailable.",
-      );
     }
 
     let operationError: unknown = null;
@@ -8692,12 +8736,22 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     } finally {
       try {
         await handle.close();
-        const storedToken = await this.readRequiredFile(lockPath);
+        const storedToken = await this.readOptionalFile(lockPath);
         if (storedToken !== token) {
-          throw this.invalid(lockPath, "semantic event append lock changed owner");
+          throw new ControllerConflictError(
+            "repair_required",
+            validatedWorkItemId,
+            `Semantic event append lock ${lockPath} changed owner before release.`,
+          );
         }
         await unlink(lockPath);
       } catch (cleanupError) {
+        if (
+          cleanupError instanceof ControllerConflictError &&
+          cleanupError.kind === "repair_required"
+        ) {
+          throw cleanupError;
+        }
         if (operationError !== null) {
           throw new AggregateError(
             [operationError, cleanupError],

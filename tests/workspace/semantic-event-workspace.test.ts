@@ -6,6 +6,7 @@ import {
   readdir,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -395,6 +396,54 @@ describe("semantic event workspace", () => {
         (_, index) => `${String(index + 1).padStart(16, "0")}.json`,
       ),
     );
+  });
+
+  it("takes over an abandoned append lock within the shared wait budget", async () => {
+    const fixture = await createFixture();
+    const workspace = new ProductWorkspace(fixture.root);
+    const intent = workflowIntent(fixture, "stale-append-lock");
+    await workspace.writeSemanticEventIntents(fixture.workItemId, [intent]);
+    const lockPath = join(
+      semanticDirectory(fixture.root, fixture.workItemId),
+      ".append.lock",
+    );
+    await writeFile(lockPath, "abandoned-owner\n", "utf8");
+    const staleTime = new Date(Date.now() - 24 * 60 * 60 * 1_000);
+    await utimes(lockPath, staleTime, staleTime);
+    const startedAt = Date.now();
+
+    const published = await workspace.publishSemanticEventIntent(
+      fixture.workItemId,
+      intent.intent_id,
+    );
+
+    expect(published.stream_sequence).toBe(1);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    await expect(readFile(lockPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("takes over an ownerless zero-byte append lock", async () => {
+    const fixture = await createFixture();
+    const workspace = new ProductWorkspace(fixture.root);
+    const intent = workflowIntent(fixture, "ownerless-append-lock");
+    await workspace.writeSemanticEventIntents(fixture.workItemId, [intent]);
+    const lockPath = join(
+      semanticDirectory(fixture.root, fixture.workItemId),
+      ".append.lock",
+    );
+    await writeFile(lockPath, "", "utf8");
+
+    await expect(
+      workspace.publishSemanticEventIntent(
+        fixture.workItemId,
+        intent.intent_id,
+      ),
+    ).resolves.toMatchObject({ stream_sequence: 1 });
+    await expect(readFile(lockPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("keeps independent sequences for different work items", async () => {
