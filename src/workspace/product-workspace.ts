@@ -199,6 +199,7 @@ import {
   canonicalSerializeSemanticEvent,
   canonicalSerializeSemanticEventIntent,
   deriveSemanticEventId,
+  deriveSemanticIntentId,
   semanticEventIntentSchema,
   semanticEventSchema,
   semanticEventStreamHeaderSchema,
@@ -1315,10 +1316,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     }
 
     await this.readManifest();
-    if (
-      !(await this.hasSafeWorkItemsDirectory()) ||
-      (await this.readValidated(workItemId)) === null
-    ) {
+    const current = await this.readValidated(workItemId);
+    if (!(await this.hasSafeWorkItemsDirectory()) || current === null) {
       throw new ControllerConflictError(
         "work_item_not_found",
         workItemId,
@@ -1344,6 +1343,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         connectedRunLaunchFingerprint(existingNonterminalRun) ===
         connectedRunLaunchFingerprint(validated)
       ) {
+        await this.ensureConnectedRunLaunchEvent(existingNonterminalRun);
         return { record: existingNonterminalRun, created: false };
       }
       throw new ControllerConflictError(
@@ -1365,6 +1365,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       record: validated,
       created_at: timestampAtOrAfter(validated.lifecycle.started_at),
     });
+    const launchIntent = await this.buildConnectedRunLaunchIntent(
+      validated,
+      current,
+    );
+    await this.writeSemanticEventIntents(workItemId, [launchIntent]);
 
     try {
       await writeFile(guardPath, `${JSON.stringify(guard, null, 2)}\n`, {
@@ -1382,6 +1387,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
     try {
       await this.publishConnectedRunDirectory(validated);
+      await this.publishSemanticEventIntent(
+        workItemId,
+        launchIntent.intent_id,
+      );
       return { record: validated, created: true };
     } catch (error) {
       try {
@@ -1655,33 +1664,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       validatedWorkItemId,
       validatedRunId,
     );
-    const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
-    const updated = connectedRunRecordV2Schema.parse({
-      ...record,
-      lifecycle: {
-        status: "terminal",
-        started_at: record.lifecycle.started_at,
-        updated_at: completedAt,
-        completed_at: completedAt,
-        terminal,
-      },
-    });
-
-    if (record.lifecycle.status === "terminal") {
-      if (JSON.stringify(record.lifecycle.terminal) !== JSON.stringify(terminal)) {
-        throw new ControllerConflictError(
-          "idempotency_conflict",
-          validatedWorkItemId,
-          "A terminal connected run cannot be completed with a different outcome.",
-        );
-      }
-      return record;
-    }
-
-    const paths = this.connectedRunPaths(validatedWorkItemId, validatedRunId);
-    await this.writeJsonAtomically(paths.run, updated);
-    await this.releaseConnectedRunGuardForRecord(updated);
-    return updated;
+    return this.terminalizeConnectedRun(record, terminal);
   }
 
   async appendConnectedRunEvent(
@@ -8765,7 +8748,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const actorMatches =
       intent.actor.kind === "connected_run" &&
       intent.actor.connected_run_id === record.connected_run_id &&
-      isDeepStrictEqual(intent.actor.provenance, record.provenance);
+      (intent.kind === "run_launched" ||
+        isDeepStrictEqual(intent.actor.provenance, record.provenance));
     const detailsMatch =
       intent.source.kind === "connected_run" &&
       intent.details.kind === intent.kind &&
@@ -8799,7 +8783,8 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const actorMatches =
       intent.actor.kind === "shaping_run" &&
       intent.actor.shaping_run_id === record.shaping_run_id &&
-      isDeepStrictEqual(intent.actor.provenance, record.provenance);
+      (intent.kind === "run_launched" ||
+        isDeepStrictEqual(intent.actor.provenance, record.provenance));
     const detailsMatch =
       intent.source.kind === "shaping_run" &&
       intent.details.kind === intent.kind &&
@@ -11343,7 +11328,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         "A different connected run launch already holds the item guard.",
       );
     }
-    return { record: existing ?? guard.record, created: false };
+    const record = existing ?? guard.record;
+    await this.ensureConnectedRunLaunchEvent(guard.record);
+    return { record, created: false };
   }
 
   private async readConnectedRunGuard(
@@ -11585,6 +11572,222 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     });
   }
 
+  private async buildConnectedRunLaunchIntent(
+    record: ConnectedRunRecordV2,
+    currentInput?: WorkItem,
+  ): Promise<SemanticEventIntentV1> {
+    const workItemId = record.mission.identity.work_item_id;
+    const current = currentInput ?? (await this.readValidated(workItemId));
+    if (current === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Work item ${workItemId} was not found for connected-run launch publication.`,
+      );
+    }
+    const source = {
+      kind: "connected_run" as const,
+      connected_run_id: record.connected_run_id,
+      expected_lifecycle_status: record.lifecycle.status,
+      mission_content_sha256: record.mission.content_sha256,
+    };
+    const kind = "run_launched" as const;
+    const slot = "run-launch";
+    const missionPath = workspaceRelativePosixPathSchema.parse(
+      record.mission.path,
+    );
+    await this.assertSafeWorkspaceDirectoryComponents(
+      posix.dirname(missionPath),
+    );
+    const missionBytes = await this.readRequiredArtifactBytes(
+      join(this.workspaceRoot, ...missionPath.split("/")),
+    );
+    return semanticEventIntentSchema.parse({
+      schema_version: 1,
+      intent_id: deriveSemanticIntentId({ source, kind, slot }),
+      source,
+      slot,
+      kind,
+      work_item_id: workItemId,
+      binding: {
+        kind: "governed",
+        governed_tuple: record.governed_tuple,
+        phase: record.mission.identity.phase,
+        status: current.state.status,
+      },
+      run: {
+        family: "connected",
+        connected_run_id: record.connected_run_id,
+        phase: record.mission.identity.phase,
+      },
+      actor: {
+        kind: "connected_run",
+        connected_run_id: record.connected_run_id,
+        provenance: record.provenance,
+      },
+      outcome: `Created durable connected ${record.mission.identity.phase} run attempt.`,
+      occurred_at: record.lifecycle.started_at,
+      evidence: [
+        {
+          kind: "mission",
+          path: missionPath,
+          expected_content_sha256: this.hashArtifactSource(missionBytes),
+        },
+      ],
+      action: null,
+      details: {
+        kind,
+        run_family: "connected",
+        phase: record.mission.identity.phase,
+        run_id: record.connected_run_id,
+        lifecycle_status: record.lifecycle.status,
+      },
+    });
+  }
+
+  private async buildConnectedRunFinishedIntent(
+    record: ConnectedRunRecordV2,
+  ): Promise<SemanticEventIntentV1> {
+    const workItemId = record.mission.identity.work_item_id;
+    if (
+      record.lifecycle.status !== "terminal" ||
+      record.lifecycle.completed_at === null ||
+      record.lifecycle.terminal === null
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Connected run finish publication requires an exact terminal record.",
+      );
+    }
+    const current = await this.readValidated(workItemId);
+    if (current === null) {
+      throw new ControllerConflictError(
+        "work_item_not_found",
+        workItemId,
+        `Work item ${workItemId} was not found for connected-run finish publication.`,
+      );
+    }
+    const source = {
+      kind: "connected_run" as const,
+      connected_run_id: record.connected_run_id,
+      expected_lifecycle_status: "terminal" as const,
+      mission_content_sha256: record.mission.content_sha256,
+    };
+    const kind = "run_finished" as const;
+    const slot = "run-finish";
+    const runPath = `.founder/${CONNECTED_RUNS_DIRECTORY}/${workItemId}/${record.connected_run_id}/${CONNECTED_RUN_FILE}`;
+    const runSource = `${JSON.stringify(record, null, 2)}\n`;
+    return semanticEventIntentSchema.parse({
+      schema_version: 1,
+      intent_id: deriveSemanticIntentId({ source, kind, slot }),
+      source,
+      slot,
+      kind,
+      work_item_id: workItemId,
+      binding: {
+        kind: "governed",
+        governed_tuple: record.governed_tuple,
+        phase: record.mission.identity.phase,
+        status: current.state.status,
+      },
+      run: {
+        family: "connected",
+        connected_run_id: record.connected_run_id,
+        phase: record.mission.identity.phase,
+      },
+      actor: {
+        kind: "connected_run",
+        connected_run_id: record.connected_run_id,
+        provenance: record.provenance,
+      },
+      outcome: `Connected ${record.mission.identity.phase} run finished with ${record.lifecycle.terminal.outcome}.`,
+      occurred_at: record.lifecycle.completed_at,
+      evidence: [
+        {
+          kind: "connected_run",
+          path: runPath,
+          expected_content_sha256: this.hashArtifactSource(runSource),
+        },
+      ],
+      action: null,
+      details: {
+        kind,
+        run_family: "connected",
+        phase: record.mission.identity.phase,
+        run_id: record.connected_run_id,
+        terminal_outcome: record.lifecycle.terminal.outcome,
+        partial: record.lifecycle.terminal.partial,
+      },
+    });
+  }
+
+  private async ensureConnectedRunLaunchEvent(
+    record: ConnectedRunRecordV2,
+  ): Promise<void> {
+    const workItemId = record.mission.identity.work_item_id;
+    const existing = (
+      await this.readSemanticEventIntentFiles(workItemId)
+    ).find(
+      (intent) =>
+        intent.kind === "run_launched" &&
+        intent.source.kind === "connected_run" &&
+        intent.source.connected_run_id === record.connected_run_id,
+    );
+    const intent = existing ?? (await this.buildConnectedRunLaunchIntent(record));
+    if (existing === undefined) {
+      await this.writeSemanticEventIntents(workItemId, [intent]);
+    }
+    if (
+      (await this.readConnectedRun(workItemId, record.connected_run_id)) !==
+      null
+    ) {
+      await this.publishSemanticEventIntent(workItemId, intent.intent_id);
+    }
+  }
+
+  private async terminalizeConnectedRun(
+    record: ConnectedRunRecordV2,
+    terminal: ConnectedRunTerminal,
+  ): Promise<ConnectedRunRecordV2> {
+    const workItemId = record.mission.identity.work_item_id;
+    let updated = record;
+    if (record.lifecycle.status === "terminal") {
+      if (!isDeepStrictEqual(record.lifecycle.terminal, terminal)) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          workItemId,
+          "A terminal connected run cannot be completed with a different outcome.",
+        );
+      }
+    } else {
+      const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
+      updated = connectedRunRecordV2Schema.parse({
+        ...record,
+        lifecycle: {
+          status: "terminal",
+          started_at: record.lifecycle.started_at,
+          updated_at: completedAt,
+          completed_at: completedAt,
+          terminal,
+        },
+      });
+    }
+
+    await this.ensureConnectedRunLaunchEvent(record);
+    const finishIntent = await this.buildConnectedRunFinishedIntent(updated);
+    await this.writeSemanticEventIntents(workItemId, [finishIntent]);
+    if (record.lifecycle.status !== "terminal") {
+      await this.writeJsonAtomically(
+        this.connectedRunPaths(workItemId, record.connected_run_id).run,
+        updated,
+      );
+    }
+    await this.releaseConnectedRunGuardForRecord(updated);
+    await this.publishSemanticEventIntent(workItemId, finishIntent.intent_id);
+    return updated;
+  }
+
   private async reconcileConnectedRunItem(
     workItemId: string,
     itemDirectory: string,
@@ -11602,7 +11805,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           "The launch was interrupted before its run directory was published.",
         );
         await this.publishConnectedRunDirectory(interrupted);
-        await this.releaseConnectedRunGuard(guard);
+        await this.terminalizeConnectedRun(
+          interrupted,
+          interrupted.lifecycle.terminal!,
+        );
       }
     }
 
@@ -11623,8 +11829,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const reconciled: ConnectedRunRecordV2[] = [];
     for (const storedRecord of records) {
       if (storedRecord.lifecycle.status === "terminal") {
-        await this.releaseConnectedRunGuardForRecord(storedRecord);
-        reconciled.push(storedRecord);
+        reconciled.push(
+          await this.terminalizeConnectedRun(
+            storedRecord,
+            storedRecord.lifecycle.terminal!,
+          ),
+        );
         continue;
       }
 
@@ -11664,9 +11874,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           ? "The connected run had no recoverable process identity."
           : "The connected agent process was not running during recovery.",
       );
-      await this.writeJsonAtomically(paths.run, interrupted);
-      await this.releaseConnectedRunGuardForRecord(interrupted);
-      reconciled.push(interrupted);
+      reconciled.push(
+        await this.terminalizeConnectedRun(
+          record,
+          interrupted.lifecycle.terminal!,
+        ),
+      );
     }
     return reconciled;
   }

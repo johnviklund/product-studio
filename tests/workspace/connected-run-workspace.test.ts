@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   mkdtemp,
   mkdir,
@@ -39,6 +40,10 @@ const defaults: ExecutionDefaultsV1 = {
   mcp: "forbidden",
   credentials: "forbidden",
 };
+const missionSources = {
+  execute: `${JSON.stringify({ phase: "execute", fixture: true }, null, 2)}\n`,
+  review: `${JSON.stringify({ phase: "review", fixture: true }, null, 2)}\n`,
+} as const;
 
 async function createWorkspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "product-studio-connected-run-"));
@@ -105,6 +110,20 @@ async function createWorkspace(): Promise<string> {
     )}\n`,
     "utf8",
   );
+  for (const phase of ["execute", "review"] as const) {
+    const missionDirectory = join(
+      founderDirectory,
+      "missions",
+      workItemId,
+      `${phase}-1-1-0`,
+    );
+    await mkdir(missionDirectory, { recursive: true });
+    await writeFile(
+      join(missionDirectory, "mission.json"),
+      missionSources[phase],
+      "utf8",
+    );
+  }
   return root;
 }
 
@@ -155,7 +174,9 @@ function connectedRun(
         attempt: 0,
       },
       path: `.founder/missions/${workItemId}/${phase}-1-1-0/mission.json`,
-      content_sha256: "a".repeat(64),
+      content_sha256: createHash("sha256")
+        .update(missionSources[phase])
+        .digest("hex"),
       source_commit: "b".repeat(40),
     },
     governed_tuple: {
@@ -252,6 +273,21 @@ function runDirectory(root: string, connectedRunId = firstRunId): string {
     "connected-runs",
     workItemId,
     connectedRunId,
+  );
+}
+
+async function semanticEvents(root: string): Promise<unknown[]> {
+  const directory = join(
+    root,
+    ".founder",
+    "semantic-events",
+    workItemId,
+    "events",
+  );
+  return Promise.all(
+    (await readdir(directory)).map(async (entry) =>
+      JSON.parse(await readFile(join(directory, entry), "utf8")),
+    ),
   );
 }
 
@@ -653,10 +689,10 @@ describe("connected-run workspace storage", () => {
     }
     const missionsRoot = join(root, ".founder", "missions");
     const outside = join(root, "outside-review-parent");
-    await mkdir(missionsRoot, { recursive: true });
+    await workspace.createConnectedRun(review);
+    await rm(join(missionsRoot, workItemId), { recursive: true });
     await mkdir(outside);
     await symlink(outside, join(missionsRoot, workItemId), "dir");
-    await workspace.createConnectedRun(review);
     await workspace.startConnectedRun(
       workItemId,
       firstRunId,
@@ -836,6 +872,34 @@ describe("connected-run workspace storage", () => {
     await expect(
       workspace.completeConnectedRun(workItemId, firstRunId, terminal),
     ).resolves.toEqual(completed);
+    expect(await semanticEvents(root)).toMatchObject([
+      {
+        stream_sequence: 1,
+        kind: "run_launched",
+        details: {
+          lifecycle_status: "starting",
+          run_id: firstRunId,
+        },
+        evidence: [
+          {
+            kind: "mission",
+            path: `.founder/missions/${workItemId}/execute-1-1-0/mission.json`,
+          },
+        ],
+      },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: {
+          terminal_outcome: "failed",
+          partial: true,
+          run_id: firstRunId,
+        },
+        actor: {
+          provenance: { effective_model: modelB },
+        },
+      },
+    ]);
     await expect(
       workspace.completeConnectedRun(workItemId, firstRunId, {
         outcome: "cancelled",
@@ -862,6 +926,16 @@ describe("connected-run workspace storage", () => {
     });
     await workspace.createConnectedRun(connectedRun());
     await rm(runDirectory(root), { recursive: true });
+    await rm(
+      join(
+        root,
+        ".founder",
+        "semantic-events",
+        workItemId,
+        "events",
+        "0000000000000001.json",
+      ),
+    );
 
     const [recovered] = await workspace.reconcileConnectedRuns();
     expect(recovered.lifecycle).toMatchObject({
@@ -869,6 +943,14 @@ describe("connected-run workspace storage", () => {
       terminal: { outcome: "interrupted", partial: true },
     });
     expect(recovered.lifecycle.terminal?.outcome).not.toBe("completed");
+    expect(await semanticEvents(root)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "interrupted", partial: true },
+      },
+    ]);
     await expect(
       readFile(
         join(
@@ -900,6 +982,9 @@ describe("connected-run workspace storage", () => {
     );
     const [live] = await liveWorkspace.reconcileConnectedRuns();
     expect(live.lifecycle.status).toBe("running");
+    expect(await semanticEvents(liveRoot)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+    ]);
 
     const goneRoot = await createWorkspace();
     const goneWorkspace = new ProductWorkspace(goneRoot, {
@@ -921,5 +1006,13 @@ describe("connected-run workspace storage", () => {
       terminal: { outcome: "interrupted", partial: true },
     });
     expect(gone.lifecycle.terminal?.outcome).not.toBe("completed");
+    expect(await semanticEvents(goneRoot)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "interrupted", partial: true },
+      },
+    ]);
   });
 });

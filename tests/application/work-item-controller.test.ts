@@ -23,6 +23,7 @@ import {
   compilePatchMission,
   compileReviewMission,
   hashHistoricalMissionContentV6,
+  serializeMissionPackage,
   type ExecuteMissionPackage,
   type ExecuteReviewSubject,
   type HistoricalExecuteMissionPackageV6,
@@ -2049,6 +2050,16 @@ async function createPhaseConnectedFixture(
           paths,
         });
   const missionPath = paths.task_path.replace(/TASK\.md$/u, "mission.json");
+  const durableMissionPath = join(
+    fixture.repository.workspaceRoot,
+    ...missionPath.split("/"),
+  );
+  await mkdir(dirname(durableMissionPath), { recursive: true });
+  await writeFile(
+    durableMissionPath,
+    serializeMissionPackage(mission),
+    "utf8",
+  );
   const originalReadMissionPackage =
     fixture.repository.readMissionPackage.bind(fixture.repository);
   fixture.repository.readMissionPackage = async (requestedIdentity) =>
