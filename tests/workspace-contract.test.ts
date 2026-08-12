@@ -68,6 +68,7 @@ import {
 import { deriveManualShapingProductionId } from "../src/domain/shaping-run";
 import {
   deriveSemanticIntentId,
+  type SemanticEventIntentV1,
   type SemanticEventV1,
 } from "../src/domain/semantic-event";
 import {
@@ -1415,9 +1416,53 @@ describe("ProductWorkspace", () => {
       interruptedDecision,
       { contracted: true },
     );
+    const semanticSource = {
+      kind: "shaping_decision" as const,
+      decision_id: prepared.writtenIntent.intent.decision_id,
+      expected_outcome: "applied" as const,
+    };
+    const semanticKind = "human_decision_recorded" as const;
+    const semanticSlot = "start-brainstorm-decision";
+    const semanticIntent: SemanticEventIntentV1 = {
+      schema_version: 1 as const,
+      intent_id: deriveSemanticIntentId({
+        source: semanticSource,
+        kind: semanticKind,
+        slot: semanticSlot,
+      }),
+      source: semanticSource,
+      slot: semanticSlot,
+      kind: semanticKind,
+      work_item_id: firstId,
+      binding: {
+        kind: "shaping" as const,
+        identity: prepared.identity,
+      },
+      run: null,
+      actor: { kind: "founder" as const },
+      outcome: "Started Brainstorm shaping.",
+      occurred_at: prepared.manifest.started_at,
+      evidence: [
+        {
+          kind: "shaping_decision" as const,
+          path: `.founder/work-items/${firstId}/shaping-decisions/${prepared.writtenIntent.intent.decision_id}.intent.json`,
+          expected_content_sha256: hashSource(
+            prepared.writtenIntent.intent_source,
+          ),
+        },
+      ],
+      action: null,
+      details: {
+        kind: semanticKind,
+        decision: "start_brainstorm" as const,
+        disposition: "accepted" as const,
+        decision_sha256: prepared.writtenIntent.intent.decision_id,
+        result_content_sha256: null,
+      },
+    };
     await expect(
       interruptedDecision.commitShapingDecision(prepared.lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [semanticIntent],
         state: prepared.nextState,
         manifest: prepared.manifest,
       }),
@@ -1463,6 +1508,23 @@ describe("ProductWorkspace", () => {
         )
       ).filter((entry) => entry.endsWith(".json") && !entry.endsWith(".intent.json")),
     ).toHaveLength(1);
+    await expect(
+      replayWorkspace.reconcileShapingDecisionCommit(
+        replayLease,
+        prepared.writtenIntent.intent.decision_id,
+      ),
+    ).resolves.toEqual(reconciled);
+    expect(
+      await readdir(
+        join(
+          replayRoot,
+          ".founder",
+          "semantic-events",
+          firstId,
+          "events",
+        ),
+      ),
+    ).toEqual(["0000000000000001.json"]);
     await replayWorkspace.releaseControllerLease(replayLease);
   });
 

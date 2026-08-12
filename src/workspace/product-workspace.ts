@@ -5801,6 +5801,13 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       ? stringify(nextGoal)
       : validatedLease.acquired_goal_bytes;
     const workItemId = validatedLease.work_item.goal.work_item_id;
+    const semanticEventIntents = this.validateCommitSemanticEventIntents(
+      validatedLease,
+      workItemSchema.parse({ goal: nextGoal, state: nextState }),
+      "shaping_decision",
+      manifest.decision_id,
+      input.semantic_event_intents,
+    );
     await this.assertControllerLeaseOwnership(validatedLease);
 
     const pending = await this.findPendingShapingDecisionManifest(workItemId);
@@ -5828,10 +5835,16 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
             `Work item ${workItemId} disappeared after its shaping decision committed.`,
           );
         }
-        return {
+        await this.writeSemanticEventIntents(
+          workItemId,
+          semanticEventIntents,
+        );
+        const replay = {
           work_item: this.withoutActiveRun(current),
           manifest: existing,
         };
+        await this.publishSemanticEventIntents(semanticEventIntents);
+        return replay;
       }
       if (
         existing.outcome === "pending" &&
@@ -5881,6 +5894,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
+    await this.writeSemanticEventIntents(workItemId, semanticEventIntents);
     await this.writeInitialShapingDecisionManifest(manifest);
     await this.afterShapingDecisionPendingManifestWritten();
     await this.writeShapingDecisionArtifacts(intent, true);
@@ -5891,10 +5905,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       completed_at: new Date().toISOString(),
     });
     await this.writeShapingDecisionManifest(appliedManifest);
-    return {
+    const committed = {
       work_item: workItemSchema.parse({ goal: nextGoal, state: nextState }),
       manifest: appliedManifest,
     };
+    await this.publishSemanticEventIntents(semanticEventIntents);
+    return committed;
   }
 
   async reconcileShapingDecisionCommit(
@@ -5934,10 +5950,16 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           `Work item ${workItemId} disappeared after its shaping decision committed.`,
         );
       }
-      return {
+      const replay = {
         work_item: this.withoutActiveRun(current),
         manifest,
       };
+      await this.publishStoredSemanticEventIntentsForSource(
+        workItemId,
+        "shaping_decision",
+        decisionId,
+      );
+      return replay;
     }
     if (manifest.outcome !== "pending") {
       throw new ControllerConflictError(
@@ -6005,7 +6027,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       completed_at: new Date().toISOString(),
     });
     await this.writeShapingDecisionManifest(appliedManifest);
-    return {
+    const committed = {
       work_item: this.parseWorkItemBytes(
         committedGoalBytes,
         committedStateBytes,
@@ -6013,6 +6035,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       ),
       manifest: appliedManifest,
     };
+    await this.publishStoredSemanticEventIntentsForSource(
+      workItemId,
+      "shaping_decision",
+      decisionId,
+    );
+    return committed;
   }
 
   async commitPlanApproval(
@@ -6026,6 +6054,13 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     );
     const nextState = workItemStateSchema.parse(input.state);
     const workItemId = validatedLease.work_item.goal.work_item_id;
+    const semanticEventIntents = this.validateCommitSemanticEventIntents(
+      validatedLease,
+      workItemSchema.parse({ goal: nextGoal, state: nextState }),
+      "plan_approval",
+      manifest.approval_id,
+      input.semantic_event_intents,
+    );
     await this.assertControllerLeaseOwnership(validatedLease);
 
     const pending = await this.findPendingPlanApprovalManifest(workItemId);
@@ -6059,10 +6094,16 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
             `Work item ${workItemId} disappeared after its Plan approval committed.`,
           );
         }
-        return {
+        await this.writeSemanticEventIntents(
+          workItemId,
+          semanticEventIntents,
+        );
+        const replay = {
           work_item: this.withoutActiveRun(current),
           manifest: existing,
         };
+        await this.publishSemanticEventIntents(semanticEventIntents);
+        return replay;
       }
       if (
         existing.outcome === "pending" &&
@@ -6111,6 +6152,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       );
     }
 
+    await this.writeSemanticEventIntents(workItemId, semanticEventIntents);
     await this.writeInitialPlanApprovalManifest(manifest);
     await this.afterPlanApprovalPendingManifestWritten();
     await this.writePlanApprovalArtifacts(intent, true);
@@ -6121,10 +6163,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       completed_at: new Date().toISOString(),
     });
     await this.writePlanApprovalManifest(appliedManifest);
-    return {
+    const committed = {
       work_item: workItemSchema.parse({ goal: nextGoal, state: nextState }),
       manifest: appliedManifest,
     };
+    await this.publishSemanticEventIntents(semanticEventIntents);
+    return committed;
   }
 
   async reconcilePlanApprovalCommit(
@@ -6170,10 +6214,16 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           `Work item ${workItemId} disappeared after its Plan approval committed.`,
         );
       }
-      return {
+      const replay = {
         work_item: this.withoutActiveRun(current),
         manifest,
       };
+      await this.publishStoredSemanticEventIntentsForSource(
+        workItemId,
+        "plan_approval",
+        approvalId,
+      );
+      return replay;
     }
     if (manifest.outcome !== "pending") {
       throw new ControllerConflictError(
@@ -6243,7 +6293,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       completed_at: new Date().toISOString(),
     });
     await this.writePlanApprovalManifest(appliedManifest);
-    return {
+    const committed = {
       work_item: this.parseWorkItemBytes(
         committedGoalBytes,
         committedStateBytes,
@@ -6251,6 +6301,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       ),
       manifest: appliedManifest,
     };
+    await this.publishStoredSemanticEventIntentsForSource(
+      workItemId,
+      "plan_approval",
+      approvalId,
+    );
+    return committed;
   }
 
   async commitControllerMutation(
@@ -10139,6 +10195,104 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       }
     }
     return intents;
+  }
+
+  private validateCommitSemanticEventIntents(
+    lease: ControllerLease,
+    nextItem: WorkItem,
+    sourceKind: "shaping_decision" | "plan_approval",
+    sourceId: string,
+    inputs: SemanticEventIntentV1[],
+  ): SemanticEventIntentV1[] {
+    const workItemId = lease.work_item.goal.work_item_id;
+    const intents = z.array(semanticEventIntentSchema).parse(inputs);
+    if (new Set(intents.map((intent) => intent.intent_id)).size !== intents.length) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Commit semantic intents must have unique identities.",
+      );
+    }
+    for (const intent of intents) {
+      const sourceMatches =
+        sourceKind === "shaping_decision"
+          ? intent.source.kind === "shaping_decision" &&
+            intent.source.decision_id === sourceId &&
+            intent.source.expected_outcome === "applied"
+          : intent.source.kind === "plan_approval" &&
+            intent.source.approval_id === sourceId &&
+            intent.source.expected_outcome === "applied";
+      const transitionBindings =
+        intent.details.kind === "workflow_transitioned"
+          ? [intent.details.before, intent.details.after]
+          : [];
+      if (
+        intent.work_item_id !== workItemId ||
+        !sourceMatches ||
+        !this.semanticBindingMatchesEitherItem(
+          intent.binding,
+          lease.work_item,
+          nextItem,
+        ) ||
+        transitionBindings.some(
+          (binding) =>
+            !this.semanticBindingMatchesEitherItem(
+              binding,
+              lease.work_item,
+              nextItem,
+            ),
+        )
+      ) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          workItemId,
+          `Semantic intent ${intent.intent_id} must bind the exact ${sourceKind} source and before/after work item.`,
+        );
+      }
+    }
+    return intents;
+  }
+
+  private semanticBindingMatchesEitherItem(
+    binding: SemanticEventIntentV1["binding"],
+    before: WorkItem,
+    after: WorkItem,
+  ): boolean {
+    if (binding.kind === "shaping") {
+      return binding.identity.work_item_id === before.goal.work_item_id;
+    }
+    return this.semanticGovernedBindingMatchesEitherItem(
+      binding,
+      before,
+      after,
+    );
+  }
+
+  private async publishSemanticEventIntents(
+    intents: SemanticEventIntentV1[],
+  ): Promise<void> {
+    for (const intent of intents) {
+      await this.publishSemanticEventIntent(
+        intent.work_item_id,
+        intent.intent_id,
+      );
+    }
+  }
+
+  private async publishStoredSemanticEventIntentsForSource(
+    workItemId: string,
+    sourceKind: "shaping_decision" | "plan_approval",
+    sourceId: string,
+  ): Promise<void> {
+    const intents = (await this.readSemanticEventIntentFiles(workItemId)).filter(
+      (intent) =>
+        sourceKind === "shaping_decision"
+          ? intent.source.kind === "shaping_decision" &&
+            intent.source.decision_id === sourceId
+          : intent.source.kind === "plan_approval" &&
+            intent.source.approval_id === sourceId,
+    );
+    await this.publishSemanticEventIntents(intents);
   }
 
   private semanticGovernedBindingMatchesEitherItem(
