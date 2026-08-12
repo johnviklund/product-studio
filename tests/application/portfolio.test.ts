@@ -1,4 +1,5 @@
 import {
+  access,
   mkdtemp,
   mkdir,
   readFile,
@@ -580,6 +581,13 @@ async function createWorkspace(productName: string): Promise<string> {
     "utf8",
   );
   return root;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  return access(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 async function createService(
@@ -3333,7 +3341,7 @@ describe("PortfolioService", () => {
           "events",
         ),
       ).then((entries) => entries.length),
-    ).toBe(2);
+    ).toBe(4);
     const listing = await service.listShapingArtifacts(sourceId, workItemId);
     expect(currentPhaseArtifact(listing.artifacts, "brainstorm").result).toBeNull();
     expect(listing.runs).toContainEqual(
@@ -5528,6 +5536,17 @@ describe("PortfolioService", () => {
       const item = await repository.read(created.goal.work_item_id);
       return item?.state.attention?.kind;
     }).toBe("missing_permission");
+    await expect.poll(() =>
+      pathExists(
+        join(
+          root,
+          ".founder",
+          "work-items",
+          created.goal.work_item_id,
+          ".controller.lock",
+        ),
+      ),
+    ).toBe(false);
     const attention = (await repository.read(created.goal.work_item_id))?.state
       .attention;
     expect(attention).toMatchObject({
@@ -5768,6 +5787,17 @@ describe("PortfolioService", () => {
         ? attention[0].entry.attention.kind
         : null;
     }).toBe("missing_permission");
+    await expect.poll(() =>
+      pathExists(
+        join(
+          root,
+          ".founder",
+          "work-items",
+          created.goal.work_item_id,
+          ".controller.lock",
+        ),
+      ),
+    ).toBe(false);
     const attention = (await connectedService.listAttention())[0]!;
     expect(attention).toMatchObject({
       kind: "governed",

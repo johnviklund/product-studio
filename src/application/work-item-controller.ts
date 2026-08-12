@@ -89,6 +89,16 @@ import {
   type ShapingRunRecordV1,
 } from "../domain/shaping-run";
 import {
+  deriveSemanticIntentId,
+  semanticEventIntentSchema,
+  type SemanticAuthoritativeSourceV1,
+  type SemanticEventDetailsV1,
+  type SemanticEventIntentV1,
+  type SemanticEvidenceSelectorV1,
+  type SemanticHumanDecisionV1,
+  type SemanticWorkflowBindingV1,
+} from "../domain/semantic-event";
+import {
   ControllerConflictError,
   InvalidWorkspaceError,
   acceptPatchPlanInputSchema,
@@ -809,6 +819,17 @@ export class WorkItemController {
             `Command authorization ${runId} does not match durable attention.`,
           );
         }
+        await this.republishSemanticEventIntents([
+          this.attentionRequestedIntent({
+            before: lease.work_item,
+            after: lease.work_item,
+            manifest: existing,
+            attention_kind: "command_authorization",
+            reference_sha256: preLockProposal.proposal_sha256,
+            outcome:
+              "Founder attention is required for command authorization.",
+          }),
+        ]);
         return {
           work_item: lease.work_item,
           manifest: existing,
@@ -885,7 +906,17 @@ export class WorkItemController {
         command_authorization: proposal,
       };
       const committed = await this.repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.attentionRequestedIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest,
+            attention_kind: "command_authorization",
+            reference_sha256: proposal.proposal_sha256,
+            outcome:
+              "Founder attention is required for command authorization.",
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -955,6 +986,16 @@ export class WorkItemController {
             `Command-authorization decision ${runId} does not match durable state.`,
           );
         }
+        await this.republishSemanticEventIntents([
+          this.permissionDecidedIntent({
+            before: lease.work_item,
+            after: lease.work_item,
+            manifest: existing,
+            decision: "allow_once",
+            operation_sha256: validatedInput.proposal_sha256,
+            next_attempt: nextAttempt,
+          }),
+        ]);
         return {
           work_item: lease.work_item,
           manifest: existing,
@@ -1047,7 +1088,16 @@ export class WorkItemController {
         command_authorization: proposal,
       };
       const committed = await this.repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.permissionDecidedIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest,
+            decision: "allow_once",
+            operation_sha256: proposal.proposal_sha256,
+            next_attempt: nextAttempt,
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -1194,6 +1244,9 @@ export class WorkItemController {
         this.assertPlanApprovalManifestMatchesIntent(
           storedManifest,
           storedIntent,
+        );
+        await this.republishSemanticEventIntents(
+          this.planApprovalSemanticIntents(storedIntent),
         );
         return this.planApprovalResult(storedIntent, storedManifest);
       }
@@ -1397,6 +1450,9 @@ export class WorkItemController {
         this.assertShapingDecisionManifestMatchesIntent(
           storedManifest,
           storedIntent,
+        );
+        await this.republishSemanticEventIntents(
+          this.shapingDecisionSemanticIntents(storedIntent),
         );
         return this.shapingDecisionResult(
           this.workItemFromShapingIntent(storedIntent),
@@ -1631,6 +1687,17 @@ export class WorkItemController {
           lease.work_item.state.input_revision === nextInputRevision &&
           lease.work_item.state.attempt === 0
         ) {
+          await this.republishSemanticEventIntents([
+            this.goalContractRevisedIntent({
+              before: lease.work_item,
+              after: lease.work_item,
+              manifest: existing,
+              previous_goal_version:
+                validatedInput.expected_goal_version ?? null,
+              previous_input_revision:
+                validatedInput.expected_input_revision ?? null,
+            }),
+          ]);
           return { work_item: lease.work_item, manifest: existing };
         }
         throw this.conflict(
@@ -1701,7 +1768,17 @@ export class WorkItemController {
       );
 
       return await this.repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.goalContractRevisedIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest,
+            previous_goal_version:
+              validatedInput.expected_goal_version ?? null,
+            previous_input_revision:
+              validatedInput.expected_input_revision ?? null,
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -1766,6 +1843,31 @@ export class WorkItemController {
             validatedInput.expected_input_revision &&
           lease.work_item.state.attempt === validatedInput.attempt
         ) {
+          const patchCycle = lease.work_item.state.patch_cycle;
+          if (patchCycle === undefined) {
+            throw this.conflict(
+              "repair_required",
+              validatedId,
+              "A workflow-transition replay requires patch_cycle.",
+            );
+          }
+          await this.republishSemanticEventIntents([
+            this.workflowTransitionIntent({
+              before: lease.work_item,
+              after: lease.work_item,
+              manifest: existing,
+              before_binding: this.governedSemanticBindingForTuple(
+                validatedInput.expected_phase,
+                validatedInput.expected_status,
+                {
+                  goal_version: validatedInput.expected_goal_version,
+                  input_revision: validatedInput.expected_input_revision,
+                  attempt: validatedInput.attempt,
+                  patch_cycle: patchCycle,
+                },
+              ),
+            }),
+          ]);
           return { work_item: lease.work_item, manifest: existing };
         }
         throw this.conflict(
@@ -1826,7 +1928,13 @@ export class WorkItemController {
       );
 
       return await this.repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.workflowTransitionIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest,
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest,
@@ -1988,7 +2096,19 @@ export class WorkItemController {
         activeRun.acquired_at,
       );
       const mutation = await repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.workflowTransitionFromExpectation({
+            after: nextItem,
+            manifest: pendingManifest,
+            expected_phase: "execute",
+            expected_status: "active",
+            expected_goal_version: validatedInput.expected_goal_version,
+            expected_input_revision:
+              validatedInput.expected_input_revision,
+            attempt: validatedInput.attempt,
+            expected_patch_cycle: lease.work_item.state.patch_cycle ?? 0,
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: pendingManifest,
@@ -2168,7 +2288,16 @@ export class WorkItemController {
         },
       });
       const mutation = await repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.attentionRequestedIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest: pendingManifest,
+            attention_kind: nextItem.state.attention!.kind,
+            reference_sha256: resultContentSha256,
+            outcome: "Founder attention is required for the Review result.",
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: pendingManifest,
@@ -2387,6 +2516,26 @@ export class WorkItemController {
             `Review import drift recovery ${runId} does not match the durable work-item attention.`,
           );
         }
+        await this.republishSemanticEventIntents([
+          this.controllerHumanDecisionIntent({
+            before: lease.work_item,
+            after: lease.work_item,
+            manifest: existing,
+            decision: "accept_review_import_drift",
+            disposition: "accepted",
+            decision_sha256: proposal.proposal_sha256,
+            result_content_sha256: proposal.result_content_sha256,
+            outcome: "Founder accepted the exact Review import drift recovery.",
+          }),
+          this.attentionRequestedIntent({
+            before: lease.work_item,
+            after: lease.work_item,
+            manifest: existing,
+            attention_kind: attention.kind,
+            reference_sha256: proposal.result_content_sha256,
+            outcome: "Founder attention is required for the recovered Review result.",
+          }),
+        ]);
         return {
           work_item: lease.work_item,
           manifest: existing,
@@ -2423,7 +2572,26 @@ export class WorkItemController {
         },
       });
       const mutation = await this.repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.controllerHumanDecisionIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest: pendingManifest,
+            decision: "accept_review_import_drift",
+            disposition: "accepted",
+            decision_sha256: proposal.proposal_sha256,
+            result_content_sha256: proposal.result_content_sha256,
+            outcome: "Founder accepted the exact Review import drift recovery.",
+          }),
+          this.attentionRequestedIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest: pendingManifest,
+            attention_kind: attention.kind,
+            reference_sha256: proposal.result_content_sha256,
+            outcome: "Founder attention is required for the recovered Review result.",
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: pendingManifest,
@@ -2529,6 +2697,30 @@ export class WorkItemController {
             validatedInput.expected_patch_cycle &&
           lease.work_item.state.attention === undefined
         ) {
+          await this.republishSemanticEventIntents([
+            this.workflowTransitionFromExpectation({
+              after: lease.work_item,
+              manifest: existing,
+              expected_phase: "review",
+              expected_status: "blocked",
+              expected_goal_version: validatedInput.expected_goal_version,
+              expected_input_revision:
+                validatedInput.expected_input_revision,
+              attempt: validatedInput.attempt,
+              expected_patch_cycle: validatedInput.expected_patch_cycle,
+            }),
+            this.controllerHumanDecisionIntent({
+              before: lease.work_item,
+              after: lease.work_item,
+              manifest: existing,
+              decision: "approve_review_result",
+              disposition: "accepted",
+              decision_sha256: approval.approval_sha256,
+              result_content_sha256:
+                validatedInput.expected_result_content_sha256,
+              outcome: "Founder approved the clean Review result.",
+            }),
+          ]);
           return { work_item: lease.work_item, manifest: existing };
         }
         throw this.conflict(
@@ -2689,17 +2881,41 @@ export class WorkItemController {
           ),
         },
       });
+      const pendingManifest = this.pendingManifest(
+        {
+          ...manifestIdentity,
+          review_result_approval: approval,
+        },
+        activeRun.acquired_at,
+      );
       return await this.repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.workflowTransitionFromExpectation({
+            after: nextItem,
+            manifest: pendingManifest,
+            expected_phase: "review",
+            expected_status: "blocked",
+            expected_goal_version: validatedInput.expected_goal_version,
+            expected_input_revision:
+              validatedInput.expected_input_revision,
+            attempt: validatedInput.attempt,
+            expected_patch_cycle: validatedInput.expected_patch_cycle,
+          }),
+          this.controllerHumanDecisionIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest: pendingManifest,
+            decision: "approve_review_result",
+            disposition: "accepted",
+            decision_sha256: approval.approval_sha256,
+            result_content_sha256:
+              validatedInput.expected_result_content_sha256,
+            outcome: "Founder approved the clean Review result.",
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
-        manifest: this.pendingManifest(
-          {
-            ...manifestIdentity,
-            review_result_approval: approval,
-          },
-          activeRun.acquired_at,
-        ),
+        manifest: pendingManifest,
       });
     } finally {
       await this.repository.releaseControllerLease(lease);
@@ -2799,6 +3015,7 @@ export class WorkItemController {
           existing,
           manifestIdentity,
           nextPatchCycle,
+          resultContentSha256,
         );
       }
 
@@ -2912,14 +3129,37 @@ export class WorkItemController {
           ),
         },
       });
+      const pendingManifest = this.pendingManifest(
+        manifestIdentity,
+        activeRun.acquired_at,
+      );
       return await this.repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.workflowTransitionFromExpectation({
+            after: nextItem,
+            manifest: pendingManifest,
+            expected_phase: "review",
+            expected_status: "blocked",
+            expected_goal_version: validatedInput.expected_goal_version,
+            expected_input_revision:
+              validatedInput.expected_input_revision,
+            attempt: validatedInput.attempt,
+            expected_patch_cycle: validatedInput.expected_patch_cycle,
+          }),
+          this.controllerHumanDecisionIntent({
+            before: lease.work_item,
+            after: nextItem,
+            manifest: pendingManifest,
+            decision: "accept_patch_plan",
+            disposition: "accepted",
+            decision_sha256: resultContentSha256,
+            result_content_sha256: resultContentSha256,
+            outcome: "Founder accepted the Review patch plan.",
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
-        manifest: this.pendingManifest(
-          manifestIdentity,
-          activeRun.acquired_at,
-        ),
+        manifest: pendingManifest,
       });
     } finally {
       await this.repository.releaseControllerLease(lease);
@@ -3089,14 +3329,27 @@ export class WorkItemController {
         input_revision: identity.input_revision,
         attempt: identity.attempt,
       };
+      const pendingManifest = this.pendingManifest(
+        manifestIdentity,
+        activeRun.acquired_at,
+      );
       const mutation = await repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: [
+          this.workflowTransitionFromExpectation({
+            after: nextItem,
+            manifest: pendingManifest,
+            expected_phase: "patch",
+            expected_status: "active",
+            expected_goal_version: validatedInput.expected_goal_version,
+            expected_input_revision:
+              validatedInput.expected_input_revision,
+            attempt: validatedInput.attempt,
+            expected_patch_cycle: validatedInput.expected_patch_cycle,
+          }),
+        ],
         goal: nextItem.goal,
         state: nextItem.state,
-        manifest: this.pendingManifest(
-          manifestIdentity,
-          activeRun.acquired_at,
-        ),
+        manifest: pendingManifest,
       });
       return {
         ...mutation,
@@ -3512,6 +3765,14 @@ export class WorkItemController {
             validatedInput,
           )
         ) {
+          await this.republishSemanticEventIntents(
+            this.connectedPermissionDenialIntents({
+              before: lease.work_item,
+              after: lease.work_item,
+              manifest: existing,
+              operation: validatedInput.operation,
+            }),
+          );
           return { work_item: lease.work_item, manifest: existing };
         }
         throw this.conflict(
@@ -3543,7 +3804,15 @@ export class WorkItemController {
         },
       });
       return await this.repository.commitControllerMutation(lease, {
-        semantic_event_intents: [],
+        semantic_event_intents: this.connectedPermissionDenialIntents({
+          before: lease.work_item,
+          after: nextItem,
+          manifest: this.pendingManifest(
+            manifestIdentity,
+            activeRun.acquired_at,
+          ),
+          operation: validatedInput.operation,
+        }),
         goal: nextItem.goal,
         state: nextItem.state,
         manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
@@ -3691,6 +3960,19 @@ export class WorkItemController {
         manifest_identity: retryManifestIdentity,
         next_attempt: nextAttempt,
         clear_attention: true,
+        build_semantic_event_intents: (after, manifest) => [
+          this.permissionDecidedIntent({
+            before: lease.work_item,
+            after,
+            manifest,
+            decision:
+              validatedInput.decision === "allow_once"
+                ? "allow_once"
+                : "retry_without_allowing",
+            operation_sha256: validatedInput.operation_sha256,
+            next_attempt: nextAttempt,
+          }),
+        ],
         validate_current: async () => {
           await this.validateConnectedPermissionResolution(
             validatedId,
@@ -3717,6 +3999,10 @@ export class WorkItemController {
     >;
     next_attempt: number;
     clear_attention: boolean;
+    build_semantic_event_intents?: (
+      after: WorkItem,
+      manifest: ControllerRunManifest,
+    ) => SemanticEventIntentV1[];
     validate_current: () => void | Promise<void>;
   }): Promise<ControllerMutationResult> {
     const existing = await this.repository.readControllerRunManifest(
@@ -3740,6 +4026,12 @@ export class WorkItemController {
           input.clear_attention,
         )
       ) {
+        await this.republishSemanticEventIntents(
+          input.build_semantic_event_intents?.(
+            input.lease.work_item,
+            existing,
+          ) ?? [],
+        );
         return { work_item: input.lease.work_item, manifest: existing };
       }
       throw this.conflict(
@@ -3766,14 +4058,16 @@ export class WorkItemController {
       goal: input.lease.work_item.goal,
       state: nextState,
     });
+    const manifest = this.pendingManifest(
+      input.manifest_identity,
+      input.active_run.acquired_at,
+    );
     return this.repository.commitControllerMutation(input.lease, {
-      semantic_event_intents: [],
+      semantic_event_intents:
+        input.build_semantic_event_intents?.(nextItem, manifest) ?? [],
       goal: nextItem.goal,
       state: nextItem.state,
-      manifest: this.pendingManifest(
-        input.manifest_identity,
-        input.active_run.acquired_at,
-      ),
+      manifest,
     });
   }
 
@@ -5626,7 +5920,7 @@ export class WorkItemController {
     });
   }
 
-  private reconcileStoredAcceptPatchPlan(
+  private async reconcileStoredAcceptPatchPlan(
     lease: ControllerLease,
     existingManifest: ControllerRunManifest,
     manifestIdentity: {
@@ -5639,7 +5933,8 @@ export class WorkItemController {
       attempt: number;
     },
     nextPatchCycle: number,
-  ): ControllerMutationResult {
+    resultContentSha256: string,
+  ): Promise<ControllerMutationResult> {
     if (
       manifestMatches(existingManifest, manifestIdentity) &&
       lease.work_item.state.phase === "patch" &&
@@ -5651,6 +5946,28 @@ export class WorkItemController {
       lease.work_item.state.patch_cycle === nextPatchCycle &&
       lease.work_item.state.attention === undefined
     ) {
+      await this.republishSemanticEventIntents([
+        this.workflowTransitionFromExpectation({
+          after: lease.work_item,
+          manifest: existingManifest,
+          expected_phase: "review",
+          expected_status: "blocked",
+          expected_goal_version: manifestIdentity.goal_version,
+          expected_input_revision: manifestIdentity.input_revision,
+          attempt: manifestIdentity.attempt,
+          expected_patch_cycle: nextPatchCycle - 1,
+        }),
+        this.controllerHumanDecisionIntent({
+          before: lease.work_item,
+          after: lease.work_item,
+          manifest: existingManifest,
+          decision: "accept_patch_plan",
+          disposition: "accepted",
+          decision_sha256: resultContentSha256,
+          result_content_sha256: resultContentSha256,
+          outcome: "Founder accepted the Review patch plan.",
+        }),
+      ]);
       return { work_item: lease.work_item, manifest: existingManifest };
     }
     throw this.conflict(
@@ -5795,6 +6112,18 @@ export class WorkItemController {
       lease.work_item.state.attention === undefined;
     if (existingManifest !== null) {
       if (manifestMatches(existingManifest, manifestIdentity) && isTargetState) {
+        await this.republishSemanticEventIntents([
+          this.workflowTransitionFromExpectation({
+            after: lease.work_item,
+            manifest: existingManifest,
+            expected_phase: "patch",
+            expected_status: "active",
+            expected_goal_version: input.expected_goal_version,
+            expected_input_revision: input.expected_input_revision,
+            attempt: input.attempt,
+            expected_patch_cycle: input.expected_patch_cycle,
+          }),
+        ]);
         return {
           work_item: lease.work_item,
           manifest: existingManifest,
@@ -5823,7 +6152,21 @@ export class WorkItemController {
       },
     });
     const mutation = await repository.commitControllerMutation(lease, {
-      semantic_event_intents: [],
+      semantic_event_intents: [
+        this.workflowTransitionFromExpectation({
+          after: nextItem,
+          manifest: this.pendingManifest(
+            manifestIdentity,
+            activeRun.acquired_at,
+          ),
+          expected_phase: "patch",
+          expected_status: "active",
+          expected_goal_version: input.expected_goal_version,
+          expected_input_revision: input.expected_input_revision,
+          attempt: input.attempt,
+          expected_patch_cycle: input.expected_patch_cycle,
+        }),
+      ],
       goal: nextItem.goal,
       state: nextItem.state,
       manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
@@ -5956,6 +6299,16 @@ export class WorkItemController {
         JSON.stringify(lease.work_item.state.attention) ===
           JSON.stringify(attention)
       ) {
+        await this.republishSemanticEventIntents([
+          this.attentionRequestedIntent({
+            before: lease.work_item,
+            after: lease.work_item,
+            manifest: existingManifest,
+            attention_kind: attention.kind,
+            reference_sha256: stored.evidence.result_content_sha256,
+            outcome: "Founder attention is required for the Review result.",
+          }),
+        ]);
         return {
           work_item: lease.work_item,
           manifest: existingManifest,
@@ -5981,11 +6334,24 @@ export class WorkItemController {
         ),
       },
     });
+    const pendingManifest = this.pendingManifest(
+      manifestIdentity,
+      activeRun.acquired_at,
+    );
     const mutation = await repository.commitControllerMutation(lease, {
-      semantic_event_intents: [],
+      semantic_event_intents: [
+        this.attentionRequestedIntent({
+          before: lease.work_item,
+          after: nextItem,
+          manifest: pendingManifest,
+          attention_kind: attention.kind,
+          reference_sha256: stored.evidence.result_content_sha256,
+          outcome: "Founder attention is required for the Review result.",
+        }),
+      ],
       goal: nextItem.goal,
       state: nextItem.state,
-      manifest: this.pendingManifest(manifestIdentity, activeRun.acquired_at),
+      manifest: pendingManifest,
     });
     return {
       ...mutation,
@@ -6048,6 +6414,18 @@ export class WorkItemController {
       lease.work_item.state.attempt === input.attempt;
     if (existingManifest !== null) {
       if (manifestMatches(existingManifest, manifestIdentity) && isTargetState) {
+        await this.republishSemanticEventIntents([
+          this.workflowTransitionFromExpectation({
+            after: lease.work_item,
+            manifest: existingManifest,
+            expected_phase: "execute",
+            expected_status: "active",
+            expected_goal_version: input.expected_goal_version,
+            expected_input_revision: input.expected_input_revision,
+            attempt: input.attempt,
+            expected_patch_cycle: lease.work_item.state.patch_cycle ?? 0,
+          }),
+        ]);
         return {
           work_item: lease.work_item,
           manifest: existingManifest,
@@ -6075,14 +6453,26 @@ export class WorkItemController {
           : nextTimestamp(lease.work_item.state.updated_at, this.clock),
       },
     });
+    const pendingManifest = this.pendingManifest(
+      manifestIdentity,
+      activeRun.acquired_at,
+    );
     const mutation = await repository.commitControllerMutation(lease, {
-      semantic_event_intents: [],
+      semantic_event_intents: [
+        this.workflowTransitionFromExpectation({
+          after: nextItem,
+          manifest: pendingManifest,
+          expected_phase: "execute",
+          expected_status: "active",
+          expected_goal_version: input.expected_goal_version,
+          expected_input_revision: input.expected_input_revision,
+          attempt: input.attempt,
+          expected_patch_cycle: lease.work_item.state.patch_cycle ?? 0,
+        }),
+      ],
       goal: nextItem.goal,
       state: nextItem.state,
-      manifest: this.pendingManifest(
-        manifestIdentity,
-        activeRun.acquired_at,
-      ),
+      manifest: pendingManifest,
     });
     return { ...mutation, evidence: stored.summary };
   }
@@ -7191,7 +7581,7 @@ export class WorkItemController {
       outcome: "pending",
     };
     const committed = await repository.commitPlanApproval(lease, {
-      semantic_event_intents: [],
+      semantic_event_intents: this.planApprovalSemanticIntents(intent),
       state: nextItem.state,
       manifest: pendingManifest,
     });
@@ -7549,7 +7939,7 @@ export class WorkItemController {
       outcome: "pending",
     };
     const committed = await repository.commitShapingDecision(lease, {
-      semantic_event_intents: [],
+      semantic_event_intents: this.shapingDecisionSemanticIntents(intent),
       ...(intent.operation === "approve_spec"
         ? { goal: nextItem.goal }
         : {}),
@@ -7627,6 +8017,499 @@ export class WorkItemController {
     const state = { ...item.state };
     delete state.active_run;
     return workItemSchema.parse({ goal: item.goal, state });
+  }
+
+  private buildSemanticIntent(input: {
+    source: SemanticAuthoritativeSourceV1;
+    slot: string;
+    kind: SemanticEventIntentV1["kind"];
+    work_item_id: string;
+    binding: SemanticWorkflowBindingV1;
+    outcome: string;
+    occurred_at: string;
+    evidence: [SemanticEvidenceSelectorV1, ...SemanticEvidenceSelectorV1[]];
+    details: SemanticEventDetailsV1;
+    actor?: SemanticEventIntentV1["actor"];
+    action?: SemanticEventIntentV1["action"];
+  }): SemanticEventIntentV1 {
+    return semanticEventIntentSchema.parse({
+      schema_version: 1,
+      intent_id: deriveSemanticIntentId({
+        source: input.source,
+        kind: input.kind,
+        slot: input.slot,
+      }),
+      source: input.source,
+      slot: input.slot,
+      kind: input.kind,
+      work_item_id: input.work_item_id,
+      binding: input.binding,
+      run: null,
+      actor: input.actor ?? { kind: "controller" },
+      outcome: input.outcome,
+      occurred_at: input.occurred_at,
+      evidence: input.evidence,
+      action: input.action ?? null,
+      details: input.details,
+    });
+  }
+
+  private governedSemanticBinding(item: WorkItem): SemanticWorkflowBindingV1 {
+    const { state } = item;
+    if (
+      state.goal_version === undefined ||
+      state.input_revision === undefined ||
+      state.attempt === undefined ||
+      state.patch_cycle === undefined
+    ) {
+      throw this.conflict(
+        "repair_required",
+        item.goal.work_item_id,
+        "A governed semantic event requires the complete durable tuple.",
+      );
+    }
+    return this.governedSemanticBindingForTuple(
+      state.phase,
+      state.status,
+      {
+        goal_version: state.goal_version,
+        input_revision: state.input_revision,
+        attempt: state.attempt,
+        patch_cycle: state.patch_cycle,
+      },
+    );
+  }
+
+  private governedSemanticBindingForTuple(
+    phase: WorkItemPhase,
+    status: WorkItemStatus,
+    governedTuple: Extract<
+      SemanticWorkflowBindingV1,
+      { kind: "governed" }
+    >["governed_tuple"],
+  ): SemanticWorkflowBindingV1 {
+    return {
+      kind: "governed",
+      governed_tuple: governedTuple,
+      phase,
+      status,
+    };
+  }
+
+  private appliedControllerManifest(
+    manifest: ControllerRunManifest,
+    after: WorkItem,
+  ): ControllerRunManifest {
+    return manifest.outcome === "applied"
+      ? manifest
+      : controllerRunManifestSchema.parse({
+          ...manifest,
+          outcome: "applied",
+          completed_at: after.state.updated_at,
+        });
+  }
+
+  private controllerSemanticEvidence(
+    manifest: ControllerRunManifest,
+    after: WorkItem,
+  ): SemanticEvidenceSelectorV1 {
+    const applied = this.appliedControllerManifest(manifest, after);
+    return {
+      kind: "controller_run",
+      path: `.founder/work-items/${applied.work_item_id}/runs/${applied.run_id}.json`,
+      expected_content_sha256: this.hashSource(
+        `${JSON.stringify(applied, null, 2)}\n`,
+      ),
+    };
+  }
+
+  private controllerSemanticIntent(input: {
+    before: WorkItem;
+    after: WorkItem;
+    manifest: ControllerRunManifest;
+    slot: string;
+    kind: SemanticEventIntentV1["kind"];
+    outcome: string;
+    details: SemanticEventDetailsV1;
+    actor?: SemanticEventIntentV1["actor"];
+    action?: SemanticEventIntentV1["action"];
+  }): SemanticEventIntentV1 {
+    const source = {
+      kind: "controller_run" as const,
+      controller_run_id: input.manifest.run_id,
+      expected_outcome: "applied" as const,
+    };
+    return this.buildSemanticIntent({
+      source,
+      slot: input.slot,
+      kind: input.kind,
+      work_item_id: input.after.goal.work_item_id,
+      binding: this.governedSemanticBinding(input.after),
+      outcome: input.outcome,
+      occurred_at: input.manifest.started_at,
+      evidence: [this.controllerSemanticEvidence(input.manifest, input.after)],
+      details: input.details,
+      actor: input.actor,
+      action: input.action,
+    });
+  }
+
+  private workflowTransitionIntent(input: {
+    before: WorkItem;
+    after: WorkItem;
+    manifest: ControllerRunManifest;
+    before_binding?: SemanticWorkflowBindingV1;
+    slot?: string;
+    outcome?: string;
+  }): SemanticEventIntentV1 {
+    const before =
+      input.before_binding ?? this.governedSemanticBinding(input.before);
+    const after = this.governedSemanticBinding(input.after);
+    return this.controllerSemanticIntent({
+      ...input,
+      slot: input.slot ?? "workflow-transition",
+      kind: "workflow_transitioned",
+      outcome:
+        input.outcome ??
+        `Workflow moved from ${input.before.state.phase}/${input.before.state.status} to ${input.after.state.phase}/${input.after.state.status}.`,
+      details: { kind: "workflow_transitioned", before, after },
+    });
+  }
+
+  private workflowTransitionFromExpectation(input: {
+    after: WorkItem;
+    manifest: ControllerRunManifest;
+    expected_phase: WorkItemPhase;
+    expected_status: WorkItemStatus;
+    expected_goal_version: number;
+    expected_input_revision: number;
+    attempt: number;
+    expected_patch_cycle: number;
+    outcome?: string;
+  }): SemanticEventIntentV1 {
+    return this.workflowTransitionIntent({
+      before: input.after,
+      after: input.after,
+      manifest: input.manifest,
+      before_binding: this.governedSemanticBindingForTuple(
+        input.expected_phase,
+        input.expected_status,
+        {
+          goal_version: input.expected_goal_version,
+          input_revision: input.expected_input_revision,
+          attempt: input.attempt,
+          patch_cycle: input.expected_patch_cycle,
+        },
+      ),
+      outcome: input.outcome,
+    });
+  }
+
+  private goalContractRevisedIntent(input: {
+    before: WorkItem;
+    after: WorkItem;
+    manifest: ControllerRunManifest;
+    previous_goal_version: number | null;
+    previous_input_revision: number | null;
+  }): SemanticEventIntentV1 {
+    const contract = input.after.goal.goal_contract;
+    const nextInputRevision = input.after.state.input_revision;
+    if (contract === undefined || nextInputRevision === undefined) {
+      throw this.conflict(
+        "repair_required",
+        input.after.goal.work_item_id,
+        "A goal-contract revision event requires the durable governed contract.",
+      );
+    }
+    return this.controllerSemanticIntent({
+      ...input,
+      slot: "goal-contract-revision",
+      kind: "goal_contract_revised",
+      outcome: `Goal contract advanced to version ${contract.goal_version}.`,
+      actor: { kind: "founder" },
+      details: {
+        kind: "goal_contract_revised",
+        previous_goal_version: input.previous_goal_version,
+        previous_input_revision: input.previous_input_revision,
+        next_goal_version: contract.goal_version,
+        next_input_revision: nextInputRevision,
+        goal_contract_sha256: hashGoalContract(contract),
+      },
+    });
+  }
+
+  private attentionRequestedIntent(input: {
+    before: WorkItem;
+    after: WorkItem;
+    manifest: ControllerRunManifest;
+    attention_kind: WorkItemAttention["kind"];
+    reference_sha256: string;
+    slot?: string;
+    outcome: string;
+  }): SemanticEventIntentV1 {
+    return this.controllerSemanticIntent({
+      ...input,
+      slot: input.slot ?? "attention-request",
+      kind: "attention_requested",
+      details: {
+        kind: "attention_requested",
+        attention_kind: input.attention_kind,
+        reference_sha256: input.reference_sha256,
+      },
+      action: {
+        kind: "work_item_attention",
+        attention_kind: input.attention_kind,
+        reference_sha256: input.reference_sha256,
+      },
+    });
+  }
+
+  private permissionDecidedIntent(input: {
+    before: WorkItem;
+    after: WorkItem;
+    manifest: ControllerRunManifest;
+    decision: "allow_once" | "retry_without_allowing";
+    operation_sha256: string;
+    next_attempt: number;
+  }): SemanticEventIntentV1 {
+    return this.controllerSemanticIntent({
+      ...input,
+      slot: "permission-decision",
+      kind: "permission_decided",
+      outcome: `Founder chose ${input.decision.replaceAll("_", " ")} for the denied operation.`,
+      actor: { kind: "founder" },
+      details: {
+        kind: "permission_decided",
+        decision: input.decision,
+        operation_sha256: input.operation_sha256,
+        next_attempt: input.next_attempt,
+      },
+    });
+  }
+
+  private connectedPermissionDenialIntents(input: {
+    before: WorkItem;
+    after: WorkItem;
+    manifest: ControllerRunManifest;
+    operation: MissingPermissionOperation;
+  }): SemanticEventIntentV1[] {
+    return [
+      this.controllerSemanticIntent({
+        ...input,
+        slot: "permission-denial",
+        kind: "permission_denied",
+        outcome: `Connected operation was denied: ${input.operation.reason}.`,
+        details: {
+          kind: "permission_denied",
+          connected_run_id: input.operation.connected_run_id,
+          operation_sha256: input.operation.operation_sha256,
+          canonical_args_sha256: input.operation.canonical_args_sha256,
+          reason_code: input.operation.reason,
+          attention_kind: "missing_permission",
+        },
+      }),
+      this.attentionRequestedIntent({
+        ...input,
+        slot: "missing-permission-attention",
+        attention_kind: "missing_permission",
+        reference_sha256: input.operation.operation_sha256,
+        outcome: "Founder attention is required for a missing permission.",
+      }),
+    ];
+  }
+
+  private controllerHumanDecisionIntent(input: {
+    before: WorkItem;
+    after: WorkItem;
+    manifest: ControllerRunManifest;
+    decision: SemanticHumanDecisionV1;
+    disposition: "accepted" | "rejected" | "request_changes";
+    decision_sha256: string;
+    result_content_sha256: string | null;
+    outcome: string;
+    slot?: string;
+  }): SemanticEventIntentV1 {
+    return this.controllerSemanticIntent({
+      ...input,
+      slot: input.slot ?? "human-decision",
+      kind: "human_decision_recorded",
+      actor: { kind: "founder" },
+      details: {
+        kind: "human_decision_recorded",
+        decision: input.decision,
+        disposition: input.disposition,
+        decision_sha256: input.decision_sha256,
+        result_content_sha256: input.result_content_sha256,
+      },
+    });
+  }
+
+  private shapingDecisionSemanticIntents(
+    intent: ShapingDecisionIntentV1,
+  ): SemanticEventIntentV1[] {
+    const mission = shapingMissionPackageSchema.parse(
+      JSON.parse(intent.next_mission_package_bytes) as unknown,
+    );
+    const source = {
+      kind: "shaping_decision" as const,
+      decision_id: intent.decision_id,
+      expected_outcome: "applied" as const,
+    };
+    const evidence: SemanticEvidenceSelectorV1 = {
+      kind: "shaping_decision",
+      path: `.founder/work-items/${intent.work_item_id}/shaping-decisions/${intent.decision_id}.intent.json`,
+      expected_content_sha256: this.hashSource(
+        `${JSON.stringify(intent, null, 2)}\n`,
+      ),
+    };
+    const after: SemanticWorkflowBindingV1 = {
+      kind: "shaping",
+      identity: mission.identity,
+    };
+    const decisionByOperation: Record<
+      ShapingDecisionOperation,
+      SemanticHumanDecisionV1
+    > = {
+      start_brainstorm: "start_brainstorm",
+      request_changes: "request_shaping_changes",
+      use_brainstorm_result: "use_brainstorm_result",
+      approve_spec: "approve_spec_result",
+      replan_with_updated_contract: "replan_with_updated_contract",
+    };
+    const disposition =
+      intent.operation === "request_changes" ||
+      intent.operation === "replan_with_updated_contract"
+        ? "request_changes"
+        : "accepted";
+    const intents = [
+      this.buildSemanticIntent({
+        source,
+        slot: "human-decision",
+        kind: "human_decision_recorded",
+        work_item_id: intent.work_item_id,
+        binding: after,
+        outcome: `Founder recorded ${decisionByOperation[intent.operation].replaceAll("_", " ")}.`,
+        occurred_at: intent.created_at,
+        evidence: [evidence],
+        actor: { kind: "founder" },
+        details: {
+          kind: "human_decision_recorded",
+          decision: decisionByOperation[intent.operation],
+          disposition,
+          decision_sha256: intent.decision_id,
+          result_content_sha256: intent.result_content_sha256,
+        },
+      }),
+    ];
+    if (intent.phase_from !== intent.phase_to) {
+      const receiptIdentity =
+        intent.decision_receipt_bytes === null
+          ? null
+          : shapingDecisionReceiptSchema.parse(
+              JSON.parse(intent.decision_receipt_bytes) as unknown,
+            ).identity;
+      const before: SemanticWorkflowBindingV1 = {
+        kind: "shaping",
+        identity:
+          receiptIdentity ??
+          ({
+            phase:
+              intent.phase_from === "idea"
+                ? "brainstorm"
+                : intent.phase_from,
+            work_item_id: intent.work_item_id,
+            input_sha256:
+              intent.phase_from === "idea"
+                ? intent.goal_input_sha256
+                : mission.identity.input_sha256,
+          } as ShapingIdentity),
+      };
+      intents.push(
+        this.buildSemanticIntent({
+          source,
+          slot: "workflow-transition",
+          kind: "workflow_transitioned",
+          work_item_id: intent.work_item_id,
+          binding: after,
+          outcome: `Shaping moved from ${intent.phase_from} to ${intent.phase_to}.`,
+          occurred_at: intent.created_at,
+          evidence: [evidence],
+          details: { kind: "workflow_transitioned", before, after },
+        }),
+      );
+    }
+    return intents;
+  }
+
+  private planApprovalSemanticIntents(
+    intent: PlanApprovalIntentV1,
+  ): SemanticEventIntentV1[] {
+    const receipt = shapingDecisionReceiptSchema.parse(
+      JSON.parse(intent.receipt_bytes) as unknown,
+    );
+    const nextItem = this.workItemFromShapingBytes(
+      intent.next_goal_bytes,
+      intent.next_state_bytes,
+    );
+    const source = {
+      kind: "plan_approval" as const,
+      approval_id: intent.approval_id,
+      expected_outcome: "applied" as const,
+    };
+    const evidence: SemanticEvidenceSelectorV1 = {
+      kind: "plan_approval",
+      path: `.founder/work-items/${intent.work_item_id}/plan-approvals/${intent.approval_id}.intent.json`,
+      expected_content_sha256: this.hashSource(
+        `${JSON.stringify(intent, null, 2)}\n`,
+      ),
+    };
+    const before: SemanticWorkflowBindingV1 = {
+      kind: "shaping",
+      identity: receipt.identity,
+    };
+    const after = this.governedSemanticBinding(nextItem);
+    return [
+      this.buildSemanticIntent({
+        source,
+        slot: "human-decision",
+        kind: "human_decision_recorded",
+        work_item_id: intent.work_item_id,
+        binding: after,
+        outcome: "Founder approved the Plan result for execution.",
+        occurred_at: intent.created_at,
+        evidence: [evidence],
+        actor: { kind: "founder" },
+        details: {
+          kind: "human_decision_recorded",
+          decision: "approve_plan_result",
+          disposition: "accepted",
+          decision_sha256: intent.approval_id,
+          result_content_sha256: intent.expected_result_content_sha256,
+        },
+      }),
+      this.buildSemanticIntent({
+        source,
+        slot: "workflow-transition",
+        kind: "workflow_transitioned",
+        work_item_id: intent.work_item_id,
+        binding: after,
+        outcome: "Workflow moved from Plan shaping to blocked Execute.",
+        occurred_at: intent.created_at,
+        evidence: [evidence],
+        details: { kind: "workflow_transitioned", before, after },
+      }),
+    ];
+  }
+
+  private async republishSemanticEventIntents(
+    intents: SemanticEventIntentV1[],
+  ): Promise<void> {
+    for (const intent of intents) {
+      await this.repository.publishSemanticEventIntent(
+        intent.work_item_id,
+        intent.intent_id,
+      );
+    }
   }
 
   private serializeDecisionReceipt(

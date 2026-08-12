@@ -6398,7 +6398,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       const appliedManifest = controllerRunManifestSchema.parse({
         ...pendingManifest,
         outcome: "applied",
-        completed_at: new Date().toISOString(),
+        completed_at: nextItem.state.updated_at,
       });
       await this.writeControllerRunManifest(appliedManifest);
       committed = { work_item: nextItem, manifest: appliedManifest };
