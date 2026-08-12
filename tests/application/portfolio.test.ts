@@ -5137,6 +5137,15 @@ describe("PortfolioService", () => {
         },
       ),
     ).rejects.toMatchObject({ kind: "stale_expectation" });
+    const commitControllerMutation =
+      repository.commitControllerMutation.bind(repository);
+    const recoverySemanticIntentCounts: number[] = [];
+    repository.commitControllerMutation = async (lease, mutationInput) => {
+      recoverySemanticIntentCounts.push(
+        mutationInput.semantic_event_intents.length,
+      );
+      return commitControllerMutation(lease, mutationInput);
+    };
     const recovered = await service.recoverConnectedReviewResult(
       sourceId,
       created.goal.work_item_id,
@@ -5167,6 +5176,7 @@ describe("PortfolioService", () => {
     expect(await repository.read(created.goal.work_item_id)).toEqual(
       stateAfterRecovery,
     );
+    expect(recoverySemanticIntentCounts).toEqual([0]);
     index.close();
   });
 

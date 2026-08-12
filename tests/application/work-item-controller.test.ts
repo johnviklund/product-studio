@@ -82,6 +82,11 @@ import {
   type StoredShapingArtifact,
 } from "../../src/domain/shaping";
 import { deriveManualShapingProductionId } from "../../src/domain/shaping-run";
+import type {
+  SemanticAuthoritativeSourceV1,
+  SemanticEventIntentV1,
+  SemanticEventV1,
+} from "../../src/domain/semantic-event";
 import {
   CLOSED_IN_SLICE_PHASE_TRANSITIONS,
   CONTROLLER_ONLY_PHASE_TRANSITIONS,
@@ -247,6 +252,76 @@ async function createWorkspace(): Promise<{
         verificationRunner: passingRunner,
       }),
   );
+}
+
+async function semanticRecordsForSource(
+  root: string,
+  workItemId: string,
+  source: SemanticAuthoritativeSourceV1,
+): Promise<
+  Array<{ intent: SemanticEventIntentV1; event: SemanticEventV1 }>
+> {
+  const semanticDirectory = join(
+    root,
+    ".founder",
+    "semantic-events",
+    workItemId,
+  );
+  const intents = await Promise.all(
+    (await readdir(join(semanticDirectory, "intents"))).map(async (entry) =>
+      JSON.parse(
+        await readFile(join(semanticDirectory, "intents", entry), "utf8"),
+      ) as SemanticEventIntentV1,
+    ),
+  );
+  const matchingIntents = new Map(
+    intents
+      .filter((intent) => JSON.stringify(intent.source) === JSON.stringify(source))
+      .map((intent) => [intent.intent_id, intent]),
+  );
+  const events = await Promise.all(
+    (await readdir(join(semanticDirectory, "events"))).map(async (entry) =>
+      JSON.parse(
+        await readFile(join(semanticDirectory, "events", entry), "utf8"),
+      ) as SemanticEventV1,
+    ),
+  );
+  return events.flatMap((event) => {
+    const intent = matchingIntents.get(event.intent_id);
+    return intent === undefined ? [] : [{ intent, event }];
+  });
+}
+
+async function expectSemanticProducer(
+  root: string,
+  workItemId: string,
+  source: SemanticAuthoritativeSourceV1,
+  expected: Array<{
+    kind: SemanticEventV1["kind"];
+    slot: string;
+    evidence_kind: SemanticEventV1["evidence"][number]["kind"];
+    evidence_path: string;
+  }>,
+): Promise<Array<{ intent: SemanticEventIntentV1; event: SemanticEventV1 }>> {
+  const records = await semanticRecordsForSource(root, workItemId, source);
+  expect(
+    records.map(({ intent, event }) => ({
+      kind: event.kind,
+      slot: intent.slot,
+      evidence_kind: event.evidence[0].kind,
+      evidence_path: event.evidence[0].path,
+    })),
+  ).toEqual(expected);
+  for (const { event } of records) {
+    for (const evidence of event.evidence) {
+      expect(evidence.content_sha256).toBe(
+        createHash("sha256")
+          .update(await readFile(join(root, evidence.path)))
+          .digest("hex"),
+      );
+    }
+  }
+  return records;
 }
 
 type CommitFailureBoundary = "pending_manifest" | "applied_manifest";
@@ -2494,6 +2569,29 @@ describe("WorkItemController", () => {
       },
     });
     expect(denied.work_item.state.active_run).toBeUndefined();
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: denied.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "permission_denied",
+          slot: "permission-denial",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${denied.manifest.run_id}.json`,
+        },
+        {
+          kind: "attention_requested",
+          slot: "missing-permission-attention",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${denied.manifest.run_id}.json`,
+        },
+      ],
+    );
   });
 
   it("does not fabricate missing-permission attention for in-envelope or non-permission signals", async () => {
@@ -2621,6 +2719,30 @@ describe("WorkItemController", () => {
       { ...decision, decision: "keep_denied" },
     );
     expect(kept).toEqual({ work_item: denied.work_item, manifest: null });
+    const semanticBeforeKept = await readdir(
+      join(
+        fixture.repository.workspaceRoot,
+        ".founder",
+        "semantic-events",
+        fixture.workItem.goal.work_item_id,
+        "events",
+      ),
+    );
+    await fixture.controller.resolveConnectedPermission(
+      fixture.workItem.goal.work_item_id,
+      { ...decision, decision: "keep_denied" },
+    );
+    expect(
+      await readdir(
+        join(
+          fixture.repository.workspaceRoot,
+          ".founder",
+          "semantic-events",
+          fixture.workItem.goal.work_item_id,
+          "events",
+        ),
+      ),
+    ).toEqual(semanticBeforeKept);
 
     const retried = await fixture.controller.resolveConnectedPermission(
       fixture.workItem.goal.work_item_id,
@@ -2647,6 +2769,31 @@ describe("WorkItemController", () => {
         credentials: "forbidden",
       },
     });
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: retried.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "permission_decided",
+          slot: "permission-decision",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${retried.manifest.run_id}.json`,
+        },
+      ],
+    );
+    const semanticDirectory = join(
+      fixture.repository.workspaceRoot,
+      ".founder",
+      "semantic-events",
+      fixture.workItem.goal.work_item_id,
+      "events",
+    );
+    const semanticBeforeMissionRecompile = await readdir(semanticDirectory);
     const retriedIdentity = {
       phase: "execute" as const,
       work_item_id: retried.work_item.goal.work_item_id,
@@ -2668,6 +2815,9 @@ describe("WorkItemController", () => {
       { executable: "git", args: ["status"] },
       { executable: "npm", args: ["run", "test"] },
     ]);
+    expect(await readdir(semanticDirectory)).toEqual(
+      semanticBeforeMissionRecompile,
+    );
   });
 
   it("retries a denied operation without granting it and replays idempotently", async () => {
@@ -2736,6 +2886,23 @@ describe("WorkItemController", () => {
         decision,
       ),
     ).resolves.toEqual(retried);
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: retried.manifest!.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "permission_decided",
+          slot: "permission-decision",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${retried.manifest!.run_id}.json`,
+        },
+      ],
+    );
 
     const retryMission = await fixture.repository.writeMissionPackage(
       {
@@ -3144,6 +3311,25 @@ describe("WorkItemController", () => {
       secondInput,
     );
     expect(replay).toEqual(updated);
+    for (const mutation of [activated, updated]) {
+      await expectSemanticProducer(
+        root,
+        created.goal.work_item_id,
+        {
+          kind: "controller_run",
+          controller_run_id: mutation.manifest.run_id,
+          expected_outcome: "applied",
+        },
+        [
+          {
+            kind: "goal_contract_revised",
+            slot: "goal-contract-revision",
+            evidence_kind: "controller_run",
+            evidence_path: `.founder/work-items/${created.goal.work_item_id}/runs/${mutation.manifest.run_id}.json`,
+          },
+        ],
+      );
+    }
 
     const beforeStaleAttempt = await repository.read(created.goal.work_item_id);
     const stalePromise = controller.updateGoalContract(
@@ -3323,6 +3509,23 @@ describe("WorkItemController", () => {
         ),
       ),
     ).toHaveLength(5);
+    await expectSemanticProducer(
+      root,
+      workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: applied.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "workflow_transitioned",
+          slot: "workflow-transition",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${workItem.goal.work_item_id}/runs/${applied.manifest.run_id}.json`,
+        },
+      ],
+    );
   });
 
   it("rejects missing contracts, stale expectations, invalid moves, and attempt conflicts", async () => {
@@ -3437,6 +3640,23 @@ describe("WorkItemController", () => {
     expect(commandNames).toEqual(["Tests", "Typecheck"]);
     expect(evidenceWrites.count).toBe(1);
     expect(evidence.size).toBe(1);
+    await expectSemanticProducer(
+      repository.workspaceRoot,
+      workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: imported.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "workflow_transitioned",
+          slot: "workflow-transition",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${workItem.goal.work_item_id}/runs/${imported.manifest.run_id}.json`,
+        },
+      ],
+    );
   });
 
   it.each(["failed", "timed_out", "spawn_error"] as const)(
@@ -3474,7 +3694,33 @@ describe("WorkItemController", () => {
       expect(
         [...evidence.values()][0].verification.map((record) => record.status),
       ).toEqual([status, "not_run"]);
+      await expectSemanticProducer(
+        repository.workspaceRoot,
+        workItem.goal.work_item_id,
+        {
+          kind: "controller_run",
+          controller_run_id: imported.manifest.run_id,
+          expected_outcome: "applied",
+        },
+        [
+          {
+            kind: "workflow_transitioned",
+            slot: "workflow-transition",
+            evidence_kind: "controller_run",
+            evidence_path: `.founder/work-items/${workItem.goal.work_item_id}/runs/${imported.manifest.run_id}.json`,
+          },
+        ],
+      );
 
+      const commitControllerMutation =
+        repository.commitControllerMutation.bind(repository);
+      const retrySemanticIntentCounts: number[] = [];
+      repository.commitControllerMutation = async (lease, mutationInput) => {
+        retrySemanticIntentCounts.push(
+          mutationInput.semantic_event_intents.length,
+        );
+        return commitControllerMutation(lease, mutationInput);
+      };
       const retried = await controller.retryExecuteAttempt(
         workItem.goal.work_item_id,
         {
@@ -3501,6 +3747,7 @@ describe("WorkItemController", () => {
           attempt: 0,
         }),
       ).toEqual(retried);
+      expect(retrySemanticIntentCounts).toEqual([0]);
     },
   );
 
@@ -4149,6 +4396,23 @@ describe("WorkItemController", () => {
     expect(commandRuns).toBe(0);
     expect(fixture.evidenceWrites.count).toBe(1);
     expect(fixture.evidence.size).toBe(1);
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: imported.manifest!.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "attention_requested",
+          slot: "attention-request",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${imported.manifest!.run_id}.json`,
+        },
+      ],
+    );
   });
 
   it.each(["P0", "P1", "P2", "P3"] as const)(
@@ -4182,6 +4446,29 @@ describe("WorkItemController", () => {
 
     expect(replay.work_item).toEqual(fixture.workItem);
     expect(replay.manifest).toMatchObject({ phase: "patch", outcome: "applied" });
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: replay.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "workflow_transitioned",
+          slot: "workflow-transition",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${replay.manifest.run_id}.json`,
+        },
+        {
+          kind: "human_decision_recorded",
+          slot: "human-decision",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${replay.manifest.run_id}.json`,
+        },
+      ],
+    );
   });
 
   it("rejects patch-plan approval when the pinned review result changes", async () => {
@@ -4373,6 +4660,29 @@ describe("WorkItemController", () => {
         input,
       ),
     ).resolves.toEqual(approved);
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: approved.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "workflow_transitioned",
+          slot: "workflow-transition",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${approved.manifest.run_id}.json`,
+        },
+        {
+          kind: "human_decision_recorded",
+          slot: "human-decision",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${approved.manifest.run_id}.json`,
+        },
+      ],
+    );
   });
 
   it("rejects Review approval when any displayed result pin is stale", async () => {
@@ -4487,6 +4797,23 @@ describe("WorkItemController", () => {
     expect(replay).toEqual(imported);
     expect(commandRuns).toBe(2);
     expect(fixture.evidenceWrites.count).toBe(2);
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: imported.manifest!.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "workflow_transitioned",
+          slot: "workflow-transition",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${imported.manifest!.run_id}.json`,
+        },
+      ],
+    );
   });
 
   it("keeps a red patch import active in the same cycle", async () => {
@@ -4975,6 +5302,15 @@ describe("WorkItemController", () => {
       ],
     });
 
+    const semanticDirectory = join(
+      fixture.repository.workspaceRoot,
+      ".founder",
+      "semantic-events",
+      fixture.workItem.goal.work_item_id,
+      "events",
+    );
+    const semanticBeforeProposal = await readdir(semanticDirectory);
+
     const proposal = await createController(fixture.repository, {
       ...driftGit,
       isWorktreeCleanExcludingFounder: async () => true,
@@ -4987,6 +5323,7 @@ describe("WorkItemController", () => {
       subject_changed_files: ["src/domain/result.ts"],
       rejected_import_run_id: rejected.evidence.import_run_id,
     });
+    expect(await readdir(semanticDirectory)).toEqual(semanticBeforeProposal);
   });
 
   it("rejects stale Review drift approval without writing recovery evidence", async () => {
@@ -5103,6 +5440,29 @@ describe("WorkItemController", () => {
       work_item: { state: { attention: { kind: "review_ready" } } },
     });
     expect(fixture.evidenceWrites.count).toBe(2);
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: recovered.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "human_decision_recorded",
+          slot: "human-decision",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${recovered.manifest.run_id}.json`,
+        },
+        {
+          kind: "attention_requested",
+          slot: "attention-request",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${recovered.manifest.run_id}.json`,
+        },
+      ],
+    );
   });
 
   it("withholds Review drift recovery unless the only rejection is exact HEAD drift on a clean descendant", async () => {
@@ -5329,7 +5689,7 @@ describe("WorkItemController", () => {
   });
 
   it("runs all five decisions in manual mode with immutable replay and no process", async () => {
-    const { repository } = await createWorkspace();
+    const { root, repository } = await createWorkspace();
     const commit = repository.commitShapingDecision.bind(repository);
     const commitOperations: string[] = [];
     repository.commitShapingDecision = async (lease, input) => {
@@ -5638,6 +5998,35 @@ describe("WorkItemController", () => {
         decision.intent.next_goal_bytes ===
           decision.intent.previous_goal_bytes,
       ).toBe(decision.manifest.operation !== "approve_spec");
+      const transitionExpected =
+        decision.intent.phase_from === decision.intent.phase_to
+          ? []
+          : [
+              {
+                kind: "workflow_transitioned" as const,
+                slot: "workflow-transition",
+                evidence_kind: "shaping_decision" as const,
+                evidence_path: `.founder/work-items/${initial.goal.work_item_id}/shaping-decisions/${decision.decision_id}.intent.json`,
+              },
+            ];
+      await expectSemanticProducer(
+        root,
+        initial.goal.work_item_id,
+        {
+          kind: "shaping_decision",
+          decision_id: decision.decision_id,
+          expected_outcome: "applied",
+        },
+        [
+          {
+            kind: "human_decision_recorded",
+            slot: "human-decision",
+            evidence_kind: "shaping_decision",
+            evidence_path: `.founder/work-items/${initial.goal.work_item_id}/shaping-decisions/${decision.decision_id}.intent.json`,
+          },
+          ...transitionExpected,
+        ],
+      );
     }
     const shapingArtifacts = await repository.listShapingArtifacts(
       initial.goal.work_item_id,
@@ -5779,7 +6168,7 @@ describe("WorkItemController", () => {
   );
 
   it("approves one Plan into the unchanged Execute tuple and replays byte-identically", async () => {
-    const { repository } = await createWorkspace();
+    const { root, repository } = await createWorkspace();
     const fixture = await createAppliedPlanDecisionFixture(repository);
     const workItemId = fixture.approved.work_item.goal.work_item_id;
     const goalBefore = await readFile(
@@ -5858,6 +6247,29 @@ describe("WorkItemController", () => {
       "2026-08-05T12:00:00.000Z",
     ).approvePlanResult(workItemId, fixture.input);
     expect(replay).toEqual(first);
+    await expectSemanticProducer(
+      root,
+      workItemId,
+      {
+        kind: "plan_approval",
+        approval_id: first.approval_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "human_decision_recorded",
+          slot: "human-decision",
+          evidence_kind: "plan_approval",
+          evidence_path: `.founder/work-items/${workItemId}/plan-approvals/${first.approval_id}.intent.json`,
+        },
+        {
+          kind: "workflow_transitioned",
+          slot: "workflow-transition",
+          evidence_kind: "plan_approval",
+          evidence_path: `.founder/work-items/${workItemId}/plan-approvals/${first.approval_id}.intent.json`,
+        },
+      ],
+    );
 
     const appliedBefore = await capturePlanApprovalDurableState(
       repository,
@@ -6966,6 +7378,29 @@ describe("WorkItemController", () => {
     if (proposal === null) {
       throw new Error("Expected an exact scope-correction proposal.");
     }
+    const semanticDirectory = join(
+      repository.workspaceRoot,
+      ".founder",
+      "semantic-events",
+      governed.workItem.goal.work_item_id,
+      "events",
+    );
+    const semanticBeforeProposalReplay = await readdir(semanticDirectory);
+    await controller.proposeScopeCorrection(
+      governed.workItem.goal.work_item_id,
+    );
+    expect(await readdir(semanticDirectory)).toEqual(
+      semanticBeforeProposalReplay,
+    );
+    const commitControllerMutation =
+      repository.commitControllerMutation.bind(repository);
+    const correctionSemanticIntentCounts: number[] = [];
+    repository.commitControllerMutation = async (lease, mutationInput) => {
+      correctionSemanticIntentCounts.push(
+        mutationInput.semantic_event_intents.length,
+      );
+      return commitControllerMutation(lease, mutationInput);
+    };
     const input = {
       source_goal_contract_sha256: proposal.source_goal_contract_sha256,
       governed_tuple: proposal.governed_tuple,
@@ -7002,6 +7437,7 @@ describe("WorkItemController", () => {
     );
     expect(replay.manifest).toEqual(corrected.manifest);
     expect(replay.work_item).toEqual(corrected.work_item);
+    expect(correctionSemanticIntentCounts).toEqual([0]);
   });
 
   it("rejects a scope correction after the retained worktree changes", async () => {
@@ -7093,6 +7529,26 @@ describe("WorkItemController", () => {
       outcome: "applied",
       command_authorization: prepared.proposal,
     });
+    if (prepared.manifest === null) {
+      throw new Error("Expected the command-authorization manifest.");
+    }
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: prepared.manifest.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "attention_requested",
+          slot: "attention-request",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${prepared.manifest.run_id}.json`,
+        },
+      ],
+    );
 
     const decision = {
       decision: "allow_once" as const,
@@ -7134,6 +7590,23 @@ describe("WorkItemController", () => {
           args: command.args,
         })),
       ),
+    );
+    await expectSemanticProducer(
+      fixture.repository.workspaceRoot,
+      fixture.workItem.goal.work_item_id,
+      {
+        kind: "controller_run",
+        controller_run_id: applied.manifest!.run_id,
+        expected_outcome: "applied",
+      },
+      [
+        {
+          kind: "permission_decided",
+          slot: "permission-decision",
+          evidence_kind: "controller_run",
+          evidence_path: `.founder/work-items/${fixture.workItem.goal.work_item_id}/runs/${applied.manifest!.run_id}.json`,
+        },
+      ],
     );
     await expect(
       controller.decideCommandAuthorization(
@@ -7263,6 +7736,15 @@ describe("WorkItemController", () => {
       fixture.workItem.goal.work_item_id,
       "execute",
     );
+    const semanticBefore = await readdir(
+      join(
+        fixture.repository.workspaceRoot,
+        ".founder",
+        "semantic-events",
+        fixture.workItem.goal.work_item_id,
+        "events",
+      ),
+    );
 
     const denied = await controller.decideCommandAuthorization(
       fixture.workItem.goal.work_item_id,
@@ -7284,6 +7766,17 @@ describe("WorkItemController", () => {
       kind: "command_authorization",
       proposal: { proposal_sha256: prepared.proposal.proposal_sha256 },
     });
+    expect(
+      await readdir(
+        join(
+          fixture.repository.workspaceRoot,
+          ".founder",
+          "semantic-events",
+          fixture.workItem.goal.work_item_id,
+          "events",
+        ),
+      ),
+    ).toEqual(semanticBefore);
   });
 
   it("refuses command preparation without a complete no-result run or exact in-scope changes", async () => {
