@@ -196,11 +196,14 @@ import {
   type ShapingProductionReceipt,
 } from "../domain/shaping-run";
 import {
+  canonicalSerializeSemanticEvent,
   canonicalSerializeSemanticEventIntent,
+  deriveSemanticEventId,
   semanticEventIntentSchema,
   semanticEventSchema,
   semanticEventStreamHeaderSchema,
   type SemanticEventIntentV1,
+  type SemanticEvidenceHandleV1,
   type SemanticEventStreamHeaderV1,
   type SemanticEventV1,
 } from "../domain/semantic-event";
@@ -269,6 +272,7 @@ const SHAPING_STAGING_DIRECTORY_PATTERN = new RegExp(
   "i",
 );
 const SEMANTIC_EVENT_FILE_PATTERN = /^(\d{16})\.json$/u;
+const SEMANTIC_INTENT_FILE_PATTERN = /^([0-9a-f]{64})\.json$/u;
 
 interface StoredAppliedShapingBundle {
   resultPath: string;
@@ -1199,11 +1203,84 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         `Semantic event intent ${validatedIntentId} is missing.`,
       );
     }
-    throw new ControllerConflictError(
-      "repair_required",
-      validatedWorkItemId,
-      `Semantic event intent ${intent.intent_id} is durable but not yet publishable.`,
-    );
+    if (intent.kind === "run_finished") {
+      await this.publishSemanticLaunchBeforeFinish(intent);
+    }
+    await this.verifySemanticAuthoritativeSource(intent);
+    const evidence = await this.resolveSemanticEvidence(intent);
+
+    return this.withSemanticEventAppendLock(validatedWorkItemId, async () => {
+      for (;;) {
+        const events = await this.readSemanticEventFiles(validatedWorkItemId);
+        const existing = events.find(
+          (event) => event.intent_id === validatedIntentId,
+        );
+        if (existing !== undefined) {
+          return this.assertSemanticEventMatchesIntent(
+            intent,
+            evidence,
+            existing,
+          );
+        }
+
+        const streamSequence = (events.at(-1)?.stream_sequence ?? 0) + 1;
+        const event = semanticEventSchema.parse({
+          schema_version: 1,
+          event_id: deriveSemanticEventId({
+            schema_version: 1,
+            work_item_id: validatedWorkItemId,
+            binding: intent.binding,
+            kind: intent.kind,
+            stream_sequence: streamSequence,
+          }),
+          stream_sequence: streamSequence,
+          kind: intent.kind,
+          work_item_id: validatedWorkItemId,
+          binding: intent.binding,
+          run: intent.run,
+          actor: intent.actor,
+          outcome: intent.outcome,
+          occurred_at: intent.occurred_at,
+          recorded_at: timestampAtOrAfter(intent.occurred_at),
+          evidence,
+          action: intent.action,
+          details: intent.details,
+          intent_id: intent.intent_id,
+        });
+        const eventPath = this.semanticEventPaths(validatedWorkItemId).event(
+          streamSequence,
+        );
+        let eventHandle;
+        try {
+          eventHandle = await open(eventPath, "wx");
+        } catch (error) {
+          if (isNodeError(error) && error.code === "EEXIST") {
+            continue;
+          }
+          throw error;
+        }
+
+        try {
+          await this.afterSemanticSequenceReserved();
+          await this.beforeSemanticEventWritten();
+          await eventHandle.writeFile(canonicalSerializeSemanticEvent(event), {
+            encoding: "utf8",
+          });
+          await eventHandle.sync();
+        } finally {
+          await eventHandle.close();
+        }
+
+        const publishedSource = await this.readRequiredFile(eventPath);
+        if (publishedSource !== canonicalSerializeSemanticEvent(event)) {
+          throw this.invalid(
+            eventPath,
+            "semantic event differs after immutable publication",
+          );
+        }
+        return event;
+      }
+    });
   }
 
   async readExecutionDefaults(): Promise<ExecutionDefaultsV1> {
@@ -8349,6 +8426,13 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           "semantic event filename must contain a positive safe sequence",
         );
       }
+      const expectedSequence = events.length + 1;
+      if (sequence !== expectedSequence) {
+        throw this.invalid(
+          join(paths.events, entry.name),
+          `semantic event sequence must be contiguous at ${expectedSequence}`,
+        );
+      }
       const eventPath = paths.event(sequence);
       const source = await this.readRequiredFile(eventPath);
       const event = this.parseJson(source, eventPath, semanticEventSchema);
@@ -8367,10 +8451,406 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           `semantic event intent ${event.intent_id} is published more than once`,
         );
       }
+      if (source !== canonicalSerializeSemanticEvent(event)) {
+        throw this.invalid(eventPath, "semantic event bytes are not canonical");
+      }
       intentIds.add(event.intent_id);
       events.push(event);
     }
     return events;
+  }
+
+  private async readSemanticEventIntentFiles(
+    workItemId: string,
+  ): Promise<SemanticEventIntentV1[]> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    if ((await this.readSemanticEventStreamHeader(validatedWorkItemId)) === null) {
+      return [];
+    }
+    const paths = this.semanticEventPaths(validatedWorkItemId);
+    const entries = await readdir(paths.intents, { withFileTypes: true });
+    const intents: SemanticEventIntentV1[] = [];
+    for (const entry of entries.sort((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      const match = SEMANTIC_INTENT_FILE_PATTERN.exec(entry.name);
+      if (match === null || !entry.isFile() || entry.isSymbolicLink()) {
+        throw this.invalid(
+          join(paths.intents, entry.name),
+          "semantic intent entries must be SHA-256-named regular JSON files",
+        );
+      }
+      const intent = await this.readSemanticEventIntentFile(
+        validatedWorkItemId,
+        match[1]!,
+      );
+      if (intent === null) {
+        throw this.invalid(
+          join(paths.intents, entry.name),
+          "listed semantic intent is missing",
+        );
+      }
+      intents.push(intent);
+    }
+    return intents;
+  }
+
+  private async withSemanticEventAppendLock<T>(
+    workItemId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const validatedWorkItemId = workItemIdSchema.parse(workItemId);
+    const paths = this.semanticEventPaths(validatedWorkItemId);
+    const lockPath = join(paths.item, ".append.lock");
+    const token = `${randomUUID()}\n`;
+    let handle = null;
+    for (let attempt = 0; attempt < 5_000; attempt += 1) {
+      try {
+        handle = await open(lockPath, "wx");
+        break;
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "EEXIST") {
+          throw error;
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 1));
+      }
+    }
+    if (handle === null) {
+      throw new ControllerConflictError(
+        "repair_required",
+        validatedWorkItemId,
+        "Semantic event append lock remained unavailable.",
+      );
+    }
+
+    let operationError: unknown = null;
+    try {
+      await handle.writeFile(token, { encoding: "utf8" });
+      await handle.sync();
+      return await operation();
+    } catch (error) {
+      operationError = error;
+      throw error;
+    } finally {
+      try {
+        await handle.close();
+        const storedToken = await this.readRequiredFile(lockPath);
+        if (storedToken !== token) {
+          throw this.invalid(lockPath, "semantic event append lock changed owner");
+        }
+        await unlink(lockPath);
+      } catch (cleanupError) {
+        if (operationError !== null) {
+          throw new AggregateError(
+            [operationError, cleanupError],
+            "Semantic event publication failed and its append lock could not be released",
+          );
+        }
+        throw cleanupError;
+      }
+    }
+  }
+
+  private async publishSemanticLaunchBeforeFinish(
+    finishIntent: SemanticEventIntentV1,
+  ): Promise<void> {
+    if (finishIntent.run === null) {
+      throw this.semanticSourceNotPublishable(finishIntent);
+    }
+    const launchIntent = (
+      await this.readSemanticEventIntentFiles(finishIntent.work_item_id)
+    ).find(
+      (candidate) =>
+        candidate.kind === "run_launched" &&
+        candidate.run?.family === finishIntent.run?.family &&
+        (candidate.run?.family === "connected"
+          ? candidate.run.connected_run_id ===
+            (finishIntent.run?.family === "connected"
+              ? finishIntent.run.connected_run_id
+              : null)
+          : candidate.run?.family === "shaping" &&
+            candidate.run.shaping_run_id ===
+              (finishIntent.run?.family === "shaping"
+                ? finishIntent.run.shaping_run_id
+                : null)),
+    );
+    if (launchIntent === undefined) {
+      throw new ControllerConflictError(
+        "repair_required",
+        finishIntent.work_item_id,
+        `Semantic run finish ${finishIntent.intent_id} has no durable launch intent.`,
+      );
+    }
+    await this.publishSemanticEventIntent(
+      finishIntent.work_item_id,
+      launchIntent.intent_id,
+    );
+  }
+
+  private async verifySemanticAuthoritativeSource(
+    intent: SemanticEventIntentV1,
+  ): Promise<void> {
+    const source = intent.source;
+    switch (source.kind) {
+      case "controller_run": {
+        const manifest = await this.readControllerRunManifest(
+          intent.work_item_id,
+          source.controller_run_id,
+        );
+        if (
+          manifest === null ||
+          manifest.run_id !== source.controller_run_id ||
+          manifest.work_item_id !== intent.work_item_id ||
+          manifest.outcome !== source.expected_outcome
+        ) {
+          throw this.semanticSourceNotPublishable(intent);
+        }
+        return;
+      }
+      case "shaping_decision": {
+        const manifest = await this.readShapingDecisionManifest(
+          intent.work_item_id,
+          source.decision_id,
+        );
+        if (
+          manifest === null ||
+          manifest.decision_id !== source.decision_id ||
+          manifest.work_item_id !== intent.work_item_id ||
+          manifest.outcome !== source.expected_outcome
+        ) {
+          throw this.semanticSourceNotPublishable(intent);
+        }
+        return;
+      }
+      case "plan_approval": {
+        const manifest = await this.readPlanApprovalManifest(
+          intent.work_item_id,
+          source.approval_id,
+        );
+        if (
+          manifest === null ||
+          manifest.approval_id !== source.approval_id ||
+          manifest.work_item_id !== intent.work_item_id ||
+          manifest.outcome !== source.expected_outcome
+        ) {
+          throw this.semanticSourceNotPublishable(intent);
+        }
+        return;
+      }
+      case "connected_run": {
+        const record = await this.readConnectedRun(
+          intent.work_item_id,
+          source.connected_run_id,
+        );
+        if (
+          record === null ||
+          record.connected_run_id !== source.connected_run_id ||
+          record.mission.identity.work_item_id !== intent.work_item_id ||
+          record.mission.content_sha256 !== source.mission_content_sha256 ||
+          !this.semanticLifecycleReached(
+            source.expected_lifecycle_status,
+            record.lifecycle.status,
+          )
+        ) {
+          throw this.semanticSourceNotPublishable(intent);
+        }
+        this.assertSemanticConnectedRunSource(intent, record);
+        return;
+      }
+      case "shaping_run": {
+        const record = await this.readShapingRun(
+          intent.work_item_id,
+          source.shaping_run_id,
+        );
+        if (
+          record === null ||
+          record.shaping_run_id !== source.shaping_run_id ||
+          record.mission.work_item_id !== intent.work_item_id ||
+          record.mission.content_sha256 !== source.mission_content_sha256 ||
+          !this.semanticLifecycleReached(
+            source.expected_lifecycle_status,
+            record.lifecycle.status,
+          )
+        ) {
+          throw this.semanticSourceNotPublishable(intent);
+        }
+        this.assertSemanticShapingRunSource(intent, record);
+      }
+    }
+  }
+
+  private assertSemanticConnectedRunSource(
+    intent: SemanticEventIntentV1,
+    record: ConnectedRunRecordV2,
+  ): void {
+    const runMatches =
+      intent.run?.family === "connected" &&
+      intent.run.connected_run_id === record.connected_run_id &&
+      intent.run.phase === record.mission.identity.phase;
+    const actorMatches =
+      intent.actor.kind === "connected_run" &&
+      intent.actor.connected_run_id === record.connected_run_id &&
+      isDeepStrictEqual(intent.actor.provenance, record.provenance);
+    const detailsMatch =
+      intent.source.kind === "connected_run" &&
+      intent.details.kind === intent.kind &&
+      (intent.details.kind === "run_launched" ||
+      intent.details.kind === "run_finished"
+        ? intent.details.run_family === "connected" &&
+          intent.details.run_id === record.connected_run_id &&
+          intent.details.phase === record.mission.identity.phase &&
+          (intent.details.kind === "run_launched"
+            ? intent.details.lifecycle_status ===
+              intent.source.expected_lifecycle_status
+            : record.lifecycle.status === "terminal" &&
+              record.lifecycle.terminal !== null &&
+              intent.details.terminal_outcome ===
+                record.lifecycle.terminal.outcome &&
+              intent.details.partial === record.lifecycle.terminal.partial)
+        : true);
+    if (!runMatches || !actorMatches || !detailsMatch) {
+      throw this.semanticSourceNotPublishable(intent);
+    }
+  }
+
+  private assertSemanticShapingRunSource(
+    intent: SemanticEventIntentV1,
+    record: ShapingRunRecordV1,
+  ): void {
+    const runMatches =
+      intent.run?.family === "shaping" &&
+      intent.run.shaping_run_id === record.shaping_run_id &&
+      intent.run.phase === record.mission.phase;
+    const actorMatches =
+      intent.actor.kind === "shaping_run" &&
+      intent.actor.shaping_run_id === record.shaping_run_id &&
+      isDeepStrictEqual(intent.actor.provenance, record.provenance);
+    const detailsMatch =
+      intent.source.kind === "shaping_run" &&
+      intent.details.kind === intent.kind &&
+      (intent.details.kind === "run_launched" ||
+      intent.details.kind === "run_finished"
+        ? intent.details.run_family === "shaping" &&
+          intent.details.run_id === record.shaping_run_id &&
+          intent.details.phase === record.mission.phase &&
+          (intent.details.kind === "run_launched"
+            ? intent.details.lifecycle_status ===
+              intent.source.expected_lifecycle_status
+            : record.lifecycle.status === "terminal" &&
+              record.lifecycle.terminal !== null &&
+              intent.details.terminal_outcome ===
+                record.lifecycle.terminal.outcome &&
+              intent.details.partial === record.lifecycle.terminal.partial)
+        : true);
+    if (!runMatches || !actorMatches || !detailsMatch) {
+      throw this.semanticSourceNotPublishable(intent);
+    }
+  }
+
+  private semanticLifecycleReached(
+    expected: "starting" | "running" | "terminal",
+    actual: "starting" | "running" | "terminal",
+  ): boolean {
+    const order = { starting: 0, running: 1, terminal: 2 } as const;
+    return order[actual] >= order[expected];
+  }
+
+  private semanticSourceNotPublishable(
+    intent: SemanticEventIntentV1,
+  ): ControllerConflictError {
+    return new ControllerConflictError(
+      "repair_required",
+      intent.work_item_id,
+      `Semantic event intent ${intent.intent_id} does not have its exact applied or terminal authoritative source.`,
+    );
+  }
+
+  private async resolveSemanticEvidence(
+    intent: SemanticEventIntentV1,
+  ): Promise<[SemanticEvidenceHandleV1, ...SemanticEvidenceHandleV1[]]> {
+    const handles: SemanticEvidenceHandleV1[] = [];
+    for (const selector of intent.evidence) {
+      const relativePath = workspaceRelativePosixPathSchema.parse(
+        selector.path,
+      );
+      await this.assertSafeWorkspaceDirectoryComponents(
+        posix.dirname(relativePath),
+      );
+      const artifactPath = join(
+        this.workspaceRoot,
+        ...relativePath.split("/"),
+      );
+      const bytes = await this.readRequiredArtifactBytes(artifactPath);
+      const contentSha256 = this.hashArtifactSource(bytes);
+      if (contentSha256 !== selector.expected_content_sha256) {
+        throw new ControllerConflictError(
+          "repair_required",
+          intent.work_item_id,
+          `Semantic evidence ${relativePath} differs from intent ${intent.intent_id}.`,
+        );
+      }
+      handles.push({
+        kind: selector.kind,
+        path: relativePath,
+        content_sha256: contentSha256,
+      });
+    }
+    return handles as [
+      SemanticEvidenceHandleV1,
+      ...SemanticEvidenceHandleV1[],
+    ];
+  }
+
+  private async readRequiredArtifactBytes(filePath: string): Promise<Buffer> {
+    let stats;
+    try {
+      stats = await lstat(filePath);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        throw this.invalid(filePath, "required evidence file is missing");
+      }
+      throw error;
+    }
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw this.invalid(
+        filePath,
+        "evidence path must be a regular file, not a symlink",
+      );
+    }
+    return readFile(filePath);
+  }
+
+  private assertSemanticEventMatchesIntent(
+    intent: SemanticEventIntentV1,
+    evidence: [SemanticEvidenceHandleV1, ...SemanticEvidenceHandleV1[]],
+    existing: SemanticEventV1,
+  ): SemanticEventV1 {
+    const expected = semanticEventSchema.parse({
+      schema_version: 1,
+      event_id: existing.event_id,
+      stream_sequence: existing.stream_sequence,
+      kind: intent.kind,
+      work_item_id: intent.work_item_id,
+      binding: intent.binding,
+      run: intent.run,
+      actor: intent.actor,
+      outcome: intent.outcome,
+      occurred_at: intent.occurred_at,
+      recorded_at: existing.recorded_at,
+      evidence,
+      action: intent.action,
+      details: intent.details,
+      intent_id: intent.intent_id,
+    });
+    if (!isDeepStrictEqual(existing, expected)) {
+      throw this.invalid(
+        this.semanticEventPaths(intent.work_item_id).event(
+          existing.stream_sequence,
+        ),
+        `semantic event does not exactly match intent ${intent.intent_id}`,
+      );
+    }
+    return existing;
   }
 
   private shapingDecisionPaths(
