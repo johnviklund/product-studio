@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
+import { hostname } from "node:os";
 import {
   appendFileSync,
   closeSync,
@@ -255,6 +256,35 @@ const CONTROLLER_LOCK_FILE = ".controller.lock";
 const VERIFICATION_LOCK_FILE = ".verification.lock";
 const DEFAULT_EXCLUSIVE_WAIT_MS = 900_000;
 const DEFAULT_EXCLUSIVE_POLL_MS = 250;
+const semanticAppendLockOwnerSchema = z.object({
+  token: z.string().min(1),
+  pid: z.number().int().positive(),
+  hostname: z.string().min(1),
+  acquired_at: z.string().min(1),
+});
+type SemanticAppendLockOwner = z.infer<
+  typeof semanticAppendLockOwnerSchema
+>;
+
+function serializeSemanticAppendLockOwner(
+  owner: SemanticAppendLockOwner,
+): string {
+  return `${JSON.stringify(semanticAppendLockOwnerSchema.parse(owner))}\n`;
+}
+
+function parseSemanticAppendLockOwner(
+  raw: string | null,
+): SemanticAppendLockOwner | null {
+  if (raw === null || raw.trim().length === 0) {
+    return null;
+  }
+  try {
+    const parsed = semanticAppendLockOwnerSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
 const execFileAsync = promisify(execFile);
 const COMMAND_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const UUID_PATTERN =
@@ -1041,6 +1071,8 @@ export interface ProductWorkspaceOptions {
   git?: GitVerificationAdapter;
   verificationRunner?: VerificationRunner;
   connectedProcessProbe?: ConnectedProcessProbe;
+  exclusiveWaitMs?: number;
+  exclusivePollMs?: number;
 }
 
 export type ConnectedProcessProbe = (
@@ -1125,7 +1157,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
   private readonly workItemsDirectory: string;
   private readonly gitAdapter: GitVerificationAdapter;
   private readonly commandRunner: VerificationRunner;
+  // This is the workspace's single pid-liveness probe across connected runs and append locks.
   private readonly connectedProcessProbe: ConnectedProcessProbe;
+  private readonly exclusiveWaitMs: number;
+  private readonly exclusivePollMs: number;
 
   constructor(
     workspaceRoot: string,
@@ -1144,6 +1179,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       new NodeVerificationRunner(this.workspaceRoot);
     this.connectedProcessProbe =
       options.connectedProcessProbe ?? defaultConnectedProcessProbe;
+    this.exclusiveWaitMs =
+      options.exclusiveWaitMs ?? DEFAULT_EXCLUSIVE_WAIT_MS;
+    this.exclusivePollMs =
+      options.exclusivePollMs ?? DEFAULT_EXCLUSIVE_POLL_MS;
   }
 
   gitVerificationAdapter(): GitVerificationAdapter {
@@ -6596,6 +6635,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     return;
   }
 
+  protected async beforeSemanticAppendLockReclaimed(): Promise<void> {
+    return;
+  }
+
   protected async afterSemanticEventWritten(): Promise<void> {
     return;
   }
@@ -8666,7 +8709,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const lockPath = join(paths.item, ".append.lock");
     const token = `${randomUUID()}\n`;
     let handle = null;
-    const deadline = Date.now() + DEFAULT_EXCLUSIVE_WAIT_MS;
+    const deadline = Date.now() + this.exclusiveWaitMs;
     for (;;) {
       try {
         handle = await open(lockPath, "wx");
@@ -8686,14 +8729,15 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           throw lockError;
         }
         const staleByAge =
-          Date.now() - lockStats.mtimeMs >= DEFAULT_EXCLUSIVE_WAIT_MS;
+          Date.now() - lockStats.mtimeMs >= this.exclusiveWaitMs;
         if (staleByAge) {
+          await this.beforeSemanticAppendLockReclaimed();
           await unlink(lockPath);
           continue;
         }
         if (lockStats.size === 0) {
           await new Promise((resolveDelay) =>
-            setTimeout(resolveDelay, DEFAULT_EXCLUSIVE_POLL_MS),
+            setTimeout(resolveDelay, this.exclusivePollMs),
           );
           let confirmedStats;
           try {
@@ -8708,6 +8752,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
             confirmedStats.size === 0 &&
             confirmedStats.mtimeMs === lockStats.mtimeMs
           ) {
+            await this.beforeSemanticAppendLockReclaimed();
             await unlink(lockPath);
             continue;
           }
@@ -8720,7 +8765,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           );
         }
         await new Promise((resolveDelay) =>
-          setTimeout(resolveDelay, DEFAULT_EXCLUSIVE_POLL_MS),
+          setTimeout(resolveDelay, this.exclusivePollMs),
         );
       }
     }
