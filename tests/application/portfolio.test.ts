@@ -92,6 +92,7 @@ import type {
   AcpSession,
 } from "../../src/infrastructure/acp/acp-client";
 import { StdioAcpClientAdapter } from "../../src/infrastructure/acp/acp-client";
+import { createLegacySemanticWorkspace } from "../helpers/legacy-semantic-workspace";
 
 const createdRoots: string[] = [];
 const controllerGit: GitVerificationAdapter = {
@@ -1280,6 +1281,19 @@ describe("PortfolioService", () => {
         reason: expect.any(String),
       },
     ]);
+    index.close();
+  });
+
+  it("reconciles a registered legacy workspace without backfilling events", async () => {
+    const root = await createRoot("product-studio-legacy-portfolio-");
+    await createLegacySemanticWorkspace(root);
+    const { index, service } = await createService();
+    await service.register({ workspace_path: root });
+
+    await expect(service.reconcileRunState()).resolves.toBeUndefined();
+    expect(
+      await pathExists(join(root, ".founder", "semantic-events")),
+    ).toBe(false);
     index.close();
   });
 

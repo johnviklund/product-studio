@@ -26,6 +26,13 @@ import {
 import { hashResultContent } from "../../src/domain/result";
 import { InvalidWorkspaceError } from "../../src/domain/work-item";
 import { ProductWorkspace } from "../../src/workspace/product-workspace";
+import {
+  LEGACY_CONNECTED_WORK_ITEM_ID,
+  NEW_CONNECTED_RUN_ID,
+  createLegacySemanticWorkspace,
+  legacyConnectedRun,
+  readLegacyFixtureSemanticEvents,
+} from "../helpers/legacy-semantic-workspace";
 
 const createdRoots: string[] = [];
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
@@ -972,6 +979,45 @@ describe("connected-run workspace storage", () => {
         "utf8",
       ),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps legacy terminal runs silent while new connected runs publish", async () => {
+    const root = await mkdtemp(join(tmpdir(), "product-studio-legacy-runs-"));
+    createdRoots.push(root);
+    await createLegacySemanticWorkspace(root);
+    const workspace = new ProductWorkspace(root);
+
+    await expect(workspace.reconcileConnectedRuns()).resolves.toHaveLength(1);
+    await expect(workspace.reconcileShapingRuns()).resolves.toHaveLength(1);
+    await expect(
+      workspace.reconcileSemanticEventIntents(),
+    ).resolves.toEqual([]);
+    await expect(
+      readdir(join(root, ".founder", "semantic-events")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    await workspace.createConnectedRun(
+      legacyConnectedRun(NEW_CONNECTED_RUN_ID),
+    );
+    await workspace.completeConnectedRun(
+      LEGACY_CONNECTED_WORK_ITEM_ID,
+      NEW_CONNECTED_RUN_ID,
+      {
+        outcome: "cancelled",
+        partial: true,
+        reason: "New connected run fixture.",
+      },
+    );
+
+    const events = await readLegacyFixtureSemanticEvents(
+      root,
+      LEGACY_CONNECTED_WORK_ITEM_ID,
+    );
+    expect(events).toHaveLength(2);
+    expect(events).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      { stream_sequence: 2, kind: "run_finished" },
+    ]);
   });
 
   it("keeps a live process nonterminal and interrupts a gone process", async () => {

@@ -26,6 +26,13 @@ import {
   type ProductWorkspaceOptions,
   type ShapingRunCreateInput,
 } from "../../src/workspace/product-workspace";
+import {
+  LEGACY_SHAPING_WORK_ITEM_ID,
+  NEW_SHAPING_RUN_ID,
+  createLegacySemanticWorkspace,
+  legacyShapingRun,
+  readLegacyFixtureSemanticEvents,
+} from "../helpers/legacy-semantic-workspace";
 
 const createdRoots: string[] = [];
 const workItemId = "wi_550e8400-e29b-41d4-a716-446655440000";
@@ -423,6 +430,45 @@ describe("shaping-run workspace storage", () => {
         shapingRunInput(fixture.mission, secondRunId),
       ),
     ).resolves.toMatchObject({ created: true });
+  });
+
+  it("keeps legacy terminal runs silent while new shaping runs publish", async () => {
+    const root = await mkdtemp(join(tmpdir(), "product-studio-legacy-runs-"));
+    createdRoots.push(root);
+    const fixture = await createLegacySemanticWorkspace(root);
+    const workspace = new ProductWorkspace(root);
+
+    await expect(workspace.reconcileConnectedRuns()).resolves.toHaveLength(1);
+    await expect(workspace.reconcileShapingRuns()).resolves.toHaveLength(1);
+    await expect(
+      workspace.reconcileSemanticEventIntents(),
+    ).resolves.toEqual([]);
+    await expect(
+      readdir(join(root, ".founder", "semantic-events")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    await workspace.createShapingRun(
+      legacyShapingRun(fixture.shapingMission, NEW_SHAPING_RUN_ID),
+    );
+    await workspace.completeShapingRun(
+      LEGACY_SHAPING_WORK_ITEM_ID,
+      NEW_SHAPING_RUN_ID,
+      {
+        outcome: "cancelled",
+        partial: true,
+        reason: "New shaping run fixture.",
+      },
+    );
+
+    const events = await readLegacyFixtureSemanticEvents(
+      root,
+      LEGACY_SHAPING_WORK_ITEM_ID,
+    );
+    expect(events).toHaveLength(2);
+    expect(events).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      { stream_sequence: 2, kind: "run_finished" },
+    ]);
   });
 
   it("owns bounded exact-path ACP ingress writes with immutable replay semantics", async () => {
