@@ -218,7 +218,9 @@ type WorkspaceGateway = Pick<
   | "findAppliedExecuteManifest"
   | "findAppliedPatchManifest"
   | "findAppliedPatchAttemptManifest"
+  | "writeSemanticEventIntents"
   | "publishSemanticEventIntent"
+  | "reconcileSemanticEventIntents"
   | "readAppliedExecuteReviewSubject"
   | "readAppliedPatchReviewSubject"
   | "readExecutionDefaults"
@@ -3726,6 +3728,7 @@ export class PortfolioService {
       const inbox = await this.ensureInboxWorkspace();
       await inbox.reconcileConnectedRuns();
       await inbox.reconcileShapingRuns();
+      await inbox.reconcileSemanticEventIntents();
     } catch (error) {
       if (!isExpectedWorkspaceFailure(error)) {
         throw error;
@@ -3737,6 +3740,7 @@ export class PortfolioService {
         await repository.readManifest();
         await repository.reconcileConnectedRuns();
         await repository.reconcileShapingRuns();
+        await repository.reconcileSemanticEventIntents();
       } catch (error) {
         if (!isExpectedWorkspaceFailure(error)) {
           throw error;

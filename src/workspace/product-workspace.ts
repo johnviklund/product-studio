@@ -1284,6 +1284,33 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     });
   }
 
+  async reconcileSemanticEventIntents(
+    workItemId?: string,
+  ): Promise<SemanticEventV1[]> {
+    const workItemIds =
+      workItemId === undefined
+        ? (await this.list()).map((item) => item.goal.work_item_id)
+        : [workItemIdSchema.parse(workItemId)];
+    const reconciled: SemanticEventV1[] = [];
+    for (const candidateWorkItemId of workItemIds) {
+      const intents = await this.readSemanticEventIntentFiles(
+        candidateWorkItemId,
+      );
+      for (const intent of intents) {
+        if (!(await this.semanticAuthoritativeSourceIsReady(intent))) {
+          continue;
+        }
+        reconciled.push(
+          await this.publishSemanticEventIntent(
+            candidateWorkItemId,
+            intent.intent_id,
+          ),
+        );
+      }
+    }
+    return reconciled;
+  }
+
   async readExecutionDefaults(): Promise<ExecutionDefaultsV1> {
     await this.readManifest();
     const executionDirectory = join(
@@ -8748,6 +8775,77 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           throw this.semanticSourceNotPublishable(intent);
         }
         this.assertSemanticShapingRunSource(intent, record);
+      }
+    }
+  }
+
+  private async semanticAuthoritativeSourceIsReady(
+    intent: SemanticEventIntentV1,
+  ): Promise<boolean> {
+    const source = intent.source;
+    switch (source.kind) {
+      case "controller_run": {
+        const manifest = await this.readControllerRunManifest(
+          intent.work_item_id,
+          source.controller_run_id,
+        );
+        return manifest?.outcome === "applied";
+      }
+      case "shaping_decision": {
+        const manifest = await this.readShapingDecisionManifest(
+          intent.work_item_id,
+          source.decision_id,
+        );
+        return manifest?.outcome === "applied";
+      }
+      case "plan_approval": {
+        const manifest = await this.readPlanApprovalManifest(
+          intent.work_item_id,
+          source.approval_id,
+        );
+        return manifest?.outcome === "applied";
+      }
+      case "connected_run": {
+        const record = await this.readConnectedRun(
+          intent.work_item_id,
+          source.connected_run_id,
+        );
+        if (
+          record !== null &&
+          (record.connected_run_id !== source.connected_run_id ||
+            record.mission.identity.work_item_id !== intent.work_item_id ||
+            record.mission.content_sha256 !== source.mission_content_sha256)
+        ) {
+          throw this.semanticSourceNotPublishable(intent);
+        }
+        return (
+          record !== null &&
+          this.semanticLifecycleReached(
+            source.expected_lifecycle_status,
+            record.lifecycle.status,
+          )
+        );
+      }
+      case "shaping_run": {
+        const record = await this.readShapingRun(
+          intent.work_item_id,
+          source.shaping_run_id,
+        );
+        if (
+          record !== null &&
+          (record.shaping_run_id !== source.shaping_run_id ||
+            record.mission.work_item_id !== intent.work_item_id ||
+            record.mission.content_sha256 !== source.mission_content_sha256)
+        ) {
+          throw this.semanticSourceNotPublishable(intent);
+        }
+        return (
+          record !== null &&
+          this.semanticLifecycleReached(
+            source.expected_lifecycle_status,
+            record.lifecycle.status,
+          )
+        );
       }
     }
   }

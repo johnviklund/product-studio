@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   access,
   mkdtemp,
@@ -56,6 +57,10 @@ import {
   evaluateShapingPermissionRequest,
   type ShapingRunWritePolicy,
 } from "../../src/domain/shaping-run";
+import {
+  deriveSemanticIntentId,
+  semanticEventIntentSchema,
+} from "../../src/domain/semantic-event";
 import {
   resolveCapabilityEnvelope,
   type CanonicalCapabilityRequest,
@@ -588,6 +593,25 @@ async function pathExists(path: string): Promise<boolean> {
     () => true,
     () => false,
   );
+}
+
+async function removeCreatedRoot(root: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await rm(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ENOTEMPTY"
+      ) {
+        throw error;
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+  }
+  await rm(root, { recursive: true, force: true });
 }
 
 async function createService(
@@ -1149,7 +1173,7 @@ async function preparePendingTransfer(
 
 afterEach(async () => {
   await Promise.all(
-    createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+    createdRoots.splice(0).map((root) => removeCreatedRoot(root)),
   );
 });
 
@@ -1256,6 +1280,116 @@ describe("PortfolioService", () => {
         reason: expect.any(String),
       },
     ]);
+    index.close();
+  });
+
+  it("publishes an orphaned applied semantic intent once and leaves a failed source unpublished", async () => {
+    const root = await createWorkspace("Semantic Reconciliation Workspace");
+    const repository = new ProductWorkspace(root, {
+      git: controllerGit,
+      verificationRunner: controllerRunner,
+    });
+    const created = await repository.create({
+      title: "Reconcile semantic intent",
+      type: "Feature",
+    });
+    const governed = await governWorkItemThrough(repository, created, []);
+    const workItemId = governed.workItem.goal.work_item_id;
+    const eventsDirectory = join(
+      root,
+      ".founder",
+      "semantic-events",
+      workItemId,
+      "events",
+    );
+    expect(await readdir(eventsDirectory)).toHaveLength(1);
+    await unlink(join(eventsDirectory, "0000000000000001.json"));
+
+    const failedRunId = "99000000-0000-4000-8000-000000000001";
+    const failedManifest = {
+      schema_version: 1 as const,
+      run_id: failedRunId,
+      work_item_id: workItemId,
+      idempotency_key: `${workItemId}:failed-semantic-source`,
+      phase: governed.workItem.state.phase,
+      goal_version: governed.workItem.state.goal_version!,
+      input_revision: governed.workItem.state.input_revision!,
+      attempt: governed.workItem.state.attempt!,
+      started_at: "2026-07-22T12:00:00.000Z",
+      completed_at: "2026-07-22T12:00:00.001Z",
+      outcome: "failed" as const,
+    };
+    const failedManifestSource = `${JSON.stringify(failedManifest, null, 2)}\n`;
+    const failedManifestPath = `.founder/work-items/${workItemId}/runs/${failedRunId}.json`;
+    await writeFile(join(root, failedManifestPath), failedManifestSource, "utf8");
+    const failedSource = {
+      kind: "controller_run" as const,
+      controller_run_id: failedRunId,
+      expected_outcome: "applied" as const,
+    };
+    const failedKind = "attention_requested" as const;
+    const failedSlot = "failed-source-attention";
+    const referenceSha256 = "f".repeat(64);
+    const failedIntent = semanticEventIntentSchema.parse({
+      schema_version: 1,
+      intent_id: deriveSemanticIntentId({
+        source: failedSource,
+        kind: failedKind,
+        slot: failedSlot,
+      }),
+      source: failedSource,
+      slot: failedSlot,
+      kind: failedKind,
+      work_item_id: workItemId,
+      binding: {
+        kind: "governed",
+        governed_tuple: {
+          goal_version: governed.workItem.state.goal_version,
+          input_revision: governed.workItem.state.input_revision,
+          attempt: governed.workItem.state.attempt,
+          patch_cycle: governed.workItem.state.patch_cycle,
+        },
+        phase: governed.workItem.state.phase,
+        status: governed.workItem.state.status,
+      },
+      run: null,
+      actor: { kind: "controller" },
+      outcome: "Failed source must remain unpublished.",
+      occurred_at: failedManifest.started_at,
+      evidence: [
+        {
+          kind: "controller_run",
+          path: failedManifestPath,
+          expected_content_sha256: createHash("sha256")
+            .update(failedManifestSource)
+            .digest("hex"),
+        },
+      ],
+      action: {
+        kind: "work_item_attention",
+        attention_kind: "review_ready",
+        reference_sha256: referenceSha256,
+      },
+      details: {
+        kind: failedKind,
+        attention_kind: "review_ready",
+        reference_sha256: referenceSha256,
+      },
+    });
+    await repository.writeSemanticEventIntents(workItemId, [failedIntent]);
+
+    const { index, service } = await createService();
+    await service.register({ workspace_path: root });
+    await expect(service.reconcileRunState()).resolves.toBeUndefined();
+    const afterFirst = await readdir(eventsDirectory);
+    expect(afterFirst).toEqual(["0000000000000001.json"]);
+    await expect(service.reconcileRunState()).resolves.toBeUndefined();
+    expect(await readdir(eventsDirectory)).toEqual(afterFirst);
+    const published = JSON.parse(
+      await readFile(join(eventsDirectory, afterFirst[0]!), "utf8"),
+    ) as { intent_id: string; kind: string };
+    expect(published).toMatchObject({ kind: "goal_contract_revised" });
+    expect(published.intent_id).not.toBe(failedIntent.intent_id);
     index.close();
   });
 
@@ -3248,6 +3382,17 @@ describe("PortfolioService", () => {
       expect(artifact.production_receipt?.effective_model.assurance).toBe(
         expectedModel === "unknown" ? "unknown" : "adapter_attested",
       );
+      await expect.poll(() =>
+        readdir(
+          join(
+            root,
+            ".founder",
+            "semantic-events",
+            created.goal.work_item_id,
+            "events",
+          ),
+        ).then((entries) => entries.length),
+      ).toBe(4);
     },
   );
 
