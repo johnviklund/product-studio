@@ -67,6 +67,7 @@ import {
 } from "../src/domain/shaping";
 import { deriveManualShapingProductionId } from "../src/domain/shaping-run";
 import {
+  canonicalSerializeSemanticEvent,
   deriveSemanticIntentId,
   type SemanticEventIntentV1,
   type SemanticEventV1,
@@ -976,10 +977,53 @@ class FailingAfterSemanticIntentWorkspace extends ProductWorkspace {
   }
 }
 
+class FailingAfterSemanticSequenceReservedWorkspace extends ProductWorkspace {
+  private failNextReservation = true;
+
+  protected override async afterSemanticSequenceReserved(): Promise<void> {
+    if (this.failNextReservation) {
+      this.failNextReservation = false;
+      throw new Error("injected failure after semantic sequence reservation");
+    }
+  }
+}
+
+class FailingBeforeSemanticEventWorkspace extends ProductWorkspace {
+  private failNextEventWrite = true;
+
+  protected override async beforeSemanticEventWritten(): Promise<void> {
+    if (this.failNextEventWrite) {
+      this.failNextEventWrite = false;
+      throw new Error("injected failure before semantic event write");
+    }
+  }
+}
+
 class FailingAfterSemanticEventWorkspace extends ProductWorkspace {
   protected override async afterSemanticEventWritten(): Promise<void> {
     throw new Error("injected failure after semantic event write");
   }
+}
+
+async function failSemanticEventPublication(
+  root: string,
+  workspace: ProductWorkspace,
+  expectedMessage: string,
+): Promise<SemanticEventIntentV1> {
+  await writeWorkItem(root, firstId, "2026-07-21T20:00:00.000Z");
+  const run = activeRun();
+  const lease = await workspace.acquireControllerLease(firstId, run);
+  if (lease === null) {
+    throw new Error("Expected controller lease");
+  }
+  const mutation = controllerMutation(lease.work_item, run);
+  const intent = await addGoalContractSemanticIntent(root, mutation, run);
+
+  await expect(
+    workspace.commitControllerMutation(lease, mutation),
+  ).rejects.toThrow(expectedMessage);
+  await workspace.releaseControllerLease(lease);
+  return intent;
 }
 
 class FailingRetainedLeaseRepairWorkspace extends ProductWorkspace {
@@ -2653,6 +2697,95 @@ describe("ProductWorkspace", () => {
     await expect(
       new ProductWorkspace(root).reconcileSemanticEventIntents(firstId),
     ).resolves.toEqual([]);
+  });
+
+  it.each([
+    {
+      boundary: "sequence reservation",
+      create: (root: string) =>
+        new FailingAfterSemanticSequenceReservedWorkspace(root),
+      message: "injected failure after semantic sequence reservation",
+    },
+    {
+      boundary: "event write",
+      create: (root: string) => new FailingBeforeSemanticEventWorkspace(root),
+      message: "injected failure before semantic event write",
+    },
+  ])(
+    "cleans and recovers a failed semantic $boundary",
+    async ({ create, message }) => {
+      const publishRoot = await createWorkspace();
+      const intent = await failSemanticEventPublication(
+        publishRoot,
+        create(publishRoot),
+        message,
+      );
+      const publishEventsDirectory = join(
+        publishRoot,
+        ".founder",
+        "semantic-events",
+        firstId,
+        "events",
+      );
+      expect(await readdir(publishEventsDirectory)).toEqual([]);
+
+      const freshWorkspace = new ProductWorkspace(publishRoot);
+      const published = await freshWorkspace.publishSemanticEventIntent(
+        firstId,
+        intent.intent_id,
+      );
+      expect(published.stream_sequence).toBe(1);
+      expect(await readdir(publishEventsDirectory)).toEqual([
+        "0000000000000001.json",
+      ]);
+      await expect(
+        freshWorkspace.reconcileSemanticEventIntents(firstId),
+      ).resolves.toEqual([published]);
+
+      const reconcileRoot = await createWorkspace();
+      const reconcileIntent = await failSemanticEventPublication(
+        reconcileRoot,
+        create(reconcileRoot),
+        message,
+      );
+      await expect(
+        new ProductWorkspace(reconcileRoot).reconcileSemanticEventIntents(
+          firstId,
+        ),
+      ).resolves.toMatchObject([
+        {
+          intent_id: reconcileIntent.intent_id,
+          stream_sequence: 1,
+        },
+      ]);
+    },
+  );
+
+  it("reclaims a zero-byte trailing reservation left by a killed process", async () => {
+    const root = await createWorkspace();
+    const intent = await failSemanticEventPublication(
+      root,
+      new FailingSemanticPublicationWorkspace(root),
+      "injected semantic publication failure",
+    );
+    const eventPath = join(
+      root,
+      ".founder",
+      "semantic-events",
+      firstId,
+      "events",
+      "0000000000000001.json",
+    );
+    await writeFile(eventPath, "", "utf8");
+
+    const published = await new ProductWorkspace(
+      root,
+    ).publishSemanticEventIntent(firstId, intent.intent_id);
+
+    expect(published.stream_sequence).toBe(1);
+    expect(await readFile(eventPath, "utf8")).toBe(
+      canonicalSerializeSemanticEvent(published),
+    );
   });
 
   it("returns the identical durable event when failure occurs after its write", async () => {
