@@ -2397,11 +2397,17 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         this.shapingRunFingerprint(existingNonterminalRun) ===
         launchFingerprint
       ) {
+        const existingInstruction =
+          await this.readShapingRunInstructionForRecord(
+            existingNonterminalRun,
+          );
+        await this.ensureShapingRunLaunchEvent(
+          existingNonterminalRun,
+          existingInstruction,
+        );
         return {
           record: existingNonterminalRun,
-          instruction: await this.readShapingRunInstructionForRecord(
-            existingNonterminalRun,
-          ),
+          instruction: existingInstruction,
           created: false,
         };
       }
@@ -2425,6 +2431,11 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       itemDirectory,
       SHAPING_RUN_LAUNCH_GUARD_FILE,
     );
+    const launchIntent = this.buildShapingRunLaunchIntent(
+      record,
+      instruction,
+    );
+    await this.writeSemanticEventIntents(workItemId, [launchIntent]);
     try {
       await writeFile(guardPath, `${JSON.stringify(guard, null, 2)}\n`, {
         encoding: "utf8",
@@ -2439,6 +2450,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
     try {
       await this.publishShapingRunDirectory(record, instruction);
+      await this.publishSemanticEventIntent(
+        workItemId,
+        launchIntent.intent_id,
+      );
       return { record, instruction, created: true };
     } catch (error) {
       try {
@@ -2671,7 +2686,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           "A terminal shaping run cannot be completed with a different outcome.",
         );
       }
-      return record;
+      return this.terminalizeShapingRun(record, validatedTerminal);
     }
 
     if (validatedTerminal.outcome === "completed") {
@@ -10708,6 +10723,10 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         "A different shaping run launch already holds the item guard.",
       );
     }
+    await this.ensureShapingRunLaunchEvent(
+      guard.record,
+      guard.instruction,
+    );
     return {
       record: existing ?? guard.record,
       instruction:
@@ -11040,27 +11059,210 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     });
   }
 
+  private buildShapingRunLaunchIntent(
+    record: ShapingRunRecordV1,
+    instruction: ShapingIngressInstructionV1,
+  ): SemanticEventIntentV1 {
+    const workItemId = record.mission.work_item_id;
+    const source = {
+      kind: "shaping_run" as const,
+      shaping_run_id: record.shaping_run_id,
+      expected_lifecycle_status: record.lifecycle.status,
+      mission_content_sha256: record.mission.content_sha256,
+    };
+    const kind = "run_launched" as const;
+    const slot = "run-launch";
+    const instructionPath = `.founder/${SHAPING_RUNS_DIRECTORY}/${workItemId}/${record.shaping_run_id}/${INSTRUCTION_JSON_FILE}`;
+    return semanticEventIntentSchema.parse({
+      schema_version: 1,
+      intent_id: deriveSemanticIntentId({ source, kind, slot }),
+      source,
+      slot,
+      kind,
+      work_item_id: workItemId,
+      binding: {
+        kind: "shaping",
+        identity: {
+          phase: record.mission.phase,
+          work_item_id: workItemId,
+          input_sha256: record.mission.input_sha256,
+        },
+      },
+      run: {
+        family: "shaping",
+        shaping_run_id: record.shaping_run_id,
+        phase: record.mission.phase,
+      },
+      actor: {
+        kind: "shaping_run",
+        shaping_run_id: record.shaping_run_id,
+        provenance: record.provenance,
+      },
+      outcome: `Created durable connected ${record.mission.phase} shaping attempt.`,
+      occurred_at: instruction.created_at,
+      evidence: [
+        {
+          kind: "shaping_instruction",
+          path: instructionPath,
+          expected_content_sha256: this.hashArtifactSource(
+            `${JSON.stringify(instruction, null, 2)}\n`,
+          ),
+        },
+      ],
+      action: null,
+      details: {
+        kind,
+        run_family: "shaping",
+        phase: record.mission.phase,
+        run_id: record.shaping_run_id,
+        lifecycle_status: record.lifecycle.status,
+      },
+    });
+  }
+
+  private async buildShapingRunFinishedIntent(
+    record: ShapingRunRecordV1,
+  ): Promise<SemanticEventIntentV1> {
+    const workItemId = record.mission.work_item_id;
+    if (
+      record.lifecycle.status !== "terminal" ||
+      record.lifecycle.completed_at === null ||
+      record.lifecycle.terminal === null
+    ) {
+      throw new ControllerConflictError(
+        "idempotency_conflict",
+        workItemId,
+        "Shaping run finish publication requires an exact terminal record.",
+      );
+    }
+    const source = {
+      kind: "shaping_run" as const,
+      shaping_run_id: record.shaping_run_id,
+      expected_lifecycle_status: "terminal" as const,
+      mission_content_sha256: record.mission.content_sha256,
+    };
+    const kind = "run_finished" as const;
+    const slot = "run-finish";
+    const runPath = `.founder/${SHAPING_RUNS_DIRECTORY}/${workItemId}/${record.shaping_run_id}/${SHAPING_RUN_FILE}`;
+    return semanticEventIntentSchema.parse({
+      schema_version: 1,
+      intent_id: deriveSemanticIntentId({ source, kind, slot }),
+      source,
+      slot,
+      kind,
+      work_item_id: workItemId,
+      binding: {
+        kind: "shaping",
+        identity: {
+          phase: record.mission.phase,
+          work_item_id: workItemId,
+          input_sha256: record.mission.input_sha256,
+        },
+      },
+      run: {
+        family: "shaping",
+        shaping_run_id: record.shaping_run_id,
+        phase: record.mission.phase,
+      },
+      actor: {
+        kind: "shaping_run",
+        shaping_run_id: record.shaping_run_id,
+        provenance: record.provenance,
+      },
+      outcome: `Connected ${record.mission.phase} shaping run finished with ${record.lifecycle.terminal.outcome}.`,
+      occurred_at: record.lifecycle.completed_at,
+      evidence: [
+        {
+          kind: "shaping_run",
+          path: runPath,
+          expected_content_sha256: this.hashArtifactSource(
+            `${JSON.stringify(record, null, 2)}\n`,
+          ),
+        },
+      ],
+      action: null,
+      details: {
+        kind,
+        run_family: "shaping",
+        phase: record.mission.phase,
+        run_id: record.shaping_run_id,
+        terminal_outcome: record.lifecycle.terminal.outcome,
+        partial: record.lifecycle.terminal.partial,
+      },
+    });
+  }
+
+  private async ensureShapingRunLaunchEvent(
+    record: ShapingRunRecordV1,
+    instructionInput?: ShapingIngressInstructionV1,
+    publish = true,
+  ): Promise<void> {
+    const workItemId = record.mission.work_item_id;
+    const existing = (
+      await this.readSemanticEventIntentFiles(workItemId)
+    ).find(
+      (intent) =>
+        intent.kind === "run_launched" &&
+        intent.source.kind === "shaping_run" &&
+        intent.source.shaping_run_id === record.shaping_run_id,
+    );
+    const intent =
+      existing ??
+      this.buildShapingRunLaunchIntent(
+        record,
+        instructionInput ??
+          (await this.readShapingRunInstructionForRecord(record)),
+      );
+    if (existing === undefined) {
+      await this.writeSemanticEventIntents(workItemId, [intent]);
+    }
+    if (
+      publish &&
+      (await this.readShapingRun(workItemId, record.shaping_run_id)) !== null
+    ) {
+      await this.publishSemanticEventIntent(workItemId, intent.intent_id);
+    }
+  }
+
   private async terminalizeShapingRun(
     record: ShapingRunRecordV1,
     terminal: ConnectedRunTerminal,
   ): Promise<ShapingRunRecordV1> {
-    const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
-    const updated = shapingRunRecordV1Schema.parse({
-      ...record,
-      lifecycle: {
-        status: "terminal",
-        started_at: record.lifecycle.started_at,
-        updated_at: completedAt,
-        completed_at: completedAt,
-        terminal,
-      },
-    });
+    const workItemId = record.mission.work_item_id;
+    let updated = record;
+    if (record.lifecycle.status === "terminal") {
+      if (!isDeepStrictEqual(record.lifecycle.terminal, terminal)) {
+        throw new ControllerConflictError(
+          "idempotency_conflict",
+          workItemId,
+          "A terminal shaping run cannot be completed with a different outcome.",
+        );
+      }
+    } else {
+      const completedAt = timestampAtOrAfter(record.lifecycle.updated_at);
+      updated = shapingRunRecordV1Schema.parse({
+        ...record,
+        lifecycle: {
+          status: "terminal",
+          started_at: record.lifecycle.started_at,
+          updated_at: completedAt,
+          completed_at: completedAt,
+          terminal,
+        },
+      });
+    }
+    await this.ensureShapingRunLaunchEvent(record, undefined, false);
+    const finishIntent = await this.buildShapingRunFinishedIntent(updated);
+    await this.writeSemanticEventIntents(workItemId, [finishIntent]);
     const paths = this.shapingRunPaths(
-      record.mission.work_item_id,
+      workItemId,
       record.shaping_run_id,
     );
-    await this.writeJsonAtomically(paths.run, updated);
+    if (record.lifecycle.status !== "terminal") {
+      await this.writeJsonAtomically(paths.run, updated);
+    }
     await this.releaseShapingRunGuardForRecord(updated);
+    await this.publishSemanticEventIntent(workItemId, finishIntent.intent_id);
     return updated;
   }
 
@@ -11111,6 +11313,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
         workItemId,
         guard.shaping_run_id,
         itemDirectory,
+        false,
       );
       if (guardedRecord === null) {
         const interrupted = this.interruptedShapingRun(
@@ -11121,7 +11324,36 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           interrupted,
           guard.instruction,
         );
-        await this.releaseShapingRunGuard(guard);
+        await this.terminalizeShapingRun(
+          interrupted,
+          interrupted.lifecycle.terminal!,
+        );
+      } else {
+        try {
+          await this.readShapingRunInstructionForRecord(guardedRecord);
+        } catch {
+          if (
+            guard.launch_fingerprint !==
+            this.shapingRunFingerprint(guardedRecord)
+          ) {
+            throw new ControllerConflictError(
+              "repair_required",
+              workItemId,
+              "The shaping launch guard does not match the published run.",
+            );
+          }
+          const paths = this.shapingRunPaths(
+            workItemId,
+            guardedRecord.shaping_run_id,
+          );
+          await this.writeJsonAtomically(paths.instruction, guard.instruction);
+          await this.terminalizeShapingRun(guardedRecord, {
+            outcome: "failed",
+            partial: true,
+            reason:
+              "The durable shaping instruction failed integrity validation.",
+          });
+        }
       }
     }
 
@@ -11142,8 +11374,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const reconciled: ShapingRunRecordV1[] = [];
     for (const storedRecord of records) {
       if (storedRecord.lifecycle.status === "terminal") {
-        await this.releaseShapingRunGuardForRecord(storedRecord);
-        reconciled.push(storedRecord);
+        reconciled.push(
+          await this.terminalizeShapingRun(
+            storedRecord,
+            storedRecord.lifecycle.terminal!,
+          ),
+        );
         continue;
       }
 
@@ -11210,9 +11446,12 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
           ? "The shaping run had no recoverable process identity."
           : "The shaping agent process was not running during recovery.",
       );
-      await this.writeJsonAtomically(paths.run, interrupted);
-      await this.releaseShapingRunGuardForRecord(interrupted);
-      reconciled.push(interrupted);
+      reconciled.push(
+        await this.terminalizeShapingRun(
+          record,
+          interrupted.lifecycle.terminal!,
+        ),
+      );
     }
     return reconciled;
   }
@@ -11724,6 +11963,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
 
   private async ensureConnectedRunLaunchEvent(
     record: ConnectedRunRecordV2,
+    publish = true,
   ): Promise<void> {
     const workItemId = record.mission.identity.work_item_id;
     const existing = (
@@ -11739,6 +11979,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       await this.writeSemanticEventIntents(workItemId, [intent]);
     }
     if (
+      publish &&
       (await this.readConnectedRun(workItemId, record.connected_run_id)) !==
       null
     ) {
@@ -11774,7 +12015,7 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
       });
     }
 
-    await this.ensureConnectedRunLaunchEvent(record);
+    await this.ensureConnectedRunLaunchEvent(record, false);
     const finishIntent = await this.buildConnectedRunFinishedIntent(updated);
     await this.writeSemanticEventIntents(workItemId, [finishIntent]);
     if (record.lifecycle.status !== "terminal") {

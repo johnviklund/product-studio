@@ -3323,6 +3323,17 @@ describe("PortfolioService", () => {
       const record = await repository.readShapingRun(workItemId, runId);
       return record?.lifecycle.status;
     }).toBe("terminal");
+    await expect.poll(async () =>
+      readdir(
+        join(
+          root,
+          ".founder",
+          "semantic-events",
+          workItemId,
+          "events",
+        ),
+      ).then((entries) => entries.length),
+    ).toBe(2);
     const listing = await service.listShapingArtifacts(sourceId, workItemId);
     expect(currentPhaseArtifact(listing.artifacts, "brainstorm").result).toBeNull();
     expect(listing.runs).toContainEqual(

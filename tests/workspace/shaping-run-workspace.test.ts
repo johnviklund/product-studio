@@ -198,6 +198,21 @@ function shapingRunDirectory(root: string, shapingRunId = firstRunId): string {
   );
 }
 
+async function semanticEvents(root: string): Promise<unknown[]> {
+  const directory = join(
+    root,
+    ".founder",
+    "semantic-events",
+    workItemId,
+    "events",
+  );
+  return Promise.all(
+    (await readdir(directory)).map(async (entry) =>
+      JSON.parse(await readFile(join(directory, entry), "utf8")),
+    ),
+  );
+}
+
 function validResult(mission: BrainstormMissionPackage): string {
   const result: BrainstormResultSubmission = {
     result_schema_version: 1,
@@ -383,6 +398,26 @@ describe("shaping-run workspace storage", () => {
       status: "terminal",
       terminal: { outcome: "cancelled" },
     });
+    await expect(
+      workspace.completeShapingRun(workItemId, firstRunId, {
+        outcome: "cancelled",
+        partial: true,
+        reason: "The founder cancelled this shaping run.",
+      }),
+    ).resolves.toEqual(cancelled);
+    expect(await semanticEvents(fixture.root)).toMatchObject([
+      {
+        stream_sequence: 1,
+        kind: "run_launched",
+        details: { lifecycle_status: "starting", run_id: firstRunId },
+        evidence: [{ kind: "shaping_instruction" }],
+      },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "cancelled", partial: true },
+      },
+    ]);
     await expect(
       workspace.createShapingRun(
         shapingRunInput(fixture.mission, secondRunId),
@@ -611,6 +646,15 @@ describe("shaping-run workspace storage", () => {
       status: "terminal",
       terminal: { outcome: "completed", partial: false, reason: null },
     });
+    expect(await semanticEvents(fixture.root)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "completed", partial: false },
+        actor: { provenance: { effective_model: modelB } },
+      },
+    ]);
     const production = JSON.parse(
       await readFile(
         join(
@@ -664,6 +708,14 @@ describe("shaping-run workspace storage", () => {
       status: "terminal",
       terminal: { outcome: "failed", partial: true },
     });
+    expect(await semanticEvents(fixture.root)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "failed", partial: true },
+      },
+    ]);
     await expect(
       workspace.readAppliedShapingResult(fixture.mission.identity),
     ).resolves.toBeNull();
@@ -743,6 +795,15 @@ describe("shaping-run workspace storage", () => {
     );
     expect(await readdir(appliedDirectory)).toHaveLength(4);
     expect(await workspace.listShapingRuns(workItemId)).toHaveLength(1);
+    await workspace.reconcileShapingRuns();
+    expect(await semanticEvents(fixture.root)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "completed", partial: false },
+      },
+    ]);
     await expect(
       workspace.createShapingRun(
         shapingRunInput(fixture.mission, secondRunId),
@@ -800,6 +861,14 @@ describe("shaping-run workspace storage", () => {
       status: "terminal",
       terminal: { outcome: "interrupted" },
     });
+    expect(await semanticEvents(deadFixture.root)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "interrupted" },
+      },
+    ]);
 
     const unpublishedFixture = await createFixture();
     const unpublishedWorkspace = new ProductWorkspace(
@@ -812,6 +881,16 @@ describe("shaping-run workspace storage", () => {
     await rm(shapingRunDirectory(unpublishedFixture.root), {
       recursive: true,
     });
+    await rm(
+      join(
+        unpublishedFixture.root,
+        ".founder",
+        "semantic-events",
+        workItemId,
+        "events",
+        "0000000000000001.json",
+      ),
+    );
     const [unpublished] = await unpublishedWorkspace.reconcileShapingRuns();
     expect(unpublished.lifecycle).toMatchObject({
       status: "terminal",
@@ -825,6 +904,14 @@ describe("shaping-run workspace storage", () => {
       "instruction.json",
       "process.json",
       "run.json",
+    ]);
+    expect(await semanticEvents(unpublishedFixture.root)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+      {
+        stream_sequence: 2,
+        kind: "run_finished",
+        details: { terminal_outcome: "interrupted" },
+      },
     ]);
   });
 
@@ -845,6 +932,9 @@ describe("shaping-run workspace storage", () => {
     );
     const [live] = await liveWorkspace.reconcileShapingRuns();
     expect(live.lifecycle.status).toBe("running");
+    expect(await semanticEvents(liveFixture.root)).toMatchObject([
+      { stream_sequence: 1, kind: "run_launched" },
+    ]);
     expect(probeArguments).toEqual([[processIdentity.pid, 0]]);
 
     const epermFixture = await createFixture();

@@ -5325,13 +5325,20 @@ ${instruction.required_fields.map((field) => `- \`${field}\``).join("\n")}
     if (reconciled?.lifecycle.status === "terminal") {
       return reconciled;
     }
-    return source.workspace
-      .completeShapingRun(
+    try {
+      return await source.workspace.completeShapingRun(
         workItemId,
         shapingRunId,
         this.failedShapingTerminal(),
-      )
-      .catch(() => null);
+      );
+    } catch {
+      return source.workspace
+        .readShapingRun(workItemId, shapingRunId)
+        .then((candidate) =>
+          candidate?.lifecycle.status === "terminal" ? candidate : null,
+        )
+        .catch(() => null);
+    }
   }
 
   private shapingRunFingerprint(run: ShapingRunRecordV1): string {
