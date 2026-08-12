@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,6 +12,12 @@ import {
   type RegisteredWorkspace,
 } from "../src/domain/portfolio";
 import type { ConnectedRunSummary } from "../src/domain/connected-run";
+import {
+  canonicalSerializeSemanticEvent,
+  deriveSemanticEventId,
+  semanticEventSchema,
+  type SemanticEventV1,
+} from "../src/domain/semantic-event";
 import type { WorkItem } from "../src/domain/work-item";
 import { SQLitePortfolioIndex } from "../src/index/work-item-index";
 
@@ -128,6 +134,31 @@ async function createDatabasePath(): Promise<string> {
   return join(root, "index.sqlite");
 }
 
+function inspectDatabase(databasePath: string): {
+  schemaVersion: unknown;
+  schema: unknown[];
+  rows: unknown[];
+} {
+  const database = new Database(databasePath, { readonly: true });
+  try {
+    return {
+      schemaVersion: database.pragma("user_version", { simple: true }),
+      schema: database
+        .prepare(
+          "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name",
+        )
+        .all(),
+      rows: database
+        .prepare(
+          "SELECT * FROM portfolio_work_items ORDER BY source_id, work_item_id",
+        )
+        .all(),
+    };
+  } finally {
+    database.close();
+  }
+}
+
 afterEach(async () => {
   await Promise.all(
     createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -167,6 +198,85 @@ describe("SQLitePortfolioIndex", () => {
     expect(rebuiltIndex.list()).toEqual(expected);
     expect(rebuiltIndex.listConnectedRunSummaries()).toEqual(summaries);
     rebuiltIndex.close();
+  });
+
+  it("ignores semantic-event artifacts when rebuilding the disposable index", async () => {
+    const databasePath = await createDatabasePath();
+    const root = dirname(databasePath);
+    const workItemId = "wi_11111111-1111-4111-8111-111111111111";
+    const item = portfolioItem(
+      firstWorkspace,
+      workItem(workItemId, "Keep the semantic ledger file-backed"),
+    );
+
+    const baselineIndex = new SQLitePortfolioIndex(databasePath);
+    baselineIndex.rebuild([item]);
+    baselineIndex.close();
+    const withoutLedger = inspectDatabase(databasePath);
+    expect(withoutLedger.schemaVersion).toBe(8);
+
+    await rm(databasePath);
+    const eventDirectory = join(
+      root,
+      ".founder",
+      "semantic-events",
+      workItemId,
+      "events",
+    );
+    await mkdir(eventDirectory, { recursive: true });
+    const eventPath = join(eventDirectory, "0000000000000001.json");
+    const before = {
+      kind: "governed" as const,
+      governed_tuple: {
+        goal_version: 1,
+        input_revision: 1,
+        attempt: 0,
+        patch_cycle: 0,
+      },
+      phase: "execute" as const,
+      status: "active" as const,
+    };
+    const binding = { ...before, phase: "review" as const };
+    const event: SemanticEventV1 = {
+      schema_version: 1,
+      event_id: deriveSemanticEventId({
+        schema_version: 1,
+        work_item_id: workItemId,
+        binding,
+        kind: "workflow_transitioned",
+        stream_sequence: 1,
+      }),
+      stream_sequence: 1,
+      kind: "workflow_transitioned",
+      work_item_id: workItemId,
+      binding,
+      run: null,
+      actor: { kind: "controller" },
+      outcome: "Transitioned the governed workflow to Review.",
+      occurred_at: "2026-08-12T08:00:00.000Z",
+      recorded_at: "2026-08-12T08:00:01.000Z",
+      evidence: [
+        {
+          kind: "controller_run",
+          path: `.founder/work-items/${workItemId}/runs/${"b".repeat(64)}.json`,
+          content_sha256: "c".repeat(64),
+        },
+      ],
+      action: null,
+      details: { kind: "workflow_transitioned", before, after: binding },
+      intent_id: "d".repeat(64),
+    };
+    const eventSource = canonicalSerializeSemanticEvent(
+      semanticEventSchema.parse(event),
+    );
+    await writeFile(eventPath, eventSource, "utf8");
+
+    const rebuiltIndex = new SQLitePortfolioIndex(databasePath);
+    rebuiltIndex.rebuild([item]);
+    rebuiltIndex.close();
+
+    expect(inspectDatabase(databasePath)).toEqual(withoutLedger);
+    expect(await readFile(eventPath, "utf8")).toBe(eventSource);
   });
 
   it("round-trips an untyped capture and its optional metadata after cache deletion", async () => {
