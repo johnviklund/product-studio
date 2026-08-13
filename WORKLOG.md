@@ -5,6 +5,34 @@ source of truth — git is the source of truth for *what* changed; `PRODUCT.md`/
 `AGENTS.md` own *what we're building*. Capped at roughly 15 entries; oldest roll off (deleted,
 not archived — they remain in git history).
 
+## 2026-08-13 · Semantic-event contract and durable publishing (roadmap 4.1 foundation) · Codex GPT-5 / Copilot Claude Opus 5 review
+- Shipped the semantic-event contract and durable, replay-safe publishing pipeline: canonical
+  serialization and stable event-ID derivation, ledger storage primitives, intent write/publish
+  with commit-boundary wiring, connected-run and shaping-run lifecycle publication, and startup
+  reconciliation for stale reservations and legacy pre-feature runs.
+- Patch cycle 2 replaced age-only stale-lock takeover on the append lock with owner-evidence
+  gating: acquisition now writes an owner record (`pid`, `hostname`, `acquired_at`) atomically via
+  staging-file + `link` before the lock is observable, and reclamation requires a failed
+  local-pid-liveness probe (never age or an observation gap) before unlinking — closing a defect
+  where a slow, live publisher could be stolen from by a second workspace on the same root.
+- Wrap-in edit: the local-live-owner `repair_required` deadline message now names the owner's
+  `pid` and `acquired_at`, matching this repo's existing "name the holder and the remedy" pattern
+  for unrecoverable lock states; no age fallback reintroduced.
+- Marked ROADMAP 3.4 **Delivered** — its completion signal (a real feature completing the
+  version-one cycle end to end, ≥2 distinct model identities, every human gate preserved,
+  reproducible evidence) was claimed on work item `wi_f2d97c58`.
+- Verified: lint 0 errors / 12 pre-existing warnings, typecheck clean, 42 files / 871 tests,
+  production build exit 0; three-cycle cross-vendor review closed clean (Cycle 3 ship — no
+  P0/P1/P2; two P3s, one fixed at wrap, one deferred to `TODO.md` alongside a
+  `connectedProcessProbe` rename and a sibling-lock audit).
+- Commits: `3dcdb05`..`7840d1c` (feature + patch cycles), `964adc2` (ROADMAP/TODO), `8e23569`
+  (leftover 3.4 run evidence), eval deposits
+- Review: ship-as-is @ `7ed229a` (cross-vendor, three cycles closed — Cycle 1 P0 fixed, Cycle 2 P2
+  fixed, Cycle 3 clean)
+- Why: delivers ROADMAP 4.1's foundation — durable semantic-event history survives crashes and
+  restarts without losing or duplicating events, the precondition for any future Activity feed or
+  live-update surface.
+
 ## 2026-08-09 · Connected Review/Patch continuation, Cycle 4 close-out (roadmap 3.4 slice 3) · Codex GPT-5.6 / Copilot Claude Opus 5 review
 - Delivered the connected Review and bounded Patch continuation of the guided handoff: a
   source-read-only, single-result-ingress authorization shape for Review enforced by its own pure
@@ -332,21 +360,3 @@ not archived — they remain in git history).
 - Why: delivers roadmap 1.5's context-preserving detail panel and keyboard flow so a founder can
   inspect and progress a board item without losing filters or scroll position.
 
-## 2026-07-21 · One-sentence capture and progressive exploration (roadmap 1.4)
-- Added durable capture domain contracts (source, kind, optional tags/notes) and a dependency-free
-  value-object module for source-ID validation to break a schema/aggregate circular import.
-- Projected capture metadata into the cache (schema v2→v3), rehydrating without NULL-backed
-  optional keys so untyped captures still pass strict validation.
-- Added atomic capture workspace operations plus a recoverable, journaled cross-workspace
-  transfer protocol (validate → stage → publish → remove-source) whose recovery inspects durable
-  target state rather than trusting the journal stage alone, with a dedicated staging-discard
-  repository primitive for unpublished rollback.
-- Exposed source-qualified capture create/detail/assignment mutations over HTTP with mapped
-  errors (`409` collision/transfer-failed, `400` bad body, `404` unknown source/item).
-- Shipped `⌘N`/`Ctrl+N` one-sentence capture and a narrow refinement side panel with immutable
-  provenance (original title/kind/captured-at) above editable metadata.
-- Verified: lint, typecheck, 93 tests, and production build pass; Phase 4 review clean (no
-  P0–P2, four deferred/wontfix P3s, no patch plan required).
-- Commits: ace4a9a a8f7a76 525abf6 501aae5 174d231
-- Why: delivers roadmap 1.4's fast, frictionless capture with safe recoverable project transfer,
-  keeping the refinement surface intentionally narrow ahead of any future promotion/AI-shaping work.
