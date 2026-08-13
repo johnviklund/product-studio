@@ -249,7 +249,7 @@ behind the post-MVP backbone choices referenced below.
   [directional mockup](docs/design/roadmap-3.4-slice-2-guided-handoff.png) supports the written
   contract but does not define lifecycle state. Slice 2 now reaches the governed Execute handoff
   through explicit Plan approval.
-- **Status:** In progress — the guided handoff mechanism now reaches Review and its bounded Patch
+- **Status:** Delivered — the guided handoff mechanism reaches Review and its bounded Patch
   continuation, not just Execute. Commits `6ca9b52`–`c0bf64f` delivered connected Brainstorm, Spec,
   and Plan launch, per-seat model selection, the Plan mission, a headed end-to-end run with three
   distinct adapter-observed effective model identities, and the closed three-cycle review. Commits
@@ -260,9 +260,13 @@ behind the post-MVP backbone choices referenced below.
   Review authorization shape and its pure evaluator, the writer/reviewer model-independence
   attestation gate, disclosed (not silently accepted) subject drift at ingress, the clean
   `connected_run.schema_version: 1` cut with no legacy reader, and a closed four-cycle
-  cross-vendor review (verdict: ship). The 3.4 completion signal is not yet claimed because the
-  cycle still does not reach a real feature's approved implementation end to end (that is the
-  gated Step 21 live proof, deferred as its own future slice).
+  cross-vendor review (verdict: ship). The completion signal was claimed on 2026-08-11: work item
+  `wi_f2d97c58` ("View full work item page lacks a to navigate back") completed the version-one
+  cycle end to end — controller-authored feature commit `2b7020e`, three distinct adapter-observed
+  model identities across its agent-driven steps (`gpt-5.4`, `claude-opus-4.5`,
+  `claude-sonnet-4.5`), every human gate preserved, and reproducible Execute and Review evidence
+  retained under `.founder/run-evidence/wi_f2d97c58…/`. Commits `00a2b21`–`8b24be3` carry the
+  controller, mission-base, evidence-budget, and Review-approval fixes that the live proof forced.
 - **Completion signal:** A real feature completes the version-one cycle without manual prompt or
   result assembly, uses at least two distinct recorded LLM model identities across its
   agent-driven steps, preserves every required human gate, and leaves reproducible mission, result,

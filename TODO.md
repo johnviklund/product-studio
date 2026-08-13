@@ -360,6 +360,36 @@ delivery phases.
   `PRODUCT_STUDIO_COPILOT_RUNTIME_PROFILE_JSON` and model auto-discovery remain untouched — the
   item stays open as written.*
 
+### Audit the semantic-event append lock's sibling locks and rename `connectedProcessProbe`
+
+- **Status:** Proposed — deferred by ROADMAP 4.1's Cycle 3 review (2026-08-12) on
+  `product-workspace.ts`'s `withSemanticEventAppendLock`.
+- **Idea:** Three related, cheap follow-ups the cycle deliberately kept out of its diff, bundled
+  because they touch the same lock-handling area:
+  1. A crash between the append lock's staging-file creation and its `link` into place
+     (`:8737-8742`) leaves an orphaned `.append.lock.<uuid>` file forever — no sweeper reclaims it,
+     and the reclamation logic only ever looks at the exact `.append.lock` path. Proven inert (a
+     planted orphan did not block or get mistaken for a real intent/event across a real publish),
+     but it is still permanent litter per crash. The safe place to unlink stale `.append.lock.*`
+     siblings is while the lock is held, the one moment exclusion makes it safe.
+  2. `connectedProcessProbe` is misleadingly named for what it now does (probing pid liveness for
+     the append lock's owner-liveness reclamation, not "connected" in the runtime-profile sense);
+     a rename would reduce confusion with the connected-runtime vocabulary elsewhere in this file.
+  3. The cycle spot-checked (not audited) `acquireExclusiveVerification` (`:869-910`) and the
+     controller lock (`:3380-3407`) and confirmed neither shares the append lock's Cycle-2 steal
+     defect — both wait then return `null` or raise `repair_required` rather than reclaiming
+     another holder's lock. A real audit (not a spot-check) of every lock primitive in this file
+     for the same failure class is still worth doing once, deliberately, rather than incidentally.
+- **Purpose:** None of these is a live defect today (all three were verified inert or non-issues in
+  review), but each is either permanent litter, a naming trap for the next reader, or an
+  unverified area of the same file family.
+- **Definition of done:** Either (a) the orphaned staging file is reclaimed on next acquisition
+  while the lock is held, `connectedProcessProbe` is renamed to reflect pid-liveness probing, and
+  the other lock primitives in `product-workspace.ts` are confirmed (not just spot-checked) free of
+  the steal defect; or (b) each is explicitly declined with a one-line reason.
+- **Boundary:** Do not widen this into a general lock-primitive refactor; each of the three items
+  above is independently small and should land as its own change.
+
 ## Deferred Initiatives
 
 ### Wire the `ambiguous_goal` attention decision
