@@ -8708,11 +8708,22 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const paths = this.semanticEventPaths(validatedWorkItemId);
     const lockPath = join(paths.item, ".append.lock");
+    const readContendingLock = async (): Promise<string | null> => {
+      try {
+        return await this.readOptionalFile(lockPath);
+      } catch (error) {
+        if (isNodeError(error) && error.code === "ENOENT") {
+          return null;
+        }
+        throw error;
+      }
+    };
     const token = randomUUID();
+    const localHostname = hostname();
     const ownerSource = serializeSemanticAppendLockOwner({
       token,
       pid: process.pid,
-      hostname: hostname(),
+      hostname: localHostname,
       acquired_at: new Date().toISOString(),
     });
     const stagingPath = `${lockPath}.${randomUUID()}`;
@@ -8743,19 +8754,31 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
             }
             throw lockError;
           }
-          const staleByAge =
-            Date.now() - lockStats.mtimeMs >= this.exclusiveWaitMs;
-          if (staleByAge) {
-            await this.beforeSemanticAppendLockReclaimed();
-            await unlink(lockPath);
+          const lockSource = await readContendingLock();
+          if (lockSource === null) {
             continue;
           }
-          // Atomic link acquisition publishes owner bytes before the lock is observable, so a
-          // stable zero-byte lock cannot belong to a live owner of this build.
-          if (lockStats.size === 0) {
+          const owner = parseSemanticAppendLockOwner(lockSource);
+          let reclaim = false;
+          let requireMatchingSource = false;
+          if (owner === null) {
+            // Atomic link acquisition publishes owner bytes before the lock is observable, so
+            // stable unparseable content cannot belong to a live owner of this build.
             await new Promise((resolveDelay) =>
               setTimeout(resolveDelay, this.exclusivePollMs),
             );
+            const rereadSource = await readContendingLock();
+            if (rereadSource === null || rereadSource !== lockSource) {
+              continue;
+            }
+            reclaim = true;
+            requireMatchingSource = true;
+          } else if (owner.hostname === localHostname) {
+            reclaim = !(await this.connectedProcessProbe(owner.pid, 0));
+          }
+
+          if (reclaim) {
+            await this.beforeSemanticAppendLockReclaimed();
             let confirmedStats;
             try {
               confirmedStats = await lstat(lockPath);
@@ -8766,19 +8789,36 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
               throw lockError;
             }
             if (
-              confirmedStats.size === 0 &&
-              confirmedStats.mtimeMs === lockStats.mtimeMs
+              confirmedStats.ino !== lockStats.ino ||
+              confirmedStats.mtimeMs !== lockStats.mtimeMs
             ) {
-              await this.beforeSemanticAppendLockReclaimed();
-              await unlink(lockPath);
               continue;
             }
+            if (requireMatchingSource) {
+              const confirmedSource = await readContendingLock();
+              if (confirmedSource === null || confirmedSource !== lockSource) {
+                continue;
+              }
+            }
+            try {
+              await unlink(lockPath);
+            } catch (unlinkError) {
+              if (isNodeError(unlinkError) && unlinkError.code === "ENOENT") {
+                continue;
+              }
+              throw unlinkError;
+            }
+            continue;
           }
           if (Date.now() >= deadline) {
+            const ownerDetail =
+              owner !== null && owner.hostname !== localHostname
+                ? ` Owner hostname ${owner.hostname} cannot be probed locally.`
+                : "";
             throw new ControllerConflictError(
               "repair_required",
               validatedWorkItemId,
-              `Semantic event append lock ${lockPath} remained unavailable.`,
+              `Semantic event append lock ${lockPath} remained unavailable.${ownerDetail}`,
             );
           }
           await new Promise((resolveDelay) =>
