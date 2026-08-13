@@ -4,12 +4,13 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -241,6 +242,54 @@ async function readEvent(
   );
 }
 
+function appendLockOwnerSource(ownerHostname: string): string {
+  return `${JSON.stringify({
+    token: randomUUID(),
+    pid: process.pid,
+    hostname: ownerHostname,
+    acquired_at: new Date().toISOString(),
+  })}\n`;
+}
+
+async function expectRepairRequired(
+  publication: Promise<unknown>,
+): Promise<ControllerConflictError> {
+  try {
+    await publication;
+  } catch (error) {
+    expect(error).toBeInstanceOf(ControllerConflictError);
+    expect(error).toMatchObject({ kind: "repair_required" });
+    return error as ControllerConflictError;
+  }
+  throw new Error("Expected semantic event publication to require repair.");
+}
+
+class SuccessorAppendLockWorkspace extends ProductWorkspace {
+  private replaced = false;
+
+  constructor(
+    root: string,
+    private readonly lockPath: string,
+    private readonly successorSource: string,
+  ) {
+    super(root, {
+      connectedProcessProbe: async () => true,
+      exclusiveWaitMs: 500,
+      exclusivePollMs: 25,
+    });
+  }
+
+  protected override async beforeSemanticAppendLockReclaimed(): Promise<void> {
+    if (this.replaced) {
+      return;
+    }
+    this.replaced = true;
+    const successorPath = `${this.lockPath}.${randomUUID()}`;
+    await writeFile(successorPath, this.successorSource, "utf8");
+    await rename(successorPath, this.lockPath);
+  }
+}
+
 afterEach(async () => {
   await Promise.all(
     createdRoots.splice(0).map((root) => rm(root, { recursive: true })),
@@ -444,6 +493,122 @@ describe("semantic event workspace", () => {
     await expect(readFile(lockPath, "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("never reclaims an aged append lock owned by a live local process", async () => {
+    const fixture = await createFixture();
+    const workspace = new ProductWorkspace(fixture.root, {
+      connectedProcessProbe: async () => true,
+      exclusiveWaitMs: 500,
+      exclusivePollMs: 25,
+    });
+    const intent = workflowIntent(fixture, "live-append-lock-owner");
+    await workspace.writeSemanticEventIntents(fixture.workItemId, [intent]);
+    const lockPath = join(
+      semanticDirectory(fixture.root, fixture.workItemId),
+      ".append.lock",
+    );
+    const ownerSource = appendLockOwnerSource(hostname());
+    await writeFile(lockPath, ownerSource, "utf8");
+    const staleTime = new Date(Date.now() - 24 * 60 * 60 * 1_000);
+    await utimes(lockPath, staleTime, staleTime);
+
+    await expectRepairRequired(
+      workspace.publishSemanticEventIntent(
+        fixture.workItemId,
+        intent.intent_id,
+      ),
+    );
+    expect(await readFile(lockPath, "utf8")).toBe(ownerSource);
+  });
+
+  it("reclaims an append lock owned by a dead local process immediately", async () => {
+    const fixture = await createFixture();
+    const workspace = new ProductWorkspace(fixture.root, {
+      connectedProcessProbe: async () => false,
+      exclusiveWaitMs: 500,
+      exclusivePollMs: 25,
+    });
+    const intent = workflowIntent(fixture, "dead-append-lock-owner");
+    await workspace.writeSemanticEventIntents(fixture.workItemId, [intent]);
+    const lockPath = join(
+      semanticDirectory(fixture.root, fixture.workItemId),
+      ".append.lock",
+    );
+    await writeFile(lockPath, appendLockOwnerSource(hostname()), "utf8");
+    const startedAt = Date.now();
+
+    const published = await workspace.publishSemanticEventIntent(
+      fixture.workItemId,
+      intent.intent_id,
+    );
+
+    expect(published.stream_sequence).toBe(1);
+    expect(Date.now() - startedAt).toBeLessThan(250);
+    await expect(readFile(lockPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("never reclaims an aged append lock owned on a foreign host", async () => {
+    const fixture = await createFixture();
+    let probeCalls = 0;
+    const workspace = new ProductWorkspace(fixture.root, {
+      connectedProcessProbe: async () => {
+        probeCalls += 1;
+        return false;
+      },
+      exclusiveWaitMs: 500,
+      exclusivePollMs: 25,
+    });
+    const intent = workflowIntent(fixture, "foreign-append-lock-owner");
+    await workspace.writeSemanticEventIntents(fixture.workItemId, [intent]);
+    const lockPath = join(
+      semanticDirectory(fixture.root, fixture.workItemId),
+      ".append.lock",
+    );
+    const foreignHostname = `${hostname()}-foreign`;
+    const ownerSource = appendLockOwnerSource(foreignHostname);
+    await writeFile(lockPath, ownerSource, "utf8");
+    const staleTime = new Date(Date.now() - 24 * 60 * 60 * 1_000);
+    await utimes(lockPath, staleTime, staleTime);
+
+    const error = await expectRepairRequired(
+      workspace.publishSemanticEventIntent(
+        fixture.workItemId,
+        intent.intent_id,
+      ),
+    );
+    expect(error.message).toContain(foreignHostname);
+    expect(probeCalls).toBe(0);
+    expect(await readFile(lockPath, "utf8")).toBe(ownerSource);
+  });
+
+  it("does not delete a successor append lock during reclamation", async () => {
+    const fixture = await createFixture();
+    const lockPath = join(
+      semanticDirectory(fixture.root, fixture.workItemId),
+      ".append.lock",
+    );
+    const successorSource = appendLockOwnerSource(hostname());
+    const workspace = new SuccessorAppendLockWorkspace(
+      fixture.root,
+      lockPath,
+      successorSource,
+    );
+    const intent = workflowIntent(fixture, "successor-append-lock-owner");
+    await workspace.writeSemanticEventIntents(fixture.workItemId, [intent]);
+    await writeFile(lockPath, "abandoned-owner\n", "utf8");
+    const staleTime = new Date(Date.now() - 24 * 60 * 60 * 1_000);
+    await utimes(lockPath, staleTime, staleTime);
+
+    await expectRepairRequired(
+      workspace.publishSemanticEventIntent(
+        fixture.workItemId,
+        intent.intent_id,
+      ),
+    );
+    expect(await readFile(lockPath, "utf8")).toBe(successorSource);
   });
 
   it("keeps independent sequences for different work items", async () => {
