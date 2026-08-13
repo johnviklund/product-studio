@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import {
+  link,
   lstat,
   mkdir,
   open,
@@ -8707,82 +8708,106 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
     const validatedWorkItemId = workItemIdSchema.parse(workItemId);
     const paths = this.semanticEventPaths(validatedWorkItemId);
     const lockPath = join(paths.item, ".append.lock");
-    const token = `${randomUUID()}\n`;
-    let handle = null;
+    const token = randomUUID();
+    const ownerSource = serializeSemanticAppendLockOwner({
+      token,
+      pid: process.pid,
+      hostname: hostname(),
+      acquired_at: new Date().toISOString(),
+    });
+    const stagingPath = `${lockPath}.${randomUUID()}`;
     const deadline = Date.now() + this.exclusiveWaitMs;
-    for (;;) {
+    try {
+      const stagingHandle = await open(stagingPath, "wx");
       try {
-        handle = await open(lockPath, "wx");
-        break;
-      } catch (error) {
-        if (!isNodeError(error) || error.code !== "EEXIST") {
-          throw error;
-        }
-
-        let lockStats;
+        await stagingHandle.writeFile(ownerSource, { encoding: "utf8" });
+        await stagingHandle.sync();
+      } finally {
+        await stagingHandle.close();
+      }
+      for (;;) {
         try {
-          lockStats = await lstat(lockPath);
-        } catch (lockError) {
-          if (isNodeError(lockError) && lockError.code === "ENOENT") {
-            continue;
+          await link(stagingPath, lockPath);
+          break;
+        } catch (error) {
+          if (!isNodeError(error) || error.code !== "EEXIST") {
+            throw error;
           }
-          throw lockError;
-        }
-        const staleByAge =
-          Date.now() - lockStats.mtimeMs >= this.exclusiveWaitMs;
-        if (staleByAge) {
-          await this.beforeSemanticAppendLockReclaimed();
-          await unlink(lockPath);
-          continue;
-        }
-        if (lockStats.size === 0) {
-          await new Promise((resolveDelay) =>
-            setTimeout(resolveDelay, this.exclusivePollMs),
-          );
-          let confirmedStats;
+
+          let lockStats;
           try {
-            confirmedStats = await lstat(lockPath);
+            lockStats = await lstat(lockPath);
           } catch (lockError) {
             if (isNodeError(lockError) && lockError.code === "ENOENT") {
               continue;
             }
             throw lockError;
           }
-          if (
-            confirmedStats.size === 0 &&
-            confirmedStats.mtimeMs === lockStats.mtimeMs
-          ) {
+          const staleByAge =
+            Date.now() - lockStats.mtimeMs >= this.exclusiveWaitMs;
+          if (staleByAge) {
             await this.beforeSemanticAppendLockReclaimed();
             await unlink(lockPath);
             continue;
           }
-        }
-        if (Date.now() >= deadline) {
-          throw new ControllerConflictError(
-            "repair_required",
-            validatedWorkItemId,
-            `Semantic event append lock ${lockPath} remained unavailable.`,
+          // Atomic link acquisition publishes owner bytes before the lock is observable, so a
+          // stable zero-byte lock cannot belong to a live owner of this build.
+          if (lockStats.size === 0) {
+            await new Promise((resolveDelay) =>
+              setTimeout(resolveDelay, this.exclusivePollMs),
+            );
+            let confirmedStats;
+            try {
+              confirmedStats = await lstat(lockPath);
+            } catch (lockError) {
+              if (isNodeError(lockError) && lockError.code === "ENOENT") {
+                continue;
+              }
+              throw lockError;
+            }
+            if (
+              confirmedStats.size === 0 &&
+              confirmedStats.mtimeMs === lockStats.mtimeMs
+            ) {
+              await this.beforeSemanticAppendLockReclaimed();
+              await unlink(lockPath);
+              continue;
+            }
+          }
+          if (Date.now() >= deadline) {
+            throw new ControllerConflictError(
+              "repair_required",
+              validatedWorkItemId,
+              `Semantic event append lock ${lockPath} remained unavailable.`,
+            );
+          }
+          await new Promise((resolveDelay) =>
+            setTimeout(resolveDelay, this.exclusivePollMs),
           );
         }
-        await new Promise((resolveDelay) =>
-          setTimeout(resolveDelay, this.exclusivePollMs),
-        );
+      }
+    } finally {
+      try {
+        await unlink(stagingPath);
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "ENOENT") {
+          throw error;
+        }
       }
     }
 
     let operationError: unknown = null;
     try {
-      await handle.writeFile(token, { encoding: "utf8" });
-      await handle.sync();
       return await operation();
     } catch (error) {
       operationError = error;
       throw error;
     } finally {
       try {
-        await handle.close();
-        const storedToken = await this.readOptionalFile(lockPath);
-        if (storedToken !== token) {
+        const storedOwner = parseSemanticAppendLockOwner(
+          await this.readOptionalFile(lockPath),
+        );
+        if (storedOwner?.token !== token) {
           throw new ControllerConflictError(
             "repair_required",
             validatedWorkItemId,
