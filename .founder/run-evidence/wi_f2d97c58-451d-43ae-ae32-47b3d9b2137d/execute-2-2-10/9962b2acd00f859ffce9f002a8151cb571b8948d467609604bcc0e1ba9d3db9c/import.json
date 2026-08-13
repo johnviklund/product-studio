@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "import_run_id": "9962b2acd00f859ffce9f002a8151cb571b8948d467609604bcc0e1ba9d3db9c",
+  "result_content_sha256": "da6ec5385a403b1f20a3a3d3e8a9e0e390c86488d91544fe7bf3a5393834e46c",
+  "mission_content_sha256": "ee60af08f4fb8de9319cdfd9c826055990e6751a99871c358cda34667a961540",
+  "git_base_commit": "0b680d3fbbf0bcd4565f2444cdd3c78863e326d5",
+  "controller_run_id": "e29b52af-1581-5c96-9a49-78c1b46b7133",
+  "started_at": "2026-08-11T12:51:56.091Z",
+  "completed_at": "2026-08-11T12:51:56.252Z",
+  "outcome": "rejected",
+  "reasons": [
+    "An already-satisfied result requires a clean workspace outside .founder/."
+  ],
+  "phase": "execute",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 10
+  },
+  "result_commit": null
+}

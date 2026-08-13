@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "run_id": "681b569f-ac91-55c6-802f-a37cc8029bff",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:2:2:2",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 2,
+  "started_at": "2026-08-11T10:44:54.048Z",
+  "completed_at": "2026-08-11T10:44:54.086Z",
+  "outcome": "applied"
+}

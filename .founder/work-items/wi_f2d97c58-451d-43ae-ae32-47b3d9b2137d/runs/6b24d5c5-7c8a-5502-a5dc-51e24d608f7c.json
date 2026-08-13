@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "run_id": "6b24d5c5-7c8a-5502-a5dc-51e24d608f7c",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:1:1:10",
+  "phase": "execute",
+  "goal_version": 1,
+  "input_revision": 1,
+  "attempt": 10,
+  "started_at": "2026-08-10T14:15:33.833Z",
+  "completed_at": "2026-08-10T14:15:33.896Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "8385090c970204085a91a68a7021e6d21da8504e53465079272896d5e4f953d9",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "npx",
+          "args": [
+            "tsc",
+            "--noEmit"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "ffb7681c2a7f24e5ace224cb339d083f35d9e258ceeb9f2ba83783c0fe4bfc90"
+  }
+}

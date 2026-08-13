@@ -1,0 +1,147 @@
+{
+  "schema_version": 2,
+  "connected_run_id": "4f48fc41-6bd2-46c1-b428-92b4430c0a9a",
+  "mission": {
+    "identity": {
+      "phase": "execute",
+      "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 10
+    },
+    "path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-2-2-10/mission.json",
+    "content_sha256": "ee60af08f4fb8de9319cdfd9c826055990e6751a99871c358cda34667a961540",
+    "source_commit": "db0b22f0cf1c7992440060451cd751c8d3fd4bce"
+  },
+  "governed_tuple": {
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 10,
+    "patch_cycle": 0
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "executor",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "claude-sonnet-4.5",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "claude-sonnet-4.5",
+      "deployment_id": null,
+      "observed_event_sha256": "0a070343c1b60ca4157192c59fdc2a92f1f33d31c0402d5b5f5a128674d3e76a"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "de66538eae54aa29f757540b16644d971ed78107cf1957c531a93abb396a701e",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    },
+    "authorization_sha256": {
+      "value": "043c5b563ed47834351ff7eb75f676fdcf8717b4a9ba0ed5b0f99580735884d6",
+      "assurance": "controller_observed"
+    }
+  },
+  "authorization": {
+    "kind": "capability_envelope",
+    "envelope": {
+      "schema_version": 1,
+      "workspace": {
+        "allowed_scope_digest": "c690bc2dcab8fb7f3368f8c5b3b9d0fc3af0a557983e2249a99d58e4e16c3d44",
+        "execution_mode": "permission_mediated_local",
+        "scope_assurance": "result_scope_validation"
+      },
+      "runtime": {
+        "containment_assurance": "not_independently_enforced",
+        "machine_authority": "launching_user",
+        "approved_command_forms": [
+          {
+            "executable": "npm",
+            "args": [
+              "run",
+              "typecheck"
+            ]
+          },
+          {
+            "executable": "npm",
+            "args": [
+              "test",
+              "--",
+              "tests/detail-panel.test.tsx"
+            ]
+          }
+        ],
+        "approved_url_operations": [],
+        "mcp": "forbidden",
+        "credentials": "forbidden"
+      }
+    },
+    "envelope_sha256": "f7259b5e6d5f71f3a939993fd543c0945688583dc2738133311b2db0115edefc"
+  },
+  "acp": {
+    "protocol_version": {
+      "value": 1,
+      "assurance": "adapter_attested"
+    },
+    "session_id": {
+      "value": "73850f16-3f46-4b42-ad5d-5d9ba41effae",
+      "assurance": "adapter_attested"
+    }
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-11T12:50:37.269Z",
+    "updated_at": "2026-08-11T12:51:56.071Z",
+    "completed_at": "2026-08-11T12:51:56.071Z",
+    "terminal": {
+      "outcome": "completed",
+      "partial": false,
+      "reason": null
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 50000,
+    "max_event_bytes": 50000000,
+    "max_output_bytes": 1000000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 89932,
+    "process_group_id": 89932,
+    "started_at": "2026-08-11T12:50:40.891Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

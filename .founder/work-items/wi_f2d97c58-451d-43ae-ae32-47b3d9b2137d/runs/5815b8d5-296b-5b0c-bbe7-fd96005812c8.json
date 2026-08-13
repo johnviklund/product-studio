@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "run_id": "5815b8d5-296b-5b0c-bbe7-fd96005812c8",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:ship:2:2:12:approve-review:e3b1359bb7305695c1844a0d3b3bddac23e1981e71306477471784c830015f1e",
+  "phase": "ship",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 12,
+  "started_at": "2026-08-11T18:41:00.341Z",
+  "completed_at": "2026-08-11T18:41:00.498Z",
+  "outcome": "applied",
+  "review_result_approval": {
+    "schema_version": 1,
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "governed_tuple": {
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 12,
+      "patch_cycle": 0
+    },
+    "review_mission_content_sha256": "146938027120816885d92788c9fec69b2d1b15383ef78bd1053e5a014c40a615",
+    "result_content_sha256": "ac44f44d6f8729355a75edeab5fa9373fc0e226468d48a60a5580962d75176b2",
+    "evidence_path": ".founder/run-evidence/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/review-2-2-12/9a2bf9ca95ddcdee590ace4dc22d94aed64783a1f62bafa2334ab872f56cc025",
+    "accepted_result_commit": "2b7020ed700164153650eac1ad1538cb2a7e1639",
+    "approval_sha256": "e3b1359bb7305695c1844a0d3b3bddac23e1981e71306477471784c830015f1e"
+  }
+}

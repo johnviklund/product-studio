@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "run_id": "7b6da830-2089-5068-82bb-e8e39c48c91e",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:1:1:13",
+  "phase": "execute",
+  "goal_version": 1,
+  "input_revision": 1,
+  "attempt": 13,
+  "started_at": "2026-08-11T06:34:55.735Z",
+  "completed_at": "2026-08-11T06:34:55.793Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "b731fa4c4e9291fecacb429d0e98f7704921693ba5b1cc4d28f1a1be3f06d5bb",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "npx",
+          "args": [
+            "tsc",
+            "--noEmit"
+          ]
+        },
+        {
+          "executable": "wc",
+          "args": [
+            "-l",
+            "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/components/kanban/detail-panel.tsx"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "7d2caf479ce43f07603009dc7013617fa0db6b7e83b6099681ebd5edd79fcfc7"
+  }
+}

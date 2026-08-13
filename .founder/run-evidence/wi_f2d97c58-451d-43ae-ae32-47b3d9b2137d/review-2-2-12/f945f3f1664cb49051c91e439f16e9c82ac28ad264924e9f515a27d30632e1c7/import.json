@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "import_run_id": "f945f3f1664cb49051c91e439f16e9c82ac28ad264924e9f515a27d30632e1c7",
+  "result_content_sha256": "ac44f44d6f8729355a75edeab5fa9373fc0e226468d48a60a5580962d75176b2",
+  "mission_content_sha256": "146938027120816885d92788c9fec69b2d1b15383ef78bd1053e5a014c40a615",
+  "git_base_commit": "7c18d3fd173b4a08775d2276cc172d36d1d4a6b3",
+  "controller_run_id": "f2d58496-5af4-51e6-b2c3-a6376684462b",
+  "started_at": "2026-08-11T17:34:01.360Z",
+  "completed_at": "2026-08-11T17:34:01.581Z",
+  "outcome": "rejected",
+  "reasons": [
+    "Workspace HEAD no longer equals the accepted subject commit.",
+    "Workspace has uncommitted changes outside .founder/."
+  ],
+  "phase": "review",
+  "identity": {
+    "phase": "review",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 12
+  },
+  "result_commit": "2b7020ed700164153650eac1ad1538cb2a7e1639"
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "import_run_id": "ccaee9d9335317f817846847fcf9bce545a505accd9940814f9b6bd0f1944401",
+  "result_content_sha256": "15780963973140d4541898cd66be12abd2982678c01c07de62dc3575b41dc224",
+  "mission_content_sha256": "d7df3a9040374fed8699b0c73883e013cfdfb4e6a74c056f557111265f7bbd68",
+  "git_base_commit": "db0b22f0cf1c7992440060451cd751c8d3fd4bce",
+  "controller_run_id": "c3482b66-a0d7-5451-ac8d-190613532d96",
+  "started_at": "2026-08-11T06:37:43.328Z",
+  "completed_at": "2026-08-11T06:37:43.536Z",
+  "outcome": "rejected",
+  "reasons": [
+    "Result omitted a commit and the worktree holds no changes to commit."
+  ],
+  "phase": "execute",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 13
+  },
+  "result_commit": null
+}

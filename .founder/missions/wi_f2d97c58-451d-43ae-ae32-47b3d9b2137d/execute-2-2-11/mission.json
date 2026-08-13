@@ -1,0 +1,107 @@
+{
+  "mission_schema_version": 8,
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 11
+  },
+  "controller_run": {
+    "run_id": "648cca89-a0ed-552a-97c7-e485f5954144",
+    "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:2:2:11",
+    "phase": "execute",
+    "started_at": "2026-08-11T13:11:14.544Z",
+    "completed_at": "2026-08-11T13:11:14.608Z"
+  },
+  "goal": {
+    "title": "View full work item page lacks a to navigate back",
+    "purpose": "Define a focused back-navigation flow from the full work item page to the details-panel context the user came from.",
+    "acceptance_criteria": [
+      "From the full work item page opened via 'View full work item', the user can trigger a visible back action that returns to the previously open work item details panel without manually closing and reopening it."
+    ],
+    "non_goals": [
+      "Redesigning global application navigation, breadcrumbs, or multi-step history beyond returning from the full work item page to its originating details-panel context."
+    ],
+    "allowed_scope": [
+      "PRODUCT.md",
+      "components/kanban/detail-panel.tsx",
+      "src/application/portfolio.ts",
+      "src/application/work-item-controller.ts",
+      "src/domain/mission.ts",
+      "src/workspace/product-workspace.ts",
+      "tests/application/portfolio.test.ts",
+      "tests/application/work-item-controller.test.ts",
+      "tests/detail-panel.test.tsx",
+      "tests/domain/mission.test.ts",
+      "tests/workspace-contract.test.ts"
+    ],
+    "review_ready": [
+      "The proposal specifies the entry point, the back-navigation affordance on the full work item page, and the expected restored destination context when returning to the details panel."
+    ]
+  },
+  "source_revision": {
+    "git_base_commit": "db0b22f0cf1c7992440060451cd751c8d3fd4bce",
+    "scope_base_commit": "8d9af8aafea7e52f7cddf8cdf23f2e0c8d8d43c1"
+  },
+  "approved_plan": {
+    "mission_content_sha256": "83c13f18c5c38ba85a53e6e4044b0f089aafc9ad5267ac795a2866f51bc65a06",
+    "result_content_sha256": "3ba0a1c845fb997e6529967b1f44d4aab72594e492c0bf1bb8c134efec7bed89",
+    "goal_contract_sha256": "2600e6eef71a4ed11168d2972a721a5397f10d25492c0e6a59b706953e2a6f7c",
+    "approved_at": "2026-08-09T17:54:43.723Z",
+    "summary": "Add unconditional back-navigation button to the full work item view in detail-panel.tsx. Currently the 'Back to shaping decision' button only appears when shapingDecisionProjection is non-null, leaving users without a visible return path when shaping context is unavailable. The fix moves the back button outside the conditional block so it always appears when showFullWorkItem is true, with context-appropriate labeling.",
+    "checklist": [
+      {
+        "id": "step-1",
+        "step": "Refactor the full work item view (line ~8227) in detail-panel.tsx to always render a back-navigation button at the top when showFullWorkItem is true, regardless of whether shapingDecisionProjection is null. Use conditional text: 'Back to shaping decision' when shaping is active, or 'Back to details panel' otherwise.",
+        "verification_check": "Run `npm run typecheck` to confirm no TypeScript errors. Manually verify the back button appears unconditionally in the full work item view by loading a work item with and without shaping context."
+      },
+      {
+        "id": "step-2",
+        "step": "Add an ArrowLeft icon prefix to the back button for visual clarity and consistency with common navigation patterns. The icon is already imported at the top of detail-panel.tsx.",
+        "verification_check": "Visual inspection confirms the ArrowLeft icon appears before the button text."
+      },
+      {
+        "id": "step-3",
+        "step": "Add a test case in tests/detail-panel.test.tsx that renders the DetailPanel in full work item view mode and asserts the back button is present and clickable, returning the user to the details panel state.",
+        "verification_check": "Run `npm test -- tests/detail-panel.test.tsx` and confirm the new test passes."
+      }
+    ],
+    "relevant_skills": [],
+    "product_doc_impacts": [],
+    "todo_impacts": [],
+    "open_questions": []
+  },
+  "capability_envelope": {
+    "schema_version": 1,
+    "workspace": {
+      "allowed_scope_digest": "c690bc2dcab8fb7f3368f8c5b3b9d0fc3af0a557983e2249a99d58e4e16c3d44",
+      "execution_mode": "permission_mediated_local",
+      "scope_assurance": "result_scope_validation"
+    },
+    "runtime": {
+      "containment_assurance": "not_independently_enforced",
+      "machine_authority": "launching_user",
+      "approved_command_forms": [],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    }
+  },
+  "result_contract": {
+    "schema_version": 4,
+    "output_path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-2-2-11/result.json",
+    "result_schema_version": 2,
+    "required_fields": [
+      "result_schema_version",
+      "mission_content_sha256",
+      "identity",
+      "commit",
+      "summary",
+      "changed_files",
+      "verification"
+    ]
+  },
+  "task_path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-2-2-11/TASK.md",
+  "content_sha256": "60a09c3594ce8aa15ab2830a5383081b187a39e59610defd4e97e3a48eaac487"
+}

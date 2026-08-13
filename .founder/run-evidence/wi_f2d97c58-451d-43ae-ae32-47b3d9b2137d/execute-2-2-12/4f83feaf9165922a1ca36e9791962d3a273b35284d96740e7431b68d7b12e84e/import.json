@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "import_run_id": "4f83feaf9165922a1ca36e9791962d3a273b35284d96740e7431b68d7b12e84e",
+  "result_content_sha256": "792408656206722930c3333b7d1f65032136efe0f2d78bd726af4dd6ccc4e5bb",
+  "mission_content_sha256": "8bb3db375c9eba0b88327ba9f2922afe2bcce819b6f7174018bd7e595827bdaa",
+  "git_base_commit": "7c18d3fd173b4a08775d2276cc172d36d1d4a6b3",
+  "controller_run_id": "f6d867a5-6cc5-5c1d-8c42-b5daa328a762",
+  "started_at": "2026-08-11T13:21:09.599Z",
+  "completed_at": "2026-08-11T13:22:02.376Z",
+  "outcome": "applied",
+  "reasons": [],
+  "phase": "execute",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 12
+  },
+  "result_commit": "2b7020ed700164153650eac1ad1538cb2a7e1639"
+}

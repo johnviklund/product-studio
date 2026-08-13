@@ -1,0 +1,69 @@
+{
+  "mission_schema_version": 7,
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 11
+  },
+  "controller_run": {
+    "run_id": "a1560535-b911-59e2-8a08-733d661c5b60",
+    "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:1:1:11",
+    "phase": "execute",
+    "started_at": "2026-08-11T06:25:24.171Z",
+    "completed_at": "2026-08-11T06:25:24.192Z"
+  },
+  "goal": {
+    "title": "View full work item page lacks a to navigate back",
+    "purpose": "Define a focused back-navigation flow from the full work item page to the details-panel context the user came from.",
+    "acceptance_criteria": [
+      "From the full work item page opened via 'View full work item', the user can trigger a visible back action that returns to the previously open work item details panel without manually closing and reopening it."
+    ],
+    "non_goals": [
+      "Redesigning global application navigation, breadcrumbs, or multi-step history beyond returning from the full work item page to its originating details-panel context."
+    ],
+    "allowed_scope": [
+      "work-item details panel to full-page work-item navigation and return behavior"
+    ],
+    "review_ready": [
+      "The proposal specifies the entry point, the back-navigation affordance on the full work item page, and the expected restored destination context when returning to the details panel."
+    ]
+  },
+  "source_revision": {
+    "git_base_commit": "4133c875769f85e69492e57986c122937fbe040b",
+    "scope_base_commit": "db0b22f0cf1c7992440060451cd751c8d3fd4bce"
+  },
+  "capability_envelope": {
+    "schema_version": 1,
+    "workspace": {
+      "allowed_scope_digest": "dc03f47661422bb0b33922ac46bafaae8080cb7ea68a100f8cebdda3f2276802",
+      "execution_mode": "permission_mediated_local",
+      "scope_assurance": "result_scope_validation"
+    },
+    "runtime": {
+      "containment_assurance": "not_independently_enforced",
+      "machine_authority": "launching_user",
+      "approved_command_forms": [],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    }
+  },
+  "result_contract": {
+    "schema_version": 4,
+    "output_path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-11/result.json",
+    "result_schema_version": 2,
+    "required_fields": [
+      "result_schema_version",
+      "mission_content_sha256",
+      "identity",
+      "commit",
+      "summary",
+      "changed_files",
+      "verification"
+    ]
+  },
+  "task_path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-11/TASK.md",
+  "content_sha256": "6cd445df51feb181a9fbe1104f6a49b1f5738746fcc34f54f4b45b2aaadc4712"
+}

@@ -1,0 +1,146 @@
+{
+  "schema_version": 2,
+  "connected_run_id": "785ad051-ada7-45ef-ae95-52551df15906",
+  "mission": {
+    "identity": {
+      "phase": "execute",
+      "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+      "goal_version": 1,
+      "input_revision": 1,
+      "attempt": 13
+    },
+    "path": ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-13/mission.json",
+    "content_sha256": "d7df3a9040374fed8699b0c73883e013cfdfb4e6a74c056f557111265f7bbd68",
+    "source_commit": "4133c875769f85e69492e57986c122937fbe040b"
+  },
+  "governed_tuple": {
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 13,
+    "patch_cycle": 0
+  },
+  "provenance": {
+    "role": {
+      "value": "writer",
+      "assurance": "controller_observed"
+    },
+    "seat": {
+      "value": "executor",
+      "assurance": "controller_observed"
+    },
+    "requested_model": {
+      "value": "claude-sonnet-4.5",
+      "assurance": "user_declared"
+    },
+    "effective_model": {
+      "assurance": "adapter_attested",
+      "model_id": "claude-sonnet-4.5",
+      "deployment_id": null,
+      "observed_event_sha256": "0a070343c1b60ca4157192c59fdc2a92f1f33d31c0402d5b5f5a128674d3e76a"
+    },
+    "effort": {
+      "value": "medium",
+      "assurance": "user_declared"
+    },
+    "harness": {
+      "value": {
+        "id": "copilot-acp",
+        "version": "1.0.78"
+      },
+      "assurance": "adapter_attested"
+    },
+    "adapter_profile": {
+      "value": {
+        "adapter_id": "copilot-acp",
+        "adapter_version": "1.0.78",
+        "profile_id": "noninteractive-execute-v1"
+      },
+      "assurance": "adapter_attested"
+    },
+    "resolved_profile_sha256": {
+      "value": "de66538eae54aa29f757540b16644d971ed78107cf1957c531a93abb396a701e",
+      "assurance": "controller_observed"
+    },
+    "resolved_skill_set_sha256": {
+      "value": null,
+      "assurance": "unknown"
+    },
+    "authorization_sha256": {
+      "value": "f0cf7b5c710f6125b0e7dc3ee2dc20fd9cf3bb0086aac96b8eaecce056e18f30",
+      "assurance": "controller_observed"
+    }
+  },
+  "authorization": {
+    "kind": "capability_envelope",
+    "envelope": {
+      "schema_version": 1,
+      "workspace": {
+        "allowed_scope_digest": "dc03f47661422bb0b33922ac46bafaae8080cb7ea68a100f8cebdda3f2276802",
+        "execution_mode": "permission_mediated_local",
+        "scope_assurance": "result_scope_validation"
+      },
+      "runtime": {
+        "containment_assurance": "not_independently_enforced",
+        "machine_authority": "launching_user",
+        "approved_command_forms": [
+          {
+            "executable": "npx",
+            "args": [
+              "tsc",
+              "--noEmit"
+            ]
+          },
+          {
+            "executable": "wc",
+            "args": [
+              "-l",
+              "/Users/JVIKLUN1/Documents/Projects/personal/product-studio/components/kanban/detail-panel.tsx"
+            ]
+          }
+        ],
+        "approved_url_operations": [],
+        "mcp": "forbidden",
+        "credentials": "forbidden"
+      }
+    },
+    "envelope_sha256": "4ecdf0da28ea2c8d467988483206ffcf0119ba5cafb9535a56045af64d59733e"
+  },
+  "acp": {
+    "protocol_version": {
+      "value": 1,
+      "assurance": "adapter_attested"
+    },
+    "session_id": {
+      "value": "12eeb7c3-5ef3-4dcb-952d-01571999fedb",
+      "assurance": "adapter_attested"
+    }
+  },
+  "lifecycle": {
+    "status": "terminal",
+    "started_at": "2026-08-11T06:36:34.992Z",
+    "updated_at": "2026-08-11T06:37:43.296Z",
+    "completed_at": "2026-08-11T06:37:43.296Z",
+    "terminal": {
+      "outcome": "completed",
+      "partial": false,
+      "reason": null
+    }
+  },
+  "limits": {
+    "wall_clock_timeout_ms": 900000,
+    "max_event_count": 50000,
+    "max_event_bytes": 50000000,
+    "max_output_bytes": 1000000,
+    "termination_grace_ms": 5000,
+    "drain_grace_ms": 1000
+  },
+  "process": {
+    "pid": 39096,
+    "process_group_id": 39096,
+    "started_at": "2026-08-11T06:36:39.068Z"
+  },
+  "diagnostics": {
+    "entries": [],
+    "truncated": false
+  }
+}

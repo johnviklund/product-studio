@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "run_id": "ac9d9367-7159-5892-9175-599ecd3baa0b",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:review-import-drift-recovery:5b8c1420a933934521ae71f7befa53925f917b1a4fbb54cc424f7d24f737e4f2",
+  "phase": "review",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 12,
+  "started_at": "2026-08-11T17:47:56.476Z",
+  "completed_at": "2026-08-11T17:47:56.804Z",
+  "outcome": "applied",
+  "review_import_drift_recovery": {
+    "schema_version": 1,
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "identity": {
+      "phase": "review",
+      "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+      "goal_version": 2,
+      "input_revision": 2,
+      "attempt": 12
+    },
+    "patch_cycle": 0,
+    "review_mission_content_sha256": "146938027120816885d92788c9fec69b2d1b15383ef78bd1053e5a014c40a615",
+    "result_content_sha256": "ac44f44d6f8729355a75edeab5fa9373fc0e226468d48a60a5580962d75176b2",
+    "rejected_import_run_id": "f945f3f1664cb49051c91e439f16e9c82ac28ad264924e9f515a27d30632e1c7",
+    "rejected_import_controller_run_id": "f2d58496-5af4-51e6-b2c3-a6376684462b",
+    "rejected_import_evidence_path": ".founder/run-evidence/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/review-2-2-12/f945f3f1664cb49051c91e439f16e9c82ac28ad264924e9f515a27d30632e1c7",
+    "accepted_result_commit": "2b7020ed700164153650eac1ad1538cb2a7e1639",
+    "current_head_commit": "439682caefd1643497c6e83469c1bdd5e0a1e15f",
+    "changed_files": [
+      "components/kanban/detail-panel.tsx",
+      "src/application/portfolio.ts",
+      "src/application/work-item-controller.ts",
+      "tests/application/portfolio.test.ts",
+      "tests/application/work-item-controller.test.ts",
+      "tests/detail-panel.test.tsx"
+    ],
+    "subject_changed_files": [
+      "components/kanban/detail-panel.tsx",
+      "tests/detail-panel.test.tsx"
+    ],
+    "proposal_sha256": "5b8c1420a933934521ae71f7befa53925f917b1a4fbb54cc424f7d24f737e4f2"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "8c9764b11f6952533f99185064b6803b07f07e2540a42de9391a95cf96b38de9",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 1,
+    "input_revision": 1,
+    "attempt": 10
+  },
+  "summary": "Documented the back-navigation flow from full work item view to details panel. The proposal specifies the entry point (View full work item button), the back-navigation affordance (context-aware back button with arrow icon), and the restored destination context (seamless return to previous panel state).",
+  "changed_files": [
+    ".founder/missions/wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d/execute-1-1-10/PROPOSAL.md"
+  ],
+  "verification": [
+    {
+      "name": "type_check",
+      "status": "passed",
+      "detail": "npx tsc --noEmit completed successfully"
+    }
+  ]
+}

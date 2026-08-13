@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "run_id": "8fec3571-74e2-5272-ad7a-899cd05fe1c8",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:2:2:12",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 12,
+  "started_at": "2026-08-11T13:19:46.849Z",
+  "completed_at": "2026-08-11T13:19:46.969Z",
+  "outcome": "applied",
+  "capability_carry_forward": {
+    "schema_version": 1,
+    "kind": "carry_forward",
+    "source_mission_content_sha256": "60a09c3594ce8aa15ab2830a5383081b187a39e59610defd4e97e3a48eaac487",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test",
+            "--",
+            "tests/detail-panel.test.tsx"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "carry_forward_sha256": "ba568e60359faeb218fb77e5f2fabf0c4fa381dec87fb28eec64b59e31d82e65"
+  }
+}

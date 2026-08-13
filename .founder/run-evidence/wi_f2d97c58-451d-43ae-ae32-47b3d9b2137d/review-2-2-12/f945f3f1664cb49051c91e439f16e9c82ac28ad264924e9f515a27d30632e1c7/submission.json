@@ -1,0 +1,18 @@
+{
+  "result_schema_version": 2,
+  "review_mission_content_sha256": "146938027120816885d92788c9fec69b2d1b15383ef78bd1053e5a014c40a615",
+  "identity": {
+    "phase": "review",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 12
+  },
+  "execute_mission_content_sha256": "8bb3db375c9eba0b88327ba9f2922afe2bcce819b6f7174018bd7e595827bdaa",
+  "execute_result_content_sha256": "792408656206722930c3333b7d1f65032136efe0f2d78bd726af4dd6ccc4e5bb",
+  "git_base_commit": "7c18d3fd173b4a08775d2276cc172d36d1d4a6b3",
+  "accepted_result_commit": "2b7020ed700164153650eac1ad1538cb2a7e1639",
+  "summary": "Implementation adds an unconditional FullWorkItemBackButton component at the top of the full work item view. The button renders with an ArrowLeft icon and context-sensitive label ('Back to shaping decision' when shaping context exists, otherwise 'Back to details panel'). Clicking invokes setShowFullWorkItem(false), restoring the details panel. Test coverage confirms the button presence, aria-label, and callback invocation. All authoritative checks passed; changes remain within allowed scope.",
+  "verdict": "clean",
+  "findings": []
+}

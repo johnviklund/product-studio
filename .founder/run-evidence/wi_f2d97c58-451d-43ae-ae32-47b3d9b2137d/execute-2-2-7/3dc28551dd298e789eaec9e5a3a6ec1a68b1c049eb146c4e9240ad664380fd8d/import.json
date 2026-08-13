@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "import_run_id": "3dc28551dd298e789eaec9e5a3a6ec1a68b1c049eb146c4e9240ad664380fd8d",
+  "result_content_sha256": "9598e1978013e939cb93e7e30ae365e17b3ee80458f89e56570b4b7f4fac6882",
+  "mission_content_sha256": "b2b9f6f0c21a7b8ca5dfb784f746416057b0b2d2a47edf48b4493be1607d9359",
+  "git_base_commit": "db0b22f0cf1c7992440060451cd751c8d3fd4bce",
+  "controller_run_id": "860b6d19-0b41-51a7-9f88-1828a5319eb7",
+  "started_at": "2026-08-11T11:48:27.718Z",
+  "completed_at": "2026-08-11T11:48:27.929Z",
+  "outcome": "rejected",
+  "reasons": [
+    "Result changed_files do not exactly match the Git diff."
+  ],
+  "phase": "execute",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 7
+  },
+  "result_commit": null
+}

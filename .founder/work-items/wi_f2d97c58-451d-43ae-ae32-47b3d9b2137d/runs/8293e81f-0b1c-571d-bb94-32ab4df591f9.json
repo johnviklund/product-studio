@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "run_id": "8293e81f-0b1c-571d-bb94-32ab4df591f9",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:scope-correction:f1538012eb4ebcc412e3bc97a310374713800ffda3d2325f1c613f4a497a8857",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 0,
+  "started_at": "2026-08-11T08:33:24.427Z",
+  "completed_at": "2026-08-11T08:33:24.730Z",
+  "outcome": "applied",
+  "scope_correction": {
+    "schema_version": 1,
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "source_goal_contract_sha256": "2600e6eef71a4ed11168d2972a721a5397f10d25492c0e6a59b706953e2a6f7c",
+    "governed_tuple": {
+      "goal_version": 1,
+      "input_revision": 1,
+      "attempt": 14,
+      "patch_cycle": 0
+    },
+    "current_allowed_scope": [
+      "work-item details panel to full-page work-item navigation and return behavior"
+    ],
+    "proposed_allowed_scope": [
+      "PRODUCT.md",
+      "components/kanban/detail-panel.tsx",
+      "src/application/portfolio.ts",
+      "src/application/work-item-controller.ts",
+      "src/domain/mission.ts",
+      "src/workspace/product-workspace.ts",
+      "tests/application/portfolio.test.ts",
+      "tests/application/work-item-controller.test.ts",
+      "tests/detail-panel.test.tsx",
+      "tests/domain/mission.test.ts",
+      "tests/workspace-contract.test.ts"
+    ],
+    "proposal_sha256": "f1538012eb4ebcc412e3bc97a310374713800ffda3d2325f1c613f4a497a8857"
+  }
+}

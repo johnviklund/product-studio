@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "import_run_id": "9a2bf9ca95ddcdee590ace4dc22d94aed64783a1f62bafa2334ab872f56cc025",
+  "result_content_sha256": "ac44f44d6f8729355a75edeab5fa9373fc0e226468d48a60a5580962d75176b2",
+  "mission_content_sha256": "146938027120816885d92788c9fec69b2d1b15383ef78bd1053e5a014c40a615",
+  "git_base_commit": "7c18d3fd173b4a08775d2276cc172d36d1d4a6b3",
+  "controller_run_id": "ac9d9367-7159-5892-9175-599ecd3baa0b",
+  "started_at": "2026-08-11T17:47:56.476Z",
+  "completed_at": "2026-08-11T17:47:56.785Z",
+  "outcome": "applied",
+  "reasons": [],
+  "phase": "review",
+  "identity": {
+    "phase": "review",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 12
+  },
+  "result_commit": "2b7020ed700164153650eac1ad1538cb2a7e1639",
+  "recovery_proposal_sha256": "5b8c1420a933934521ae71f7befa53925f917b1a4fbb54cc424f7d24f737e4f2"
+}

@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "run_id": "eed4cd1e-107f-5925-8817-1e40ba824455",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:2:2:2",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 2,
+  "started_at": "2026-08-11T10:43:53.896Z",
+  "completed_at": "2026-08-11T10:43:53.942Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "acf72a58c0092246a56c1235a950c227776875a99cad75599c614b9f7b4c9dfa",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "git",
+          "args": [
+            "add",
+            "--",
+            "PRODUCT.md",
+            "components/kanban/detail-panel.tsx",
+            "src/application/portfolio.ts",
+            "src/application/work-item-controller.ts",
+            "src/domain/mission.ts",
+            "src/workspace/product-workspace.ts",
+            "tests/application/portfolio.test.ts",
+            "tests/application/work-item-controller.test.ts",
+            "tests/detail-panel.test.tsx",
+            "tests/domain/mission.test.ts",
+            "tests/workspace-contract.test.ts"
+          ]
+        },
+        {
+          "executable": "git",
+          "args": [
+            "commit",
+            "-m",
+            "View full work item page lacks a to navigate back"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "build"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "lint"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test",
+            "--",
+            "tests/detail-panel.test.tsx"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "fea112873aa15b813a94f93c0783039128e911d32fbe6a61277dbe0aa99d6b8c"
+  }
+}

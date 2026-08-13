@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "run_id": "3a8500f5-da60-5956-9048-e53f8c355b0c",
+  "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+  "idempotency_key": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d:execute:2:2:10",
+  "phase": "execute",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 10,
+  "started_at": "2026-08-11T12:50:29.240Z",
+  "completed_at": "2026-08-11T12:50:29.296Z",
+  "outcome": "applied",
+  "capability_grant": {
+    "schema_version": 1,
+    "source_mission_content_sha256": "55eaf8c4ec967646168206c5ef321a0b02c2997c63922671ccaadd1ae2505d15",
+    "execution_defaults": {
+      "schema_version": 1,
+      "approved_command_forms": [
+        {
+          "executable": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ]
+        },
+        {
+          "executable": "npm",
+          "args": [
+            "test",
+            "--",
+            "tests/detail-panel.test.tsx"
+          ]
+        }
+      ],
+      "approved_url_operations": [],
+      "mcp": "forbidden",
+      "credentials": "forbidden"
+    },
+    "grant_sha256": "a7e5752697da7909074f60bbe253bde719bb24a964ccb6f2f8a767706dcc6439"
+  }
+}

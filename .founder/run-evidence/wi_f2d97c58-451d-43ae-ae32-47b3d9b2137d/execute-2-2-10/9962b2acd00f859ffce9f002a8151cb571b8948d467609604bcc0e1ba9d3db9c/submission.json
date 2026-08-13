@@ -1,0 +1,25 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "ee60af08f4fb8de9319cdfd9c826055990e6751a99871c358cda34667a961540",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 10
+  },
+  "summary": "Back-navigation button already implemented with ArrowLeft icon and context-aware labeling. All approved steps satisfied at compiled commit.",
+  "changed_files": [],
+  "verification": [
+    {
+      "name": "TypeScript type checking",
+      "status": "passed",
+      "detail": "npm run typecheck completed with exit code 0"
+    },
+    {
+      "name": "Detail panel tests",
+      "status": "passed",
+      "detail": "npm test -- tests/detail-panel.test.tsx passed 56 tests"
+    }
+  ]
+}

@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
-  "phase": "execute",
+  "phase": "learn",
   "status": "active",
-  "updated_at": "2026-08-09T21:42:33.337Z",
-  "goal_version": 1,
-  "input_revision": 1,
-  "attempt": 9,
+  "updated_at": "2026-08-11T18:51:54.801Z",
+  "goal_version": 2,
+  "input_revision": 2,
+  "attempt": 12,
   "patch_cycle": 0
 }

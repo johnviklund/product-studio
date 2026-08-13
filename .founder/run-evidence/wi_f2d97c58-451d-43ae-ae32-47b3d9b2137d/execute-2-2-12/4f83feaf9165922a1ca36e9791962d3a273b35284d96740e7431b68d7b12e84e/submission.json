@@ -1,0 +1,28 @@
+{
+  "result_schema_version": 2,
+  "mission_content_sha256": "8bb3db375c9eba0b88327ba9f2922afe2bcce819b6f7174018bd7e595827bdaa",
+  "identity": {
+    "phase": "execute",
+    "work_item_id": "wi_f2d97c58-451d-43ae-ae32-47b3d9b2137d",
+    "goal_version": 2,
+    "input_revision": 2,
+    "attempt": 12
+  },
+  "summary": "Added unconditional back-navigation button to full work item view with ArrowLeft icon and context-appropriate labeling. Created FullWorkItemBackButton component that always renders when showFullWorkItem is true, displaying 'Back to shaping decision' or 'Back to details panel' based on context. Added test coverage for back button functionality.",
+  "changed_files": [
+    "components/kanban/detail-panel.tsx",
+    "tests/detail-panel.test.tsx"
+  ],
+  "verification": [
+    {
+      "name": "TypeScript type checking",
+      "status": "passed",
+      "detail": "npm run typecheck completed with no errors"
+    },
+    {
+      "name": "Detail panel tests",
+      "status": "passed",
+      "detail": "All 56 tests passed including back button test"
+    }
+  ]
+}
