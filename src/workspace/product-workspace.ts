@@ -8814,7 +8814,9 @@ export class ProductWorkspace implements ReviewWorkItemRepository {
             const ownerDetail =
               owner !== null && owner.hostname !== localHostname
                 ? ` Owner hostname ${owner.hostname} cannot be probed locally.`
-                : "";
+                : owner !== null
+                  ? ` Owner pid ${owner.pid} acquired at ${owner.acquired_at}.`
+                  : "";
             throw new ControllerConflictError(
               "repair_required",
               validatedWorkItemId,
